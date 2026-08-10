@@ -193,6 +193,167 @@ class VerifyTest(ReceiptsCliTest):
         self.assertFalse(self.log_path.exists())
 
 
+class FileReferenceTest(ReceiptsCliTest):
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+
+    def write_file(self, relpath, content):
+        path = self.workdir / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def last_entry(self):
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        return json.loads(lines[-1])
+
+    def test_log_with_file_records_path_and_sha256(self):
+        self.write_file("report.md", "elephants never forget\n")
+        expected_sha = hashlib.sha256(
+            (self.workdir / "report.md").read_bytes()
+        ).hexdigest()
+
+        result = run_receipts(
+            "log", "--actor", "agent", "--action", "wrote report",
+            "--file", "report.md", cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.last_entry()["files"],
+            [{"path": "report.md", "sha256": expected_sha}],
+        )
+        verify_result = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(verify_result.returncode, 0, verify_result.stdout)
+
+
+    def test_case_only_differing_reference_warns_at_write_time(self):
+        self.write_file("report.md", "content\n")
+        run_receipts(
+            "log", "--actor", "agent", "--action", "first spelling",
+            "--file", "report.md", cwd=self.workdir,
+        )
+
+        result = run_receipts(
+            "log", "--actor", "agent", "--action", "second spelling",
+            "--file", "Report.md", cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("case", result.stderr.lower())
+        self.assertIn("report.md", result.stderr.lower())
+        self.assertEqual(self.last_entry()["files"][0]["path"], "Report.md")
+
+    def test_log_with_nonexistent_file_errors_cleanly(self):
+        before = self.log_path.read_text(encoding="utf-8")
+
+        result = run_receipts(
+            "log", "--actor", "agent", "--action", "phantom file",
+            "--file", "not-there.md", cwd=self.workdir,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not-there.md", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
+
+    def test_backslash_path_stores_forward_slash_spelling(self):
+        self.write_file("sub/report.md", "nested\n")
+
+        run_receipts(
+            "log", "--actor", "agent", "--action", "backslash intake",
+            "--file", "sub\\report.md", cwd=self.workdir,
+        )
+        backslash_files = self.last_entry()["files"]
+
+        run_receipts(
+            "log", "--actor", "agent", "--action", "forward-slash intake",
+            "--file", "sub/report.md", cwd=self.workdir,
+        )
+        forward_files = self.last_entry()["files"]
+
+        self.assertEqual(backslash_files[0]["path"], "sub/report.md")
+        self.assertEqual(backslash_files, forward_files)
+
+    def test_absolute_and_dotdot_paths_are_rejected(self):
+        self.write_file("report.md", "content\n")
+        before = self.log_path.read_text(encoding="utf-8")
+
+        for bad_path in (str(self.workdir / "report.md"), "../escape.md"):
+            result = run_receipts(
+                "log", "--actor", "agent", "--action", "bad path",
+                "--file", bad_path, cwd=self.workdir,
+            )
+            self.assertNotEqual(result.returncode, 0, bad_path)
+            self.assertIn("error", result.stderr.lower())
+
+        self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
+
+    def test_multiple_files_sorted_by_path_bytes(self):
+        for name in ("b.md", "a.md", "sub/c.md"):
+            self.write_file(name, f"{name}\n")
+
+        run_receipts(
+            "log", "--actor", "agent", "--action", "multi-file",
+            "--file", "b.md", "--file", "sub/c.md", "--file", "a.md",
+            cwd=self.workdir,
+        )
+
+        paths = [ref["path"] for ref in self.last_entry()["files"]]
+        self.assertEqual(paths, ["a.md", "b.md", "sub/c.md"])
+
+    def test_verify_files_reports_modified_file_chain_intact(self):
+        self.write_file("report.md", "original\n")
+        run_receipts(
+            "log", "--actor", "agent", "--action", "wrote report",
+            "--file", "report.md", cwd=self.workdir,
+        )
+        self.write_file("report.md", "sneakily changed after logging\n")
+
+        result = run_receipts("verify", "--files", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("FILES-DIVERGED", result.stdout)
+        self.assertIn("MODIFIED-SINCE-LOGGED", result.stdout)
+        self.assertIn("report.md", result.stdout)
+        self.assertNotIn("BROKEN", result.stdout)
+
+    def test_verify_files_current_and_missing(self):
+        self.write_file("kept.md", "kept\n")
+        self.write_file("doomed.md", "doomed\n")
+        run_receipts(
+            "log", "--actor", "agent", "--action", "wrote both",
+            "--file", "kept.md", "--file", "doomed.md", cwd=self.workdir,
+        )
+        (self.workdir / "doomed.md").unlink()
+
+        result = run_receipts("verify", "--files", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CURRENT: kept.md", result.stdout)
+        self.assertIn("doomed.md", result.stdout)
+        self.assertIn("VALID", result.stdout)
+        self.assertNotIn("BROKEN", result.stdout)
+
+    def test_latest_reference_per_path_is_authoritative(self):
+        self.write_file("report.md", "draft\n")
+        run_receipts(
+            "log", "--actor", "agent", "--action", "draft",
+            "--file", "report.md", cwd=self.workdir,
+        )
+        self.write_file("report.md", "final\n")
+        run_receipts(
+            "log", "--actor", "agent", "--action", "final",
+            "--file", "report.md", cwd=self.workdir,
+        )
+
+        result = run_receipts("verify", "--files", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("CURRENT: report.md", result.stdout)
+
+
 class TamperTest(ReceiptsCliTest):
     """The core battery: each way a writer might rewrite history is caught."""
 
