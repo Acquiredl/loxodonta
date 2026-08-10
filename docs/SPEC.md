@@ -80,12 +80,15 @@ The **chain head** is the `entry_hash` of the last entry. It commits to the enti
 4. `prev` equals the previous entry's `entry_hash` (genesis: `prev` is `null`) — catches splice attacks.
 5. `ts` is non-decreasing relative to the previous entry.
 6. *(optional, `--files`)* Every referenced path that still exists on disk hashes to some entry's recorded `sha256`; the **latest** reference per path is reported as `CURRENT` or `MODIFIED-SINCE-LOGGED`.
+7. *(optional, `--expect-head <hex>`)* After the walk, the chain head (the last entry's `entry_hash`) is compared to the given value. A mismatch means the file is not the chain the operator last recorded — even if every internal check passed. This is the v0.1 defense against **whole-chain regeneration**: an internally consistent rewrite still produces a different head.
 
-**Verdicts:** `VALID` (exit 0) or `BROKEN at entry N: <reason>` (exit 1, first break reported, walk continues to list all breaks). File mismatches under `--files` are reported but produce exit 2 — the chain itself is intact; the working tree diverged.
+The companion command `receipts head` prints the current chain head, so the operator can record it somewhere the writer cannot reach (another machine, a password-manager note, a message to self). The tool deliberately does **not** store heads locally on the operator's behalf: a state file the writer can also reach would be false security. The out-of-reach storage is the operator's job; the tool only makes the comparison mechanical.
+
+**Verdicts:** `VALID` (exit 0) or `BROKEN at entry N: <reason>` (exit 1, first break reported, walk continues to list all breaks). File mismatches under `--files` are reported but produce exit 2 — the chain itself is intact; the working tree diverged. A head mismatch under `--expect-head` produces `HEAD-MISMATCH` (exit 3) — the chain may be internally valid, but it is not the recorded history.
 
 ## 7. Explicit non-goals (v0.1)
 
 - **No keys, no signatures.** The chain proves internal consistency, not authorship. (ADR-0001.)
-- **No prevention of whole-chain regeneration by the log owner.** Closed by anchoring in Stage B; the spec reserves no fields for it — anchor proofs live beside the log, not inside it.
+- **No prevention of whole-chain regeneration by anyone with write access to the log** — which includes the writer itself (in the target use case, an AI agent has the same filesystem access as the operator). Partially mitigated in v0.1 by `receipts head` + `verify --expect-head` against an operator-held head record; fully closed by anchoring in Stage B. The spec reserves no fields for anchoring — anchor proofs live beside the log, not inside it.
 - **No concurrency.** One writer per log. Two processes appending simultaneously is corruption, not a supported mode.
 - **No secrets in receipts.** `action` and `path` values are plaintext forever; the logger must not put credentials or sensitive content in them.

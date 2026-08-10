@@ -20,6 +20,8 @@ Each receipt also records the SHA256 of every file it touched, so "the report th
 receipts init                    # start a chain (writes the genesis entry)
 receipts log --actor agent --action "wrote draft" --file report.md
 receipts verify                  # walk the chain; exit 1 on any break
+receipts head                    # print the chain head — record it out of the agent's reach
+receipts verify --expect-head <hex>   # also catch a wholesale rewrite, against your recorded head
 receipts report                  # human-readable timeline of the run
 ```
 
@@ -34,7 +36,7 @@ Honest threat model, in both directions:
 | Reordering entries | ✔ | every moved entry breaks its neighbor's link |
 | Silently modifying a logged file after the fact | ✔ | file's current hash ≠ hash in its receipt |
 | A compromised writer lying *at write time* | ✘ | garbage in, faithfully chained garbage out |
-| The log owner regenerating the whole chain from scratch | ✘ in v0.1 | this is exactly what **anchoring** (Stage B) closes: committing the chain head to an external system — OpenTimestamps onto the Bitcoin blockchain — makes even a full rewrite detectable against the anchored head |
+| The writer (or anyone with write access) regenerating the whole chain from scratch | partial in v0.1 | `receipts head` + `verify --expect-head` catch a full rewrite *if* the operator recorded the head somewhere the writer can't reach; **anchoring** (Stage B) removes the "if" by committing the head to Bitcoin via OpenTimestamps |
 
 "Tamper-evident" is the precise claim: tampering is not prevented, it is *always detectable*. See [docs/SPEC.md](docs/SPEC.md) for the format and [adrs/](adrs/) for why a hash chain and not signatures.
 

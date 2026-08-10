@@ -11,6 +11,24 @@ If a concept is in your head but not in this file, the agent will guess — and 
 
 ---
 
+## Roles
+
+### Operator
+
+The human who owns the machine and the receipt log, and who runs `verify`. The operator's job in the trust story is exactly one thing: keep a [head record](#head-record) somewhere the writer cannot reach.
+
+### Writer
+
+The process that appends entries to the log — in the target use case, an AI agent (directly in Stage A, via a harness hook in Stage C). The writer is **semi-trusted**: trusted to run, *not* trusted to leave history alone afterward. The writer is the tool's primary adversary — receipts exists so that a writer that edits, deletes, or reorders its own history is always caught. One writer per log.
+
+The writer/operator split is the load-bearing idea of the project: in Acu (the predecessor), writer and operator were the same person, so log tampering was "self-sabotage" and a plain JSONL file sufficed. An AI agent with filesystem access is a semi-trusted third party operating inside your machine — that is what makes the chain earn its keep.
+
+### Head record
+
+An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin.
+
+---
+
 ## Core domain
 
 ### Receipt log
@@ -47,11 +65,11 @@ A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one 
 
 ### Verify
 
-The walk defined in `docs/SPEC.md` §6: schema → sequence → recomputed hash → chain rule → timestamps, optionally file checks. Produces a verdict, never repairs anything.
+The walk defined in `docs/SPEC.md` §6: schema → sequence → recomputed hash → chain rule → timestamps, optionally file checks, optionally head comparison (`--expect-head`). Produces a verdict, never repairs anything.
 
 ### Tamper-evident
 
-The precise security claim of this tool: modifications to history are *always detectable*, never *prevented*. Deliberately weaker than "immutable" — see Anti-terms.
+The precise security claim of this tool: modifications to history are *always detectable*, never *prevented*. Deliberately weaker than "immutable" — see Anti-terms. Scope in v0.1: *surgical* tampering (edit / delete / reorder / file swap) is detectable unconditionally; *whole-chain regeneration* is detectable only against a head record (`--expect-head`) or, in Stage B, an anchor.
 
 ### Anchor *(Stage B)*
 
@@ -69,7 +87,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## States and transitions
 
-- Verification verdict is one of: `VALID` (exit 0) | `BROKEN` (exit 1, chain integrity failed at ≥1 entries) | `FILES-DIVERGED` (exit 2, chain intact but a referenced file was modified since logging).
+- Verification verdict is one of: `VALID` (exit 0) | `BROKEN` (exit 1, chain integrity failed at ≥1 entries) | `FILES-DIVERGED` (exit 2, chain intact but a referenced file was modified since logging) | `HEAD-MISMATCH` (exit 3, chain internally valid but its head differs from the operator's head record — the whole-chain-regeneration case).
 - A log never transitions backward: append is the only legal write; anything else moves the verdict to `BROKEN`.
 
 ---
