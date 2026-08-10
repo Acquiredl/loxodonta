@@ -41,7 +41,7 @@ One line of the receipt log: a JSON object with exactly `n`, `ts`, `actor`, `act
 
 ### Genesis
 
-The entry with `n == 0` and `prev == null` — the only entry allowed a null `prev`. Written by `receipts init`. Marks the start of a chain; carries no file references.
+The entry with `n == 0` and `prev == null` — the only entry allowed a null `prev`, and the only entry carrying `v`, the format version. Written by `receipts init` with pinned contents (`actor: "receipts"`, `action: "genesis"`, `files: []`); only its timestamp varies. The chain's title page: who started it, when, and under which rulebook — all hash-committed, so a chain can't be relabeled to a different version without breaking.
 
 ### Canonical form
 
@@ -91,7 +91,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## States and transitions
 
-- Verification verdict is one of: `VALID` (exit 0) | `BROKEN` (exit 1, chain integrity failed at ≥1 entries) | `FILES-DIVERGED` (exit 2, chain intact but a referenced file was modified since logging) | `HEAD-MISMATCH` (exit 3, chain internally valid but its head differs from the operator's head record — the whole-chain-regeneration case).
+- Verification verdict is one of: `VALID` (exit 0) | `BROKEN` (exit 1, chain integrity failed at ≥1 entries) | `FILES-DIVERGED` (exit 2, chain intact but a referenced file was modified since logging) | `HEAD-MISMATCH` (exit 3, chain internally valid but its head differs from the operator's head record — the whole-chain-regeneration case). `UNSUPPORTED-VERSION` (exit 4) is a refusal to judge, not a verdict: the log's genesis declares a format this verifier doesn't speak.
 - A log never transitions backward: append is the only legal write; anything else moves the verdict to `BROKEN`.
 
 ---

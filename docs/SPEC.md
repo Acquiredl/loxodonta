@@ -16,7 +16,7 @@ A receipt log is a single UTF-8 text file, JSON Lines format (one JSON object pe
 
 ## 2. Entry schema
 
-Every entry is a JSON object with exactly these fields (no extras in v0.1):
+Every entry is a JSON object with exactly these fields (no extras in v0.1). The genesis entry additionally carries `v` — see §2.1.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -27,6 +27,18 @@ Every entry is a JSON object with exactly these fields (no extras in v0.1):
 | `files` | array | Zero or more **file references** (§3). Genesis uses `[]`. |
 | `prev` | string \| null | The `entry_hash` of entry `n-1`. Genesis uses `null` — the only entry allowed to. |
 | `entry_hash` | string | SHA256 of this entry's **canonical form** (§4), lowercase hex. |
+
+### 2.1 The genesis entry, pinned
+
+Genesis is fully determined except for its timestamp:
+
+```json
+{"action":"genesis","actor":"receipts","entry_hash":"<computed>","files":[],"n":0,"prev":null,"ts":"<init time>","v":"0.1"}
+```
+
+- `v` is the **format version** — a string, present on genesis and **only** genesis. A chain is born under one version and stays there; a format upgrade means starting a new chain.
+- Because `v` sits inside the genesis entry, it is hash-committed like everything else: every later entry's chain transitively pins the version. A chain cannot be relabeled without breaking.
+- Verifiers MUST read `v` before applying any other rule. An unrecognized version stops verification immediately with `UNSUPPORTED-VERSION: log is format "X"; this verifier speaks "0.1"` (exit 4) — a clean refusal, not a tamper verdict.
 
 ## 3. File references
 
@@ -73,9 +85,9 @@ The **chain head** is the `entry_hash` of the last entry. It commits to the enti
 
 ## 6. Verification algorithm
 
-`verify` walks the file top to bottom and checks, per entry:
+`verify` walks the file top to bottom. Before anything else it reads the genesis entry's `v` (§2.1) and refuses cleanly if it doesn't speak that version. Then it checks, per entry:
 
-1. The line parses as JSON with exactly the schema fields.
+1. The line parses as JSON with exactly the schema fields (genesis: plus `v`).
 2. `n` equals the line number (0-based) — catches deletion and reordering.
 3. Recomputed canonical hash equals the stored `entry_hash` — catches edits.
 4. `prev` equals the previous entry's `entry_hash` (genesis: `prev` is `null`) — catches splice attacks.
