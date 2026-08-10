@@ -1,7 +1,7 @@
 # receipts format specification
 
 **Version:** 0.1-draft
-**Status:** in design review — nothing below is frozen until ADR-0001 is `accepted`.
+**Status:** in design review — nothing below is frozen until ADR-0001 and ADR-0002 are `accepted`.
 
 This document defines the receipt log format precisely enough that an independent implementation, in any language, produces byte-identical hashes. That reproducibility is the whole game: a hash chain is only as trustworthy as the serialization rules underneath it.
 
@@ -51,6 +51,12 @@ A file reference snapshots one file at log time:
 - `path` is relative to the receipt log's directory, forward slashes, no `..` segments.
 - `sha256` is the lowercase-hex SHA256 of the file's bytes at the moment of logging.
 - Within one entry, `files` is sorted by `path` (byte order) — part of canonicalization, not decoration.
+
+**Path identity rules:**
+
+- Writers normalize separators **on intake**: backslashes become forward slashes before the entry is built. The hashed bytes are always the forward-slash spelling — Windows and Unix writers produce identical hashes for the same relative path.
+- Absolute paths and paths containing `..` are **rejected with an error**, never silently rewritten. A file outside the log's directory usually means the log is in the wrong place; the operator should feel that friction. (Absolute paths would also leak machine-specific directory layout into a log that may be shown to others.)
+- Path identity is **byte-exact — no case folding**. Case-insensitivity is a property of some filesystems, not of the format; a verifier on another OS cannot know what the writer's filesystem considered equal. Instead, `log`/`run` SHOULD warn at write time when a new reference differs from an existing one only by case — the mistake is caught on the machine that knows, and the format stays dumb.
 
 ## 4. Canonical form and `entry_hash`
 
