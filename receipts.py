@@ -115,7 +115,18 @@ def append_entry(log, actor, action, file_paths):
         lines = read_log(log)
     except FileNotFoundError:
         return missing_log(log)
-    last = json.loads(lines[-1])
+    if not lines:
+        print(f"error: {log} is empty — run `receipts init` first", file=sys.stderr)
+        return 1
+    # A new entry chains to the tail; a damaged tail cannot anchor one.
+    try:
+        last = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        last = None
+    if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+        print(f"error: {log} has a damaged final line — run `receipts verify` "
+              "(appending would bury the damage)", file=sys.stderr)
+        return 1
 
     # SPEC §3: case-insensitivity belongs to filesystems, not the format.
     # Catch a case-only respelling here, on the machine that knows.
@@ -159,7 +170,10 @@ def cmd_run(args):
     # did, and the invoked process cannot prevent or shape it (SPEC §7).
     completed = subprocess.run(args.command_argv)
     action = f"run: {' '.join(args.command_argv)} (exit {completed.returncode})"
-    append_entry(args.log, args.actor, action, args.file)
+    if append_entry(args.log, args.actor, action, args.file) != 0:
+        # A lost receipt must never hide behind the command's success code.
+        print(f"error: receipt not written for: {action}", file=sys.stderr)
+        return 1
     return completed.returncode
 
 
@@ -199,6 +213,11 @@ def walk(lines):
             entries.append(None)
             prev_hash = None
             continue
+        if not isinstance(entry, dict):
+            breaks.append((n, f"BROKEN at entry {n}: line is not a JSON object"))
+            entries.append(None)
+            prev_hash = None
+            continue
         entries.append(entry)
         expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
         if set(entry) != expected_fields:
@@ -232,13 +251,21 @@ def cmd_verify(args):
         lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+    if not lines:
+        print(f"error: {args.log} is empty — not a receipt log", file=sys.stderr)
+        return 1
 
     # SPEC §2.1: read the genesis version before applying any other rule.
-    # An unparseable genesis can't declare a version; the walk reports it.
+    # The refusal is only for a *claimed* version we don't speak. A genesis
+    # with no version claim at all (damaged, non-object, or v stripped) is
+    # the walk's business — that's tampering to judge, not a dialect to
+    # politely decline.
     try:
-        log_version = json.loads(lines[0]).get("v")
+        genesis = json.loads(lines[0])
     except json.JSONDecodeError:
-        log_version = FORMAT_VERSION
+        genesis = None
+    log_version = genesis.get("v", FORMAT_VERSION) if isinstance(genesis, dict) \
+        else FORMAT_VERSION
     if log_version != FORMAT_VERSION:
         print(
             f'UNSUPPORTED-VERSION: log is format "{log_version}"; '
