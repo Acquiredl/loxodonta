@@ -18,6 +18,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RECEIPTS = REPO_ROOT / "receipts.py"
 
 
+def spec_hash(entry_without_hash):
+    """Independent SPEC §4 canonicalization — deliberately reimplemented here,
+    never imported from receipts.py, so tests prove the tool matches the spec
+    rather than matching itself."""
+    canonical = json.dumps(
+        entry_without_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def run_receipts(*args, cwd):
     """Invoke the receipts CLI as an operator would."""
     return subprocess.run(
@@ -134,10 +144,7 @@ class VerifyTest(ReceiptsCliTest):
             "files": [],
             "prev": None,
         }
-        canonical = json.dumps(
-            genesis, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
-        genesis["entry_hash"] = hashlib.sha256(canonical).hexdigest()
+        genesis["entry_hash"] = spec_hash(genesis)
         # Deliberately non-canonical on disk (unsorted keys, spaces): the hash
         # is over canonical form, not file bytes (SPEC §4).
         self.log_path.write_text(json.dumps(genesis) + "\n", encoding="utf-8")
@@ -397,10 +404,7 @@ class HeadTest(ReceiptsCliTest):
             entry.pop("entry_hash")
             entry["n"] = i
             entry["prev"] = prev
-            canonical = json.dumps(
-                entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-            ).encode("utf-8")
-            entry["entry_hash"] = prev = hashlib.sha256(canonical).hexdigest()
+            entry["entry_hash"] = prev = spec_hash(entry)
         self.log_path.write_text(
             "".join(json.dumps(e, sort_keys=True, separators=(",", ":")) + "\n"
                     for e in entries),
@@ -502,10 +506,7 @@ class TamperTest(ReceiptsCliTest):
             "files": [],
             "prev": hashlib.sha256(b"some other history").hexdigest(),
         }
-        canonical = json.dumps(
-            foreign, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
-        foreign["entry_hash"] = hashlib.sha256(canonical).hexdigest()
+        foreign["entry_hash"] = spec_hash(foreign)
         lines = self.read_lines()
         lines[3] = json.dumps(foreign, sort_keys=True, separators=(",", ":"))
         self.write_lines(lines)
@@ -519,10 +520,7 @@ class TamperTest(ReceiptsCliTest):
         entry = json.loads(lines[2])
         del entry["entry_hash"]
         entry["note"] = "smuggled"
-        canonical = json.dumps(
-            entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
-        entry["entry_hash"] = hashlib.sha256(canonical).hexdigest()
+        entry["entry_hash"] = spec_hash(entry)
         lines[2] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
         self.write_lines(lines)
 
@@ -539,6 +537,75 @@ class TamperTest(ReceiptsCliTest):
         result = self.assert_broken(at_entry=1)
         self.assertIn("BROKEN at entry 3", result.stdout)
         self.assertTrue(result.stdout.startswith("BROKEN at entry 1"))
+
+
+class TornTailTest(ReceiptsCliTest):
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+        for i in range(1, 4):
+            run_receipts(
+                "log", "--actor", "agent", "--action", f"step {i}", cwd=self.workdir
+            )
+
+    def truncate_line(self, index):
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        lines[index] = lines[index][: len(lines[index]) // 2]
+        self.log_path.write_text(
+            "".join(l + "\n" for l in lines), encoding="utf-8"
+        )
+
+    def test_torn_final_line_reports_torn_tail_and_intact_prefix(self):
+        self.truncate_line(3)
+
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("torn tail at line 3", result.stdout)
+        self.assertIn("intact", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_torn_middle_line_is_ordinary_broken(self):
+        self.truncate_line(2)
+
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("BROKEN at entry 2", result.stdout)
+        self.assertNotIn("torn tail", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_backward_ts_warns_but_verdict_stays_valid(self):
+        # Rewrite the last entry with a ts before its predecessor's and a
+        # correctly recomputed hash: mechanically valid, suspicious testimony.
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        entry = json.loads(lines[3])
+        prev_entry = json.loads(lines[2])
+        entry.pop("entry_hash")
+        entry["ts"] = "2020-01-01T00:00:00Z"
+        entry["prev"] = prev_entry["entry_hash"]
+        entry["entry_hash"] = spec_hash(entry)
+        lines[3] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        self.log_path.write_text(
+            "".join(l + "\n" for l in lines), encoding="utf-8"
+        )
+
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VALID", result.stdout)
+        combined = result.stdout + result.stderr
+        self.assertIn("WARN", combined)
+        self.assertIn("entry 3", combined)
+
+    def test_no_repair_or_trim_command_exists(self):
+        help_result = run_receipts("--help", cwd=self.workdir)
+        self.assertNotIn("repair", help_result.stdout.lower())
+        self.assertNotIn("trim", help_result.stdout.lower())
+
+        for forbidden in ("repair", "trim"):
+            result = run_receipts(forbidden, cwd=self.workdir)
+            self.assertNotEqual(result.returncode, 0, forbidden)
 
 
 if __name__ == "__main__":
