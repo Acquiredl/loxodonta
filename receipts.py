@@ -44,6 +44,17 @@ def entry_line(entry):
     return json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
 
 
+def read_log(path):
+    """All lines of the receipt log; FileNotFoundError if it doesn't exist."""
+    with open(path, encoding="utf-8") as f:
+        return f.read().splitlines()
+
+
+def missing_log(path):
+    print(f"error: {path} not found — run `receipts init` first", file=sys.stderr)
+    return 1
+
+
 # --- Commands -----------------------------------------------------------------
 
 def cmd_init(args):
@@ -101,11 +112,9 @@ def cmd_log(args):
         return 1
     files.sort(key=lambda ref: ref["path"])  # by path bytes (SPEC §3)
     try:
-        with open(args.log, encoding="utf-8") as f:
-            lines = f.read().splitlines()
+        lines = read_log(args.log)
     except FileNotFoundError:
-        print(f"error: {args.log} not found — run `receipts init` first", file=sys.stderr)
-        return 1
+        return missing_log(args.log)
     last = json.loads(lines[-1])
 
     # SPEC §3: case-insensitivity belongs to filesystems, not the format.
@@ -134,9 +143,23 @@ def cmd_log(args):
     return 0
 
 
+def cmd_head(args):
+    try:
+        lines = read_log(args.log)
+    except FileNotFoundError:
+        return missing_log(args.log)
+    if not lines:
+        print(f"error: {args.log} is empty — no chain head to print", file=sys.stderr)
+        return 1
+    print(json.loads(lines[-1])["entry_hash"])
+    return 0
+
+
 def cmd_verify(args):
-    with open(args.log, encoding="utf-8") as f:
-        lines = f.read().splitlines()
+    try:
+        lines = read_log(args.log)
+    except FileNotFoundError:
+        return missing_log(args.log)
 
     # SPEC §2.1: read the genesis version before applying any other rule.
     log_version = json.loads(lines[0]).get("v")
@@ -193,8 +216,25 @@ def cmd_verify(args):
                   "differ from their logged fingerprints")
             return 2
 
+    if args.expect_head is not None and prev_hash != args.expect_head:
+        # Internally consistent, but not the chain the operator recorded —
+        # the signature of whole-chain regeneration.
+        print(f"HEAD-MISMATCH: chain head is {prev_hash}, expected "
+              f"{args.expect_head} — this is not the recorded history")
+        return 3
+
     print("VALID")
     return 0
+
+
+def head_record(value):
+    """argparse validator: a head record is 64 lowercase hex characters."""
+    v = value.lower()
+    if len(v) != 64 or any(c not in "0123456789abcdef" for c in v):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a chain head (need 64 hex characters)"
+        )
+    return v
 
 
 def main(argv=None):
@@ -212,10 +252,15 @@ def main(argv=None):
     log_parser.add_argument("--file", action="append", default=[], metavar="PATH",
                             help="file to fingerprint (repeatable)")
     log_parser.set_defaults(func=cmd_log)
+    sub.add_parser("head", parents=[common],
+                   help="print the chain head (record it out of the writer's reach)"
+                   ).set_defaults(func=cmd_head)
     verify_parser = sub.add_parser("verify", parents=[common],
                                    help="walk the chain and report a verdict")
     verify_parser.add_argument("--files", action="store_true",
                                help="also compare referenced files against disk")
+    verify_parser.add_argument("--expect-head", metavar="HEX", type=head_record,
+                               help="operator-held head record to compare against")
     verify_parser.set_defaults(func=cmd_verify)
 
     args = parser.parse_args(argv)
