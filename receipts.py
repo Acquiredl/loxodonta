@@ -162,7 +162,11 @@ def cmd_verify(args):
         return missing_log(args.log)
 
     # SPEC §2.1: read the genesis version before applying any other rule.
-    log_version = json.loads(lines[0]).get("v")
+    # An unparseable genesis can't declare a version; the walk reports it.
+    try:
+        log_version = json.loads(lines[0]).get("v")
+    except json.JSONDecodeError:
+        log_version = FORMAT_VERSION
     if log_version != FORMAT_VERSION:
         print(
             f'UNSUPPORTED-VERSION: log is format "{log_version}"; '
@@ -172,24 +176,47 @@ def cmd_verify(args):
 
     breaks = []
     prev_hash = None
+    prev_ts = None
     for n, line in enumerate(lines):
-        entry = json.loads(line)
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            if n == len(lines) - 1:
+                # The one honest damage signature: a crash mid-append can
+                # truncate the final line and nothing else (SPEC §6).
+                breaks.append(f"BROKEN: torn tail at line {n} (crash-truncated "
+                              f"append; entries 0..{n - 1} intact)")
+            else:
+                breaks.append(f"BROKEN at entry {n}: line is not valid JSON")
+            prev_hash = None
+            continue
         expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
         if set(entry) != expected_fields:
             odd = set(entry) ^ expected_fields
-            breaks.append((n, f"schema mismatch: {', '.join(sorted(odd))}"))
+            breaks.append(f"BROKEN at entry {n}: schema mismatch: "
+                          f"{', '.join(sorted(odd))}")
         if entry.get("n") != n:
-            breaks.append((n, f"sequence number is {entry.get('n')}, expected {n}"))
+            breaks.append(f"BROKEN at entry {n}: sequence number is "
+                          f"{entry.get('n')}, expected {n}")
         if entry.get("prev") != prev_hash:
-            breaks.append((n, "prev does not match predecessor's entry_hash"))
+            breaks.append(f"BROKEN at entry {n}: prev does not match "
+                          "predecessor's entry_hash")
         stored_hash = entry.pop("entry_hash", None)
         if entry_hash(entry) != stored_hash:
-            breaks.append((n, "entry_hash does not match canonical form"))
+            breaks.append(f"BROKEN at entry {n}: entry_hash does not match "
+                          "canonical form")
+        # ts is writer-supplied testimony, not a mechanical fact: a backward
+        # jump warns but never changes the verdict (SPEC §6, ADR-0002).
+        ts = entry.get("ts")
+        if prev_ts is not None and ts is not None and ts < prev_ts:
+            print(f"WARN: ts decreases at entry {n} — clock skew at write time?",
+                  file=sys.stderr)
+        prev_ts = ts
         prev_hash = stored_hash
 
     if breaks:
-        for n, reason in breaks:
-            print(f"BROKEN at entry {n}: {reason}")
+        for line in breaks:
+            print(line)
         return 1
 
     if args.files:
