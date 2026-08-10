@@ -84,6 +84,23 @@ class LogFlagTest(ReceiptsCliTest):
         self.assertIn("VALID", verify_result.stdout)
 
 
+class LogTest(ReceiptsCliTest):
+    def test_log_three_entries_then_verify_valid(self):
+        run_receipts("init", cwd=self.workdir)
+        for i in range(1, 4):
+            result = run_receipts(
+                "log", "--actor", "agent", "--action", f"step {i}", cwd=self.workdir
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 4)
+
+        verify_result = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(verify_result.returncode, 0, verify_result.stdout)
+        self.assertIn("VALID", verify_result.stdout)
+
+
 class VerifyTest(ReceiptsCliTest):
     def test_verify_genesis_only_chain_is_valid(self):
         run_receipts("init", cwd=self.workdir)
@@ -151,6 +168,126 @@ class VerifyTest(ReceiptsCliTest):
         self.assertIn('"9.9"', output)
         self.assertIn('"0.1"', output)
         self.assertNotIn("BROKEN", output)
+
+
+    def test_log_rejects_empty_actor_and_action(self):
+        run_receipts("init", cwd=self.workdir)
+        before = self.log_path.read_text(encoding="utf-8")
+
+        for flags in (("--actor", "", "--action", "did a thing"),
+                      ("--actor", "agent", "--action", "")):
+            result = run_receipts("log", *flags, cwd=self.workdir)
+            self.assertNotEqual(result.returncode, 0, flags)
+            self.assertIn("non-empty", result.stderr)
+
+        self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
+
+    def test_log_without_init_errors_cleanly(self):
+        result = run_receipts(
+            "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("init", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(self.log_path.exists())
+
+
+class TamperTest(ReceiptsCliTest):
+    """The core battery: each way a writer might rewrite history is caught."""
+
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+        for i in range(1, 4):
+            run_receipts(
+                "log", "--actor", "agent", "--action", f"step {i}", cwd=self.workdir
+            )
+
+    def read_lines(self):
+        return self.log_path.read_text(encoding="utf-8").splitlines()
+
+    def write_lines(self, lines):
+        self.log_path.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
+
+    def assert_broken(self, at_entry):
+        result = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"BROKEN at entry {at_entry}", result.stdout)
+        self.assertNotIn("VALID", result.stdout)
+        return result
+
+    def test_editing_past_entry_text_is_caught(self):
+        lines = self.read_lines()
+        entry = json.loads(lines[2])
+        entry["action"] = "step 2 (rewritten to look innocent)"
+        lines[2] = json.dumps(entry)
+        self.write_lines(lines)
+
+        self.assert_broken(at_entry=2)
+
+    def test_deleting_middle_entry_is_caught(self):
+        lines = self.read_lines()
+        del lines[2]
+        self.write_lines(lines)
+
+        self.assert_broken(at_entry=2)
+
+    def test_swapping_two_entries_is_caught(self):
+        lines = self.read_lines()
+        lines[1], lines[2] = lines[2], lines[1]
+        self.write_lines(lines)
+
+        self.assert_broken(at_entry=1)
+
+    def test_splicing_foreign_well_formed_entry_is_caught(self):
+        # Correct n, internally valid hash — but prev commits to a history
+        # this chain never had. Only the chain rule can catch it.
+        foreign = {
+            "n": 3,
+            "ts": "2026-08-10T12:00:00Z",
+            "actor": "agent",
+            "action": "step 3 (from a parallel universe)",
+            "files": [],
+            "prev": hashlib.sha256(b"some other history").hexdigest(),
+        }
+        canonical = json.dumps(
+            foreign, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        foreign["entry_hash"] = hashlib.sha256(canonical).hexdigest()
+        lines = self.read_lines()
+        lines[3] = json.dumps(foreign, sort_keys=True, separators=(",", ":"))
+        self.write_lines(lines)
+
+        self.assert_broken(at_entry=3)
+
+    def test_extra_schema_field_is_caught_even_with_consistent_hash(self):
+        # An entry with a smuggled extra field, hash recomputed over the
+        # tampered form: internally consistent, but not v0.1 schema.
+        lines = self.read_lines()
+        entry = json.loads(lines[2])
+        del entry["entry_hash"]
+        entry["note"] = "smuggled"
+        canonical = json.dumps(
+            entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        entry["entry_hash"] = hashlib.sha256(canonical).hexdigest()
+        lines[2] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        self.write_lines(lines)
+
+        self.assert_broken(at_entry=2)
+
+    def test_two_breaks_are_both_reported_first_named_first(self):
+        lines = self.read_lines()
+        for i in (1, 3):
+            entry = json.loads(lines[i])
+            entry["action"] = f"step {i} (rewritten)"
+            lines[i] = json.dumps(entry)
+        self.write_lines(lines)
+
+        result = self.assert_broken(at_entry=1)
+        self.assertIn("BROKEN at entry 3", result.stdout)
+        self.assertTrue(result.stdout.startswith("BROKEN at entry 1"))
 
 
 if __name__ == "__main__":
