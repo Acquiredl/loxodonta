@@ -4,7 +4,7 @@
 
 **receipts** — a tamper-evident flight recorder for AI agent pipelines. A small, stdlib-only CLI that gives any automation pipeline a hash-chained activity log: every action an agent takes leaves a receipt, every receipt is chained to the one before it, and a single command proves whether the history has been edited, deleted from, or reordered.
 
-> **Status: design phase.** The format spec and decision records below are the current deliverable; implementation follows after design review. Nothing here is running code yet.
+> **Status: design accepted.** Format spec v0.1 is frozen; the decision records are `accepted`. Stage A implementation is next — nothing here is running code yet.
 
 ## the problem
 
