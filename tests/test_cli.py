@@ -709,5 +709,88 @@ class TornTailTest(ReceiptsCliTest):
             self.assertNotEqual(result.returncode, 0, forbidden)
 
 
+class ReportTest(ReceiptsCliTest):
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+        (self.workdir / "report.md").write_text("findings\n", encoding="utf-8")
+        run_receipts(
+            "log", "--actor", "agent", "--action", "wrote findings",
+            "--file", "report.md", cwd=self.workdir,
+        )
+        run_receipts(
+            "log", "--actor", "human", "--action", "approved findings",
+            cwd=self.workdir,
+        )
+
+    def test_report_shows_every_entry_in_order_with_files(self):
+        result = run_receipts("report", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn("genesis", out)
+        self.assertIn("agent", out)
+        self.assertIn("wrote findings", out)
+        self.assertIn("human", out)
+        self.assertIn("approved findings", out)
+        self.assertIn("report.md", out)
+        self.assertLess(out.index("wrote findings"), out.index("approved findings"))
+
+    def test_report_on_broken_chain_renders_everything_and_flags_break(self):
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        entry = json.loads(lines[1])
+        entry["action"] = "wrote findings (rewritten)"
+        lines[1] = json.dumps(entry)
+        self.log_path.write_text(
+            "".join(l + "\n" for l in lines), encoding="utf-8"
+        )
+
+        result = run_receipts("report", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        out = result.stdout
+        self.assertIn("wrote findings (rewritten)", out)
+        self.assertIn("approved findings", out)
+        self.assertIn("BROKEN", out)
+        self.assertIn("entry 1", out)
+
+    def test_report_renders_torn_tail_with_intact_prefix(self):
+        content = self.log_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        lines[2] = lines[2][: len(lines[2]) // 2]
+        self.log_path.write_text(
+            "".join(l + "\n" for l in lines), encoding="utf-8"
+        )
+
+        result = run_receipts("report", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        out = result.stdout
+        self.assertIn("wrote findings", out)  # intact prefix still rendered
+        self.assertIn("torn tail", out)
+        self.assertIn("intact", out)
+
+    def test_report_carries_clock_skew_note_inline(self):
+        # Mechanically valid chain whose last entry claims an earlier ts.
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        entry = json.loads(lines[2])
+        entry.pop("entry_hash")
+        entry["ts"] = "2020-01-01T00:00:00Z"
+        entry["entry_hash"] = spec_hash(entry)
+        lines[2] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        self.log_path.write_text(
+            "".join(l + "\n" for l in lines), encoding="utf-8"
+        )
+
+        result = run_receipts("report", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        out = result.stdout
+        self.assertIn("clock skew", out)
+        self.assertIn("entry 2", out)
+        self.assertNotIn("BROKEN", out)
+        self.assertLess(out.index("approved findings"), out.index("clock skew"))
+
+
 if __name__ == "__main__":
     unittest.main()
