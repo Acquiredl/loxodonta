@@ -1,6 +1,6 @@
 # ADR-0002: The writer is the primary adversary
 
-**Status:** `proposed`
+**Status:** `accepted` (2026-08-10)
 **Date:** 2026-08-09
 **Deciders:** Acquiredl
 

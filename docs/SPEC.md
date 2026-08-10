@@ -1,7 +1,7 @@
 # receipts format specification
 
-**Version:** 0.1-draft
-**Status:** in design review — nothing below is frozen until ADR-0001 and ADR-0002 are `accepted`.
+**Version:** 0.1
+**Status:** accepted 2026-08-10 (ADR-0001, ADR-0002 both `accepted`) — v0.1 is **frozen**; any format change requires a new version and a new chain (§2.1).
 
 This document defines the receipt log format precisely enough that an independent implementation, in any language, produces byte-identical hashes. That reproducibility is the whole game: a hash chain is only as trustworthy as the serialization rules underneath it.
 

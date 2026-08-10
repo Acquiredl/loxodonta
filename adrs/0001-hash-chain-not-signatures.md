@@ -1,6 +1,6 @@
 # ADR-0001: Tamper evidence via hash chain, not digital signatures
 
-**Status:** `proposed`
+**Status:** `accepted` (2026-08-10)
 **Date:** 2026-08-09
 **Deciders:** Acquiredl
 
