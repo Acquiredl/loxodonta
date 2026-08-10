@@ -110,6 +110,63 @@ class LogTest(ReceiptsCliTest):
         self.assertEqual(verify_result.returncode, 0, verify_result.stdout)
         self.assertIn("VALID", verify_result.stdout)
 
+    def test_log_rejects_empty_actor_and_action(self):
+        run_receipts("init", cwd=self.workdir)
+        before = self.log_path.read_text(encoding="utf-8")
+
+        for flags in (("--actor", "", "--action", "did a thing"),
+                      ("--actor", "agent", "--action", "")):
+            result = run_receipts("log", *flags, cwd=self.workdir)
+            self.assertNotEqual(result.returncode, 0, flags)
+            self.assertIn("non-empty", result.stderr)
+
+        self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
+
+    def test_log_on_damaged_log_errors_cleanly(self):
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
+        intact = self.log_path.read_text(encoding="utf-8")
+
+        for damaged_tail in ('{"torn": ', "[1,2,3]"):
+            lines = intact.splitlines()
+            lines[-1] = damaged_tail
+            damaged = "".join(l + "\n" for l in lines)
+            self.log_path.write_text(damaged, encoding="utf-8")
+
+            result = run_receipts(
+                "log", "--actor", "agent", "--action", "step 2", cwd=self.workdir
+            )
+
+            self.assertNotEqual(result.returncode, 0, repr(damaged_tail))
+            self.assertIn("verify", result.stderr.lower())
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(
+                self.log_path.read_text(encoding="utf-8"), damaged,
+                repr(damaged_tail),
+            )
+
+    def test_log_on_empty_log_errors_cleanly(self):
+        self.log_path.write_text("", encoding="utf-8")
+
+        result = run_receipts(
+            "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("empty", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.log_path.read_text(encoding="utf-8"), "")
+
+    def test_log_without_init_errors_cleanly(self):
+        result = run_receipts(
+            "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("init", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(self.log_path.exists())
+
 
 class VerifyTest(ReceiptsCliTest):
     def test_verify_genesis_only_chain_is_valid(self):
@@ -131,6 +188,15 @@ class VerifyTest(ReceiptsCliTest):
         self.assertEqual(result.returncode, 1)
         self.assertIn("BROKEN at entry 0", result.stdout)
         self.assertNotIn("VALID", result.stdout)
+
+    def test_verify_on_empty_log_errors_cleanly(self):
+        self.log_path.write_text("", encoding="utf-8")
+
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("empty", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_genesis_hash_matches_independent_spec_canonicalization(self):
         # Independent SPEC §4 implementation: keys sorted, compact separators,
@@ -154,6 +220,27 @@ class VerifyTest(ReceiptsCliTest):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("VALID", result.stdout)
 
+    def test_genesis_with_v_stripped_is_broken_not_a_version_refusal(self):
+        # An adversary deleting v (hash recomputed) must not downgrade a
+        # tamper verdict into a polite exit-4 refusal to judge.
+        genesis = {
+            "n": 0,
+            "ts": "2026-08-10T12:00:00Z",
+            "actor": "receipts",
+            "action": "genesis",
+            "files": [],
+            "prev": None,
+        }
+        genesis["entry_hash"] = spec_hash(genesis)
+        self.log_path.write_text(json.dumps(genesis) + "\n", encoding="utf-8")
+
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("BROKEN at entry 0", result.stdout)
+        self.assertIn("schema", result.stdout)
+        self.assertNotIn("UNSUPPORTED-VERSION", result.stdout)
+
     def test_verify_refuses_unknown_format_version_before_any_other_rule(self):
         genesis = {
             "v": "9.9",
@@ -175,29 +262,6 @@ class VerifyTest(ReceiptsCliTest):
         self.assertIn('"9.9"', output)
         self.assertIn('"0.1"', output)
         self.assertNotIn("BROKEN", output)
-
-
-    def test_log_rejects_empty_actor_and_action(self):
-        run_receipts("init", cwd=self.workdir)
-        before = self.log_path.read_text(encoding="utf-8")
-
-        for flags in (("--actor", "", "--action", "did a thing"),
-                      ("--actor", "agent", "--action", "")):
-            result = run_receipts("log", *flags, cwd=self.workdir)
-            self.assertNotEqual(result.returncode, 0, flags)
-            self.assertIn("non-empty", result.stderr)
-
-        self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
-
-    def test_log_without_init_errors_cleanly(self):
-        result = run_receipts(
-            "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("init", result.stderr)
-        self.assertNotIn("Traceback", result.stderr)
-        self.assertFalse(self.log_path.exists())
 
 
 class FileReferenceTest(ReceiptsCliTest):
@@ -526,6 +590,25 @@ class TamperTest(ReceiptsCliTest):
 
         self.assert_broken(at_entry=2)
 
+    def test_non_object_json_line_is_broken_not_a_crash(self):
+        lines = self.read_lines()
+        lines[2] = "[1,2,3]"
+        self.write_lines(lines)
+
+        result = self.assert_broken(at_entry=2)
+        self.assertNotIn("Traceback", result.stderr)
+
+        report = run_receipts("report", cwd=self.workdir)
+        self.assertEqual(report.returncode, 0, report.stdout + report.stderr)
+        self.assertNotIn("Traceback", report.stderr)
+
+        # Same treatment when the non-object line is the genesis.
+        lines = self.read_lines()
+        lines[0] = "[1,2,3]"
+        self.write_lines(lines)
+        result = self.assert_broken(at_entry=0)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_two_breaks_are_both_reported_first_named_first(self):
         lines = self.read_lines()
         for i in (1, 3):
@@ -618,6 +701,22 @@ class RunTest(ReceiptsCliTest):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("init", result.stderr)
         self.assertFalse((self.workdir / "side-effect.txt").exists())
+
+    def test_run_fails_loudly_when_receipt_cannot_be_written(self):
+        # SPEC §7: the invoked process cannot prevent its own receipt. If it
+        # destroys a --file so the receipt can't be built, run must not
+        # report the command's success code as its own.
+        (self.workdir / "doomed.txt").write_text("data", encoding="utf-8")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--file", "doomed.txt", "--",
+            sys.executable, "-c", "import os; os.remove('doomed.txt')",
+            cwd=self.workdir,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("doomed.txt", result.stderr)
+        self.assertIn("receipt", result.stderr)
 
     def test_chain_verifies_valid_after_several_runs(self):
         run_receipts(
