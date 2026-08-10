@@ -354,6 +354,96 @@ class FileReferenceTest(ReceiptsCliTest):
         self.assertIn("CURRENT: report.md", result.stdout)
 
 
+class HeadTest(ReceiptsCliTest):
+    def test_head_prints_last_entry_hash(self):
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 2", cwd=self.workdir)
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        last_hash = json.loads(lines[-1])["entry_hash"]
+
+        result = run_receipts("head", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), last_hash)
+
+    def test_verify_expect_head_with_true_head_is_valid(self):
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
+        head = run_receipts("head", cwd=self.workdir).stdout.strip()
+
+        result = run_receipts("verify", "--expect-head", head, cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VALID", result.stdout)
+
+    def test_regenerated_chain_passes_plain_verify_but_fails_head_record(self):
+        run_receipts("init", cwd=self.workdir)
+        for action in ("step 1", "the incriminating step", "step 3"):
+            run_receipts(
+                "log", "--actor", "agent", "--action", action, cwd=self.workdir
+            )
+        recorded_head = run_receipts("head", cwd=self.workdir).stdout.strip()
+
+        # The adversary: drop entry 2, renumber, recompute every hash so the
+        # chain is internally consistent again (independent canonicalization).
+        entries = [
+            json.loads(line)
+            for line in self.log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        del entries[2]
+        prev = entries[0]["entry_hash"]  # genesis untouched
+        for i, entry in enumerate(entries[1:], start=1):
+            entry.pop("entry_hash")
+            entry["n"] = i
+            entry["prev"] = prev
+            canonical = json.dumps(
+                entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+            entry["entry_hash"] = prev = hashlib.sha256(canonical).hexdigest()
+        self.log_path.write_text(
+            "".join(json.dumps(e, sort_keys=True, separators=(",", ":")) + "\n"
+                    for e in entries),
+            encoding="utf-8",
+        )
+
+        plain = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(plain.returncode, 0, plain.stdout)
+        self.assertIn("VALID", plain.stdout)
+
+        against_record = run_receipts(
+            "verify", "--expect-head", recorded_head, cwd=self.workdir
+        )
+        self.assertEqual(against_record.returncode, 3, against_record.stdout)
+        self.assertIn("HEAD-MISMATCH", against_record.stdout)
+        self.assertIn("not the recorded history", against_record.stdout)
+        self.assertNotIn("BROKEN", against_record.stdout)
+
+    def test_head_on_missing_or_empty_log_errors_cleanly(self):
+        missing = run_receipts("head", cwd=self.workdir)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("init", missing.stderr)
+        self.assertNotIn("Traceback", missing.stderr)
+
+        self.log_path.write_text("", encoding="utf-8")
+        empty = run_receipts("head", cwd=self.workdir)
+        self.assertNotEqual(empty.returncode, 0)
+        self.assertIn("empty", empty.stderr)
+        self.assertNotIn("Traceback", empty.stderr)
+
+    def test_malformed_expect_head_is_usage_error_not_verdict(self):
+        run_receipts("init", cwd=self.workdir)
+
+        for bad in ("not-hex-at-all", "abc123"):  # garbage; wrong length
+            result = run_receipts(
+                "verify", "--expect-head", bad, cwd=self.workdir
+            )
+            self.assertNotEqual(result.returncode, 0, bad)
+            self.assertIn("expect-head", result.stderr)
+            for verdict in ("VALID", "BROKEN", "HEAD-MISMATCH"):
+                self.assertNotIn(verdict, result.stdout, bad)
+
+
 class TamperTest(ReceiptsCliTest):
     """The core battery: each way a writer might rewrite history is caught."""
 
