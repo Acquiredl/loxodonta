@@ -36,7 +36,8 @@ receipts must let anyone holding a receipt log detect whether its history was ed
 
 ## References
 
-- Related ADRs: none yet.
+- Related ADRs: `0002-writer-as-adversary.md` (names the adversary this mechanism serves).
+- Prior-art landscape: `docs/PRIOR-ART.md` — the 2026-08-09 survey found the niche's closest competitors chose Ed25519 signatures; this ADR's reasoning (whoever holds the key can rewrite and re-sign; anchoring binds history to something nobody holds) must therefore surface in the README, not only here.
 - Glossary terms **added or sharpened**: `GLOSSARY.md` — *hash chain*, *chain head*, *tamper-evident*, *anchor*, *canonical form*.
 - Glossary terms **retired**, and topologies overruled: none — first ADR of the repo.
 - Discussion: design conversation, Cowork session 2026-08-09 (career/portfolio thread).
