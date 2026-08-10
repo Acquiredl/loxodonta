@@ -84,6 +84,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 ## Relationships
 
 - A receipt log has exactly one genesis and zero-or-more subsequent entries.
+- A workflow with parallel writers uses one log **per writer** (sibling chains). Chains never share a file; merging happens only at display time in `report`.
 - An entry references zero-or-more files; a file may be referenced by many entries (its latest reference is authoritative for `--files` checks).
 - An anchor commits to exactly one chain head; a log may accumulate many anchors over time.
 
