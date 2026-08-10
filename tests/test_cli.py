@@ -539,6 +539,107 @@ class TamperTest(ReceiptsCliTest):
         self.assertTrue(result.stdout.startswith("BROKEN at entry 1"))
 
 
+class RunTest(ReceiptsCliTest):
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+
+    def last_entry(self):
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        return json.loads(lines[-1])
+
+    def test_run_appends_receipt_with_command_line_and_exit_code(self):
+        result = run_receipts(
+            "run", "--actor", "agent", "--",
+            sys.executable, "-c", "print('hi')",
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = self.last_entry()
+        self.assertEqual(entry["n"], 1)
+        self.assertEqual(entry["actor"], "agent")
+        self.assertEqual(
+            entry["action"],
+            f"run: {sys.executable} -c print('hi') (exit 0)",
+        )
+
+    def test_run_of_failing_command_still_appends_and_propagates_exit_code(self):
+        result = run_receipts(
+            "run", "--actor", "agent", "--",
+            sys.executable, "-c", "import sys; sys.exit(7)",
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 7, result.stderr)
+        entry = self.last_entry()
+        self.assertEqual(entry["n"], 1)
+        self.assertIn("(exit 7)", entry["action"])
+
+    def test_run_file_fingerprint_reflects_post_command_contents(self):
+        (self.workdir / "data.txt").write_text("before", encoding="utf-8")
+        rewrite = "open('data.txt', 'w').write('after')"
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--file", "data.txt", "--",
+            sys.executable, "-c", rewrite,
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after_sha = hashlib.sha256(b"after").hexdigest()
+        self.assertEqual(
+            self.last_entry()["files"],
+            [{"path": "data.txt", "sha256": after_sha}],
+        )
+
+    def test_run_without_separator_or_command_is_usage_error(self):
+        before = self.log_path.read_text(encoding="utf-8")
+
+        no_separator = run_receipts("run", "--actor", "agent", cwd=self.workdir)
+        empty_command = run_receipts("run", "--actor", "agent", "--", cwd=self.workdir)
+
+        for result in (no_separator, empty_command):
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--", result.stderr)
+        self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
+
+    def test_run_without_init_refuses_before_running_the_command(self):
+        # No log → no receipt possible → the command must not run at all;
+        # otherwise the wrapper would execute work it cannot record.
+        self.log_path.unlink()
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--",
+            sys.executable, "-c", "open('side-effect.txt', 'w').write('ran')",
+            cwd=self.workdir,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("init", result.stderr)
+        self.assertFalse((self.workdir / "side-effect.txt").exists())
+
+    def test_chain_verifies_valid_after_several_runs(self):
+        run_receipts(
+            "run", "--actor", "agent", "--",
+            sys.executable, "-c", "print('one')", cwd=self.workdir,
+        )
+        run_receipts(
+            "run", "--actor", "agent", "--",
+            sys.executable, "-c", "import sys; sys.exit(3)", cwd=self.workdir,
+        )
+        run_receipts(
+            "log", "--actor", "human", "--action", "reviewed the runs",
+            cwd=self.workdir,
+        )
+
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VALID", result.stdout)
+        self.assertEqual(self.last_entry()["n"], 3)
+
+
 class TornTailTest(ReceiptsCliTest):
     def setUp(self):
         super().setUp()

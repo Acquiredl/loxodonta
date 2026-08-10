@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -100,21 +101,20 @@ def file_reference(log_dir, raw_path):
     return {"path": path, "sha256": sha256}
 
 
-def cmd_log(args):
-    if not args.actor or not args.action:
-        print("error: --actor and --action must be non-empty", file=sys.stderr)
-        return 1
-    log_dir = os.path.dirname(os.path.abspath(args.log))
+def append_entry(log, actor, action, file_paths):
+    """Append one chained entry. Shared by `log` and `run` — run introduces
+    no new schema fields (SPEC §7)."""
+    log_dir = os.path.dirname(os.path.abspath(log))
     try:
-        files = [file_reference(log_dir, p) for p in args.file]
+        files = [file_reference(log_dir, p) for p in file_paths]
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     files.sort(key=lambda ref: ref["path"])  # by path bytes (SPEC §3)
     try:
-        lines = read_log(args.log)
+        lines = read_log(log)
     except FileNotFoundError:
-        return missing_log(args.log)
+        return missing_log(log)
     last = json.loads(lines[-1])
 
     # SPEC §3: case-insensitivity belongs to filesystems, not the format.
@@ -129,18 +129,38 @@ def cmd_log(args):
     entry = {
         "n": last["n"] + 1,
         "ts": now_ts(),
-        "actor": args.actor,
-        "action": args.action,
+        "actor": actor,
+        "action": action,
         "files": files,
         "prev": last["entry_hash"],
     }
     entry["entry_hash"] = entry_hash(entry)
     # Single write of one complete line (SPEC §1): a crash can at worst
     # truncate this line, never damage earlier entries.
-    with open(args.log, "a", encoding="utf-8", newline="\n") as f:
+    with open(log, "a", encoding="utf-8", newline="\n") as f:
         f.write(entry_line(entry))
     print(f"logged entry {entry['n']}")
     return 0
+
+
+def cmd_log(args):
+    if not args.actor or not args.action:
+        print("error: --actor and --action must be non-empty", file=sys.stderr)
+        return 1
+    return append_entry(args.log, args.actor, args.action, args.file)
+
+
+def cmd_run(args):
+    # No log means no receipt could be written — refuse before the command
+    # runs, or the wrapper would execute work it cannot record.
+    if not os.path.exists(args.log):
+        return missing_log(args.log)
+    # Run first, hash after: the receipt records what the command actually
+    # did, and the invoked process cannot prevent or shape it (SPEC §7).
+    completed = subprocess.run(args.command_argv)
+    action = f"run: {' '.join(args.command_argv)} (exit {completed.returncode})"
+    append_entry(args.log, args.actor, action, args.file)
+    return completed.returncode
 
 
 def cmd_head(args):
@@ -272,13 +292,18 @@ def main(argv=None):
     sub.add_parser("init", parents=[common],
                    help="create a new receipt log with its genesis entry"
                    ).set_defaults(func=cmd_init)
-    log_parser = sub.add_parser("log", parents=[common],
+    actor_files = argparse.ArgumentParser(add_help=False)
+    actor_files.add_argument("--actor", required=True, help="who acted")
+    actor_files.add_argument("--file", action="append", default=[], metavar="PATH",
+                             help="file to fingerprint (repeatable)")
+    log_parser = sub.add_parser("log", parents=[common, actor_files],
                                 help="append one chained entry")
-    log_parser.add_argument("--actor", required=True, help="who acted")
     log_parser.add_argument("--action", required=True, help="what happened, one line")
-    log_parser.add_argument("--file", action="append", default=[], metavar="PATH",
-                            help="file to fingerprint (repeatable)")
     log_parser.set_defaults(func=cmd_log)
+    sub.add_parser(
+        "run", parents=[common, actor_files],
+        help="run a command, then append its receipt -- <command> [args...]"
+        ).set_defaults(func=cmd_run)
     sub.add_parser("head", parents=[common],
                    help="print the chain head (record it out of the writer's reach)"
                    ).set_defaults(func=cmd_head)
@@ -290,7 +315,21 @@ def main(argv=None):
                                help="operator-held head record to compare against")
     verify_parser.set_defaults(func=cmd_verify)
 
+    if argv is None:
+        argv = sys.argv[1:]
+    # `run` owns everything after `--`: split it off before argparse so the
+    # wrapped command's own flags are never parsed as ours.
+    command_argv = None
+    if argv[:1] == ["run"] and "--" in argv:
+        split = argv.index("--")
+        command_argv = argv[split + 1:]
+        argv = argv[:split]
+
     args = parser.parse_args(argv)
+    if args.command == "run":
+        if not command_argv:
+            parser.error("run requires `-- <command> [args...]` after its flags")
+        args.command_argv = command_argv
     return args.func(args)
 
 
