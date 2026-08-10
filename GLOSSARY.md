@@ -65,7 +65,7 @@ A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one 
 
 ### Verify
 
-The walk defined in `docs/SPEC.md` §6: schema → sequence → recomputed hash → chain rule → timestamps, optionally file checks, optionally head comparison (`--expect-head`). Produces a verdict, never repairs anything.
+The walk defined in `docs/SPEC.md` §6: schema → sequence → recomputed hash → chain rule → timestamp sanity (warning only), optionally file checks, optionally head comparison (`--expect-head`). Produces a verdict, never repairs anything. Verdicts come only from mechanical facts; writer-supplied testimony (`ts`, `actor`, `action`) can at most raise warnings.
 
 ### Tamper-evident
 

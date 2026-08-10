@@ -91,7 +91,7 @@ The **chain head** is the `entry_hash` of the last entry. It commits to the enti
 2. `n` equals the line number (0-based) — catches deletion and reordering.
 3. Recomputed canonical hash equals the stored `entry_hash` — catches edits.
 4. `prev` equals the previous entry's `entry_hash` (genesis: `prev` is `null`) — catches splice attacks.
-5. `ts` is non-decreasing relative to the previous entry.
+5. `ts` is non-decreasing relative to the previous entry — violations produce a **warning** (`WARN: ts decreases at entry N — clock skew at write time?`), never a verdict change. Rationale: `ts` is writer-supplied testimony, like `actor` and `action`. No attack trips this check without also tripping a hash check (editing a past `ts` breaks that entry's hash; a full regeneration fakes timestamps consistently), so a hard failure here could only ever fire on honest clock wobble — NTP step-backs, VM resume — and false `BROKEN`s teach operators to ignore real ones. Mechanical facts get verdicts; testimony gets reporting.
 6. *(optional, `--files`)* Every referenced path that still exists on disk hashes to some entry's recorded `sha256`; the **latest** reference per path is reported as `CURRENT` or `MODIFIED-SINCE-LOGGED`.
 7. *(optional, `--expect-head <hex>`)* After the walk, the chain head (the last entry's `entry_hash`) is compared to the given value. A mismatch means the file is not the chain the operator last recorded — even if every internal check passed. This is the v0.1 defense against **whole-chain regeneration**: an internally consistent rewrite still produces a different head.
 
