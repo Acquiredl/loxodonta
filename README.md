@@ -19,6 +19,7 @@ Each receipt also records the SHA256 of every file it touched, so "the report th
 ```
 receipts init                    # start a chain (writes the genesis entry)
 receipts log --actor agent --action "wrote draft" --file report.md
+receipts run --actor agent --file report.md -- python make_draft.py   # run a command; it cannot skip its own receipt
 receipts verify                  # walk the chain; exit 1 on any break
 receipts head                    # print the chain head — record it out of the agent's reach
 receipts verify --expect-head <hex>   # also catch a wholesale rewrite, against your recorded head
@@ -36,13 +37,14 @@ Honest threat model, in both directions:
 | Reordering entries | ✔ | every moved entry breaks its neighbor's link |
 | Silently modifying a logged file after the fact | ✔ | file's current hash ≠ hash in its receipt |
 | A compromised writer lying *at write time* | ✘ | garbage in, faithfully chained garbage out |
+| The writer omitting an entry entirely | ✘ for the chain itself | a never-written entry leaves no break to detect — completeness comes from moving the `log` call outside the writer's volition (`receipts run`, gate scripts, the Stage C hook) |
 | The writer (or anyone with write access) regenerating the whole chain from scratch | partial in v0.1 | `receipts head` + `verify --expect-head` catch a full rewrite *if* the operator recorded the head somewhere the writer can't reach; **anchoring** (Stage B) removes the "if" by committing the head to Bitcoin via OpenTimestamps |
 
 "Tamper-evident" is the precise claim: tampering is not prevented, it is *always detectable*. See [docs/SPEC.md](docs/SPEC.md) for the format and [adrs/](adrs/) for why a hash chain and not signatures.
 
 ## roadmap
 
-- **Stage A — core:** format spec (done, in review) → stdlib-only CLI (`init` / `log` / `verify` / `report`) → tamper-demo test suite (edit / delete / reorder each caught).
+- **Stage A — core:** format spec (done, in review) → stdlib-only CLI (`init` / `log` / `run` / `head` / `verify` / `report`) → tamper-demo test suite (edit / delete / reorder / regenerate each caught).
 - **Stage B — anchoring:** `receipts anchor` commits the chain head to Bitcoin via OpenTimestamps (free calendar servers, no wallet, no tokens); `verify` learns to check anchor proofs.
 - **Stage C — agent adapter:** a Claude Code `PostToolUse` hook that logs every tool call automatically — any agent session becomes a verifiable flight recording; plus `receipts explain`, an optional LLM layer that narrates a run and flags anomalies.
 

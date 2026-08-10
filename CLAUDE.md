@@ -12,7 +12,7 @@
 
 ## Roadmap
 
-- **Stage A** — spec review → stdlib-only CLI (`init` / `log` / `verify` / `report`) via `/tdd`, tamper-demo tests (edit / delete / reorder / splice each caught).
+- **Stage A** — spec review → stdlib-only CLI (`init` / `log` / `run` / `head` / `verify` / `report`) via `/tdd`, tamper-demo tests (edit / delete / reorder / splice / regenerate each caught).
 - **Stage B** — `receipts anchor`: OpenTimestamps commitment of the chain head to Bitcoin; `verify` learns anchor proofs.
 - **Stage C** — Claude Code `PostToolUse` hook adapter (auto-log every tool call) + `receipts explain` (LLM narration/anomaly layer).
 

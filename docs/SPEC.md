@@ -86,8 +86,17 @@ The companion command `receipts head` prints the current chain head, so the oper
 
 **Verdicts:** `VALID` (exit 0) or `BROKEN at entry N: <reason>` (exit 1, first break reported, walk continues to list all breaks). File mismatches under `--files` are reported but produce exit 2 — the chain itself is intact; the working tree diverged. A head mismatch under `--expect-head` produces `HEAD-MISMATCH` (exit 3) — the chain may be internally valid, but it is not the recorded history.
 
-## 7. Explicit non-goals (v0.1)
+## 7. `receipts run` — logging outside the writer's volition
 
+```
+receipts run --actor <name> [--file PATH]... -- <command> [args...]
+```
+
+Runs the command, waits for it to exit, then appends exactly one entry: `action` is the literal command line plus its exit code (e.g. `run: pytest -q (exit 0)`), and each `--file` is hashed **after** the command completes. The entry is appended whether the command succeeded or failed — the point of the wrapper is that the invoked process cannot prevent or shape its own receipt. `run` introduces no new schema fields; it is sugar over `log` with the invocation moved outside the writer's volition.
+
+## 8. Explicit non-goals (v0.1)
+
+- **No history completeness.** The chain proves nothing was removed *from what was logged*; it cannot prove that everything got logged — a writer that simply never calls `log` leaves no break to detect. Completeness comes from placing the `log` call outside the writer's volition: pipeline gate scripts, the `receipts run` wrapper (§7), or a harness hook that fires on every action (Stage C). **Integrity is the tool's job; completeness is the integration's job.**
 - **No keys, no signatures.** The chain proves internal consistency, not authorship. (ADR-0001.)
 - **No prevention of whole-chain regeneration by anyone with write access to the log** — which includes the writer itself (in the target use case, an AI agent has the same filesystem access as the operator). Partially mitigated in v0.1 by `receipts head` + `verify --expect-head` against an operator-held head record; fully closed by anchoring in Stage B. The spec reserves no fields for anchoring — anchor proofs live beside the log, not inside it.
 - **No concurrency.** One writer per log. Two processes appending simultaneously is corruption, not a supported mode.
