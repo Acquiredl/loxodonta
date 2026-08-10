@@ -12,6 +12,7 @@ A receipt log is a single UTF-8 text file, JSON Lines format (one JSON object pe
 - Line 0 is the **genesis entry**.
 - Every subsequent line is an **entry** appended in strictly increasing sequence.
 - The file is append-only. Any other mutation is tampering by definition.
+- Writers SHOULD append each entry as a single write of one complete line (`{...}\n`) so a crash mid-append can at worst truncate the final line (see *torn tail*, §6) — never interleave or damage earlier entries.
 
 ## 2. Entry schema
 
@@ -85,6 +86,8 @@ The **chain head** is the `entry_hash` of the last entry. It commits to the enti
 The companion command `receipts head` prints the current chain head, so the operator can record it somewhere the writer cannot reach (another machine, a password-manager note, a message to self). The tool deliberately does **not** store heads locally on the operator's behalf: a state file the writer can also reach would be false security. The out-of-reach storage is the operator's job; the tool only makes the comparison mechanical.
 
 **Verdicts:** `VALID` (exit 0) or `BROKEN at entry N: <reason>` (exit 1, first break reported, walk continues to list all breaks). File mismatches under `--files` are reported but produce exit 2 — the chain itself is intact; the working tree diverged. A head mismatch under `--expect-head` produces `HEAD-MISMATCH` (exit 3) — the chain may be internally valid, but it is not the recorded history.
+
+**Torn tail:** if the **final** line of the file fails to parse as JSON, verify reports it distinctly — `BROKEN: torn tail at line N (crash-truncated append; entries 0–N-1 intact)` — still exit 1. This is the signature of an honest interrupted append, and the message says so plus what survives; the operator repairs it by removing the partial line themselves. An unparseable line anywhere **other than** the final line is ordinary `BROKEN` — there is no innocent way for garbage to appear mid-file. Verify never repairs anything, and the tool deliberately ships no repair command: a sanctioned way to trim the end of a log is exactly the capability an adversary with a cover story wants.
 
 ## 7. `receipts run` — logging outside the writer's volition
 

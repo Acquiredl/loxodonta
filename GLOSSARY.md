@@ -99,6 +99,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 ## Sub-terms and orthogonal categories
 
 - A *broken* chain is still a readable log — `report` works on it; only its integrity claim is gone. Broken ≠ unparseable.
+- A *torn tail* is the one honest way a log gets damaged: the final line truncated by a crash mid-append. Verify reports it distinctly (entries before it are intact; operator trims the partial line by hand) but it is still `BROKEN`/exit 1. A malformed line anywhere *else* has no innocent explanation and reports as ordinary tampering.
 - An *anchored* chain is still just a chain — anchoring adds an external proof, it does not change any entry.
 
 ---
