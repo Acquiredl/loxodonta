@@ -16,7 +16,7 @@ A receipt log is a single UTF-8 text file, JSON Lines format (one JSON object pe
 
 ## 2. Entry schema
 
-Every entry is a JSON object with exactly these fields (no extras in v0.1). The genesis entry additionally carries `v` — see §2.1.
+Every entry is a JSON object with exactly these fields (no extras in v0.1). The genesis entry additionally carries `v` — see §2.1. These field names are **frozen**: canonical form hashes the field-name bytes, so renaming any of them after the first real chain exists would orphan every existing log. (Decided 2026-08-09; `null` is JSON's own keyword, not a name of ours.)
 
 | Field | Type | Meaning |
 |---|---|---|
