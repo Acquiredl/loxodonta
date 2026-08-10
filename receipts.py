@@ -44,8 +44,12 @@ def cmd_init(args):
         "prev": None,
     }
     genesis["entry_hash"] = entry_hash(genesis)
-    with open(args.log, "w", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps(genesis, sort_keys=True, separators=(",", ":")) + "\n")
+    try:
+        with open(args.log, "x", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(genesis, sort_keys=True, separators=(",", ":")) + "\n")
+    except FileExistsError:
+        print(f"error: {args.log} already exists; refusing to overwrite", file=sys.stderr)
+        return 1
     print(f"initialized {args.log}")
     return 0
 
@@ -53,6 +57,15 @@ def cmd_init(args):
 def cmd_verify(args):
     with open(args.log, encoding="utf-8") as f:
         lines = f.read().splitlines()
+
+    # SPEC §2.1: read the genesis version before applying any other rule.
+    log_version = json.loads(lines[0]).get("v")
+    if log_version != FORMAT_VERSION:
+        print(
+            f'UNSUPPORTED-VERSION: log is format "{log_version}"; '
+            f'this verifier speaks "{FORMAT_VERSION}"'
+        )
+        return 4
 
     breaks = []
     for n, line in enumerate(lines):
@@ -71,16 +84,18 @@ def cmd_verify(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="receipts", description=__doc__)
-    parser.add_argument("--log", default=DEFAULT_LOG, help="receipt log path")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--log", default=DEFAULT_LOG, help="receipt log path")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("init", help="create a new receipt log with its genesis entry")
-    sub.add_parser("verify", help="walk the chain and report a verdict")
+    sub.add_parser("init", parents=[common],
+                   help="create a new receipt log with its genesis entry"
+                   ).set_defaults(func=cmd_init)
+    sub.add_parser("verify", parents=[common],
+                   help="walk the chain and report a verdict"
+                   ).set_defaults(func=cmd_verify)
 
     args = parser.parse_args(argv)
-    if args.command == "init":
-        return cmd_init(args)
-    if args.command == "verify":
-        return cmd_verify(args)
+    return args.func(args)
 
 
 if __name__ == "__main__":
