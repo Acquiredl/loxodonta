@@ -175,6 +175,58 @@ def cmd_head(args):
     return 0
 
 
+def walk(lines):
+    """The mechanical walk of SPEC §6, shared by verify (which judges) and
+    report (which narrates). Returns (entries, breaks, warns): entries[n] is
+    the parsed entry or None where the line is unparseable; breaks and warns
+    are (n, message) lists in walk order."""
+    entries = []
+    breaks = []
+    warns = []
+    prev_hash = None
+    prev_ts = None
+    for n, line in enumerate(lines):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            if n == len(lines) - 1:
+                # The one honest damage signature: a crash mid-append can
+                # truncate the final line and nothing else (SPEC §6).
+                breaks.append((n, f"BROKEN: torn tail at line {n} (crash-"
+                                  f"truncated append; entries 0..{n - 1} intact)"))
+            else:
+                breaks.append((n, f"BROKEN at entry {n}: line is not valid JSON"))
+            entries.append(None)
+            prev_hash = None
+            continue
+        entries.append(entry)
+        expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
+        if set(entry) != expected_fields:
+            odd = set(entry) ^ expected_fields
+            breaks.append((n, f"BROKEN at entry {n}: schema mismatch: "
+                              f"{', '.join(sorted(odd))}"))
+        if entry.get("n") != n:
+            breaks.append((n, f"BROKEN at entry {n}: sequence number is "
+                              f"{entry.get('n')}, expected {n}"))
+        if entry.get("prev") != prev_hash:
+            breaks.append((n, f"BROKEN at entry {n}: prev does not match "
+                              "predecessor's entry_hash"))
+        stored_hash = entry.get("entry_hash")
+        hashed_form = {k: v for k, v in entry.items() if k != "entry_hash"}
+        if entry_hash(hashed_form) != stored_hash:
+            breaks.append((n, f"BROKEN at entry {n}: entry_hash does not "
+                              "match canonical form"))
+        # ts is writer-supplied testimony, not a mechanical fact: a backward
+        # jump warns but never changes the verdict (SPEC §6, ADR-0002).
+        ts = entry.get("ts")
+        if prev_ts is not None and ts is not None and ts < prev_ts:
+            warns.append((n, f"WARN: ts decreases at entry {n} — clock skew "
+                             "at write time?"))
+        prev_ts = ts
+        prev_hash = stored_hash
+    return entries, breaks, warns
+
+
 def cmd_verify(args):
     try:
         lines = read_log(args.log)
@@ -194,56 +246,19 @@ def cmd_verify(args):
         )
         return 4
 
-    breaks = []
-    prev_hash = None
-    prev_ts = None
-    for n, line in enumerate(lines):
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            if n == len(lines) - 1:
-                # The one honest damage signature: a crash mid-append can
-                # truncate the final line and nothing else (SPEC §6).
-                breaks.append(f"BROKEN: torn tail at line {n} (crash-truncated "
-                              f"append; entries 0..{n - 1} intact)")
-            else:
-                breaks.append(f"BROKEN at entry {n}: line is not valid JSON")
-            prev_hash = None
-            continue
-        expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
-        if set(entry) != expected_fields:
-            odd = set(entry) ^ expected_fields
-            breaks.append(f"BROKEN at entry {n}: schema mismatch: "
-                          f"{', '.join(sorted(odd))}")
-        if entry.get("n") != n:
-            breaks.append(f"BROKEN at entry {n}: sequence number is "
-                          f"{entry.get('n')}, expected {n}")
-        if entry.get("prev") != prev_hash:
-            breaks.append(f"BROKEN at entry {n}: prev does not match "
-                          "predecessor's entry_hash")
-        stored_hash = entry.pop("entry_hash", None)
-        if entry_hash(entry) != stored_hash:
-            breaks.append(f"BROKEN at entry {n}: entry_hash does not match "
-                          "canonical form")
-        # ts is writer-supplied testimony, not a mechanical fact: a backward
-        # jump warns but never changes the verdict (SPEC §6, ADR-0002).
-        ts = entry.get("ts")
-        if prev_ts is not None and ts is not None and ts < prev_ts:
-            print(f"WARN: ts decreases at entry {n} — clock skew at write time?",
-                  file=sys.stderr)
-        prev_ts = ts
-        prev_hash = stored_hash
-
+    entries, breaks, warns = walk(lines)
+    for _, message in warns:
+        print(message, file=sys.stderr)
     if breaks:
-        for line in breaks:
-            print(line)
+        for _, message in breaks:
+            print(message)
         return 1
 
     if args.files:
         # Latest reference per path is authoritative (GLOSSARY: file reference).
         latest = {}
-        for line in lines:
-            for ref in json.loads(line)["files"]:
+        for entry in entries:
+            for ref in entry["files"]:
                 latest[ref["path"]] = ref["sha256"]
         log_dir = os.path.dirname(os.path.abspath(args.log))
         diverged = 0
@@ -263,14 +278,43 @@ def cmd_verify(args):
                   "differ from their logged fingerprints")
             return 2
 
-    if args.expect_head is not None and prev_hash != args.expect_head:
+    chain_head = entries[-1]["entry_hash"] if entries else None
+    if args.expect_head is not None and chain_head != args.expect_head:
         # Internally consistent, but not the chain the operator recorded —
         # the signature of whole-chain regeneration.
-        print(f"HEAD-MISMATCH: chain head is {prev_hash}, expected "
+        print(f"HEAD-MISMATCH: chain head is {chain_head}, expected "
               f"{args.expect_head} — this is not the recorded history")
         return 3
 
     print("VALID")
+    return 0
+
+
+def cmd_report(args):
+    try:
+        lines = read_log(args.log)
+    except FileNotFoundError:
+        return missing_log(args.log)
+
+    entries, breaks, warns = walk(lines)
+    flags = {}
+    for n, message in breaks + warns:
+        flags.setdefault(n, []).append(message)
+
+    print(f"receipt log: {args.log} ({len(lines)} entries)")
+    print()
+    for n, entry in enumerate(entries):
+        if entry is not None:
+            print(f"  {n:>4}  {entry.get('ts')}  "
+                  f"{entry.get('actor')}: {entry.get('action')}")
+            for ref in entry.get("files", []):
+                print(f"        - {ref['path']} ({ref['sha256'][:12]}…)")
+        for message in flags.get(n, []):
+            print(f"        !! {message}")
+    if breaks:
+        print()
+        print("chain integrity: BROKEN — this timeline is testimony only "
+              "(run `receipts verify` for the verdict)")
     return 0
 
 
@@ -304,6 +348,9 @@ def main(argv=None):
         "run", parents=[common, actor_files],
         help="run a command, then append its receipt -- <command> [args...]"
         ).set_defaults(func=cmd_run)
+    sub.add_parser("report", parents=[common],
+                   help="render the log as a human-readable timeline"
+                   ).set_defaults(func=cmd_report)
     sub.add_parser("head", parents=[common],
                    help="print the chain head (record it out of the writer's reach)"
                    ).set_defaults(func=cmd_head)
