@@ -24,7 +24,8 @@ In the project's `.claude/settings.json` (or your user settings):
 }
 ```
 
-- The hook command runs in the session's working directory, so per-session logs land in the project root by default. Add `--log-dir receipts/` to keep them in one place (create the directory first).
+- The hook command runs in the session's working directory, so per-session logs land in the project root by default. Add `--log-dir receipts/` to keep them in one place — the hook creates the directory on first use and seeds it with a protective `.gitignore` (command history must not ride into a commit by accident).
+- For machine-wide recording, put the same block in your user-level `~/.claude/settings.json` with an absolute path to `receipts.py` and `--log-dir "$CLAUDE_PROJECT_DIR/receipts"` — every project then gets its own chains with zero per-repo setup. Don't wire the same hook at both user and project level: both fire, and every tool call is logged twice.
 - Narrow `matcher` (e.g. `"Edit|Write|Bash"`) to receipt only state-changing tools; `"*"` records everything, reads included.
 - The adapter reads `session_id`, `tool_name`, and `tool_input` from the payload; nothing else. Tool output is deliberately not recorded — receipts are not transcripts, and `action`/`path` values are plaintext forever (SPEC §8: no secrets).
 
