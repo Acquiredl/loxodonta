@@ -281,6 +281,7 @@ def cmd_verify(args):
             print(message)
         return 1
 
+    diverged = 0
     if args.files:
         # Latest reference per path is authoritative (GLOSSARY: file reference).
         latest = {}
@@ -288,7 +289,6 @@ def cmd_verify(args):
             for ref in entry["files"]:
                 latest[ref["path"]] = ref["sha256"]
         log_dir = os.path.dirname(os.path.abspath(args.log))
-        diverged = 0
         for path in sorted(latest):
             try:
                 on_disk = sha256_file(os.path.join(log_dir, path))
@@ -303,15 +303,19 @@ def cmd_verify(args):
         if diverged:
             print(f"FILES-DIVERGED: chain intact, {diverged} file(s) "
                   "differ from their logged fingerprints")
-            return 2
 
     chain_head = entries[-1]["entry_hash"] if entries else None
     if args.expect_head is not None and chain_head != args.expect_head:
         # Internally consistent, but not the chain the operator recorded —
-        # the signature of whole-chain regeneration.
+        # the signature of whole-chain regeneration. When files diverged
+        # too, both are reported but this graver verdict sets the exit
+        # code — a regenerated chain must never hide behind "some files
+        # changed" (SPEC §6).
         print(f"HEAD-MISMATCH: chain head is {chain_head}, expected "
               f"{args.expect_head} — this is not the recorded history")
         return 3
+    if diverged:
+        return 2
 
     print("VALID")
     return 0
