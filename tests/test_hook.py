@@ -166,6 +166,35 @@ class HookTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_missing_log_dir_is_created_with_protective_gitignore(self):
+        # Global wiring points every repo at <project>/receipts without any
+        # per-repo setup: the hook creates the directory on first use, and
+        # seeds a .gitignore so command history can't ride into a commit.
+        result = run_hook(
+            payload(tool="Bash", tool_input={"command": "ls"}),
+            self.workdir, "--log-dir", "fresh/receipts",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log_dir = self.workdir / "fresh" / "receipts"
+        self.assertTrue((log_dir / "receipts-sess-1234abcd.jsonl").exists())
+        gitignore = (log_dir / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("*", gitignore.splitlines())
+
+    def test_existing_log_dir_gitignore_is_left_alone(self):
+        vault = self.workdir / "vault"
+        vault.mkdir()
+        (vault / ".gitignore").write_text("mine\n", encoding="utf-8")
+
+        result = run_hook(
+            payload(tool="Bash", tool_input={"command": "ls"}),
+            self.workdir, "--log-dir", "vault",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((vault / ".gitignore").read_text(encoding="utf-8"),
+                         "mine\n")
+
     def test_log_dir_flag_places_session_chains(self):
         vault = self.workdir / "vault"
         vault.mkdir()

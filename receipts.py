@@ -866,6 +866,17 @@ def cmd_hook(args):
 
     # Session id becomes part of a filename: keep only safe characters.
     safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(session))
+    if not os.path.isdir(args.log_dir):
+        os.makedirs(args.log_dir, exist_ok=True)
+        # A freshly created log dir gets a protective .gitignore: action
+        # lines record every command a session ran, and that history must
+        # not ride into a commit by accident (SPEC §8: no secrets).
+        try:
+            with open(os.path.join(args.log_dir, ".gitignore"), "x",
+                      encoding="utf-8", newline="\n") as f:
+                f.write("*\n!.gitignore\n")
+        except FileExistsError:
+            pass
     log = os.path.join(args.log_dir, f"receipts-{safe}.jsonl")
     if not os.path.exists(log):
         try:

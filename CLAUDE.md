@@ -2,7 +2,7 @@
 
 **receipts**: a tamper-evident, hash-chained activity log ("flight recorder") for AI agent pipelines. Stdlib-only Python CLI. The elephant never forgets.
 
-**Current phase: dogfooding.** Stages A–C are implemented and merged (2026-08-13); SPEC v0.1 and ADR-0001/0002/0003 are `accepted`; the format is frozen. The repo now records its own development: a `PostToolUse` hook in `.claude/settings.json` writes per-session chains into `receipts/` (gitignored). The experiment — signals, decision date, journal — lives in `DOGFOOD.md`; the driver is `dogfood.sh`. Code changes still go tests-first through the public CLI. Open: issue #10's human readability sign-off of `receipts.py`.
+**Current phase: dogfooding.** Stages A–C are implemented and merged (2026-08-13); SPEC v0.1 and ADR-0001/0002/0003 are `accepted`; the format is frozen. Sessions are recorded machine-wide: `./dogfood.sh install-global` wires the `PostToolUse` hook into `~/.claude/settings.json`, and every Claude Code session writes per-session chains into that project's `receipts/` (auto-created, auto-gitignored). The experiment — signals, decision date, journal — lives in `DOGFOOD.md`; the driver is `dogfood.sh`. Code changes still go tests-first through the public CLI. Open: issue #10's human readability sign-off of `receipts.py`.
 
 ## Read first
 
