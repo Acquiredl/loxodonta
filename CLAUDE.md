@@ -2,7 +2,7 @@
 
 **receipts**: a tamper-evident, hash-chained activity log ("flight recorder") for AI agent pipelines. Stdlib-only Python CLI. The elephant never forgets.
 
-**Current phase: Stage A implementation.** SPEC v0.1 and ADR-0001/0002 are `accepted` (2026-08-10); the format is frozen. `receipts.py` gets written via `/tdd` against the frozen spec — behavior tested through the public CLI only.
+**Current phase: dogfooding.** Stages A–C are implemented and merged (2026-08-13); SPEC v0.1 and ADR-0001/0002/0003 are `accepted`; the format is frozen. The repo now records its own development: a `PostToolUse` hook in `.claude/settings.json` writes per-session chains into `receipts/` (gitignored). The experiment — signals, decision date, journal — lives in `DOGFOOD.md`; the driver is `dogfood.sh`. Code changes still go tests-first through the public CLI. Open: issue #10's human readability sign-off of `receipts.py`.
 
 ## Read first
 
@@ -14,9 +14,10 @@
 
 ## Roadmap
 
-- **Stage A** — spec review → stdlib-only CLI (`init` / `log` / `run` / `head` / `verify` / `report`) via `/tdd`, tamper-demo tests (edit / delete / reorder / splice / regenerate each caught).
-- **Stage B** — `receipts anchor`: OpenTimestamps commitment of the chain head to Bitcoin; `verify` learns anchor proofs.
-- **Stage C** — Claude Code `PostToolUse` hook adapter (auto-log every tool call) + `receipts explain` (LLM narration/anomaly layer).
+- **Stage A** *(done)* — spec review → stdlib-only CLI (`init` / `log` / `run` / `head` / `verify` / `report`), tamper-demo tests (edit / delete / reorder / splice / regenerate each caught), golden fixture pinning canonicalization.
+- **Stage B** *(done)* — `receipts anchor`: OpenTimestamps commitment of the chain head to Bitcoin (minimal in-file OTS subset, ADR-0003, `docs/ANCHORING.md`); `verify --anchors` judges proofs offline.
+- **Stage C** *(done)* — Claude Code `PostToolUse` hook adapter (`receipts hook`, `docs/HOOK.md`) + `receipts explain` (LLM narration via external command, default `claude -p`).
+- **Next** — decided by the dogfood on `DOGFOOD.md`'s decision date: reader-side supervisor, go public, or park.
 
 ## Constraints
 
