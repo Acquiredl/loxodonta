@@ -305,6 +305,11 @@ class FileReferenceTest(ReceiptsCliTest):
             "log", "--actor", "agent", "--action", "first spelling",
             "--file", "report.md", cwd=self.workdir,
         )
+        # On a case-insensitive filesystem this writes the same file; on a
+        # case-sensitive one it creates a sibling. Either way `Report.md`
+        # now exists, so the test exercises the warning — which compares
+        # against chain history (SPEC §3), not the filesystem — everywhere.
+        self.write_file("Report.md", "content\n")
 
         result = run_receipts(
             "log", "--actor", "agent", "--action", "second spelling",
@@ -498,6 +503,29 @@ class HeadTest(ReceiptsCliTest):
         self.assertNotEqual(empty.returncode, 0)
         self.assertIn("empty", empty.stderr)
         self.assertNotIn("Traceback", empty.stderr)
+
+    def test_head_mismatch_outranks_files_divergence(self):
+        # Issue #12: when --files and --expect-head both fire, the graver
+        # verdict must win — a regenerated chain must never hide behind
+        # "some files changed". Both findings reported, exit is 3.
+        run_receipts("init", cwd=self.workdir)
+        report = self.workdir / "report.md"
+        report.write_text("original\n", encoding="utf-8")
+        run_receipts(
+            "log", "--actor", "agent", "--action", "wrote report",
+            "--file", "report.md", cwd=self.workdir,
+        )
+        report.write_text("changed since logged\n", encoding="utf-8")
+
+        result = run_receipts(
+            "verify", "--files", "--expect-head", "0" * 64, cwd=self.workdir
+        )
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("MODIFIED-SINCE-LOGGED: report.md", result.stdout)
+        self.assertIn("FILES-DIVERGED", result.stdout)
+        self.assertIn("HEAD-MISMATCH", result.stdout)
+        self.assertNotIn("VALID", result.stdout)
 
     def test_malformed_expect_head_is_usage_error_not_verdict(self):
         run_receipts("init", cwd=self.workdir)
