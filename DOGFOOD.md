@@ -2,7 +2,7 @@
 
 **Started:** 2026-08-13 · **Decision date:** 2026-09-10 (four weeks)
 
-receipts now records its own development: a `PostToolUse` hook in `.claude/settings.json` writes one chained entry per tool call, one chain per Claude Code session, into `receipts/` (gitignored — action lines record every command run). The tool works; this experiment answers whether it is *useful* — decided by usage data, not argument.
+receipts records every Claude Code session on this machine: `./dogfood.sh install-global` (run once) wires a `PostToolUse` hook into `~/.claude/settings.json`, and each session writes one chained entry per tool call into `<project>/receipts/` — the hook creates that directory and a protective `.gitignore` on first use, since action lines record every command run. The tool works; this experiment answers whether it is *useful* — decided by usage data, not argument.
 
 ## The bet, written down before the data
 
@@ -22,9 +22,9 @@ receipts now records its own development: a `PostToolUse` hook in `.claude/setti
 
 ## How to run it
 
-Once: `alias receipts='python3 /path/to/loxodonta/receipts.py'` in your shell rc.
+Once: `alias receipts='python3 /path/to/loxodonta/receipts.py'` in your shell rc, and `./dogfood.sh install-global` (then restart open Claude Code sessions — hooks load at session start).
 
-The hook runs itself — every Claude Code session in this repo leaves a chain. Everything else is `./dogfood.sh`:
+From then on the hook runs itself — every session in every repo leaves a chain in that repo's `receipts/`. Everything else is `./dogfood.sh` (status/report/anchor/upgrade read this repo's `receipts/`; run them from wherever the chains you care about live, via the alias or a copy of the script):
 
 | When | Command | What it does |
 |---|---|---|
