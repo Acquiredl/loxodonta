@@ -1,0 +1,5 @@
+# Session chains and anchor sidecars stay local: action lines record every
+# command run in a session — not for a public repo. Copy *.anchors.jsonl
+# somewhere out of the writer's reach instead (docs/ANCHORING.md §5).
+*
+!.gitignore
