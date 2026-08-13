@@ -8,6 +8,10 @@
 #   ./dogfood.sh upgrade      complete pending anchor proofs
 #   ./dogfood.sh drill        tamper fire drill on a scratch chain
 #   ./dogfood.sh note "..."   append a line to the DOGFOOD.md journal
+#   ./dogfood.sh install-global
+#                             wire the hook into ~/.claude/settings.json so
+#                             every Claude Code session on this machine logs
+#                             to <project>/receipts/ (created on first use)
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -158,6 +162,57 @@ PY
     fi
     printf -- '- %s: %s\n' "$(date +%F)" "$*" >> DOGFOOD.md
     tail -1 DOGFOOD.md
+    ;;
+
+  install-global)
+    # Merge the hook into the user-level Claude Code settings, idempotently
+    # and without clobbering anything already there. Restart open sessions
+    # afterward — hooks load at session start.
+    python3 - "$PWD/receipts.py" <<'PY'
+import json, os, shutil, sys
+
+receipts = os.path.abspath(sys.argv[1])
+command = (f'python3 "{receipts}" hook '
+           '--log-dir "$CLAUDE_PROJECT_DIR/receipts"')
+path = os.path.expanduser(os.path.join("~", ".claude", "settings.json"))
+
+settings = {}
+if os.path.exists(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            settings = json.load(f)
+    except json.JSONDecodeError as e:
+        sys.exit(f"refusing to touch {path}: it is not valid JSON ({e}) — "
+                 "fix it by hand first")
+    shutil.copy2(path, path + ".bak")
+else:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+blocks = settings.setdefault("hooks", {}).setdefault("PostToolUse", [])
+already = [h.get("command", "") for b in blocks for h in b.get("hooks", [])
+           if "receipts.py" in h.get("command", "")]
+if already:
+    print(f"already installed in {path}:")
+    for c in already:
+        print(f"  {c}")
+    sys.exit(0)
+
+blocks.append({
+    "matcher": "Edit|Write|NotebookEdit|Bash",
+    "hooks": [{"type": "command", "command": command}],
+})
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+
+print(f"installed in {path}"
+      + (" (previous version saved as settings.json.bak)"
+         if os.path.exists(path + ".bak") else ""))
+print(f"  hook: {command}")
+print("every NEW Claude Code session on this machine now leaves a chain in")
+print("<project>/receipts/ — the hook creates the directory and a protective")
+print(".gitignore on first use. Restart open sessions to pick it up.")
+PY
     ;;
 
   *)
