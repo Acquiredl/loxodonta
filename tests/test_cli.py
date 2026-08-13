@@ -305,6 +305,11 @@ class FileReferenceTest(ReceiptsCliTest):
             "log", "--actor", "agent", "--action", "first spelling",
             "--file", "report.md", cwd=self.workdir,
         )
+        # On a case-insensitive filesystem this writes the same file; on a
+        # case-sensitive one it creates a sibling. Either way `Report.md`
+        # now exists, so the test exercises the warning — which compares
+        # against chain history (SPEC §3), not the filesystem — everywhere.
+        self.write_file("Report.md", "content\n")
 
         result = run_receipts(
             "log", "--actor", "agent", "--action", "second spelling",
@@ -498,6 +503,29 @@ class HeadTest(ReceiptsCliTest):
         self.assertNotEqual(empty.returncode, 0)
         self.assertIn("empty", empty.stderr)
         self.assertNotIn("Traceback", empty.stderr)
+
+    def test_head_mismatch_outranks_files_divergence(self):
+        # Issue #12: when --files and --expect-head both fire, the graver
+        # verdict must win — a regenerated chain must never hide behind
+        # "some files changed". Both findings reported, exit is 3.
+        run_receipts("init", cwd=self.workdir)
+        report = self.workdir / "report.md"
+        report.write_text("original\n", encoding="utf-8")
+        run_receipts(
+            "log", "--actor", "agent", "--action", "wrote report",
+            "--file", "report.md", cwd=self.workdir,
+        )
+        report.write_text("changed since logged\n", encoding="utf-8")
+
+        result = run_receipts(
+            "verify", "--files", "--expect-head", "0" * 64, cwd=self.workdir
+        )
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("MODIFIED-SINCE-LOGGED: report.md", result.stdout)
+        self.assertIn("FILES-DIVERGED", result.stdout)
+        self.assertIn("HEAD-MISMATCH", result.stdout)
+        self.assertNotIn("VALID", result.stdout)
 
     def test_malformed_expect_head_is_usage_error_not_verdict(self):
         run_receipts("init", cwd=self.workdir)
@@ -889,6 +917,37 @@ class ReportTest(ReceiptsCliTest):
         self.assertIn("entry 2", out)
         self.assertNotIn("BROKEN", out)
         self.assertLess(out.index("approved findings"), out.index("clock skew"))
+
+
+class GoldenFixtureTest(ReceiptsCliTest):
+    """The reproducibility contract of SPEC §4, pinned forever.
+
+    tests/fixtures/golden.jsonl was built once (2026-08-13) and is never
+    regenerated. It exercises the canonicalization rules an implementation
+    is most likely to drift on: non-ASCII emitted as-is (accents, «», 🐘),
+    files sorted by path bytes, null prev, and the genesis-only v field.
+    If any canonicalization detail changes, these hashes stop verifying —
+    that failure is the guard working, not the fixture being stale.
+    """
+
+    GOLDEN = REPO_ROOT / "tests" / "fixtures" / "golden.jsonl"
+    GOLDEN_HEAD = "dc1a73b9c913f584e041863d9efaf4abe8de993eac214d6a6305ce9007142c71"
+
+    def setUp(self):
+        super().setUp()
+        self.log_path.write_bytes(self.GOLDEN.read_bytes())
+
+    def test_golden_fixture_verifies_valid_forever(self):
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VALID", result.stdout)
+
+    def test_golden_fixture_head_is_pinned(self):
+        result = run_receipts("head", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), self.GOLDEN_HEAD)
 
 
 if __name__ == "__main__":
