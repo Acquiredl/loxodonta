@@ -919,5 +919,36 @@ class ReportTest(ReceiptsCliTest):
         self.assertLess(out.index("approved findings"), out.index("clock skew"))
 
 
+class GoldenFixtureTest(ReceiptsCliTest):
+    """The reproducibility contract of SPEC §4, pinned forever.
+
+    tests/fixtures/golden.jsonl was built once (2026-08-13) and is never
+    regenerated. It exercises the canonicalization rules an implementation
+    is most likely to drift on: non-ASCII emitted as-is (accents, «», 🐘),
+    files sorted by path bytes, null prev, and the genesis-only v field.
+    If any canonicalization detail changes, these hashes stop verifying —
+    that failure is the guard working, not the fixture being stale.
+    """
+
+    GOLDEN = REPO_ROOT / "tests" / "fixtures" / "golden.jsonl"
+    GOLDEN_HEAD = "dc1a73b9c913f584e041863d9efaf4abe8de993eac214d6a6305ce9007142c71"
+
+    def setUp(self):
+        super().setUp()
+        self.log_path.write_bytes(self.GOLDEN.read_bytes())
+
+    def test_golden_fixture_verifies_valid_forever(self):
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VALID", result.stdout)
+
+    def test_golden_fixture_head_is_pinned(self):
+        result = run_receipts("head", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), self.GOLDEN_HEAD)
+
+
 if __name__ == "__main__":
     unittest.main()
