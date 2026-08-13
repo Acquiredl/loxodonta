@@ -61,7 +61,8 @@ def missing_log(path):
 
 # --- Commands -----------------------------------------------------------------
 
-def cmd_init(args):
+def genesis_entry():
+    """The pinned genesis of SPEC §2.1 — only its timestamp varies."""
     genesis = {
         "v": FORMAT_VERSION,
         "n": 0,
@@ -72,9 +73,13 @@ def cmd_init(args):
         "prev": None,
     }
     genesis["entry_hash"] = entry_hash(genesis)
+    return genesis
+
+
+def cmd_init(args):
     try:
         with open(args.log, "x", encoding="utf-8", newline="\n") as f:
-            f.write(entry_line(genesis))
+            f.write(entry_line(genesis_entry()))
     except FileExistsError:
         print(f"error: {args.log} already exists; refusing to overwrite", file=sys.stderr)
         return 1
@@ -740,6 +745,83 @@ def cmd_report(args):
     return 0
 
 
+# --- Harness hook (Stage C) ---------------------------------------------------
+#
+# `receipts hook` turns one Claude Code PostToolUse payload (JSON on stdin)
+# into one chained entry. This is the completeness mechanism of SPEC §8:
+# the harness fires the hook on every tool call, so the log call sits
+# outside the writer's volition — the agent cannot skip its own receipt.
+# One chain per session (SPEC §8: one writer per log; parallel sessions
+# are sibling chains, never a shared file).
+
+# The most descriptive scalar a tool call has, in preference order.
+HOOK_SUMMARY_KEYS = ("file_path", "notebook_path", "command", "path",
+                     "pattern", "url", "query", "prompt")
+
+
+def one_line(text, limit=160):
+    """Whitespace collapsed to single spaces, truncated with an ellipsis —
+    action is one line (SPEC §2), and receipts are not transcripts."""
+    line = " ".join(str(text).split())
+    if len(line) > limit:
+        line = line[:limit] + "…"
+    return line
+
+
+def cmd_hook(args):
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        payload = None
+    if not isinstance(payload, dict):
+        print("error: stdin is not a JSON hook payload", file=sys.stderr)
+        return 1
+    session = payload.get("session_id")
+    tool = payload.get("tool_name")
+    if not session or not tool:
+        print("error: hook payload has no session_id or tool_name",
+              file=sys.stderr)
+        return 1
+
+    # Session id becomes part of a filename: keep only safe characters.
+    safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(session))
+    log = os.path.join(args.log_dir, f"receipts-{safe}.jsonl")
+    if not os.path.exists(log):
+        try:
+            with open(log, "x", encoding="utf-8", newline="\n") as f:
+                f.write(entry_line(genesis_entry()))
+        except FileExistsError:
+            pass  # a parallel hook won the race; appending is all we need
+
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    action = str(tool)
+    for key in HOOK_SUMMARY_KEYS:
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            action = f"{tool}: {one_line(value)}"
+            break
+
+    # Fingerprint files the tool touched — when they sit under the log's
+    # directory and still exist. Anything else is skipped, never fatal:
+    # a hook that fails the session over path layout would teach the
+    # operator to turn the hook off.
+    log_dir_abs = os.path.dirname(os.path.abspath(log))
+    file_paths = []
+    for key in ("file_path", "notebook_path"):
+        raw = tool_input.get(key)
+        if not isinstance(raw, str) or not raw:
+            continue
+        resolved = os.path.abspath(raw)
+        relative = os.path.relpath(resolved, log_dir_abs)
+        if relative.split(os.sep)[0] == ".." or not os.path.isfile(resolved):
+            continue
+        file_paths.append(relative.replace(os.sep, "/"))
+
+    return append_entry(log, args.actor, action, file_paths)
+
+
 def head_record(value):
     """argparse validator: a head record is 64 lowercase hex characters."""
     v = value.lower()
@@ -795,6 +877,14 @@ def main(argv=None):
     anchor_parser.add_argument("--upgrade", action="store_true",
                                help="complete pending proofs once Bitcoin has them")
     anchor_parser.set_defaults(func=cmd_anchor)
+    hook_parser = sub.add_parser(
+        "hook",
+        help="append one entry from a Claude Code PostToolUse payload on stdin")
+    hook_parser.add_argument("--log-dir", default=".", metavar="DIR",
+                             help="directory for per-session receipt logs")
+    hook_parser.add_argument("--actor", default="claude-code",
+                             help="actor recorded for hook entries")
+    hook_parser.set_defaults(func=cmd_hook)
 
     if argv is None:
         argv = sys.argv[1:]
