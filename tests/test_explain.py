@@ -117,6 +117,29 @@ class ExplainTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("no-such-llm-command-xyz", result.stderr)
+
+    def test_explain_accepts_a_quoted_interpreter_path_with_spaces(self):
+        # The ordinary Windows shape ("C:\\Program Files\\...\\python.exe"),
+        # and the reason --llm is parsed per-platform: POSIX escaping rules
+        # would eat the separators out of a native path.
+        roomy = self.workdir / "dir with space"
+        roomy.mkdir()
+        fake = roomy / "fake_llm.py"
+        fake.write_text(FAKE_LLM.format(capture=str(self.capture)),
+                        encoding="utf-8")
+
+        result = run_receipts(
+            "explain", "--llm", f'"{sys.executable}" "{fake}"', cwd=self.workdir
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NARRATION:", result.stdout)
+
+    def test_explain_with_an_empty_llm_command_errors_cleanly(self):
+        result = run_receipts("explain", "--llm", "   ", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_explain_without_log_errors_cleanly(self):
