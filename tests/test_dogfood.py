@@ -7,6 +7,7 @@ measure — it reports "no session chains yet" while chains accumulate
 next door. These tests drive the command surface, never internals.
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -27,6 +28,32 @@ def run_dogfood(*args, root):
         [sys.executable, str(DOGFOOD), *args],
         capture_output=True, text=True, env=env,
     )
+
+
+def write_pending_anchor(log, head, calendar="https://calendar.example.test"):
+    """A minimal but genuine OTS timestamp: no operations, one pending
+    calendar attestation on the head digest itself. Enough for verify to
+    replay and report ANCHOR-PENDING, with no network and no real calendar
+    (ANCHORING.md §OTS subset)."""
+    tag_pending = bytes.fromhex("83dfe30d2ef90c8e")
+
+    def varint(n):
+        out = bytearray()
+        while True:
+            byte = n & 0x7F
+            n >>= 7
+            out.append(byte | 0x80 if n else byte)
+            if not n:
+                return bytes(out)
+
+    uri = calendar.encode("utf-8")
+    payload = varint(len(uri)) + uri
+    proof = bytes([0x00]) + tag_pending + varint(len(payload)) + payload
+    record = {"head": head, "n": 1, "ts": "2026-08-14T16:00:00Z",
+              "calendar": calendar,
+              "proof": base64.b64encode(proof).decode()}
+    Path(str(log) + ".anchors.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8")
 
 
 def make_chain(log_dir, session, entries=2):
@@ -117,6 +144,25 @@ class DogfoodStatusTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("no session chains", result.stdout)
+
+    def test_status_surfaces_anchor_state_not_only_the_verdict(self):
+        # verify prints anchor lines *above* its verdict, so a dashboard
+        # showing only the last line hides them — and reading the anchor
+        # state is the operator's half of the regeneration defence
+        # (ANCHORING.md §5). VALID-and-unanchored, VALID-and-pending, and
+        # VALID-and-anchored-to-a-block are three different situations.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        head = subprocess.run(
+            [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
+            capture_output=True, text=True, check=True).stdout.strip()
+        write_pending_anchor(log, head)
+
+        result = run_dogfood("status", root=self.root)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("VALID", result.stdout)
+        self.assertIn("ANCHOR-PENDING", result.stdout,
+                      "a pending anchor must not be hidden behind the verdict")
 
 
 class DogfoodDefaultRootTest(unittest.TestCase):
