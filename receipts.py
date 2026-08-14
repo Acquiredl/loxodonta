@@ -6,6 +6,7 @@ Stdlib only. Format spec: docs/SPEC.md (v0.1, frozen).
 
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -783,6 +784,20 @@ timeline:
 """
 
 
+def split_command(text):
+    """Split a command line into argv the way the running platform means it.
+
+    shlex's POSIX mode treats a backslash as an escape character, so it eats
+    the separators out of a native Windows path: an unquoted
+    `C:\\Users\\me\\python.exe` arrives as `C:Usersmepython.exe` and the
+    command appears not to exist. Windows quotes rather than escapes, so
+    parse in non-POSIX mode there and drop the quotes shlex leaves attached.
+    """
+    if os.name == "nt":
+        return [token.strip('"') for token in shlex.split(text, posix=False)]
+    return shlex.split(text)
+
+
 def cmd_explain(args):
     try:
         lines = read_log(args.log)
@@ -805,12 +820,16 @@ def cmd_explain(args):
         verdict=verdict,
         timeline="\n".join(timeline_lines(entries, breaks, warns)),
     )
-    command = shlex.split(args.llm)
+    command = split_command(args.llm)
+    if not command:
+        print("error: --llm is empty — pass a command to narrate with, "
+              "or install the `claude` CLI", file=sys.stderr)
+        return 1
     try:
         completed = subprocess.run(
             command, input=prompt, capture_output=True, text=True
         )
-    except (FileNotFoundError, OSError):
+    except OSError:
         print(f"error: LLM command not found: {command[0]} — pass --llm "
               "or install the `claude` CLI", file=sys.stderr)
         return 1
@@ -1059,8 +1078,15 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except BrokenPipeError:
+    except OSError as e:
         # The reader hung up (`receipts report | head`) — no verdict was
         # asked of the lines that went unread; die quietly, not loudly.
+        # POSIX raises BrokenPipeError (EPIPE); Windows reports a plain
+        # EINVAL from the closed handle instead, so match on both or the
+        # quiet death is a traceback on half the platforms.
+        if not isinstance(e, BrokenPipeError) and not (
+                os.name == "nt" and e.errno == errno.EINVAL):
+            raise  # EINVAL means nothing about pipes off Windows: let it fly
+        # Give the interpreter a sink to flush into, or shutdown re-raises.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         sys.exit(1)
