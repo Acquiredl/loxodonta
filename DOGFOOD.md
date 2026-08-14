@@ -42,7 +42,7 @@ Everything else is `python dogfood.py`, run from anywhere. It searches every rep
 
 To automate the upgrade step, schedule `python dogfood.py upgrade` weekly — Task Scheduler on Windows (Action: `python`, arguments: `S:\Code\repos\loxodonta\dogfood.py upgrade`), or cron elsewhere (`0 9 * * 1 cd ~/loxodonta && python3 dogfood.py upgrade`). Or just run it by hand when you remember; pending proofs don't expire quickly.
 
-Ritual reminders: copy `receipts/*.anchors.jsonl` somewhere the writer can't reach (proofs are self-authenticating — an out-of-reach copy beats a head record, ANCHORING.md §5); and when `verify --anchors` says ANCHORED, actually read the block height — freshness judgment is the operator's half of the regeneration defense.
+Ritual reminders: a session can span **sibling chains** (`receipts-<session>-002.jsonl`) if a tail is ever damaged — each has its own head and anchors separately, so `anchor` and the head-record ritual cover every chain, not one per session; copy `receipts/*.anchors.jsonl` somewhere the writer can't reach (proofs are self-authenticating — an out-of-reach copy beats a head record, ANCHORING.md §5); and when `verify --anchors` says ANCHORED, actually read the block height — freshness judgment is the operator's half of the regeneration defense.
 
 ## What to journal
 

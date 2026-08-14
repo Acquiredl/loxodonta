@@ -19,7 +19,9 @@ The human who owns the machine and the receipt log, and who runs `verify`. The o
 
 ### Writer
 
-The process that appends entries to the log — in the target use case, an AI agent (directly in Stage A, via a harness hook in Stage C). The writer is **semi-trusted**: trusted to run, *not* trusted to leave history alone afterward. The writer is the tool's primary adversary — receipts exists so that a writer that edits, deletes, or reorders its own history is always caught. One writer per log.
+The process that appends entries to the log — in the target use case, an AI agent (directly in Stage A, via a harness hook in Stage C). The writer is **semi-trusted**: trusted to run, *not* trusted to leave history alone afterward. The writer is the tool's primary adversary — receipts exists so that a writer that edits, deletes, or reorders its own history is always caught.
+
+**One writer per log — and the writer is a *process*, not a session.** The distinction is load-bearing and was learned the hard way (ADR-0004): a Claude Code session runs tool calls in parallel and the harness fires one hook process per call, so a chain keyed by session id has many writers at once. Where several processes must share a chain, the integration serializes them with a lock; the format itself offers no concurrency guarantee.
 
 The writer/operator split is the load-bearing idea of the project: in Acu (the predecessor), writer and operator were the same person, so log tampering was "self-sabotage" and a plain JSONL file sufficed. An AI agent with filesystem access is a semi-trusted third party operating inside your machine — that is what makes the chain earn its keep.
 
@@ -84,7 +86,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 ## Relationships
 
 - A receipt log has exactly one genesis and zero-or-more subsequent entries.
-- A workflow with parallel writers uses one log **per writer** (sibling chains). Chains never share a file; merging happens only at display time in `report`.
+- A workflow with parallel writers prefers one log **per writer** (sibling chains); merging happens only at display time in `report`. Where writers genuinely must share a file — the Stage C hook, where the session is the unit of history but every tool call is its own process — the integration serializes them with a lock (ADR-0004). The format still guarantees nothing here; the lock is the integration keeping the format's precondition true.
 - An entry references zero-or-more files; a file may be referenced by many entries (its latest reference is authoritative for `--files` checks).
 - An anchor commits to exactly one chain head; a log may accumulate many anchors over time.
 
@@ -100,7 +102,8 @@ An external commitment of the chain head to a system the log owner doesn't contr
 ## Sub-terms and orthogonal categories
 
 - A *broken* chain is still a readable log — `report` works on it; only its integrity claim is gone. Broken ≠ unparseable.
-- A *torn tail* is the one honest way a log gets damaged: the final line truncated by a crash mid-append. Verify reports it distinctly (entries before it are intact; operator trims the partial line by hand) but it is still `BROKEN`/exit 1. A malformed line anywhere *else* has no innocent explanation and reports as ordinary tampering.
+- A *torn tail* is the honest way a log gets damaged: the final line left partial. Two causes, both innocent — a crash mid-append, or two writers appending at once (ADR-0004). Verify reports it distinctly (entries before it are intact; operator trims the partial line by hand) but it is still `BROKEN`/exit 1. A malformed line anywhere *else* has no innocent explanation and reports as ordinary tampering.
+- A *sibling chain* is a second, complete chain for the same session — `receipts-<session>-002.jsonl` — with its own genesis, head, and anchor. The hook starts one when the chain it would append to has a damaged tail: recording must not stop, and damage must not be repaired (ADR-0002, ADR-0004). Siblings are continuation by naming only; nothing links them cryptographically, and each verifies alone.
 - An *anchored* chain is still just a chain — anchoring adds an external proof, it does not change any entry.
 
 ---

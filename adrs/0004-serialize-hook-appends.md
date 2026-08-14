@@ -1,6 +1,6 @@
 # ADR-0004: Serialize the hook's appends, and never stop recording
 
-**Status:** `proposed`
+**Status:** `accepted` (2026-08-14)
 **Date:** 2026-08-14
 **Deciders:** Acquiredl
 
@@ -14,7 +14,13 @@ The dogfood caught it on 2026-08-14, in this repo's own chain: entries 0–7 int
 
 The refusal is correct (ADR-0002: no repair command). Its consequence is not: because `append_entry` will not append past a damaged tail, **the session stopped recording, silently, for the rest of its life.** For a tool whose entire value proposition is completeness, a fault that quietly ends the recording is worse than the tear that caused it.
 
-`append_entry` reads the tail, computes `n` and `prev`, then appends, with no mutual exclusion. Two faults live in that gap: a **torn line** (observed) and a **forked chain** — two entries claiming the same `n` (not yet observed, equally reachable).
+`append_entry` reads the tail, computes `n` and `prev`, then appends, with no mutual exclusion. Three faults live in that gap:
+
+- a **torn line** — a partial entry on disk (observed in the field);
+- a **forked chain** — two entries claiming the same `n`. Reproducing the race under test showed this is not merely reachable but the *common* outcome: eight parallel writers left six entries, so most collisions silently lost a receipt rather than tearing one;
+- a **startup race** — two writers creating the same chain at once, one seeing the other's file while it is still empty and dying with "run `receipts init` first". The receipt is lost to a chain that is about to exist.
+
+The middle one is the worst of the three, because it leaves a chain that verifies `VALID` while entries are missing. Integrity is intact and completeness is not — and completeness is the property no verdict can report on (SPEC §8).
 
 ## Decision
 
@@ -22,7 +28,9 @@ The refusal is correct (ADR-0002: no repair command). Its consequence is not: be
 
 Two parts, one fault domain:
 
-1. **Lock.** `append_entry` holds an `os.open(log + ".lock", O_CREAT | O_EXCL)` lock across read-tail-then-append. It retries with backoff; it breaks a lock whose recorded holder is provably gone; on timeout it **fails loudly** rather than dropping the entry.
+1. **Lock.** `append_entry` holds an `os.open(log + ".lock", O_CREAT | O_EXCL)` lock across read-tail-then-append. It retries with backoff; it breaks a lock left untouched past a staleness window (60s); on timeout it **fails loudly** rather than dropping the entry. The wait is `RECEIPTS_LOCK_TIMEOUT` (default 10s).
+
+   *Amended during implementation:* this ADR first said the lock would be broken when its holder was "provably gone". Proving that needs a per-platform process API — `os.kill(pid, 0)` on POSIX, `OpenProcess` on Windows — which is the very fork this ADR rejects two paragraphs down for `fcntl`/`msvcrt`. Staleness is judged by age instead. The trade is real and worth naming: a writer that legitimately stalls longer than 60s can have its lock stolen, so the window must stay far above any honest append.
 2. **Sibling on damage.** Finding a damaged tail, the hook repairs nothing, trims nothing, appends nothing. It starts `receipts-<session>-002.jsonl` and records there. The damaged chain is preserved byte-for-byte as evidence.
 
 Part 2 is what keeps part 1 honest: a lock reduces the odds of damage but cannot reach damage that already exists, and "stop recording" is not an acceptable response to either.
@@ -55,6 +63,8 @@ No format change. No new fields. v0.1 stays frozen.
 
 - **One chain per hook process** — follows SPEC §8 to the letter, and is absurd in practice: a hook process is a single tool call, so this yields two-entry chains and destroys the session as the unit of history.
 - **`fcntl.flock` / `msvcrt.locking`** — rejected: a platform fork inside a deliberately single-file, readable-top-to-bottom tool. Windows portability has already cost this repo three bugs in one day; `O_EXCL` is one path everywhere.
+
+  *Honesty about that claim:* "one path everywhere" did not survive contact. Windows returns `EACCES`, not `EEXIST`, during the window in which a lock file is being deleted, so a release by one writer crashes a concurrent acquire by another. It surfaced only under machine load, after the test had passed a dozen times — the failure needs another process to be releasing at the instant you acquire. The lock therefore carries a small `os.name == "nt"` branch. It is still far less platform-specific code than `fcntl`/`msvcrt` would have been, and the branch is three lines with the reason written beside it, but the alternative was rejected partly on a cleanliness argument that reality discounted.
 - **A resident writer daemon serializing appends** — rejected: a background process contradicts the stdlib-only, nothing-to-install premise.
 - **Optimistic retry without a lock** (re-read the tail, re-append on conflict) — rejected: it can resolve a fork but not a tear. By the time the conflict is visible, the torn bytes are already on disk.
 - **Let `verify` tolerate torn tails and heal them** — rejected outright. ADR-0002 refuses a repair command because a sanctioned way to trim a tail is exactly the capability an adversary with a "crash" cover story wants. That reasoning is unchanged; this ADR routes *around* damage instead of erasing it.
@@ -62,7 +72,7 @@ No format change. No new fields. v0.1 stays frozen.
 ## References
 
 - Related ADRs: `0002-writer-as-adversary.md` — supplies the no-repair constraint and the completeness principle this decision is bounded by; `0001-hash-chain-not-signatures.md`.
-- **Spec amendment required:** `docs/SPEC.md` §8 "No concurrency" currently says sharing a log is unsupported and stops there. It must state that the Stage C hook *enforces* one-writer-at-a-time on a shared session chain, and that a session may span sibling chains. The entry format is untouched.
-- Glossary terms **sharpened**: *Writer* — "one writer per log" reads as satisfied by one chain per session; it must say the writer is a **process**, and that one session has many.
+- **Spec amended** (done, same commit): `docs/SPEC.md` §8 — the "No concurrency" bullet now scopes the guarantee to the format, defines a writer as a process, and states that an integration sharing a chain must serialize its writers, with the hook as the worked example. The entry format is untouched; v0.1 stays frozen.
+- Glossary terms **sharpened** (done, same commit): *Writer* — "one writer per log" now says the writer is a **process**, not a session, and names the parallel-tool-call case. *Torn tail* — previously called a crash mid-append "the one honest way a log gets damaged"; concurrent appends are a second honest cause, so the line was stale the moment Stage C shipped. **Added:** *Sibling chain*.
 - Glossary terms **retired**: none. No topology is overruled — the session-keyed chain survives; only its concurrency assumption is corrected.
 - Discussion: the dogfood, 2026-08-14 — the first fault this tool caught in the field rather than in a drill.
