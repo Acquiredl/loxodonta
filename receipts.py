@@ -849,6 +849,45 @@ def one_line(text, limit=160):
     return line
 
 
+def main_repo_root(project):
+    """The durable home of a project's chains.
+
+    A git worktree is a working copy that routine hygiene deletes once its
+    branch merges. Chains written inside one are deleted with it — the
+    sessions most worth keeping are exactly the ones whose worktree gets
+    pruned. So a session running in a worktree logs to the repository the
+    worktree belongs to, and every worktree's history collects in one place.
+
+    Read from the files git itself writes, not by shelling out: this runs on
+    every tool call, and a hook that spawns a process per call is a hook the
+    operator eventually turns off. A worktree's `.git` is a file reading
+    `gitdir: <main>/.git/worktrees/<name>`, and that directory holds a
+    `commondir` pointing back at `<main>/.git`, whose parent is the root.
+
+    Anything unexpected — no `.git`, an unreadable one, a link that leads
+    nowhere — returns `project` unchanged. Never fail a session over path
+    layout (SPEC §8).
+    """
+    dot_git = os.path.join(project, ".git")
+    if not os.path.isfile(dot_git):
+        return project  # a normal checkout (.git/ dir), or not a repo at all
+    try:
+        with open(dot_git, encoding="utf-8") as f:
+            line = f.read().strip()
+        if not line.startswith("gitdir:"):
+            return project
+        gitdir = line[len("gitdir:"):].strip()
+        if not os.path.isabs(gitdir):
+            gitdir = os.path.join(project, gitdir)
+        with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as f:
+            common = f.read().strip()
+        common = os.path.normpath(os.path.join(gitdir, common))
+        root = os.path.dirname(common)  # <main>/.git -> <main>
+        return root if os.path.isdir(root) else project
+    except OSError:
+        return project
+
+
 def cmd_hook(args):
     try:
         payload = json.load(sys.stdin)
@@ -868,10 +907,13 @@ def cmd_hook(args):
     # <project>/receipts via the CLAUDE_PROJECT_DIR variable the harness
     # sets for hooks (read here in Python — no shell expansion, so one
     # settings command works on every platform); else the working directory.
+    # When the project is a git worktree, the chain goes to the repository
+    # it belongs to rather than the disposable copy (see main_repo_root).
     log_dir = args.log_dir
     if log_dir is None:
         project = os.environ.get("CLAUDE_PROJECT_DIR")
-        log_dir = os.path.join(project, "receipts") if project else "."
+        log_dir = (os.path.join(main_repo_root(project), "receipts")
+                   if project else ".")
 
     # Session id becomes part of a filename: keep only safe characters.
     safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(session))
