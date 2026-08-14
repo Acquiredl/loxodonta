@@ -13,6 +13,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -59,6 +60,121 @@ def read_log(path):
 def missing_log(path):
     print(f"error: {path} not found — run `receipts init` first", file=sys.stderr)
     return 1
+
+
+# --- One writer at a time (ADR-0004) ------------------------------------------
+#
+# The format guarantees nothing about concurrency (SPEC §8): a writer is a
+# *process*, and two of them appending at once tear a line or fork the chain
+# at the same `n`. Where an integration must share a chain — the Stage C hook
+# does, because a harness fires one hook process per tool call and runs tool
+# calls in parallel — the integration supplies the mutual exclusion.
+
+LOCK_TIMEOUT_SECONDS = 10.0   # override: RECEIPTS_LOCK_TIMEOUT
+LOCK_STALE_SECONDS = 60.0
+
+
+class LockTimeout(Exception):
+    """Another writer held the chain for longer than we were willing to wait."""
+
+
+def lock_timeout():
+    try:
+        return float(os.environ.get("RECEIPTS_LOCK_TIMEOUT",
+                                    LOCK_TIMEOUT_SECONDS))
+    except ValueError:
+        return LOCK_TIMEOUT_SECONDS
+
+
+class ChainLock:
+    """Exclusive lock over one log's read-tail-then-append.
+
+    `O_EXCL` on a sidecar file is the most portable mechanism available;
+    `fcntl` and `msvcrt` would fork this file in two (ADR-0004). It is not
+    *entirely* uniform — see the Windows case in `__enter__` — but the
+    difference is three lines rather than two implementations.
+
+    The lock is reachable by the writer, so it prevents accidents, not
+    adversaries; an adversarial writer was never going to be stopped by a
+    lock file (ADR-0002).
+    """
+
+    def __init__(self, log):
+        self.path = str(log) + ".lock"
+        self.fd = None
+
+    def __enter__(self):
+        deadline = time.monotonic() + lock_timeout()
+        while True:
+            try:
+                self.fd = os.open(self.path,
+                                  os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, f"{os.getpid()} {now_ts()}\n".encode("utf-8"))
+                return self
+            except FileExistsError:
+                self.break_if_stale()
+            except PermissionError:
+                # Windows reports EACCES, not EEXIST, for the window in
+                # which a lock file is mid-delete — another writer is
+                # releasing it this instant. A genuine permissions fault is
+                # indistinguishable here, so it is told apart at timeout
+                # (see locked_out) rather than guessed at now.
+                if os.name != "nt":
+                    raise
+            if time.monotonic() >= deadline:
+                raise LockTimeout(self.path)
+            time.sleep(0.02)
+
+    def break_if_stale(self):
+        """Drop a lock nobody is holding. The crash that strands a lock is
+        the same crash that tears a line, so a lock must not wedge a log
+        forever. Judged by age, not by liveness: proving the holder is gone
+        needs a per-platform process API, and the staleness window is set
+        far above any honest append so age is a safe proxy."""
+        try:
+            if time.time() - os.path.getmtime(self.path) > LOCK_STALE_SECONDS:
+                os.unlink(self.path)
+                return True
+        except OSError:
+            return True  # it vanished under us — try to take it
+        return False
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            os.close(self.fd)  # close before unlink: Windows holds open files
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+        return False
+
+
+def locked_out(log):
+    """Report a lock we never got. No lock file means we were never
+    contended — the directory itself refused us, which is a different
+    problem and deserves a different sentence."""
+    lock = str(log) + ".lock"
+    if not os.path.exists(lock):
+        print(f"error: cannot create {lock} — no entry was written. "
+              "Check write permissions on the directory.", file=sys.stderr)
+        return 1
+    print(f"error: {log} is locked by another writer — no entry was written. "
+          "Retry; if nothing is running, delete the .lock file beside it.",
+          file=sys.stderr)
+    return 1
+
+
+def tail_entry(lines):
+    """The chain's final entry, or None if the tail is damaged."""
+    if not lines:
+        return None
+    try:
+        last = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+        return None
+    return last
 
 
 # --- Commands -----------------------------------------------------------------
@@ -121,6 +237,18 @@ def append_entry(log, actor, action, file_paths):
         print(f"error: {e}", file=sys.stderr)
         return 1
     files.sort(key=lambda ref: ref["path"])  # by path bytes (SPEC §3)
+    # From here the tail is read, extended, and written as one unit. A
+    # racing writer that slips between the read and the write tears the
+    # line or forks the chain at the same `n` (ADR-0004).
+    try:
+        with ChainLock(log):
+            return append_locked(log, actor, action, files)
+    except LockTimeout:
+        return locked_out(log)
+
+
+def append_locked(log, actor, action, files):
+    """The critical section of `append_entry` — callers must hold the lock."""
     try:
         lines = read_log(log)
     except FileNotFoundError:
@@ -129,11 +257,8 @@ def append_entry(log, actor, action, file_paths):
         print(f"error: {log} is empty — run `receipts init` first", file=sys.stderr)
         return 1
     # A new entry chains to the tail; a damaged tail cannot anchor one.
-    try:
-        last = json.loads(lines[-1])
-    except json.JSONDecodeError:
-        last = None
-    if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+    last = tail_entry(lines)
+    if last is None:
         print(f"error: {log} has a damaged final line — run `receipts verify` "
               "(appending would bury the damage)", file=sys.stderr)
         return 1
@@ -907,6 +1032,45 @@ def main_repo_root(project):
         return project
 
 
+def chain_is_damaged(log):
+    """True when the log exists but cannot be extended — a torn tail."""
+    try:
+        lines = read_log(log)
+    except OSError:
+        return False
+    return bool(lines) and tail_entry(lines) is None
+
+
+def writable_chain(log_dir, session):
+    """The chain this session writes to: its own, unless that chain's tail
+    is damaged — then the next sibling (ADR-0004).
+
+    Damage ends a chain, never the recording. The damaged chain is left
+    exactly as it lies: it is evidence, and there is no repair path
+    (ADR-0002). Each sibling is a complete chain with its own genesis and
+    head, linked to the session by name alone.
+    """
+    log = os.path.join(log_dir, f"receipts-{session}.jsonl")
+    n = 1
+    while chain_is_damaged(log):
+        n += 1
+        log = os.path.join(log_dir, f"receipts-{session}-{n:03d}.jsonl")
+    return log
+
+
+def ensure_chain(log):
+    """Start the chain with its genesis entry if it isn't there yet.
+
+    Under the lock: two hook processes racing to create the same chain must
+    never leave a half-made file behind, and an empty one reads as
+    "run init first" — a receipt lost to a startup race.
+    """
+    with ChainLock(log):
+        if not os.path.exists(log) or os.path.getsize(log) == 0:
+            with open(log, "w", encoding="utf-8", newline="\n") as f:
+                f.write(entry_line(genesis_entry()))
+
+
 def cmd_hook(args):
     try:
         payload = json.load(sys.stdin)
@@ -947,13 +1111,13 @@ def cmd_hook(args):
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
-    log = os.path.join(log_dir, f"receipts-{safe}.jsonl")
-    if not os.path.exists(log):
-        try:
-            with open(log, "x", encoding="utf-8", newline="\n") as f:
-                f.write(entry_line(genesis_entry()))
-        except FileExistsError:
-            pass  # a parallel hook won the race; appending is all we need
+    # A damaged chain is not extended and not repaired — recording moves to
+    # a sibling so the session keeps leaving receipts (ADR-0004).
+    log = writable_chain(log_dir, safe)
+    try:
+        ensure_chain(log)
+    except LockTimeout:
+        return locked_out(log)
 
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
