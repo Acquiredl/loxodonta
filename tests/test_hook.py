@@ -7,6 +7,7 @@ public CLI with stdin payloads, never internals.
 """
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -17,13 +18,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RECEIPTS = REPO_ROOT / "receipts.py"
 
 
-def run_hook(payload, cwd, *args):
+def run_hook(payload, cwd, *args, extra_env=None):
+    # CLAUDE_PROJECT_DIR steers the default log dir; scrub the ambient one
+    # so tests are deterministic wherever they run, and inject it only when
+    # a test is exercising that resolution.
+    env = dict(os.environ)
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(RECEIPTS), "hook", *args],
         cwd=cwd,
         input=payload if isinstance(payload, str) else json.dumps(payload),
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
@@ -165,6 +174,38 @@ class HookTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_claude_project_dir_env_places_chains_without_any_flags(self):
+        # The global wiring passes no arguments at all: the hook reads
+        # CLAUDE_PROJECT_DIR from the environment (set by the harness) and
+        # logs to <project>/receipts. No shell expansion, so the same
+        # settings command works on every platform.
+        project = self.workdir / "someproject"
+        project.mkdir()
+
+        result = run_hook(
+            payload(tool="Bash", tool_input={"command": "ls"}),
+            self.workdir,  # cwd differs from the project dir on purpose
+            extra_env={"CLAUDE_PROJECT_DIR": str(project)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log_dir = project / "receipts"
+        self.assertTrue((log_dir / "receipts-sess-1234abcd.jsonl").exists())
+        self.assertTrue((log_dir / ".gitignore").exists())
+
+    def test_explicit_log_dir_flag_outranks_the_env(self):
+        result = run_hook(
+            payload(tool="Bash", tool_input={"command": "ls"}),
+            self.workdir, "--log-dir", "chosen",
+            extra_env={"CLAUDE_PROJECT_DIR": str(self.workdir / "ignored")},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (self.workdir / "chosen" / "receipts-sess-1234abcd.jsonl").exists()
+        )
+        self.assertFalse((self.workdir / "ignored").exists())
 
     def test_missing_log_dir_is_created_with_protective_gitignore(self):
         # Global wiring points every repo at <project>/receipts without any
