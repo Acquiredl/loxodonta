@@ -919,6 +919,42 @@ class ReportTest(ReceiptsCliTest):
         self.assertLess(out.index("approved findings"), out.index("clock skew"))
 
 
+class BrokenPipeTest(ReceiptsCliTest):
+    def test_report_into_a_closed_pipe_dies_quietly(self):
+        # Operators pipe output through head/less; a closed pipe must not
+        # produce a traceback. Build a chain big enough to overflow the
+        # pipe buffer, then close the reading end immediately.
+        entries = []
+        genesis = {"v": "0.1", "n": 0, "ts": "2026-08-14T00:00:00Z",
+                   "actor": "receipts", "action": "genesis",
+                   "files": [], "prev": None}
+        genesis["entry_hash"] = spec_hash(genesis)
+        entries.append(genesis)
+        for i in range(1, 1500):
+            entry = {"n": i, "ts": "2026-08-14T00:00:01Z", "actor": "agent",
+                     "action": f"step {i} " + "x" * 80, "files": [],
+                     "prev": entries[-1]["entry_hash"]}
+            entry["entry_hash"] = spec_hash(entry)
+            entries.append(entry)
+        self.log_path.write_text(
+            "".join(json.dumps(e, sort_keys=True, separators=(",", ":")) + "\n"
+                    for e in entries),
+            encoding="utf-8",
+        )
+
+        process = subprocess.Popen(
+            [sys.executable, str(RECEIPTS), "report"],
+            cwd=self.workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        process.stdout.close()  # reader hangs up, like `| head` does
+        _, stderr = process.communicate()
+
+        self.assertNotIn("Traceback", stderr)
+
+
 class GoldenFixtureTest(ReceiptsCliTest):
     """The reproducibility contract of SPEC §4, pinned forever.
 
