@@ -27,7 +27,9 @@ Once: `python dogfood.py install-global` (then restart open Claude Code sessions
 - PowerShell (`$PROFILE`): `function receipts { python S:\Code\repos\loxodonta\receipts.py @args }`
 - bash/zsh rc: `alias receipts='python3 /path/to/loxodonta/receipts.py'`
 
-From then on the hook runs itself — every session in every repo leaves a chain in that repo's `receipts/`. Everything else is `python dogfood.py` (status/report/anchor/upgrade read this repo's `receipts/`; run them from wherever the chains you care about live, via the alias or a copy of the script):
+From then on the hook runs itself — every session in every repo leaves a chain in that repo's `receipts/`. Sessions run in a git worktree log to the repo the worktree belongs to, so nothing is lost when the worktree is pruned after its branch merges.
+
+Everything else is `python dogfood.py`, run from anywhere. It searches every repo in the folder holding this one, so one dashboard covers the whole experiment; point it elsewhere with `RECEIPTS_DOGFOOD_ROOT`. `status` exits non-zero if any chain fails to verify, so it can be scheduled and shout.
 
 | When | Command | What it does |
 |---|---|---|
