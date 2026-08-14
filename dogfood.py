@@ -6,6 +6,7 @@ The experiment itself — the bet, the decision date, the journal — is
 DOGFOOD.md.
 
   python dogfood.py                 status: verdict for every session chain
+                                    found across every repo (see below)
   python dogfood.py report [LOG]    timeline of the newest (or named) chain
   python dogfood.py anchor          anchor every chain head to Bitcoin
   python dogfood.py upgrade         complete pending anchor proofs
@@ -14,6 +15,10 @@ DOGFOOD.md.
   python dogfood.py install-global  wire the hook into ~/.claude/settings.json
                                     so every Claude Code session on this
                                     machine logs to <project>/receipts/
+
+Chains are searched for under the directory holding this repo — the folder
+your repos live in. Point the search somewhere else with the environment
+variable RECEIPTS_DOGFOOD_ROOT.
 """
 
 import hashlib
@@ -28,7 +33,22 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RECEIPTS = HERE / "receipts.py"
-CHAIN_DIR = HERE / "receipts"
+
+sys.path.insert(0, str(HERE))
+from receipts import main_repo_root  # noqa: E402  (needs HERE on the path)
+
+# The dogfood is machine-wide: the hook writes a chain into whichever repo
+# each session ran in, so the dashboard has to look across all of them. The
+# default search root is the folder holding this repo — i.e. where your
+# repos live — and never a path hardcoded into a public repo.
+#
+# Resolve this repo's root the same way the hook does. Run from a worktree,
+# the naive parent directory is `.claude/worktrees/`, which holds no repos:
+# the dashboard would find only itself and report an empty experiment.
+DOGFOOD_ROOT = Path(
+    os.environ.get("RECEIPTS_DOGFOOD_ROOT")
+    or Path(main_repo_root(str(HERE))).parent
+).resolve()
 
 
 def receipts(*args, **kwargs):
@@ -36,28 +56,60 @@ def receipts(*args, **kwargs):
 
 
 def chains():
-    """Session chains in this repo, newest first (anchor sidecars excluded)."""
-    logs = [p for p in CHAIN_DIR.glob("*.jsonl")
-            if not p.name.endswith(".anchors.jsonl")]
+    """Every session chain under DOGFOOD_ROOT, newest first.
+
+    Three shapes, because history has three shapes: the root itself being a
+    repo, each sibling repo's receipts/, and chains stranded in worktrees by
+    sessions that ran before the hook learned to log to the main repo.
+    Anchor sidecars are proofs about a chain, not chains.
+    """
+    patterns = ("receipts/*.jsonl",
+                "*/receipts/*.jsonl",
+                "*/.claude/worktrees/*/receipts/*.jsonl")
+    logs = {p.resolve() for pattern in patterns
+            for p in DOGFOOD_ROOT.glob(pattern)
+            if not p.name.endswith(".anchors.jsonl")}
     return sorted(logs, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def describe(log):
+    """(repo, session) — which project a chain came from, and which session
+    wrote it. The filename alone is a bare UUID; the repo is the part a
+    human actually recognises."""
+    session = log.stem
+    if session.startswith("receipts-"):
+        session = session[len("receipts-"):]
+    try:
+        parts = log.relative_to(DOGFOOD_ROOT).parts
+        repo = DOGFOOD_ROOT.name if parts[0] == "receipts" else parts[0]
+    except ValueError:
+        repo = log.parent.parent.name
+    if ".claude" in log.parts:
+        repo += " (worktree)"  # stranded: pruning the worktree deletes it
+    return repo, session
 
 
 def cmd_status(args):
     logs = chains()
     if not logs:
-        print("no session chains in receipts/ yet — work a Claude Code "
-              "session first (any repo, once the hook is installed)")
+        print(f"no session chains under {DOGFOOD_ROOT} yet — work a Claude "
+              "Code session first (any repo, once the hook is installed)")
         return 0
+    worst = 0
     for log in logs:
+        repo, session = describe(log)
         entries = sum(1 for _ in open(log, encoding="utf-8"))
         result = receipts("verify", "--log", str(log), "--anchors",
                           capture_output=True, text=True)
         lines = (result.stdout.strip() or "?").splitlines()
-        print(f"{log.name:44} {entries:4} entries  {lines[-1]}")
+        print(f"{repo:30} {session:38} {entries:5} entries  {lines[-1]}")
         if result.returncode != 0:
+            # A failing chain is the whole point of the tool — surface it in
+            # the exit code too, so a scheduled run can shout.
+            worst = max(worst, result.returncode)
             print(f"  !! exit {result.returncode} — full detail: "
                   f"python receipts.py verify --log {log} --anchors")
-    return 0
+    return worst
 
 
 def cmd_report(args):
