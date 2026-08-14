@@ -251,5 +251,130 @@ class HookTest(unittest.TestCase):
         )
 
 
+class HookWorktreeTest(unittest.TestCase):
+    """A session run in a git worktree must leave its chain in the main
+    repository, not in the worktree.
+
+    Worktrees are disposable by convention — pruned once their branch
+    merges — so a chain written inside one is deleted by routine hygiene.
+    A flight recorder that stores recordings in the most disposable
+    directory on the machine loses exactly the sessions worth keeping.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+
+    def make_worktree(self, main_name="mainrepo", worktree_name="feature"):
+        """Lay out on disk exactly what `git worktree add` produces: the
+        worktree's .git is a *file* pointing at <main>/.git/worktrees/<name>,
+        and that directory holds a `commondir` pointing back at <main>/.git.
+        Built by hand so the test needs no git binary."""
+        main = self.workdir / main_name
+        (main / ".git").mkdir(parents=True, exist_ok=True)
+        worktree = self.workdir / worktree_name
+        worktree.mkdir()
+        gitdir = main / ".git" / "worktrees" / worktree_name
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        (worktree / ".git").write_text(
+            f"gitdir: {gitdir.as_posix()}\n", encoding="utf-8")
+        return main, worktree
+
+    def test_worktree_session_logs_to_the_main_repo(self):
+        main, worktree = self.make_worktree()
+
+        result = run_hook(
+            payload(tool="Bash", tool_input={"command": "ls"}),
+            self.workdir,
+            extra_env={"CLAUDE_PROJECT_DIR": str(worktree)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (main / "receipts" / "receipts-sess-1234abcd.jsonl").exists(),
+            "chain should land in the main repo",
+        )
+        self.assertFalse(
+            (worktree / "receipts").exists(),
+            "nothing should be written into the disposable worktree",
+        )
+
+    def test_sessions_from_two_worktrees_collect_in_one_place(self):
+        main, first = self.make_worktree(worktree_name="feature-one")
+        _, second = self.make_worktree(main_name="mainrepo",
+                                       worktree_name="feature-two")
+
+        run_hook(payload(session="sess-aaaa"), self.workdir,
+                 extra_env={"CLAUDE_PROJECT_DIR": str(first)})
+        run_hook(payload(session="sess-bbbb"), self.workdir,
+                 extra_env={"CLAUDE_PROJECT_DIR": str(second)})
+
+        chains = sorted(p.name for p in (main / "receipts").glob("*.jsonl"))
+        self.assertEqual(
+            chains, ["receipts-sess-aaaa.jsonl", "receipts-sess-bbbb.jsonl"])
+
+    def test_ordinary_repo_still_logs_to_its_own_root(self):
+        project = self.workdir / "plainrepo"
+        (project / ".git").mkdir(parents=True)
+
+        result = run_hook(
+            payload(tool="Bash", tool_input={"command": "ls"}),
+            self.workdir,
+            extra_env={"CLAUDE_PROJECT_DIR": str(project)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (project / "receipts" / "receipts-sess-1234abcd.jsonl").exists())
+
+    def test_project_outside_any_repo_still_logs(self):
+        project = self.workdir / "notarepo"
+        project.mkdir()
+
+        result = run_hook(
+            payload(tool="Bash", tool_input={"command": "ls"}),
+            self.workdir,
+            extra_env={"CLAUDE_PROJECT_DIR": str(project)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (project / "receipts" / "receipts-sess-1234abcd.jsonl").exists())
+
+    def test_unreadable_git_linkage_falls_back_to_the_project_dir(self):
+        # Never fail a session over path layout (SPEC §8): a .git file the
+        # hook cannot follow degrades to logging in place.
+        project = self.workdir / "brokenlink"
+        project.mkdir()
+        (project / ".git").write_text("gitdir: nowhere-at-all\n",
+                                      encoding="utf-8")
+
+        result = run_hook(
+            payload(tool="Bash", tool_input={"command": "ls"}),
+            self.workdir,
+            extra_env={"CLAUDE_PROJECT_DIR": str(project)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (project / "receipts" / "receipts-sess-1234abcd.jsonl").exists())
+
+    def test_explicit_log_dir_flag_outranks_worktree_resolution(self):
+        main, worktree = self.make_worktree()
+
+        result = run_hook(
+            payload(tool="Bash", tool_input={"command": "ls"}),
+            self.workdir, "--log-dir", str(self.workdir / "chosen"),
+            extra_env={"CLAUDE_PROJECT_DIR": str(worktree)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (self.workdir / "chosen" / "receipts-sess-1234abcd.jsonl").exists())
+        self.assertFalse((main / "receipts").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
