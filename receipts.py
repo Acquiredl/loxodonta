@@ -864,20 +864,29 @@ def cmd_hook(args):
               file=sys.stderr)
         return 1
 
+    # Where chains live, most specific wins: an explicit --log-dir; else
+    # <project>/receipts via the CLAUDE_PROJECT_DIR variable the harness
+    # sets for hooks (read here in Python — no shell expansion, so one
+    # settings command works on every platform); else the working directory.
+    log_dir = args.log_dir
+    if log_dir is None:
+        project = os.environ.get("CLAUDE_PROJECT_DIR")
+        log_dir = os.path.join(project, "receipts") if project else "."
+
     # Session id becomes part of a filename: keep only safe characters.
     safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(session))
-    if not os.path.isdir(args.log_dir):
-        os.makedirs(args.log_dir, exist_ok=True)
+    if not os.path.isdir(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
         # A freshly created log dir gets a protective .gitignore: action
         # lines record every command a session ran, and that history must
         # not ride into a commit by accident (SPEC §8: no secrets).
         try:
-            with open(os.path.join(args.log_dir, ".gitignore"), "x",
+            with open(os.path.join(log_dir, ".gitignore"), "x",
                       encoding="utf-8", newline="\n") as f:
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
-    log = os.path.join(args.log_dir, f"receipts-{safe}.jsonl")
+    log = os.path.join(log_dir, f"receipts-{safe}.jsonl")
     if not os.path.exists(log):
         try:
             with open(log, "x", encoding="utf-8", newline="\n") as f:
@@ -972,8 +981,10 @@ def main(argv=None):
     hook_parser = sub.add_parser(
         "hook",
         help="append one entry from a Claude Code PostToolUse payload on stdin")
-    hook_parser.add_argument("--log-dir", default=".", metavar="DIR",
-                             help="directory for per-session receipt logs")
+    hook_parser.add_argument("--log-dir", default=None, metavar="DIR",
+                             help="directory for per-session receipt logs "
+                                  "(default: $CLAUDE_PROJECT_DIR/receipts, "
+                                  "else the working directory)")
     hook_parser.add_argument("--actor", default="claude-code",
                              help="actor recorded for hook entries")
     hook_parser.set_defaults(func=cmd_hook)
@@ -1004,4 +1015,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        # The reader hung up (`receipts report | head`) — no verdict was
+        # asked of the lines that went unread; die quietly, not loudly.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(1)
