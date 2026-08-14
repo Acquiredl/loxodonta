@@ -89,6 +89,23 @@ def describe(log):
     return repo, session
 
 
+def fold(lines):
+    """[(line, count)] with adjacent duplicates merged, order preserved.
+
+    One anchor submission produces one line per calendar, differing only in
+    the calendar URL and a second or two of timestamp. Collapsing them on
+    their leading clause keeps four near-identical lines from burying the
+    verdict they belong to."""
+    folded = []
+    for line in lines:
+        key = line.split(" via ")[0].split(" submitted ")[0]
+        if folded and folded[-1][0] == key:
+            folded[-1][1] += 1
+        else:
+            folded.append([key, 1])
+    return [(key, count) for key, count in folded]
+
+
 def cmd_status(args):
     logs = chains()
     if not logs:
@@ -102,7 +119,14 @@ def cmd_status(args):
         result = receipts("verify", "--log", str(log), "--anchors",
                           capture_output=True, text=True)
         lines = (result.stdout.strip() or "?").splitlines()
+        # verify prints its verdict last, with anchor and warning lines
+        # above it. Showing only the verdict hides exactly the half the
+        # operator is supposed to read — whether the chain is anchored, and
+        # to which block (ANCHORING.md §5). Anchor lines repeat once per
+        # calendar, so identical ones are folded into a count.
         print(f"{repo:30} {session:38} {entries:5} entries  {lines[-1]}")
+        for note, count in fold(l for l in lines[:-1] if l.startswith("ANCHOR")):
+            print(f"     {count}x  {note}" if count > 1 else f"     {note}")
         if result.returncode != 0:
             # A failing chain is the whole point of the tool — surface it in
             # the exit code too, so a scheduled run can shout.
