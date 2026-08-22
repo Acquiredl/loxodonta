@@ -2,7 +2,9 @@
 
 **receipts**: a tamper-evident, hash-chained activity log ("flight recorder") for AI agent pipelines. Stdlib-only Python CLI. The elephant never forgets.
 
-**Current phase: dogfooding.** Stages A–C are implemented and merged (2026-08-13); SPEC v0.1 and ADR-0001/0002/0003 are `accepted`; the format is frozen. Sessions are recorded machine-wide: `python dogfood.py install-global` wires the `PostToolUse` hook into `~/.claude/settings.json`, and every Claude Code session writes per-session chains into that project's `receipts/` (auto-created, auto-gitignored; sessions run in a worktree log to the main repo, since worktrees get pruned). `python dogfood.py status` reads every chain across every repo, not just this one. The experiment — signals, decision date, journal — lives in `DOGFOOD.md`; the driver is `dogfood.py`. Code changes still go tests-first through the public CLI. Open: issue #10's human readability sign-off of `receipts.py`.
+**Current phase: supervisor design → build.** The dogfood closed early on 2026-08-21 (verdict: **push forward**); issue #10's readability sign-off is done (`docs/TOUR.md` is the artifact). The supervisor/frontend direction was grilled and ratified 2026-08-22: `supervisor.py` as a sibling stdlib-only single file driving receipts through the public CLI (ADR-0005); security claim is *a tripwire with a memory* — detection latency only, anchors stay the only hard boundary (GLOSSARY: *Supervisor*, *Baseline*); duties are continuous verify, baseline change detection, anchor freshness/auto-upgrade, and completeness monitoring (flagship claim, transcript files as the liveness witness); the frontend opens on the **recall** surface (GLOSSARY: *Recall*) with integrity panels as the alarm layer, plus a fire-drill surface on sandboxed copies. The hook stays outcome-blind (`.out-of-scope/001`). Next: `/to-prd` → `/to-issues` → `/tdd`; the completeness alarm state machine is the standing `/prototype` candidate.
+
+Stages A–C are implemented and merged (2026-08-13); SPEC v0.1 and ADR-0001/0002/0003 are `accepted`; the format is frozen. Sessions are recorded machine-wide: `python dogfood.py install-global` wires the `PostToolUse` hook into `~/.claude/settings.json`, and every Claude Code session writes per-session chains into that project's `receipts/` (auto-created, auto-gitignored; sessions run in a worktree log to the main repo, since worktrees get pruned). `python dogfood.py status` reads every chain across every repo, not just this one. The experiment — signals, decision date, journal — lives in `DOGFOOD.md`; the driver is `dogfood.py` (recording continues even though the experiment has concluded). Code changes still go tests-first through the public CLI.
 
 ## Read first
 
@@ -17,7 +19,8 @@
 - **Stage A** *(done)* — spec review → stdlib-only CLI (`init` / `log` / `run` / `head` / `verify` / `report`), tamper-demo tests (edit / delete / reorder / splice / regenerate each caught), golden fixture pinning canonicalization.
 - **Stage B** *(done)* — `receipts anchor`: OpenTimestamps commitment of the chain head to Bitcoin (minimal in-file OTS subset, ADR-0003, `docs/ANCHORING.md`); `verify --anchors` judges proofs offline.
 - **Stage C** *(done)* — Claude Code `PostToolUse` hook adapter (`receipts hook`, `docs/HOOK.md`) + `receipts explain` (LLM narration via external command, default `claude -p`).
-- **Next** — decided by the dogfood on `DOGFOOD.md`'s decision date: reader-side supervisor, go public, or park.
+- **Stage D** *(design ratified 2026-08-22, ADR-0005)* — reader-side supervisor + frontend: `supervisor.py`, stdlib-only sibling file; recall front page, integrity alarms, anchor automation, completeness monitoring against the transcript witness. PRD and slices pending (`/to-prd` → `/to-issues`).
+- **Later** — go public (PRIOR-ART positioning discipline governs; opsec review before any push).
 
 ## Constraints
 

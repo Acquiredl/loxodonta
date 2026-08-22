@@ -1,6 +1,6 @@
 # Dogfood log — the usefulness experiment
 
-**Started:** 2026-08-13 · **Decision date:** 2026-09-10 (four weeks)
+**Started:** 2026-08-13 · **Decision date:** 2026-09-10 (four weeks) — **closed early 2026-08-21: push forward** (see journal)
 
 receipts records every Claude Code session on this machine: `python dogfood.py install-global` (run once) wires a `PostToolUse` hook into `~/.claude/settings.json`, and each session writes one chained entry per tool call into `<project>/receipts/` — the hook creates that directory and a protective `.gitignore` on first use, since action lines record every command run. The tool works; this experiment answers whether it is *useful* — decided by usage data, not argument.
 
@@ -53,3 +53,10 @@ One line per event, via `python dogfood.py note "..."`: consulted a log (and whe
 - 2026-08-13: wired up — hook, driver script, this file. Experiment starts. First local `anchor` run doubles as live validation of the OTS wire subset (calendars were unreachable from the build sandbox).
 - 2026-08-13: first friction finding, before the first chain: the driver shipped as bash and the operator's machine runs Windows. Ported to dogfood.py (stdlib, cross-platform); hook command made shell-free (receipts.py reads CLAUDE_PROJECT_DIR itself).
 - 2026-08-14: concurrent hook writes tore this session's chain — verify caught it precisely (torn tail at line 8, 0..7 intact) and recording then stopped silently, which was the worse half. ADR-0004 (O_EXCL lock + sibling chains) shipped the same day; recording resumed on its own in a -002 sibling the moment it merged. Testing the race showed the fork, not the tear, is the common outcome: 8 parallel writers left 6 entries — chains that verify VALID with receipts missing. First fault caught in the field rather than in a drill.
+- 2026-08-21: consulted the chains for real: reading raw entries surfaced mojibake sealed into every em-dash action on Windows — hook was decoding UTF-8 payloads with the console codepage. Fixed tests-first. The log itself caught the bug in the tool.
+- 2026-08-21: dashboard alarm fatigue fixed: a torn tail already superseded by a sibling (ADR-0004 working as designed) no longer fails the exit code forever; the tear stays printed as evidence. New damage still shouts.
+- 2026-08-21: anchor upgrade completed: three heads carry Bitcoin attestations (blocks 962469 and 962604); pool-calendar proofs still pending. Full suite 118 green; drill 4/4.
+- 2026-08-21: signal #1 again, in a neighbour repo: the chains answered 'did I work in albatross this week?' with exact session spans (three sessions Aug 18-19, ~500 entries) faster than memory or git-reflog-across-repos could.
+- 2026-08-21: migrated the stranded worktree chain (a5233b5e, 27 entries, Aug 14-15) into project-albatross/receipts/ as -worktree sibling before hygiene prunes the worktree; verifies VALID in its new home. Original left in place.
+- 2026-08-21: decision closed early, 20 days ahead of the registered date: push forward. Two value signals met twice over, the operator is learning from the tool, and the investment reads as worth it. Supervisor-vs-public gets picked after the issue #10 readability pass, which starts today.
+- 2026-08-21: readability walk done: all 1,260 lines of receipts.py, seven clusters, guided. 11 findings — 3 real defects fixed tests-first (all three in the encoding/robustness family), 8 minor addressed or dispatched. docs/TOUR.md kept as reference. Issue #10 closed with sign-off. Every prior slice is now done; the project is at a clean 'push forward' starting line.

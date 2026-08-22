@@ -28,7 +28,7 @@ The middle one is the worst of the three, because it leaves a chain that verifie
 
 Two parts, one fault domain:
 
-1. **Lock.** `append_entry` holds an `os.open(log + ".lock", O_CREAT | O_EXCL)` lock across read-tail-then-append. It retries with backoff; it breaks a lock left untouched past a staleness window (60s); on timeout it **fails loudly** rather than dropping the entry. The wait is `RECEIPTS_LOCK_TIMEOUT` (default 10s).
+1. **Lock.** `append_entry` holds an `os.open(log + ".lock", O_CREAT | O_EXCL)` lock across read-tail-then-append. It retries on a short fixed poll; it breaks a lock left untouched past a staleness window (60s); on timeout it **fails loudly** rather than dropping the entry. The wait is `RECEIPTS_LOCK_TIMEOUT` (default 10s).
 
    *Amended during implementation:* this ADR first said the lock would be broken when its holder was "provably gone". Proving that needs a per-platform process API — `os.kill(pid, 0)` on POSIX, `OpenProcess` on Windows — which is the very fork this ADR rejects two paragraphs down for `fcntl`/`msvcrt`. Staleness is judged by age instead. The trade is real and worth naming: a writer that legitimately stalls longer than 60s can have its lock stolen, so the window must stay far above any honest append.
 2. **Sibling on damage.** Finding a damaged tail, the hook repairs nothing, trims nothing, appends nothing. It starts `receipts-<session>-002.jsonl` and records there. The damaged chain is preserved byte-for-byte as evidence.
