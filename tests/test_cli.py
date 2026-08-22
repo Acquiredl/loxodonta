@@ -492,6 +492,22 @@ class HeadTest(ReceiptsCliTest):
         self.assertIn("not the recorded history", against_record.stdout)
         self.assertNotIn("BROKEN", against_record.stdout)
 
+    def test_head_on_a_torn_tail_errors_cleanly(self):
+        # A torn final line means the chain head is not readable — head must
+        # say so in a sentence, not a traceback (found in the 2026-08-21
+        # readability walk: head parsed the tail directly instead of using
+        # the same damage check every other command goes through).
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
+        with open(self.log_path, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":2,"half-writ')
+
+        result = run_receipts("head", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("damaged", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_head_on_missing_or_empty_log_errors_cleanly(self):
         missing = run_receipts("head", cwd=self.workdir)
         self.assertNotEqual(missing.returncode, 0)
@@ -538,6 +554,20 @@ class HeadTest(ReceiptsCliTest):
             self.assertIn("expect-head", result.stderr)
             for verdict in ("VALID", "BROKEN", "HEAD-MISMATCH"):
                 self.assertNotIn(verdict, result.stdout, bad)
+
+
+class ReportEmptyLogTest(ReceiptsCliTest):
+    def test_report_on_an_empty_log_errors_like_verify(self):
+        # verify calls an empty file "not a receipt log"; report used to
+        # print a straight-faced "(0 entries)" timeline for the same file.
+        # The two readers keep one opinion about what a log is.
+        self.log_path.write_text("", encoding="utf-8")
+
+        result = run_receipts("report", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("empty", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 class TamperTest(ReceiptsCliTest):
