@@ -139,6 +139,52 @@ class DogfoodStatusTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("BROKEN", result.stdout)
 
+    def test_status_does_not_fail_on_a_torn_tail_a_sibling_superseded(self):
+        # A torn tail with a sibling beside it is ADR-0004 having already
+        # worked: the tear is preserved evidence and recording continued.
+        # A dashboard that fails its exit code forever over it is an alarm
+        # that never stops sounding — and an alarm nobody schedules.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa-002")
+
+        result = run_dogfood("status", root=self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("torn tail", result.stdout,
+                      "the tear stays visible; only the exit code stands down")
+        self.assertIn("sess-aaaa-002", result.stdout)
+
+    def test_status_still_fails_on_a_torn_tail_with_no_sibling(self):
+        # No sibling means recording did NOT continue — that is a live
+        # fault, not handled history.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+
+        result = run_dogfood("status", root=self.root)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("torn tail", result.stdout)
+
+    def test_status_still_fails_on_a_tampered_chain_even_with_a_sibling(self):
+        # Only the honest damage pattern — a crash-truncated final line —
+        # stands down. A rewritten past entry is tampering wherever the
+        # recording moved afterwards.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        lines = log.read_text(encoding="utf-8").splitlines()
+        entry = json.loads(lines[1])
+        entry["action"] = "something else entirely"
+        lines[1] = json.dumps(entry)
+        log.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa-002")
+
+        result = run_dogfood("status", root=self.root)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("BROKEN", result.stdout)
+
     def test_status_says_so_when_there_is_nothing_to_report(self):
         result = run_dogfood("status", root=self.root)
 
