@@ -264,7 +264,10 @@ def append_locked(log, actor, action, files):
         return 1
 
     # SPEC §3: case-insensitivity belongs to filesystems, not the format.
-    # Catch a case-only respelling here, on the machine that knows.
+    # Catch a case-only respelling here, on the machine that knows. This
+    # re-parses the whole log on every append — fine at session scale
+    # (hundreds of entries), but it makes each append O(chain length) in
+    # the hook's hot path; revisit if chains ever grow long.
     known_paths = {ref["path"] for line in lines for ref in json.loads(line)["files"]}
     for ref in files:
         for known in known_paths:
@@ -320,7 +323,13 @@ def cmd_head(args):
     if not lines:
         print(f"error: {args.log} is empty — no chain head to print", file=sys.stderr)
         return 1
-    print(json.loads(lines[-1])["entry_hash"])
+    last = tail_entry(lines)
+    if last is None:
+        print(f"error: {args.log} has a damaged final line — run "
+              "`receipts verify` (a torn tail has no head to record)",
+              file=sys.stderr)
+        return 1
+    print(last["entry_hash"])
     return 0
 
 
