@@ -230,6 +230,71 @@ class ServeTest(ServerFixture):
         self.assertEqual(caught.exception.code, 404)
 
 
+class WalkerTest(ServerFixture):
+    """The chain walker (issue #20): a per-chain entries endpoint the
+    browser walks entry by entry, recomputing hashes itself via
+    WebCrypto — a second, independent check in the reader's hands. The
+    in-browser recomputation is a manual fire-drill item; what tests can
+    hold still is the endpoint and the page's boundary language."""
+
+    def walk(self, log_param):
+        _, _, body = self.get("/api/chain?log="
+                              + urllib.parse.quote(str(log_param)))
+        return json.loads(body)
+
+    def test_the_walker_endpoint_serves_entries_with_damage_inlined(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        self.serve()
+
+        report = self.walk("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        kinds = [("entry" if "entry" in line else "damage")
+                 for line in report["lines"]]
+        self.assertEqual(kinds, ["entry", "entry", "entry", "damage"],
+                         "a broken chain is still a readable log — the "
+                         "damage sits where it sits")
+        genesis = report["lines"][0]["entry"]
+        self.assertEqual(genesis["n"], 0)
+        self.assertIn("entry_hash", genesis)
+        self.assertIn("half-written", report["lines"][3]["damage"])
+
+    def test_non_ascii_content_survives_the_endpoint_intact(self):
+        # The mojibake lesson: an em-dash action must reach the browser
+        # as the exact characters that were hashed.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        log_entry(log, "close the grill — Recall enters the glossary")
+        self.serve()
+
+        report = self.walk("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        actions = [line["entry"]["action"] for line in report["lines"]]
+        self.assertIn("close the grill — Recall enters the glossary",
+                      actions)
+
+    def test_paths_outside_the_root_are_refused(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        for outside in ("../../../windows/win.ini",
+                        "alpha/receipts/receipts-sess-aaaa.jsonl/../../"
+                        "../../secrets.jsonl",
+                        "no/such/chain.jsonl"):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.walk(outside)
+            self.assertEqual(caught.exception.code, 404, outside)
+
+    def test_walker_language_reports_recomputation_never_a_verdict(self):
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn('id="walker"', page)
+        self.assertIn("recomputed in your browser", page)
+        self.assertIn("verify", page)
+
+
 class RecallTest(ServerFixture):
     """The memory surface (GLOSSARY: Recall): the timeline endpoint reads
     chains as testimony — what was attempted, when, in which repo — and

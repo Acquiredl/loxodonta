@@ -690,6 +690,40 @@ def recall_root(root, repo=None, since=None, until=None, path=None):
             "sessions": sessions}
 
 
+def walk_chain(root, asked):
+    """One chain, line by line, for the walker: parsed entries where
+    lines parse, raw damage kept where it sits — a broken chain is
+    still a readable log. Display only (ADR-0005): the browser
+    recomputes hashes itself, and verify owns the verdict. Only chains
+    under the root are served; anything else is None (404)."""
+    path = Path(asked)
+    if not path.is_absolute():
+        path = root / path
+    try:
+        path = path.resolve()
+        relpath = path.relative_to(root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return None
+    if (not path.name.endswith(".jsonl")
+            or path.name.endswith(".anchors.jsonl")
+            or not path.is_file()):
+        return None
+    lines = []
+    with open(path, encoding="utf-8", errors="replace") as chain:
+        for raw in chain:
+            raw = raw.rstrip("\n")
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                lines.append({"damage": raw})
+                continue
+            if isinstance(entry, dict):
+                lines.append({"entry": entry})
+            else:
+                lines.append({"damage": raw})
+    return {"log": relpath, "testimony": TESTIMONY, "lines": lines}
+
+
 SEARCH_CAP = 500  # hits returned; `matched` still counts every one
 
 
@@ -744,6 +778,15 @@ class Face(BaseHTTPRequestHandler):
                                  since=asked.get("from") or None,
                                  until=asked.get("to") or None,
                                  path=asked.get("path") or None)
+            self.reply(json.dumps(report).encode("utf-8"),
+                       "application/json")
+        elif url.path == "/api/chain":
+            asked = {key: values[0]
+                     for key, values in parse_qs(url.query).items()}
+            report = walk_chain(self.server.root, asked.get("log", ""))
+            if report is None:
+                self.send_error(404)
+                return
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/api/search":
@@ -914,6 +957,29 @@ PAGE = """<!doctype html>
   .berth .bare { opacity: 0.75; }
   .berth .stale { color: #b45309; font-weight: 700; }
   .berth .shout { color: #b3261e; font-weight: 700; }
+
+  /* The walker: entry by entry, with the browser's own recomputation
+     beside each hash — a second check in the reader's hands. */
+  .walk-entry { padding: 0.5rem 0.8rem; margin: 0.4rem 0;
+                border-radius: 0.5rem; font-size: 0.9rem;
+                border: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
+  .walk-entry .hashes { font-family: monospace; font-size: 0.8rem;
+                        opacity: 0.75; }
+  .walk-entry .said { font-family: monospace; overflow-wrap: anywhere; }
+  .walk-entry .who { opacity: 0.75; font-size: 0.85rem; }
+  .walk-damage { padding: 0.5rem 0.8rem; margin: 0.4rem 0;
+                 border: 3px solid #b3261e; background: #b3261e14;
+                 border-radius: 0.5rem; font-family: monospace;
+                 overflow-wrap: anywhere; }
+  .recheck { font-size: 0.8rem; padding: 0.1rem 0.5rem;
+             border-radius: 0.4rem; }
+  .recheck.match { color: #1d7a3e; border: 1px solid #1d7a3e; }
+  .recheck.mismatch { background: #b3261e; color: #fff; font-weight: 700; }
+  .broken-link { color: #b3261e; font-weight: 700; font-size: 0.85rem; }
+  button.walk { font: inherit; font-size: 0.8rem; cursor: pointer;
+                border-radius: 0.4rem; padding: 0.1rem 0.6rem;
+                border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+                background: transparent; color: inherit; }
 </style>
 </head>
 <body>
@@ -956,6 +1022,15 @@ PAGE = """<!doctype html>
   <div id="tripwire"></div>
   <div id="watch"></div>
   <div id="band"></div>
+</section>
+<section id="walker" hidden>
+  <h2>walker</h2>
+  <p class="testimony">entry by entry, each hash recomputed in your
+  browser via WebCrypto — a second, independent check in your hands.
+  The walker reports its recomputation; the verdict comes from
+  <code>receipts verify</code></p>
+  <div id="walking"></div>
+  <div id="entries"></div>
 </section>
 <script>
 "use strict";
@@ -1012,6 +1087,10 @@ function chainRow(chain) {
   if (chain.worktree) {
     row.appendChild(el("span", "badge", "stranded in a worktree"));
   }
+  const walk = el("button", "walk", "walk this chain");
+  walk.type = "button";
+  walk.addEventListener("click", () => openWalker(chain.log));
+  row.appendChild(walk);
   const anchoredLine =
     chain.detail.find(line => line.startsWith("ANCHORED"));
   row.appendChild(el("p", "claim",
@@ -1111,6 +1190,101 @@ function render(report) {
       ask.appendChild(option);
     }
   }
+}
+
+// --- the walker: recomputed in your browser -------------------------
+
+// SPEC §4 in JavaScript: keys sorted at every depth, compact
+// separators, entry_hash stripped, UTF-8 — the exact bytes the CLI
+// hashes, rebuilt independently here.
+function canonicalJSON(value) {
+  if (Array.isArray(value)) {
+    return "[" + value.map(canonicalJSON).join(",") + "]";
+  }
+  if (value && typeof value === "object") {
+    return "{" + Object.keys(value).sort().map(key =>
+      JSON.stringify(key) + ":" + canonicalJSON(value[key])
+    ).join(",") + "}";
+  }
+  return JSON.stringify(value);
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest(
+    "SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest),
+    b => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function recheck(entry, badge) {
+  const hashed = {};
+  for (const key of Object.keys(entry)) {
+    if (key !== "entry_hash") hashed[key] = entry[key];
+  }
+  try {
+    const recomputed = await sha256Hex(canonicalJSON(hashed));
+    const agrees = recomputed === entry.entry_hash;
+    badge.textContent = "recomputed in your browser: " +
+      (agrees ? "matches" : "does NOT match the stored entry_hash");
+    badge.className = "recheck " + (agrees ? "match" : "mismatch");
+  } catch (error) {
+    badge.textContent = "recomputation unavailable: " + error;
+  }
+}
+
+function walkEntry(entry, prevHash) {
+  const row = el("div", "walk-entry");
+  const head = el("div");
+  head.appendChild(el("strong", "", "#" + entry.n + " "));
+  head.appendChild(el("span", "who",
+    (entry.ts || "no ts") + " · " + entry.actor + " "));
+  const badge = el("span", "recheck", "recomputing…");
+  head.appendChild(badge);
+  row.appendChild(head);
+  row.appendChild(el("p", "said", entry.action));
+  for (const ref of entry.files || []) {
+    row.appendChild(el("div", "hashes",
+      "file " + ref.path + " · " + String(ref.sha256).slice(0, 12)));
+  }
+  row.appendChild(el("div", "hashes",
+    "prev " + String(entry.prev).slice(0, 12) + " → entry_hash " +
+    String(entry.entry_hash).slice(0, 12)));
+  if (entry.prev !== prevHash) {
+    row.appendChild(el("div", "broken-link",
+      "chain link does not match the previous entry — damage sits here"));
+  }
+  recheck(entry, badge);
+  return row;
+}
+
+async function openWalker(logPath) {
+  const section = document.getElementById("walker");
+  const entries = document.getElementById("entries");
+  section.hidden = false;
+  entries.replaceChildren();
+  document.getElementById("walking").textContent = "walking " + logPath;
+  let report;
+  try {
+    const response =
+      await fetch("/api/chain?log=" + encodeURIComponent(logPath));
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    report = await response.json();
+  } catch (error) {
+    entries.textContent = "the walker could not read this chain: " + error;
+    return;
+  }
+  let prevHash = null;
+  for (const line of report.lines) {
+    if (line.damage !== undefined) {
+      entries.appendChild(el("div", "walk-damage",
+        "unreadable line — damage sits here: " + line.damage));
+      prevHash = null;
+      continue;
+    }
+    entries.appendChild(walkEntry(line.entry, prevHash));
+    prevHash = line.entry.entry_hash;
+  }
+  section.scrollIntoView({behavior: "smooth"});
 }
 
 // --- the anchor panel -----------------------------------------------
