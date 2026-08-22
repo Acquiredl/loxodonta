@@ -355,6 +355,7 @@ BRANCH_MARKER = 0xFF
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
 MAX_PROOF_BYTES = 8192  # generous; real calendar proofs are a few hundred
+MAX_PROOF_DEPTH = 512   # ops nest one level each; real proofs stay under ~100
 
 
 class ProofError(ValueError):
@@ -413,10 +414,17 @@ def write_varbytes(b):
     return write_varint(len(b)) + b
 
 
-def parse_timestamp(reader):
+def parse_timestamp(reader, depth=0):
     """One node of the proof tree: attestations that hold at the current
     digest, plus operations that each transform it and continue into a
-    child node. Wire format: every element but the last is 0xff-prefixed."""
+    child node. Wire format: every element but the last is 0xff-prefixed.
+
+    Depth is capped: each chained op nests one level, so without a cap a
+    crafted proof a few KB long could exhaust the interpreter's recursion
+    limit — a crash where a verdict belongs. Malformed evidence is judged
+    (ANCHOR-INVALID), never guessed at and never crashed on."""
+    if depth > MAX_PROOF_DEPTH:
+        raise ProofError(f"proof nests deeper than {MAX_PROOF_DEPTH} operations")
     node = {"attestations": [], "ops": []}
     while True:
         tag = reader.byte()
@@ -429,9 +437,9 @@ def parse_timestamp(reader):
             )
         elif tag in (OP_APPEND, OP_PREPEND):
             arg = bytes(reader.varbytes())
-            node["ops"].append((tag, arg, parse_timestamp(reader)))
+            node["ops"].append((tag, arg, parse_timestamp(reader, depth + 1)))
         elif tag == OP_SHA256:
-            node["ops"].append((tag, None, parse_timestamp(reader)))
+            node["ops"].append((tag, None, parse_timestamp(reader, depth + 1)))
         else:
             raise ProofError(
                 f"proof uses operation 0x{tag:02x}, "
