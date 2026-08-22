@@ -12,9 +12,11 @@ here is a head record (GLOSSARY: Supervisor, Baseline).
   python supervisor.py serve --root DIR
 
 `scan` is one tick without timers: a census of every chain under the
-root, a verdict for each, machine-readable JSON on stdout, and an exit
-code cron can shout about — 0 when nothing demands attention, else the
-worst verify exit found.
+root, a verdict for each, a baseline diff against the last look,
+machine-readable JSON on stdout, and an exit code cron can shout about —
+0 when nothing demands attention, 1–4 for the worst verify exit found,
+5 when the baseline saw a change appends cannot explain (a reason to
+investigate, never a verdict).
 
 `serve` is the face: a localhost-only stdlib HTTP server serving one
 inline HTML page — no framework, no build step. The page opens on
@@ -79,6 +81,23 @@ def chain_identity(root, log):
     return repo, session, seq
 
 
+def read_entries(log):
+    """Every line of a chain that still reads as an entry — the census's
+    parsing half, display and diffing only (ADR-0005). Damage is not
+    judged here: a torn or garbled line is simply not remembered; the
+    verify walk is where damage gets its name."""
+    entries = []
+    with open(log, encoding="utf-8", errors="replace") as lines:
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
+    return entries
+
+
 # --- Verdict runner -----------------------------------------------------------
 
 def verify(log):
@@ -126,11 +145,74 @@ def superseded(log, detail):
             and sibling_of(log).exists())
 
 
+# --- Baseline -----------------------------------------------------------------
+# The tripwire's memory (GLOSSARY: Baseline): every chain's last-seen
+# head, kept in a file beside the repos. Writer-reachable by definition,
+# therefore trusted for nothing — a disagreement is a reason to
+# investigate, never a verdict about which side is true. Verdicts come
+# from verify; the out-of-reach copy, if you keep one, is the anchor.
+
+BASELINE_NAME = ".supervisor-baseline.json"
+
+INVESTIGATE = ("investigate — this memory is writer-reachable and decides "
+               "nothing; run receipts verify and check your anchors")
+
+CHANGE_WORDS = {
+    "rewritten": "the head seen last look is no longer in this chain's "
+                 "history — change appends cannot explain; " + INVESTIGATE,
+    "regressed": "this chain is shorter than it was last look — receipts "
+                 "do not un-happen; " + INVESTIGATE,
+    "vanished": "this chain was here last look and is gone; " + INVESTIGATE,
+}
+
+
+def read_baseline(path):
+    """The remembered heads, plus a note when the file could not be read.
+    An unreadable memory is reported and replaced, never repaired and
+    never trusted — this look simply remembers afresh."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        chains = data["chains"]
+        if not all(isinstance(known, dict) and "head" in known
+                   and "n" in known for known in chains.values()):
+            raise ValueError("baseline rows must remember a head and an n")
+        return chains, None
+    except FileNotFoundError:
+        return {}, None  # cold start: seed silently
+    except (ValueError, KeyError, TypeError, AttributeError,
+            json.JSONDecodeError, OSError):
+        return {}, ("the baseline could not be read — remembering afresh "
+                    "from this look; it was trusted for nothing either way")
+
+
+def diff_baseline(remembered, relpath, entries):
+    """One chain against the memory of it: None when appends explain
+    everything (or the chain is new), else the change kind."""
+    known = remembered.get(relpath)
+    if known is None:
+        return None
+    at_n = {entry.get("n"): entry.get("entry_hash") for entry in entries}
+    if at_n.get(known["n"]) == known["head"]:
+        return None  # still there, possibly grown past — appends explain it
+    if entries and max((n for n in at_n if isinstance(n, int)),
+                       default=-1) < known["n"]:
+        return "regressed"
+    if not entries:
+        return "regressed"
+    return "rewritten"
+
+
 # --- Scan ---------------------------------------------------------------------
 
 def scan_root(root):
-    """One tick without timers: census + verdicts as a report dict —
-    what `scan` prints and what the status endpoint serves."""
+    """One tick without timers: census + verdicts + baseline diff as a
+    report dict — what `scan` prints and what the status endpoint
+    serves. The baseline is remembered anew after diffing, so an alarm
+    belongs to the tick that caught it."""
+    baseline_path = root / BASELINE_NAME
+    remembered, note = read_baseline(baseline_path)
+    events = []
+    heads = {}
     # Walk in display order — repo, then session, then sibling sequence —
     # so the grouping below is plain insertion, no re-sorting.
     census = sorted((chain_identity(root, log), log)
@@ -158,9 +240,39 @@ def scan_root(root):
         if not stood_down:
             worst = max(worst, exit_code)
 
+        relpath = log.relative_to(root).as_posix()
+        entries = read_entries(log)
+        change = diff_baseline(remembered, relpath, entries)
+        if change:
+            events.append({"repo": repo, "session": session, "log": relpath,
+                           "change": change,
+                           "investigate": CHANGE_WORDS[change]})
+        if entries:
+            heads[relpath] = {"n": entries[-1].get("n"),
+                              "head": entries[-1].get("entry_hash")}
+
+    for relpath in remembered:
+        if relpath not in heads and not (root / relpath).exists():
+            repo_name, session, _ = chain_identity(root, root / relpath)
+            events.append({"repo": repo_name, "session": session,
+                           "log": relpath, "change": "vanished",
+                           "investigate": CHANGE_WORDS["vanished"]})
+
+    baseline_path.write_text(json.dumps({
+        "purpose": "the supervisor's memory between looks — "
+                   "writer-reachable, trusted for nothing",
+        "chains": heads,
+    }, indent=2) + "\n", encoding="utf-8")
+    if events:
+        worst = max(worst, 5)
+
+    baseline = {"file": baseline_path.as_posix(), "events": events}
+    if note:
+        baseline["note"] = note
     return {
         "root": root.as_posix(),
         "exit": worst,
+        "baseline": baseline,
         "repos": [
             {"repo": repo,
              "sessions": [{"session": session, "chains": chains}
@@ -184,22 +296,6 @@ def cmd_scan(args):
 
 TESTIMONY = ("testimony, not a verdict — what was attempted, as the writer "
              "told it; run receipts verify for the verdict")
-
-
-def read_entries(log):
-    """Every line of a chain that still reads as an entry. Damage is not
-    judged here — a torn or garbled line is simply not remembered; the
-    status band's verify walk is where damage gets its name."""
-    entries = []
-    with open(log, encoding="utf-8", errors="replace") as lines:
-        for line in lines:
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(entry, dict):
-                entries.append(entry)
-    return entries
 
 
 def mentions(entries, needle):
@@ -448,6 +544,15 @@ PAGE = """<!doctype html>
   .tier-superseded { opacity: 0.55; }
   .tier-superseded .chip { color: inherit;
                            border-color: color-mix(in srgb, currentColor 40%, transparent); }
+
+  /* The tripwire speaks in its own color: a change event is a reason to
+     investigate, deliberately unlike any verdict tier. */
+  .trip { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: baseline;
+          padding: 0.5rem 0.8rem; margin: 0.4rem 0; border-radius: 0.5rem;
+          border: 3px solid #6d28a8; background: #6d28a81a; }
+  .trip .chip { background: #6d28a8; color: #fff; }
+  .trip .claim { flex-basis: 100%; margin: 0; font-size: 0.9rem;
+                 opacity: 0.9; }
 </style>
 </head>
 <body>
@@ -480,6 +585,7 @@ PAGE = """<!doctype html>
 
 <section id="alarms">
   <h2>status band</h2>
+  <div id="tripwire"></div>
   <div id="band"></div>
 </section>
 <script>
@@ -555,6 +661,7 @@ function render(report) {
   const chains = report.repos.flatMap(r =>
     r.sessions.flatMap(s => s.chains));
   const quietEvidence = chains.filter(c => c.superseded).length;
+  const changes = report.baseline.events.length;
   if (report.exit === 0) {
     summary.className = "quiet";
     summary.textContent = "all quiet — " + chains.length + " chain(s) " +
@@ -564,7 +671,25 @@ function render(report) {
   } else {
     summary.className = "shouting";
     summary.textContent = "attention — something under " + report.root +
-      " is not in good standing (worst verify exit: " + report.exit + ")";
+      " demands it" +
+      (changes ? " — " + changes + " change(s) since the last look" : "") +
+      " (scan exit: " + report.exit + ")";
+  }
+
+  const tripwire = document.getElementById("tripwire");
+  tripwire.replaceChildren();
+  for (const event of report.baseline.events) {
+    const row = el("div", "trip");
+    row.appendChild(el("span", "chip",
+                       "CHANGED SINCE LAST LOOK · " + event.change));
+    row.appendChild(el("span", "file",
+                       event.repo + " · " + event.session +
+                       " · " + event.log));
+    row.appendChild(el("p", "claim", event.investigate));
+    tripwire.appendChild(row);
+  }
+  if (report.baseline.note) {
+    tripwire.appendChild(el("p", "claim", report.baseline.note));
   }
 
   const band = document.getElementById("band");

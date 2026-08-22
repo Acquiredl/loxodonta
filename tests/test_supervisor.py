@@ -346,5 +346,134 @@ class ScanAnchorTest(unittest.TestCase):
         self.assertFalse(regenerated["anchored"])
 
 
+class BaselineTest(unittest.TestCase):
+    """The tripwire's memory (GLOSSARY: Baseline): heads remembered
+    between looks, diffed each tick. Growth an append can explain is
+    normal; anything else is a change event — a reason to investigate,
+    never a verdict about which side is true."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.baseline = self.root / ".supervisor-baseline.json"
+
+    def events(self, result):
+        return json.loads(result.stdout)["baseline"]["events"]
+
+    def test_appends_between_ticks_raise_no_alarm(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        first = run_scan(self.root)  # cold start seeds silently
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "one more step"],
+            capture_output=True, check=True)
+
+        second = run_scan(self.root)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(self.events(first), [], "cold start is silent")
+        self.assertEqual(second.returncode, 0,
+                         second.stdout + second.stderr)
+        self.assertEqual(self.events(second), [],
+                         "growth an append can explain is normal")
+
+    def test_a_regenerated_chain_between_ticks_trips_the_wire(self):
+        # The tripwire's whole reason to exist: a regenerated chain with
+        # no anchor still verifies VALID — only the memory of the last
+        # look notices.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+        log.unlink()
+        subprocess.run([sys.executable, str(RECEIPTS), "init",
+                        "--log", str(log)], capture_output=True, check=True)
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "innocent-looking work"],
+            capture_output=True, check=True)
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "nothing to see here"],
+            capture_output=True, check=True)
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        (event,) = report["baseline"]["events"]
+        self.assertEqual(event["change"], "rewritten")
+        self.assertEqual(event["repo"], "alpha")
+        self.assertEqual(event["session"], "sess-aaaa")
+        sessions = chains_by_session(report)
+        (chain,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "VALID",
+                         "the verdict machinery sees nothing — that is "
+                         "why the tripwire exists")
+
+    def test_a_shortened_chain_regresses_and_a_deleted_chain_vanishes(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        gone = make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        run_scan(self.root)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        log.write_text("".join(l + "\n" for l in lines[:-1]),
+                       encoding="utf-8")  # still a VALID, shorter chain
+        gone.unlink()
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        changes = {e["session"]: e["change"] for e in self.events(result)}
+        self.assertEqual(changes, {"sess-aaaa": "regressed",
+                                   "sess-bbbb": "vanished"})
+
+    def test_alarm_language_investigates_and_never_claims_a_verdict(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        log.write_text("".join(l + "\n" for l in lines[:-1]),
+                       encoding="utf-8")
+
+        result = run_scan(self.root)
+
+        baseline_words = json.dumps(
+            json.loads(result.stdout)["baseline"]).lower()
+        self.assertIn("investigate", baseline_words)
+        self.assertNotIn("head record", baseline_words,
+                         "the baseline is never called a head record")
+
+    def test_the_baseline_updates_each_tick_so_one_change_shouts_once(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        log.write_text("".join(l + "\n" for l in lines[:-1]),
+                       encoding="utf-8")
+        caught = run_scan(self.root)
+
+        settled = run_scan(self.root)
+
+        self.assertEqual(caught.returncode, 5)
+        self.assertEqual(settled.returncode, 0,
+                         settled.stdout + settled.stderr)
+        self.assertEqual(self.events(settled), [],
+                         "remembered anew after diffing — the alarm "
+                         "belongs to the tick that caught it")
+
+    def test_a_corrupt_baseline_is_reported_never_trusted(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+        self.baseline.write_text("{not json at all", encoding="utf-8")
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertIn("could not be read",
+                      report["baseline"].get("note", ""))
+        self.assertEqual(report["baseline"]["events"], [])
+        after = run_scan(self.root)
+        self.assertNotIn("note", json.loads(after.stdout)["baseline"],
+                         "remembering resumes from the fresh look")
+
+
 if __name__ == "__main__":
     unittest.main()
