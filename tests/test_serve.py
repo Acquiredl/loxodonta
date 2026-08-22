@@ -184,6 +184,16 @@ class ServeTest(ServerFixture):
         self.assertIn("superseded", page)
         self.assertIn("verify", page, "verdicts come from receipts verify")
 
+    def test_front_page_gives_the_tripwire_its_own_voice(self):
+        # A change event is a reason to investigate, never a verdict —
+        # the band draws it in its own words, apart from every tier.
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn("CHANGED SINCE LAST LOOK", page)
+        self.assertIn('id="tripwire"', page)
+
     def test_no_anti_terms_in_the_user_visible_surface(self):
         self.serve()
 
