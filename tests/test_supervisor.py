@@ -36,7 +36,8 @@ def ots_varint(n):
 def chain_head(log):
     return subprocess.run(
         [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
-        capture_output=True, text=True, check=True).stdout.strip()
+        capture_output=True, encoding="utf-8", check=True,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
 
 
 def write_completed_anchor(log, head, height=850000):
