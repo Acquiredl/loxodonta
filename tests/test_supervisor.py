@@ -8,12 +8,17 @@ CLI in temp directories. No mocks, no internals.
 """
 
 import base64
+import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -21,6 +26,7 @@ SUPERVISOR = REPO_ROOT / "supervisor.py"
 RECEIPTS = REPO_ROOT / "receipts.py"
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
+TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
 
 
 def ots_varint(n):
@@ -40,6 +46,22 @@ def chain_head(log):
         env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
 
 
+def ots_varbytes(b):
+    return ots_varint(len(b)) + b
+
+
+def write_pending_anchor(log, head, submitted,
+                         calendar="http://127.0.0.1:1"):
+    """A genuine pending OTS record whose calendar (by default) refuses
+    connections instantly — the keeper's attempt fails fast, offline."""
+    proof = (b"\x00" + TAG_PENDING
+             + ots_varbytes(ots_varbytes(calendar.encode())))
+    record = {"head": head, "n": 2, "ts": submitted, "calendar": calendar,
+              "proof": base64.b64encode(proof).decode()}
+    Path(str(log) + ".anchors.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8")
+
+
 def write_completed_anchor(log, head, height=850000):
     """A minimal but genuine OTS timestamp: one sha256 op, then a Bitcoin
     attestation — enough for `verify --anchors` to replay offline and
@@ -54,7 +76,7 @@ def write_completed_anchor(log, head, height=850000):
         json.dumps(record) + "\n", encoding="utf-8")
 
 
-def run_scan(root, *extra):
+def run_scan(root, *extra, env=None):
     # Pin both ends of the pipe to UTF-8 (PYTHONIOENCODING for the child,
     # encoding= for this parent): `text=True` alone decodes with the locale
     # codec — cp1252 on Windows — and crashes on a UTF-8-emitting child.
@@ -62,7 +84,8 @@ def run_scan(root, *extra):
         [sys.executable, str(SUPERVISOR), "scan", "--root", str(root),
          "--json", *extra],
         capture_output=True, encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8"})
 
 
 def make_chain(log_dir, session, entries=2):
@@ -351,6 +374,682 @@ class ScanAnchorTest(unittest.TestCase):
         self.assertEqual(regenerated["verdict"], "ANCHOR-MISMATCH")
         self.assertEqual(regenerated["exit"], 3)
         self.assertFalse(regenerated["anchored"])
+
+
+class BaselineTest(unittest.TestCase):
+    """The tripwire's memory (GLOSSARY: Baseline): heads remembered
+    between looks, diffed each tick. Growth an append can explain is
+    normal; anything else is a change event — a reason to investigate,
+    never a verdict about which side is true."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.baseline = self.root / ".supervisor-baseline.json"
+
+    def events(self, result):
+        return json.loads(result.stdout)["baseline"]["events"]
+
+    def test_appends_between_ticks_raise_no_alarm(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        first = run_scan(self.root)  # cold start seeds silently
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "one more step"],
+            capture_output=True, check=True)
+
+        second = run_scan(self.root)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(self.events(first), [], "cold start is silent")
+        self.assertEqual(second.returncode, 0,
+                         second.stdout + second.stderr)
+        self.assertEqual(self.events(second), [],
+                         "growth an append can explain is normal")
+
+    def test_a_regenerated_chain_between_ticks_trips_the_wire(self):
+        # The tripwire's whole reason to exist: a regenerated chain with
+        # no anchor still verifies VALID — only the memory of the last
+        # look notices.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+        log.unlink()
+        subprocess.run([sys.executable, str(RECEIPTS), "init",
+                        "--log", str(log)], capture_output=True, check=True)
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "innocent-looking work"],
+            capture_output=True, check=True)
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "nothing to see here"],
+            capture_output=True, check=True)
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        (event,) = report["baseline"]["events"]
+        self.assertEqual(event["change"], "rewritten")
+        self.assertEqual(event["repo"], "alpha")
+        self.assertEqual(event["session"], "sess-aaaa")
+        sessions = chains_by_session(report)
+        (chain,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "VALID",
+                         "the verdict machinery sees nothing — that is "
+                         "why the tripwire exists")
+
+    def test_a_shortened_chain_regresses_and_a_deleted_chain_vanishes(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        gone = make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        run_scan(self.root)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        log.write_text("".join(l + "\n" for l in lines[:-1]),
+                       encoding="utf-8")  # still a VALID, shorter chain
+        gone.unlink()
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        changes = {e["session"]: e["change"] for e in self.events(result)}
+        self.assertEqual(changes, {"sess-aaaa": "regressed",
+                                   "sess-bbbb": "vanished"})
+
+    def test_alarm_language_investigates_and_never_claims_a_verdict(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        log.write_text("".join(l + "\n" for l in lines[:-1]),
+                       encoding="utf-8")
+
+        result = run_scan(self.root)
+
+        baseline_words = json.dumps(
+            json.loads(result.stdout)["baseline"]).lower()
+        self.assertIn("investigate", baseline_words)
+        self.assertNotIn("head record", baseline_words,
+                         "the baseline is never called a head record")
+
+    def test_the_baseline_updates_each_tick_so_one_change_shouts_once(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        log.write_text("".join(l + "\n" for l in lines[:-1]),
+                       encoding="utf-8")
+        caught = run_scan(self.root)
+
+        settled = run_scan(self.root)
+
+        self.assertEqual(caught.returncode, 5)
+        self.assertEqual(settled.returncode, 0,
+                         settled.stdout + settled.stderr)
+        self.assertEqual(self.events(settled), [],
+                         "remembered anew after diffing — the alarm "
+                         "belongs to the tick that caught it")
+
+    def test_a_corrupt_baseline_is_reported_never_trusted(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+        self.baseline.write_text("{not json at all", encoding="utf-8")
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertIn("could not be read",
+                      report["baseline"].get("note", ""))
+        self.assertEqual(report["baseline"]["events"], [])
+        after = run_scan(self.root)
+        self.assertNotIn("note", json.loads(after.stdout)["baseline"],
+                         "remembering resumes from the fresh look")
+
+
+def munge(path):
+    """A project path the way the harness names its transcript folder:
+    every character that isn't a letter, digit, or dash becomes a dash."""
+    return re.sub(r"[^A-Za-z0-9-]", "-", str(path))
+
+
+def ago(seconds):
+    return (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(seconds=seconds)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def write_transcript(witness, project, session, event_times=(),
+                     error_times=(), chatter=0, idle=0):
+    """A synthetic harness transcript: tool-result lines (the witness
+    signal), failed tool results (excluded — the hook never fires for
+    them), and plain chatter lines (never counted)."""
+    folder = witness / munge(project)
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for ts in event_times:
+        lines.append({"type": "user", "timestamp": ts,
+                      "toolUseResult": {"stdout": "ok"}})
+    for ts in error_times:
+        lines.append({"type": "user", "timestamp": ts,
+                      "toolUseResult": {"is_error": True}})
+    for _ in range(chatter):
+        lines.append({"type": "assistant", "timestamp": ago(10),
+                      "message": "just talk"})
+    transcript = folder / f"{session}.jsonl"
+    transcript.write_text(
+        "".join(json.dumps(line) + "\n" for line in lines),
+        encoding="utf-8")
+    if idle:
+        quiet_since = time.time() - idle
+        os.utime(transcript, (quiet_since, quiet_since))
+    return transcript
+
+
+class CompletenessTest(unittest.TestCase):
+    """The flagship (issue #22): the ratified alarm state machine over
+    the liveness witness — shouting when a session is demonstrably
+    active but its chain is silent, and staying honest about what that
+    claim is (accident detection and latency, nothing more)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name) / "witness"
+
+    def scan(self, *extra, env=None):
+        return run_scan(self.root, "--witness", str(self.witness),
+                        *extra, env=env)
+
+    def states(self, result):
+        report = json.loads(result.stdout)
+        return {s["session"]: s
+                for s in report["completeness"]["sessions"]}
+
+    def test_the_silent_fork_alarms_while_the_chain_verifies_valid(self):
+        # The flagship case, from the field (2026-08-14): witness saw 8
+        # tools, the chain holds 6 receipts and verifies VALID — entries
+        # are missing and no verdict can say so. Only the pairing can.
+        make_chain(self.root / "alpha" / "receipts", "sess-fork", entries=6)
+        write_transcript(self.witness, self.root / "alpha", "sess-fork",
+                         event_times=[ago(180 - 10 * i) for i in range(8)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        watched = self.states(result)["sess-fork"]
+        self.assertEqual(watched["state"], "ALARM-DEFICIT")
+        self.assertEqual(watched["tools"], 8)
+        self.assertEqual(watched["receipts"], 6)
+        self.assertEqual(watched["deficit"], 2)
+        sessions = chains_by_session(report)
+        (chain,) = sessions[("alpha", "sess-fork")]
+        self.assertEqual(chain["verdict"], "VALID",
+                         "the hole is invisible to every verdict")
+
+    def test_a_hook_disabled_from_the_start_leaves_no_chain_yet_alarms(self):
+        # No chain exists at all — the census alone would never notice.
+        write_transcript(self.witness, self.root / "beta", "sess-ghost",
+                         event_times=[ago(120), ago(110), ago(100)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        ghost = self.states(result)["sess-ghost"]
+        self.assertEqual(ghost["state"], "ALARM-SILENT")
+        self.assertEqual(ghost["receipts"], 0)
+
+    def test_a_wedged_lock_mid_session_reads_silent_not_deficit(self):
+        # Receipts flowed, then stopped while tools kept running: no
+        # receipt since the deficit began. (Grace pinned to zero via the
+        # env knob — the test suite's clock handle.)
+        make_chain(self.root / "alpha" / "receipts", "sess-wedge",
+                   entries=2)
+        time.sleep(1.2)
+        write_transcript(self.witness, self.root / "alpha", "sess-wedge",
+                         event_times=[ago(300), ago(290),
+                                      ago(0), ago(0), ago(0)])
+
+        result = self.scan(env={**os.environ,
+                                "SUPERVISOR_GRACE_SECONDS": "0"})
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        wedged = self.states(result)["sess-wedge"]
+        self.assertEqual(wedged["state"], "ALARM-SILENT")
+
+    def test_sibling_continuation_is_ok_and_sibling_genesis_not_counted(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-sib", entries=2)
+        make_chain(self.root / "alpha" / "receipts", "sess-sib-002",
+                   entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-sib",
+                         event_times=[ago(300), ago(290), ago(280)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        story = self.states(result)["sess-sib"]
+        self.assertEqual(story["state"], "OK")
+        self.assertEqual(story["receipts"], 3,
+                         "family counted, administrative geneses not")
+
+    def test_chat_only_and_failed_tools_never_alarm(self):
+        # A chat-only session expects nothing; a failed tool call fires
+        # no hook (the field's suppression finding), so it is owed no
+        # receipt and must not create a deficit.
+        write_transcript(self.witness, self.root / "alpha", "sess-chat",
+                         error_times=[ago(60), ago(50)], chatter=5)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chat = self.states(result)["sess-chat"]
+        self.assertEqual(chat["state"], "QUIET")
+        self.assertEqual(chat["tools"], 0)
+
+    def test_a_clean_end_clears_cleanly(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-done", entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-done",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.states(result)["sess-done"]["state"],
+                         "ENDED-CLEAN")
+
+    def test_an_ended_deficit_is_evidence_not_a_live_alarm(self):
+        # Missing forever: reported so the operator sees it, but never a
+        # siren that sounds for the rest of time (the dogfood's lesson).
+        make_chain(self.root / "alpha" / "receipts", "sess-lost", entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-lost",
+                         event_times=[ago(7200), ago(7100), ago(7000)],
+                         idle=6900)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lost = self.states(result)["sess-lost"]
+        self.assertEqual(lost["state"], "ENDED-DEFICIT")
+        self.assertIn("evidence", lost["words"])
+
+    def test_a_deficit_inside_the_grace_window_only_lags(self):
+        # An honest lock wait must never alarm: 30 seconds of grace.
+        make_chain(self.root / "alpha" / "receipts", "sess-lag", entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-lag",
+                         event_times=[ago(300), ago(2)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.states(result)["sess-lag"]["state"],
+                         "LAGGING")
+
+    def test_surplus_is_an_investigate_flag_never_a_verdict(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-plus", entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-plus",
+                         event_times=[ago(60)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plus = self.states(result)["sess-plus"]
+        self.assertEqual(plus["state"], "SURPLUS")
+        self.assertIn("investigate", plus["words"])
+
+    def test_an_absent_witness_is_reported_never_guessed_at(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = self.scan()  # self.witness was never created
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertIn("witness absent", report["completeness"]["note"])
+        self.assertEqual(self.states(result)["sess-aaaa"]["state"],
+                         "UNWITNESSED")
+
+    def test_alarm_language_claims_detection_never_more(self):
+        write_transcript(self.witness, self.root / "alpha", "sess-ghost",
+                         event_times=[ago(120), ago(110)])
+
+        result = self.scan()
+
+        words = json.dumps(
+            json.loads(result.stdout)["completeness"]).lower()
+        self.assertIn("accident", words)
+        for overclaim in ("prevent", "guarantee", "complete record"):
+            self.assertNotIn(overclaim, words)
+
+
+class FakeCalendarHandler(BaseHTTPRequestHandler):
+    """The minimal calendar from the anchor suite: submits get a pending
+    proof; polls get 404 while "pending", a Bitcoin continuation once
+    "complete". Network isolation the same way test_anchor does it."""
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        digest = self.rfile.read(int(self.headers["Content-Length"]))
+        self.server.submitted.append(digest)
+        body = (b"\xf0" + ots_varbytes(b"fake-nonce") + b"\x08"
+                + b"\x00" + TAG_PENDING
+                + ots_varbytes(ots_varbytes(self.server.url.encode())))
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self.server.polled.append(self.path)
+        if self.server.mode == "pending":
+            self.send_error(404, "Pending confirmation")
+            return
+        payload = ots_varint(850000)
+        body = (b"\x08"
+                + b"\x00" + TAG_BITCOIN + ots_varbytes(payload))
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def keeper_env(**knobs):
+    """Proxy-free env (urllib must reach 127.0.0.1 directly) with any
+    supervisor knobs applied."""
+    env = {k: v for k, v in os.environ.items()
+           if k.lower() not in ("http_proxy", "https_proxy", "all_proxy",
+                                "no_proxy")}
+    env.update(knobs)
+    return env
+
+
+class AnchorKeeperTest(unittest.TestCase):
+    """The anchor keeper (issue #19): freshness assessed every tick,
+    pending proofs completed with no operator action — the ritual the
+    dogfood proved nobody remembers, absorbed by the operator that
+    never sleeps."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def start_calendar(self):
+        server = HTTPServer(("127.0.0.1", 0), FakeCalendarHandler)
+        server.mode = "pending"
+        server.submitted = []
+        server.polled = []
+        server.url = f"http://127.0.0.1:{server.server_address[1]}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def chain_report(self, result, repo, session):
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            (repo, session)]
+        return chain
+
+    def test_the_panel_data_lists_heights_pending_and_fresh_heads(self):
+        anchored_log = make_chain(self.root / "alpha" / "receipts",
+                                  "sess-anch")
+        write_completed_anchor(anchored_log, chain_head(anchored_log))
+        pending_log = make_chain(self.root / "alpha" / "receipts",
+                                 "sess-pend")
+        # Submitted long ago, calendar unreachable: stale, quiet, and
+        # never a broken scan.
+        write_pending_anchor(pending_log, chain_head(pending_log),
+                             submitted=ago(100000))
+        make_chain(self.root / "beta" / "receipts", "sess-bare")
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        anch = self.chain_report(result, "alpha", "sess-anch")["anchors"]
+        self.assertEqual(anch["anchored"], [{"upto": 2, "height": 850000}])
+        self.assertTrue(anch["head"]["anchored"])
+        pend = self.chain_report(result, "alpha", "sess-pend")["anchors"]
+        (proof,) = pend["pending"]
+        self.assertEqual(proof["submitted"], json.loads(
+            (Path(str(pending_log) + ".anchors.jsonl"))
+            .read_text(encoding="utf-8"))["ts"])
+        self.assertIn("calendar", proof)
+        self.assertFalse(pend["head"]["anchored"])
+        bare = self.chain_report(result, "beta", "sess-bare")["anchors"]
+        self.assertEqual(bare["anchored"], [])
+        self.assertEqual(bare["pending"], [])
+        self.assertFalse(bare["head"]["anchored"])
+        self.assertTrue(bare["head"]["ts"], "age is the reader's to judge "
+                        "from the surfaced timestamp")
+
+    def test_a_completed_calendar_upgrades_on_tick_with_no_operator(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "anchor", "--log", str(log),
+             "--calendar", calendar.url],
+            capture_output=True, check=True, env=keeper_env())
+        calendar.mode = "complete"
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-aaaa")
+        self.assertEqual(chain["anchors"]["anchored"],
+                         [{"upto": 2, "height": 850000}])
+        self.assertEqual(chain["anchors"]["pending"], [],
+                         "the panel reflects the upgrade the same tick")
+        self.assertTrue(chain["anchored"])
+        self.assertEqual(len(calendar.polled), 1)
+
+    def test_upgrade_attempts_are_polite_between_ticks(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "anchor", "--log", str(log),
+             "--calendar", calendar.url],
+            capture_output=True, check=True, env=keeper_env())
+
+        first = run_scan(self.root, env=keeper_env())   # polls: pending
+        calendar.mode = "complete"
+        throttled = run_scan(self.root, env=keeper_env())
+        eager = run_scan(self.root, env=keeper_env(
+            SUPERVISOR_UPGRADE_EVERY_SECONDS="0"))
+
+        self.assertEqual(len(calendar.polled), 2,
+                         "one poll on the first tick, none while "
+                         "throttled, one when due again")
+        still = self.chain_report(throttled, "alpha", "sess-aaaa")
+        self.assertEqual(len(still["anchors"]["pending"]), 1)
+        done = self.chain_report(eager, "alpha", "sess-aaaa")
+        self.assertEqual(done["anchors"]["anchored"],
+                         [{"upto": 2, "height": 850000}])
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+    def test_a_fresh_head_older_than_the_cadence_is_anchored_on_tick(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        head = chain_head(log)
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [bytes.fromhex(head)],
+                         "the head itself went to the calendar")
+        chain = self.chain_report(result, "alpha", "sess-aaaa")
+        self.assertEqual(len(chain["anchors"]["pending"]), 1,
+                         "the panel reflects the submission this tick")
+
+        again = run_scan(self.root, "--anchor-every", "0s",
+                         "--calendar", calendar.url,
+                         env=keeper_env(SUPERVISOR_UPGRADE_EVERY_SECONDS="0"))
+
+        self.assertEqual(len(calendar.submitted), 1,
+                         "a head already submitted is not resubmitted")
+        self.assertEqual(again.returncode, 0, again.stderr)
+
+    def test_default_is_off_and_nothing_is_submitted_without_opt_in(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run_scan(self.root, "--calendar", calendar.url,
+                          env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [])
+        self.assertFalse(Path(str(log) + ".anchors.jsonl").exists())
+
+    def test_a_young_head_waits_for_its_cadence(self):
+        calendar = self.start_calendar()
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run_scan(self.root, "--anchor-every", "1d",
+                          "--calendar", calendar.url, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [])
+
+    def test_sibling_chains_are_anchored_individually(self):
+        calendar = self.start_calendar()
+        base = make_chain(self.root / "alpha" / "receipts", "sess-sib")
+        sibling = make_chain(self.root / "alpha" / "receipts",
+                             "sess-sib-002", entries=1)
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=keeper_env())
+
+        self.assertEqual(sorted(calendar.submitted),
+                         sorted([bytes.fromhex(chain_head(base)),
+                                 bytes.fromhex(chain_head(sibling))]),
+                         "no chain skipped because its session already "
+                         "anchored another")
+        sessions = chains_by_session(json.loads(result.stdout))
+        for chain in sessions[("alpha", "sess-sib")]:
+            self.assertEqual(len(chain["anchors"]["pending"]), 1)
+
+    def test_all_calendars_failing_is_loud_never_silent(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", "http://127.0.0.1:1",
+                          env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-aaaa")
+        self.assertTrue(chain["anchors"]["failed"])
+        self.assertIn("anchoring failed", chain["anchors"]["note"])
+        self.assertFalse(chain["anchors"]["head"]["anchored"])
+
+    def test_an_already_anchored_head_is_left_alone(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [])
+
+    def test_every_sibling_chain_is_assessed_separately(self):
+        base = make_chain(self.root / "alpha" / "receipts", "sess-sib")
+        sibling = make_chain(self.root / "alpha" / "receipts",
+                             "sess-sib-002", entries=1)
+        write_completed_anchor(sibling, chain_head(sibling), height=900000)
+
+        result = run_scan(self.root, env=keeper_env())
+
+        sessions = chains_by_session(json.loads(result.stdout))
+        bare, anchored = sessions[("alpha", "sess-sib")]
+        self.assertFalse(bare["anchors"]["head"]["anchored"])
+        self.assertEqual(anchored["anchors"]["anchored"],
+                         [{"upto": 1, "height": 900000}])
+        self.assertTrue(anchored["anchors"]["head"]["anchored"])
+
+
+class DrillTest(unittest.TestCase):
+    """The fire drill (issue #24): the tamper playground graduated into
+    its honest job — rehearse detection on sandbox copies so the
+    operator can trust the alarms before ever needing them."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def drill(self, log):
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), "drill", "--root",
+             str(self.root), "--log", str(log), "--json"],
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+    def test_the_four_way_battery_fires_every_expected_alarm(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+
+        result = self.drill("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        outcomes = {d["tamper"]: d for d in report["drills"]}
+        self.assertEqual(set(outcomes), {"edit", "delete", "reorder",
+                                         "regenerate"})
+        for tamper in ("edit", "delete", "reorder"):
+            self.assertEqual(outcomes[tamper]["expected"], "BROKEN")
+            self.assertEqual(outcomes[tamper]["verdict"], "BROKEN", tamper)
+            self.assertTrue(outcomes[tamper]["fired"], tamper)
+        regen = outcomes["regenerate"]
+        self.assertEqual(regen["expected"], "HEAD-MISMATCH")
+        self.assertEqual(regen["verdict"], "HEAD-MISMATCH")
+        self.assertTrue(regen["fired"])
+        self.assertTrue(report["all_fired"])
+        self.assertIn("sandbox", report["rehearsal"],
+                      "results present as rehearsal, never verdicts")
+
+    def test_the_real_chain_is_byte_for_byte_untouched(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        before = log.read_bytes()
+
+        result = self.drill("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(log.read_bytes(), before)
+
+    def test_the_sandbox_is_invisible_to_the_census(self):
+        # Broken-on-purpose copies must never show up as alarms.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=3)
+        self.drill("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        self.assertEqual(set(sessions), {("alpha", "sess-aaaa")})
+
+    def test_a_chain_too_short_to_play_with_is_refused(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-tiny",
+                   entries=1)
+
+        result = self.drill("alpha/receipts/receipts-sess-tiny.jsonl")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("too short", result.stdout + result.stderr)
+        self.assertFalse((self.root / ".supervisor-drill").exists(),
+                         "a refused drill writes nothing")
+
+    def test_a_chain_outside_the_root_is_refused(self):
+        elsewhere = Path(self._tmp.name).parent
+
+        result = self.drill(elsewhere / "receipts-nope.jsonl")
+
+        self.assertEqual(result.returncode, 1)
 
 
 if __name__ == "__main__":
