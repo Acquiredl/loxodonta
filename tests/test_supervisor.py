@@ -97,6 +97,19 @@ class ScanCensusTest(unittest.TestCase):
                          ["receipts-sess-aaaa.jsonl",
                           "receipts-sess-aaaa-002.jsonl"])
 
+    def test_anchor_sidecars_are_not_chains(self):
+        # A sidecar is a proof *about* a chain, not a chain: it gets no row.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        Path(str(log) + ".anchors.jsonl").write_text("{}\n", encoding="utf-8")
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        sessions = chains_by_session(json.loads(result.stdout))
+        self.assertEqual(len(sessions), 1)
+        (chain,) = sessions[("alpha", "sess-aaaa")]
+        self.assertNotIn(".anchors", chain["log"])
+
     def test_a_chain_recorded_from_a_worktree_appears_under_its_main_repo(self):
         # Sessions that ran before the hook learned to log to the main repo
         # left chains inside .claude/worktrees/<name>/receipts/. Still real
@@ -112,6 +125,27 @@ class ScanCensusTest(unittest.TestCase):
         (chain,) = sessions[("alpha", "sess-stranded")]
         self.assertTrue(chain["worktree"],
                         "strandedness is evidence — say so")
+
+    def test_an_empty_root_is_a_clean_scan(self):
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["repos"], [])
+        self.assertEqual(report["exit"], 0)
+
+    def test_scan_without_json_flag_is_still_parseable(self):
+        # One shape, two dressings: --json is compact for machines, the
+        # default pretty-prints for eyes — both parse identically.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        machine = run_scan(self.root)
+        human = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "scan", "--root", str(self.root)],
+            capture_output=True, text=True)
+
+        self.assertEqual(human.returncode, 0, human.stderr)
+        self.assertEqual(json.loads(human.stdout), json.loads(machine.stdout))
 
 
 class ScanVerdictTest(unittest.TestCase):
@@ -185,6 +219,45 @@ class ScanVerdictTest(unittest.TestCase):
         result = run_scan(self.root)
 
         self.assertNotEqual(result.returncode, 0)
+
+    def test_a_foreign_versioned_chain_is_reported_as_a_refusal(self):
+        # UNSUPPORTED-VERSION is a refusal to judge, not a verdict — but a
+        # chain nobody can judge still demands the operator's attention.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        lines = log.read_text(encoding="utf-8").splitlines()
+        genesis = json.loads(lines[0])
+        genesis["v"] = "receipts/v99"
+        lines[0] = json.dumps(genesis)
+        log.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+
+        result = run_scan(self.root)
+
+        self.assertNotEqual(result.returncode, 0)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (foreign,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(foreign["verdict"], "UNSUPPORTED-VERSION")
+        (good,) = sessions[("beta", "sess-bbbb")]
+        self.assertEqual(good["verdict"], "VALID")
+
+    def test_a_chain_verify_cannot_judge_at_all_is_still_reported(self):
+        # An empty file draws an error, not a verdict line. The scan says
+        # so — NO-VERDICT, verify's own words as detail — and shouts,
+        # because a chain nobody can judge is not a chain in good standing.
+        empty = self.root / "alpha" / "receipts" / "receipts-sess-hollow.jsonl"
+        empty.parent.mkdir(parents=True)
+        empty.write_text("", encoding="utf-8")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+
+        result = run_scan(self.root)
+
+        self.assertNotEqual(result.returncode, 0)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (hollow,) = sessions[("alpha", "sess-hollow")]
+        self.assertEqual(hollow["verdict"], "NO-VERDICT")
+        self.assertTrue(hollow["detail"], "verify's refusal is the evidence")
+        (good,) = sessions[("beta", "sess-bbbb")]
+        self.assertEqual(good["verdict"], "VALID")
 
 
 if __name__ == "__main__":

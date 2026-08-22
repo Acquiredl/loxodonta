@@ -32,30 +32,37 @@ def find_chains(root):
     """Every receipt log under the root. Three shapes, because history has
     three shapes: the root itself being a repo, each sibling repo's
     receipts/, and chains stranded in worktrees by sessions that ran
-    before the hook learned to log to the main repo."""
+    before the hook learned to log to the main repo. Anchor sidecars are
+    proofs about a chain, not chains."""
     patterns = ("receipts/*.jsonl",
                 "*/receipts/*.jsonl",
                 "*/.claude/worktrees/*/receipts/*.jsonl")
-    return sorted(p for pattern in patterns for p in root.glob(pattern))
+    return sorted(p for pattern in patterns for p in root.glob(pattern)
+                  if not p.name.endswith(".anchors.jsonl"))
+
+
+def split_seq(stem):
+    """(base, seq) — a trailing three-digit sibling suffix split off.
+
+    A sibling chain (`-002`, `-003`) is continuation by naming alone
+    (ADR-0004): it belongs to whatever the name says before the suffix,
+    in suffix order. An unsuffixed name is seq 1."""
+    prefix, dash, tail = stem.rpartition("-")
+    if dash and len(tail) == 3 and tail.isdigit():
+        return prefix, int(tail)
+    return stem, 1
 
 
 def chain_identity(root, log):
     """(repo, session, seq) — which repo a chain belongs to, which session
     wrote it, and where it sits in the session's run of sibling chains,
-    all read from where the log lies and what it is named.
-
-    A sibling chain (`-002`, `-003`) is continuation by naming alone
-    (ADR-0004): it belongs to the session named before the suffix, in
-    suffix order. The unsuffixed chain is seq 1."""
+    all read from where the log lies and what it is named."""
     parts = log.relative_to(root).parts
     repo = root.name if parts[0] == "receipts" else parts[0]
     session = log.stem
     if session.startswith("receipts-"):
         session = session[len("receipts-"):]
-    prefix, dash, tail = session.rpartition("-")
-    seq = 1
-    if dash and len(tail) == 3 and tail.isdigit():
-        session, seq = prefix, int(tail)
+    session, seq = split_seq(session)
     return repo, session, seq
 
 
@@ -68,7 +75,14 @@ def verify(log):
         [sys.executable, str(RECEIPTS), "verify", "--log", str(log)],
         capture_output=True, text=True)
     lines = result.stdout.strip().splitlines()
-    verdict = lines[-1].split(":")[0].split(" at ")[0] if lines else "NO-VERDICT"
+    if lines:
+        verdict = lines[-1].split(":")[0].split(" at ")[0]
+    else:
+        # verify refused without a verdict line (an empty or unopenable
+        # log). Its own words on stderr are the evidence; the supervisor
+        # invents no verdict of its own.
+        verdict = "NO-VERDICT"
+        lines = result.stderr.strip().splitlines()
     return verdict, result.returncode, lines
 
 
@@ -76,13 +90,8 @@ def sibling_of(log):
     """Where recording moved when this chain's tail tore (ADR-0004):
     receipts-<session>.jsonl continues in receipts-<session>-002.jsonl,
     and -002 continues in -003."""
-    stem = log.name[:-len(".jsonl")]
-    prefix, dash, tail = stem.rpartition("-")
-    if dash and len(tail) == 3 and tail.isdigit():
-        stem = f"{prefix}-{int(tail) + 1:03d}"
-    else:
-        stem += "-002"
-    return log.with_name(stem + ".jsonl")
+    base, seq = split_seq(log.name[:-len(".jsonl")])
+    return log.with_name(f"{base}-{seq + 1:03d}.jsonl")
 
 
 def superseded(log, detail):
@@ -101,25 +110,27 @@ def superseded(log, detail):
 
 def cmd_scan(args):
     root = Path(args.root).resolve()
+    # Walk in display order — repo, then session, then sibling sequence —
+    # so the grouping below is plain insertion, no re-sorting.
+    census = sorted((chain_identity(root, log), log)
+                    for log in find_chains(root))
     repos = {}
     worst = 0
-    for log in find_chains(root):
-        repo, session, seq = chain_identity(root, log)
+    for (repo, session, _), log in census:
         verdict, exit_code, detail = verify(log)
         stood_down = exit_code != 0 and superseded(log, detail)
-        entries = sum(1 for _ in open(log, encoding="utf-8"))
         chain = {
             "log": log.as_posix(),
             # Stranded in a worktree: still this repo's history, but pruning
             # the worktree deletes it — worth saying, not worth hiding.
             "worktree": ".claude" in log.relative_to(root).parts,
-            "entries": entries,
+            "entries": sum(1 for _ in open(log, encoding="utf-8")),
             "verdict": verdict,
             "exit": exit_code,
             "superseded": stood_down,
             "detail": detail,
         }
-        repos.setdefault(repo, {}).setdefault(session, []).append((seq, chain))
+        repos.setdefault(repo, {}).setdefault(session, []).append(chain)
         if not stood_down:
             worst = max(worst, exit_code)
 
@@ -128,11 +139,9 @@ def cmd_scan(args):
         "exit": worst,
         "repos": [
             {"repo": repo,
-             "sessions": [{"session": session,
-                           "chains": [c for _, c in sorted(chains,
-                                                           key=lambda s: s[0])]}
-                          for session, chains in sorted(sessions.items())]}
-            for repo, sessions in sorted(repos.items())
+             "sessions": [{"session": session, "chains": chains}
+                          for session, chains in sessions.items()]}
+            for repo, sessions in repos.items()
         ],
     }
     print(json.dumps(report, indent=None if args.json else 2))
