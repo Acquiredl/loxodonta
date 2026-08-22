@@ -1,6 +1,6 @@
 # Dogfood log — the usefulness experiment
 
-**Started:** 2026-08-13 · **Decision date:** 2026-09-10 (four weeks)
+**Started:** 2026-08-13 · **Decision date:** 2026-09-10 (four weeks) — **closed early 2026-08-21: push forward** (see journal)
 
 receipts records every Claude Code session on this machine: `python dogfood.py install-global` (run once) wires a `PostToolUse` hook into `~/.claude/settings.json`, and each session writes one chained entry per tool call into `<project>/receipts/` — the hook creates that directory and a protective `.gitignore` on first use, since action lines record every command run. The tool works; this experiment answers whether it is *useful* — decided by usage data, not argument.
 
@@ -58,3 +58,4 @@ One line per event, via `python dogfood.py note "..."`: consulted a log (and whe
 - 2026-08-21: anchor upgrade completed: three heads carry Bitcoin attestations (blocks 962469 and 962604); pool-calendar proofs still pending. Full suite 118 green; drill 4/4.
 - 2026-08-21: signal #1 again, in a neighbour repo: the chains answered 'did I work in albatross this week?' with exact session spans (three sessions Aug 18-19, ~500 entries) faster than memory or git-reflog-across-repos could.
 - 2026-08-21: migrated the stranded worktree chain (a5233b5e, 27 entries, Aug 14-15) into project-albatross/receipts/ as -worktree sibling before hygiene prunes the worktree; verifies VALID in its new home. Original left in place.
+- 2026-08-21: decision closed early, 20 days ahead of the registered date: push forward. Two value signals met twice over, the operator is learning from the tool, and the investment reads as worth it. Supervisor-vs-public gets picked after the issue #10 readability pass, which starts today.
