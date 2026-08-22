@@ -15,8 +15,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +26,7 @@ SUPERVISOR = REPO_ROOT / "supervisor.py"
 RECEIPTS = REPO_ROOT / "receipts.py"
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
+TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
 
 
 def ots_varint(n):
@@ -40,6 +43,22 @@ def chain_head(log):
     return subprocess.run(
         [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
         capture_output=True, text=True, check=True).stdout.strip()
+
+
+def ots_varbytes(b):
+    return ots_varint(len(b)) + b
+
+
+def write_pending_anchor(log, head, submitted,
+                         calendar="http://127.0.0.1:1"):
+    """A genuine pending OTS record whose calendar (by default) refuses
+    connections instantly — the keeper's attempt fails fast, offline."""
+    proof = (b"\x00" + TAG_PENDING
+             + ots_varbytes(ots_varbytes(calendar.encode())))
+    record = {"head": head, "n": 2, "ts": submitted, "calendar": calendar,
+              "proof": base64.b64encode(proof).decode()}
+    Path(str(log) + ".anchors.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8")
 
 
 def write_completed_anchor(log, head, height=850000):
@@ -693,6 +712,169 @@ class CompletenessTest(unittest.TestCase):
         self.assertIn("accident", words)
         for overclaim in ("prevent", "guarantee", "complete record"):
             self.assertNotIn(overclaim, words)
+
+
+class FakeCalendarHandler(BaseHTTPRequestHandler):
+    """The minimal calendar from the anchor suite: submits get a pending
+    proof; polls get 404 while "pending", a Bitcoin continuation once
+    "complete". Network isolation the same way test_anchor does it."""
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        digest = self.rfile.read(int(self.headers["Content-Length"]))
+        self.server.submitted.append(digest)
+        body = (b"\xf0" + ots_varbytes(b"fake-nonce") + b"\x08"
+                + b"\x00" + TAG_PENDING
+                + ots_varbytes(ots_varbytes(self.server.url.encode())))
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self.server.polled.append(self.path)
+        if self.server.mode == "pending":
+            self.send_error(404, "Pending confirmation")
+            return
+        payload = ots_varint(850000)
+        body = (b"\x08"
+                + b"\x00" + TAG_BITCOIN + ots_varbytes(payload))
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def keeper_env(**knobs):
+    """Proxy-free env (urllib must reach 127.0.0.1 directly) with any
+    supervisor knobs applied."""
+    env = {k: v for k, v in os.environ.items()
+           if k.lower() not in ("http_proxy", "https_proxy", "all_proxy",
+                                "no_proxy")}
+    env.update(knobs)
+    return env
+
+
+class AnchorKeeperTest(unittest.TestCase):
+    """The anchor keeper (issue #19): freshness assessed every tick,
+    pending proofs completed with no operator action — the ritual the
+    dogfood proved nobody remembers, absorbed by the operator that
+    never sleeps."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def start_calendar(self):
+        server = HTTPServer(("127.0.0.1", 0), FakeCalendarHandler)
+        server.mode = "pending"
+        server.submitted = []
+        server.polled = []
+        server.url = f"http://127.0.0.1:{server.server_address[1]}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def chain_report(self, result, repo, session):
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            (repo, session)]
+        return chain
+
+    def test_the_panel_data_lists_heights_pending_and_fresh_heads(self):
+        anchored_log = make_chain(self.root / "alpha" / "receipts",
+                                  "sess-anch")
+        write_completed_anchor(anchored_log, chain_head(anchored_log))
+        pending_log = make_chain(self.root / "alpha" / "receipts",
+                                 "sess-pend")
+        # Submitted long ago, calendar unreachable: stale, quiet, and
+        # never a broken scan.
+        write_pending_anchor(pending_log, chain_head(pending_log),
+                             submitted=ago(100000))
+        make_chain(self.root / "beta" / "receipts", "sess-bare")
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        anch = self.chain_report(result, "alpha", "sess-anch")["anchors"]
+        self.assertEqual(anch["anchored"], [{"upto": 2, "height": 850000}])
+        self.assertTrue(anch["head"]["anchored"])
+        pend = self.chain_report(result, "alpha", "sess-pend")["anchors"]
+        (proof,) = pend["pending"]
+        self.assertEqual(proof["submitted"], json.loads(
+            (Path(str(pending_log) + ".anchors.jsonl"))
+            .read_text(encoding="utf-8"))["ts"])
+        self.assertIn("calendar", proof)
+        self.assertFalse(pend["head"]["anchored"])
+        bare = self.chain_report(result, "beta", "sess-bare")["anchors"]
+        self.assertEqual(bare["anchored"], [])
+        self.assertEqual(bare["pending"], [])
+        self.assertFalse(bare["head"]["anchored"])
+        self.assertTrue(bare["head"]["ts"], "age is the reader's to judge "
+                        "from the surfaced timestamp")
+
+    def test_a_completed_calendar_upgrades_on_tick_with_no_operator(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "anchor", "--log", str(log),
+             "--calendar", calendar.url],
+            capture_output=True, check=True, env=keeper_env())
+        calendar.mode = "complete"
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-aaaa")
+        self.assertEqual(chain["anchors"]["anchored"],
+                         [{"upto": 2, "height": 850000}])
+        self.assertEqual(chain["anchors"]["pending"], [],
+                         "the panel reflects the upgrade the same tick")
+        self.assertTrue(chain["anchored"])
+        self.assertEqual(len(calendar.polled), 1)
+
+    def test_upgrade_attempts_are_polite_between_ticks(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        subprocess.run(
+            [sys.executable, str(RECEIPTS), "anchor", "--log", str(log),
+             "--calendar", calendar.url],
+            capture_output=True, check=True, env=keeper_env())
+
+        first = run_scan(self.root, env=keeper_env())   # polls: pending
+        calendar.mode = "complete"
+        throttled = run_scan(self.root, env=keeper_env())
+        eager = run_scan(self.root, env=keeper_env(
+            SUPERVISOR_UPGRADE_EVERY_SECONDS="0"))
+
+        self.assertEqual(len(calendar.polled), 2,
+                         "one poll on the first tick, none while "
+                         "throttled, one when due again")
+        still = self.chain_report(throttled, "alpha", "sess-aaaa")
+        self.assertEqual(len(still["anchors"]["pending"]), 1)
+        done = self.chain_report(eager, "alpha", "sess-aaaa")
+        self.assertEqual(done["anchors"]["anchored"],
+                         [{"upto": 2, "height": 850000}])
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+    def test_every_sibling_chain_is_assessed_separately(self):
+        base = make_chain(self.root / "alpha" / "receipts", "sess-sib")
+        sibling = make_chain(self.root / "alpha" / "receipts",
+                             "sess-sib-002", entries=1)
+        write_completed_anchor(sibling, chain_head(sibling), height=900000)
+
+        result = run_scan(self.root, env=keeper_env())
+
+        sessions = chains_by_session(json.loads(result.stdout))
+        bare, anchored = sessions[("alpha", "sess-sib")]
+        self.assertFalse(bare["anchors"]["head"]["anchored"])
+        self.assertEqual(anchored["anchors"]["anchored"],
+                         [{"upto": 1, "height": 900000}])
+        self.assertTrue(anchored["anchors"]["head"]["anchored"])
 
 
 if __name__ == "__main__":
