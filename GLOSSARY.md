@@ -27,7 +27,15 @@ The writer/operator split is the load-bearing idea of the project: in Acu (the p
 
 ### Head record
 
-An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin.
+An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin. A [supervisor](#supervisor)'s baseline is deliberately **not** a head record — see the distinction there.
+
+### Supervisor
+
+An operator-side reader process that continuously verifies receipt logs against its [baseline](#baseline) and shouts on change — **a tripwire with a memory**. Its claim is detection latency only: it shortens the window between tampering and discovery and raises the cost of tampering; it is never a wall. Everything it stores is writer-reachable, so nothing it holds is a [head record](#head-record); anchors remain the only hard boundary (ADR-0002 stands unamended). It may drive anchoring — keeping heads anchored and proofs upgraded — and that is how the head-record ritual is honestly automated: the out-of-reach property comes from the anchor, never from the supervisor. The tripwire watches the *log*, not the machine: this is a flight-recorder accessory, not an intrusion-detection system (`docs/PRIOR-ART.md` governs the public claim).
+
+### Baseline
+
+The supervisor's remembered copy of chain heads, used to detect change between looks. Writer-reachable by definition, therefore trusted for nothing: a baseline that disagrees with the log is a reason to shout, never a verdict about which side is true — verdicts still come only from `verify` and its inputs. Named after the Tripwire/AIDE convention, where the same weakness (an adversary who can reach the baseline) has the same documented answer: the trustworthy copy lives out of reach (here, the anchor).
 
 ---
 
@@ -119,9 +127,9 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`
 - Related out-of-scope decisions: none yet.
 
 ---
 
-*Last updated: 2026-08-09*
+*Last updated: 2026-08-21*
