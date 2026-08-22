@@ -418,4 +418,47 @@ Capturing outputs would drag tool output — secrets included — toward
 the log. The cost: a hook chain cannot distinguish a failed command
 from a successful one.
 
-*(Cluster 7 is added as the walk covers it.)*
+## 7. The front door and the quiet death
+
+The last cluster is front of house: the menu board, the bouncer, and —
+at the very bottom of the file — how to behave when someone slams the
+door mid-sentence.
+
+**`head_record`** is an argparse validator, and its placement is a
+vocabulary boundary: a malformed `--expect-head` is a *usage error* —
+the command was spoken wrong — never a *verdict* about the chain. The
+inspector does not spend verdicts on questions that were not
+well-formed. (Uppercase hex is politely lowercased at the door.)
+
+**`main()`** carries two design ideas through its ceremony. Parent
+parsers (`--log`; `--actor`/`--file`) are defined once and inherited,
+so every command's shared flags behave identically because they *are*
+the same flags. And each subcommand registers its handler via
+`set_defaults(func=...)` — dispatch with no if-ladder to fall out of
+sync with the menu.
+
+**The `run --` split** happens *before* argparse ever runs: everything
+after `--` is sliced off and handed to the wrapped command verbatim,
+because flags like `-x` in `receipts run -- pytest -x` were never ours
+to parse. A jurisdiction rule in the spirit of `file_reference`: the
+wrapper owns nothing past the `--`, and the wrapped argument list
+crosses the boundary untouched. `run` without `--` is a usage error —
+a wrapper with nothing to wrap.
+
+**The epilogue** handles `receipts report | head`: the reader hanging
+up is not a fault — no verdict was asked of the unread lines — so the
+tool dies quietly, not loudly. Three real-world scars, annotated in
+place: Windows reports a plain `EINVAL` where POSIX raises
+`BrokenPipeError`, so both are matched but EINVAL only on Windows
+(elsewhere it means something else and should fly); stdout is pointed
+at the null device before exit, because the interpreter flushes during
+shutdown and flushing into the dead pipe would re-raise after the
+handler ran; and the handling wraps `main()` once at the outermost
+layer, since pipe death can strike any command that prints.
+
+---
+
+*This tour was written during the 2026-08-21 readability walk (issue
+#10) and is maintained as reference documentation. If a section here
+contradicts the code, the code moved — fix the tour in the same commit
+next time.*
