@@ -26,14 +26,26 @@ def run_hook(payload, cwd, *args, extra_env=None):
     env.pop("CLAUDE_PROJECT_DIR", None)
     if extra_env:
         env.update(extra_env)
-    return subprocess.run(
+    # The harness pipes the payload as raw UTF-8 bytes; feeding the hook the
+    # same way keeps the console codepage out of the test's path (bytes in,
+    # decoded output out — never `text=True`, whose locale codec would mask
+    # an encoding fault on Windows).
+    if isinstance(payload, str):
+        stdin = payload.encode("utf-8")
+    elif isinstance(payload, bytes):
+        stdin = payload
+    else:
+        stdin = json.dumps(payload).encode("utf-8")
+    result = subprocess.run(
         [sys.executable, str(RECEIPTS), "hook", *args],
         cwd=cwd,
-        input=payload if isinstance(payload, str) else json.dumps(payload),
+        input=stdin,
         capture_output=True,
-        text=True,
         env=env,
     )
+    result.stdout = result.stdout.decode("utf-8", errors="replace")
+    result.stderr = result.stderr.decode("utf-8", errors="replace")
+    return result
 
 
 def run_receipts(*args, cwd):
@@ -161,8 +173,25 @@ class HookTest(unittest.TestCase):
         self.assertLess(len(action), 200)
         self.assertIn("echo xxxx", action)
 
+    def test_non_ascii_in_payload_is_recorded_verbatim(self):
+        # The harness sends the payload as UTF-8 bytes regardless of the
+        # console codepage. Decoding it with anything else seals mojibake
+        # into the chain — an em-dash arriving as "â€”" — and a receipt that
+        # misquotes the command is testimony against the tool itself. Caught
+        # in the field 2026-08-21: every merge-commit em-dash on this
+        # machine was recorded mangled.
+        command = 'git merge -m "chains — durable"'
+        raw = json.dumps(payload(tool="Bash", tool_input={"command": command}),
+                         ensure_ascii=False).encode("utf-8")
+
+        result = run_hook(raw, cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Bash: {command}", self.entries()[1]["action"])
+
     def test_malformed_stdin_errors_cleanly(self):
-        for bad in ("not json at all", '["a", "list"]', ""):
+        for bad in ("not json at all", '["a", "list"]', "",
+                    b"\xff\xfe not utf-8 \x80"):
             result = run_hook(bad, cwd=self.workdir)
 
             self.assertEqual(result.returncode, 1, repr(bad))
