@@ -203,4 +203,100 @@ cluster and the heart of the ritual: a head recorded out of the writer's
 reach is what turns whole-chain regeneration from a winning move into a
 losing one.
 
-*(Clusters 4–7 are added as the walk covers them.)*
+## 4. Anchoring — the postmark
+
+Cluster 3 ended on the head-record ritual: copy the top seal somewhere
+the cook cannot reach. Its weakness is the operator — the ritual only
+works if it is actually done, every time, out of reach. Anchoring
+(ADR-0003, `docs/ANCHORING.md`) replaces discipline with a postmark.
+
+**The story.** There is an old folk remedy for proving a manuscript's
+date: mail yourself a sealed copy, and the post office's date stamp on
+the envelope proves the work existed by that day. OpenTimestamps is that
+remedy with three upgrades. *Mail the fingerprint, not the manuscript*:
+a hash is tiny, reveals nothing, and matches exactly one document.
+*Replace the clerk with something un-bribable*: the date stamp is a
+Bitcoin block — millions of strangers keep identical copies of every
+block ever minted, and nobody can sneak a new letter into everyone's
+copy of last Tuesday. *Split the postage*: a free counter service (a
+**calendar**) staples thousands of fingerprints into one bundle and gets
+one stamp for all of them; what you keep is the **receipt trail** — the
+staple-by-staple path from your fingerprint to the stamped bundle, which
+anyone can re-follow without trusting the counter. One wrinkle: the
+counter first hands you a **claim ticket** ("bundle goes out tonight"),
+and you come back later to swap it for the finished trail.
+
+What the postmark proves against the adversary: a cook who regenerates
+the whole chain — every seal internally perfect — produces a head whose
+receipt trail no longer lands on the stamped bundle, while the *old*
+head still does. The old postmark proves a different history existed by
+that date. The forger's only counter-move is destroying the receipts,
+which is why one copy of the sidecar anywhere the writer cannot reach
+preserves full proof power forever: the receipts are
+**self-authenticating** — checking one needs no trust in whoever stored
+it, only arithmetic.
+
+**The map, story to code:**
+
+| In the story | In the code |
+|---|---|
+| The manuscript | The chain, entries 0..n (one seal covers all of it) |
+| The mailed fingerprint | The chain head (`cmd_head`) |
+| The counter service | A calendar server (`DEFAULT_CALENDARS`; all four are used — redundancy, not ceremony) |
+| The claim ticket | A pending attestation (`TAG_PENDING`) |
+| Swapping ticket for trail | `anchor --upgrade` (`upgrade_anchors`, `splice_continuation`) |
+| The receipt trail | The proof — a tree of append/prepend/sha256 steps (`parse_timestamp`) |
+| Re-following the staples | `replay_proof` |
+| The date stamp | A Bitcoin block: height = the date, merkle root = the stamped bundle (`TAG_BITCOIN`, `judge_proof`) |
+| The skeptical friend, offline | `verify --anchors` (`check_anchors`) |
+| The shoebox of receipts | The sidecar, `<log>.anchors.jsonl` |
+
+**The subset discipline.** This is not an OpenTimestamps client — a full
+client is a dependency or a vendored codebase, and both break this
+repo's premises. It implements only what calendar proofs actually use:
+three operations (sha256 / append / prepend) and two attestations
+(Bitcoin, pending). Anything else is **refused by name, never guessed**
+(`ProofError`), because a verifier of evidence that guesses at bytes it
+does not understand is not a verifier. The same discipline bounds every
+read: `ProofReader` bounds-checks each access, field lengths are capped
+(`MAX_PROOF_BYTES`), and nesting is capped (`MAX_PROOF_DEPTH`) so a
+crafted proof earns a verdict instead of crashing the interpreter —
+proofs arrive from the network or from a writer-reachable file, and are
+hostile bytes until proven otherwise.
+
+**The proof is a tree, not a list.** A node holds attestations true *at
+that point in the folding* plus operations that each transform the
+digest and descend. One mailing can end in several outcomes — after an
+upgrade, the same early steps branch into the calendar's old promise and
+the completed Bitcoin trail. `replay_proof` walks the tree from your
+32-byte head; at a Bitcoin attestation, the digest as it stands *is* the
+block's merkle root to compare (displayed byte-reversed, per Bitcoin
+convention). `judge_proof` then answers in preference order: any Bitcoin
+attestation wins (offline, forever); else pending (whose commitment
+digest doubles as the claim-ticket number `upgrade` polls); else refuse.
+
+**Decisions worth knowing in the four commands:**
+
+- `cmd_anchor` judges every proof *before* storing it — refuse to store
+  what cannot replay. One counter failing is a warning; all counters
+  failing is exit 1, said plainly, because a silently unanchored head
+  defeats the whole trip.
+- `upgrade_anchors` appends the upgraded proof as a new record and never
+  rewrites the pending one. The shoebox is append-only like the chain:
+  this tool owns no "edit evidence" code path, even for its own
+  bookkeeping. Supersession is by presence — a completed record for the
+  same (head, calendar) simply outranks the claim ticket.
+- `check_anchors` accepts a head that matches *any* entry, not just the
+  newest — anchoring entry 15 of a chain now 62 long is normal; later
+  entries just are not covered until the next anchor run.
+- The ANCHORED sentence ends at the honesty boundary: the verifier
+  proves the fingerprint folds up to *that merkle root*; whether the
+  root sits in the named block is a fact about the outside world,
+  confirmed against a block source the operator trusts. Reading the
+  block height for freshness is likewise the operator's half of the
+  regeneration defense (ANCHORING.md §5).
+- Verdict tiers: ANCHOR-MISMATCH and ANCHOR-INVALID share exit 3 with
+  HEAD-MISMATCH — the "this is not the recorded history" tier, graver
+  than exit 2 (files drifted) and never masked by it.
+
+*(Clusters 5–7 are added as the walk covers them.)*
