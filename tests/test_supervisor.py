@@ -7,6 +7,7 @@ output and exit code — against real chains built through the receipts
 CLI in temp directories. No mocks, no internals.
 """
 
+import base64
 import json
 import subprocess
 import sys
@@ -17,6 +18,38 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 RECEIPTS = REPO_ROOT / "receipts.py"
+
+TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
+
+
+def ots_varint(n):
+    out = bytearray()
+    while True:
+        byte = n & 0x7F
+        n >>= 7
+        out.append(byte | 0x80 if n else byte)
+        if not n:
+            return bytes(out)
+
+
+def chain_head(log):
+    return subprocess.run(
+        [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
+        capture_output=True, text=True, check=True).stdout.strip()
+
+
+def write_completed_anchor(log, head, height=850000):
+    """A minimal but genuine OTS timestamp: one sha256 op, then a Bitcoin
+    attestation — enough for `verify --anchors` to replay offline and
+    report ANCHORED, with no network and no calendar (ANCHORING.md §4)."""
+    payload = ots_varint(height)
+    proof = (b"\x08"
+             + b"\x00" + TAG_BITCOIN + ots_varint(len(payload)) + payload)
+    record = {"head": head, "n": 2, "ts": "2026-08-22T09:00:00Z",
+              "calendar": "https://calendar.example.test",
+              "proof": base64.b64encode(proof).decode()}
+    Path(str(log) + ".anchors.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8")
 
 
 def run_scan(root, *extra):
@@ -98,9 +131,11 @@ class ScanCensusTest(unittest.TestCase):
                           "receipts-sess-aaaa-002.jsonl"])
 
     def test_anchor_sidecars_are_not_chains(self):
-        # A sidecar is a proof *about* a chain, not a chain: it gets no row.
+        # A sidecar is a proof *about* a chain, not a chain: it gets no
+        # row of its own. (A real record, because the scan now judges
+        # sidecar contents — malformed evidence would rightly shout.)
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        Path(str(log) + ".anchors.jsonl").write_text("{}\n", encoding="utf-8")
+        write_completed_anchor(log, chain_head(log))
 
         result = run_scan(self.root)
 
@@ -258,6 +293,57 @@ class ScanVerdictTest(unittest.TestCase):
         self.assertTrue(hollow["detail"], "verify's refusal is the evidence")
         (good,) = sessions[("beta", "sess-bbbb")]
         self.assertEqual(good["verdict"], "VALID")
+
+
+class ScanAnchorTest(unittest.TestCase):
+    """The scan judges anchors too: VALID and ANCHORED are different
+    claims (ADR-0002), and an anchor that contradicts the log is the
+    exit-3 tier — "this is not the recorded history"."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_an_anchored_chain_is_a_distinct_claim_not_just_valid(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (anchored,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(anchored["verdict"], "VALID")
+        self.assertTrue(anchored["anchored"])
+        self.assertTrue(any(l.startswith("ANCHORED") for l in
+                            anchored["detail"]),
+                        "the anchor's own words are the evidence")
+        (plain,) = sessions[("beta", "sess-bbbb")]
+        self.assertEqual(plain["verdict"], "VALID")
+        self.assertFalse(plain["anchored"],
+                         "unanchored VALID must never borrow the claim")
+
+    def test_a_regenerated_chain_fails_the_scan_at_the_gravest_tier(self):
+        # The adversary's best move: rewrite history wholesale. The fresh
+        # chain is internally valid; only the anchor remembers.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+        log.unlink()
+        # One entry fewer: rewritten history must actually differ, or a
+        # same-second rebuild reproduces the old head and the anchor
+        # rightly (and confusingly) still matches.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=1)
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (regenerated,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(regenerated["verdict"], "ANCHOR-MISMATCH")
+        self.assertEqual(regenerated["exit"], 3)
+        self.assertFalse(regenerated["anchored"])
 
 
 if __name__ == "__main__":
