@@ -968,8 +968,13 @@ def cmd_explain(args):
               "or install the `claude` CLI", file=sys.stderr)
         return 1
     try:
+        # The prompt crosses the pipe as UTF-8 whatever the console
+        # speaks — actions carry arbitrary characters, and the locale
+        # codec would crash on the first one it cannot spell, stranding
+        # the narrator on a half-open pipe.
         completed = subprocess.run(
-            command, input=prompt, capture_output=True, text=True
+            command, input=prompt, capture_output=True, text=True,
+            encoding="utf-8", errors="replace"
         )
     except OSError:
         print(f"error: LLM command not found: {command[0]} — pass --llm "
