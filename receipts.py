@@ -1072,9 +1072,13 @@ def ensure_chain(log):
 
 
 def cmd_hook(args):
+    # The harness sends the payload as UTF-8 bytes (JSON's interchange
+    # encoding), whatever codepage the console speaks. Read the bytes and
+    # decode them ourselves: letting sys.stdin's locale codec do it seals
+    # mojibake into the chain — a receipt that misquotes the command.
     try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
         payload = None
     if not isinstance(payload, dict):
         print("error: stdin is not a JSON hook payload", file=sys.stderr)
