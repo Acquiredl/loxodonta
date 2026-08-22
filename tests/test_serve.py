@@ -9,13 +9,16 @@ the claims the page is built from are strings we can hold still here.
 """
 
 import base64
+import datetime
 import json
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -71,7 +74,19 @@ def write_completed_anchor(log, height=850000):
         json.dumps(record) + "\n", encoding="utf-8")
 
 
-class ServeTest(unittest.TestCase):
+def log_entry(log, action, actor="claude-code", files=()):
+    """One more receipt through the public CLI, optionally fingerprinting
+    files (which must exist — receipts hashes them at log time)."""
+    file_args = [arg for f in files for arg in ("--file", str(f))]
+    subprocess.run(
+        [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+         "--actor", actor, "--action", action, *file_args],
+        capture_output=True, check=True)
+
+
+class ServerFixture(unittest.TestCase):
+    """A temp root and a real `serve` subprocess on an ephemeral port."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -101,6 +116,13 @@ class ServeTest(unittest.TestCase):
             return (response.status, response.headers.get("Content-Type", ""),
                     response.read().decode("utf-8"))
 
+    def recall(self, **filters):
+        query = "?" + urllib.parse.urlencode(filters) if filters else ""
+        _, _, body = self.get("/api/recall" + query)
+        return json.loads(body)
+
+
+class ServeTest(ServerFixture):
     def test_serve_binds_localhost_only(self):
         # The announcement is the bind: an ephemeral port on 127.0.0.1,
         # answering — nothing is offered to any other interface.
@@ -179,5 +201,122 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, 404)
 
 
+class RecallTest(ServerFixture):
+    """The memory surface (GLOSSARY: Recall): the timeline endpoint reads
+    chains as testimony — what was attempted, when, in which repo — and
+    owns no verdicts. Sessions read newest first; siblings read as one
+    story; the field-proven question ("did I work in X this week?") is
+    one repo + one date range away."""
+
+    def test_front_page_opens_on_recall(self):
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn("what was attempted", page,
+                      "the testimony label is the surface's first claim")
+        self.assertLess(page.index('id="recall"'), page.index('id="band"'),
+                        "the memory view lands first; alarms sit around it")
+
+    def test_timeline_lists_sessions_across_repos_newest_first(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-old")
+        time.sleep(1.2)  # receipts stamps whole seconds; force an order
+        make_chain(self.root / "beta" / "receipts", "sess-new")
+        self.serve()
+
+        report = self.recall()
+
+        self.assertEqual([(s["repo"], s["session"])
+                          for s in report["sessions"]],
+                         [("beta", "sess-new"), ("alpha", "sess-old")])
+        newest = report["sessions"][0]
+        self.assertEqual(newest["entries"], 3)  # genesis + 2
+        self.assertLessEqual(newest["started"], newest["ended"])
+
+    def test_sibling_chains_read_as_one_session_story(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa-002",
+                   entries=1)
+        self.serve()
+
+        report = self.recall()
+
+        (story,) = report["sessions"]
+        self.assertEqual(story["session"], "sess-aaaa")
+        self.assertEqual(len(story["chains"]), 2)
+        self.assertEqual(story["entries"], 5)  # (genesis+2) + (genesis+1)
+
+    def test_filter_by_repo(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        self.serve()
+
+        report = self.recall(repo="alpha")
+
+        self.assertEqual([s["repo"] for s in report["sessions"]], ["alpha"])
+
+    def test_one_repo_one_week_gives_exact_session_spans(self):
+        # The journaled query, demoed: "did I work in alpha this week?"
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        self.serve()
+        day = self.recall()["sessions"][0]["started"][:10]
+        before = (datetime.date.fromisoformat(day)
+                  - datetime.timedelta(days=1)).isoformat()
+        after = (datetime.date.fromisoformat(day)
+                 + datetime.timedelta(days=1)).isoformat()
+
+        this_week = self.recall(repo="alpha", **{"from": day, "to": day})
+        last_week = self.recall(repo="alpha", to=before)
+        next_week = self.recall(repo="alpha", **{"from": after})
+
+        (span,) = this_week["sessions"]
+        self.assertEqual(span["entries"], 4)
+        self.assertTrue(span["started"] and span["ended"],
+                        "an exact span, not a shrug")
+        self.assertEqual(last_week["sessions"], [])
+        self.assertEqual(next_week["sessions"], [])
+
+    def test_filter_by_file_path_matches_references_and_action_lines(self):
+        # A fingerprinted file matches; so does a path that only survives
+        # in the action line — the field's common case, where the hook
+        # leaves files[] empty.
+        ref_log = make_chain(self.root / "alpha" / "receipts", "sess-refs")
+        (ref_log.parent / "touched.py").write_text("pass\n",
+                                                   encoding="utf-8")
+        # --file takes paths relative to the log's directory (SPEC §3).
+        log_entry(ref_log, "edited a file", files=["touched.py"])
+        action_log = make_chain(self.root / "beta" / "receipts", "sess-act")
+        log_entry(action_log, "Write: src/widget.py")
+        make_chain(self.root / "gamma" / "receipts", "sess-none")
+        self.serve()
+
+        by_reference = self.recall(path="touched.py")
+        by_action = self.recall(path="widget.py")
+
+        self.assertEqual([s["session"] for s in by_reference["sessions"]],
+                         ["sess-refs"])
+        self.assertEqual([s["session"] for s in by_action["sessions"]],
+                         ["sess-act"])
+
+    def test_recall_owns_no_verdicts_and_still_reads_damaged_chains(self):
+        # Recall renders testimony and judges nothing: no verdict language
+        # on the surface, and a torn chain is still remembered — its
+        # readable receipts shown, the judging left to the status band.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-torn")
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        self.serve()
+
+        _, _, body = self.get("/api/recall")
+
+        report = json.loads(body)
+        self.assertIn("what was attempted", report["testimony"])
+        (story,) = report["sessions"]
+        self.assertEqual(story["entries"], 3, "the readable receipts remain")
+        for verdict_word in ("VALID", "BROKEN", "ANCHORED"):
+            self.assertNotIn(verdict_word, body)
+
+
 if __name__ == "__main__":
     unittest.main()
+
