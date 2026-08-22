@@ -8,10 +8,14 @@ CLI in temp directories. No mocks, no internals.
 """
 
 import base64
+import datetime
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -52,11 +56,11 @@ def write_completed_anchor(log, head, height=850000):
         json.dumps(record) + "\n", encoding="utf-8")
 
 
-def run_scan(root, *extra):
+def run_scan(root, *extra, env=None):
     return subprocess.run(
         [sys.executable, str(SUPERVISOR), "scan", "--root", str(root),
          "--json", *extra],
-        capture_output=True, text=True)
+        capture_output=True, text=True, env=env)
 
 
 def make_chain(log_dir, session, entries=2):
@@ -473,6 +477,222 @@ class BaselineTest(unittest.TestCase):
         after = run_scan(self.root)
         self.assertNotIn("note", json.loads(after.stdout)["baseline"],
                          "remembering resumes from the fresh look")
+
+
+def munge(path):
+    """A project path the way the harness names its transcript folder:
+    every character that isn't a letter, digit, or dash becomes a dash."""
+    return re.sub(r"[^A-Za-z0-9-]", "-", str(path))
+
+
+def ago(seconds):
+    return (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(seconds=seconds)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def write_transcript(witness, project, session, event_times=(),
+                     error_times=(), chatter=0, idle=0):
+    """A synthetic harness transcript: tool-result lines (the witness
+    signal), failed tool results (excluded — the hook never fires for
+    them), and plain chatter lines (never counted)."""
+    folder = witness / munge(project)
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for ts in event_times:
+        lines.append({"type": "user", "timestamp": ts,
+                      "toolUseResult": {"stdout": "ok"}})
+    for ts in error_times:
+        lines.append({"type": "user", "timestamp": ts,
+                      "toolUseResult": {"is_error": True}})
+    for _ in range(chatter):
+        lines.append({"type": "assistant", "timestamp": ago(10),
+                      "message": "just talk"})
+    transcript = folder / f"{session}.jsonl"
+    transcript.write_text(
+        "".join(json.dumps(line) + "\n" for line in lines),
+        encoding="utf-8")
+    if idle:
+        quiet_since = time.time() - idle
+        os.utime(transcript, (quiet_since, quiet_since))
+    return transcript
+
+
+class CompletenessTest(unittest.TestCase):
+    """The flagship (issue #22): the ratified alarm state machine over
+    the liveness witness — shouting when a session is demonstrably
+    active but its chain is silent, and staying honest about what that
+    claim is (accident detection and latency, nothing more)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name) / "witness"
+
+    def scan(self, *extra, env=None):
+        return run_scan(self.root, "--witness", str(self.witness),
+                        *extra, env=env)
+
+    def states(self, result):
+        report = json.loads(result.stdout)
+        return {s["session"]: s
+                for s in report["completeness"]["sessions"]}
+
+    def test_the_silent_fork_alarms_while_the_chain_verifies_valid(self):
+        # The flagship case, from the field (2026-08-14): witness saw 8
+        # tools, the chain holds 6 receipts and verifies VALID — entries
+        # are missing and no verdict can say so. Only the pairing can.
+        make_chain(self.root / "alpha" / "receipts", "sess-fork", entries=6)
+        write_transcript(self.witness, self.root / "alpha", "sess-fork",
+                         event_times=[ago(180 - 10 * i) for i in range(8)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        watched = self.states(result)["sess-fork"]
+        self.assertEqual(watched["state"], "ALARM-DEFICIT")
+        self.assertEqual(watched["tools"], 8)
+        self.assertEqual(watched["receipts"], 6)
+        self.assertEqual(watched["deficit"], 2)
+        sessions = chains_by_session(report)
+        (chain,) = sessions[("alpha", "sess-fork")]
+        self.assertEqual(chain["verdict"], "VALID",
+                         "the hole is invisible to every verdict")
+
+    def test_a_hook_disabled_from_the_start_leaves_no_chain_yet_alarms(self):
+        # No chain exists at all — the census alone would never notice.
+        write_transcript(self.witness, self.root / "beta", "sess-ghost",
+                         event_times=[ago(120), ago(110), ago(100)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        ghost = self.states(result)["sess-ghost"]
+        self.assertEqual(ghost["state"], "ALARM-SILENT")
+        self.assertEqual(ghost["receipts"], 0)
+
+    def test_a_wedged_lock_mid_session_reads_silent_not_deficit(self):
+        # Receipts flowed, then stopped while tools kept running: no
+        # receipt since the deficit began. (Grace pinned to zero via the
+        # env knob — the test suite's clock handle.)
+        make_chain(self.root / "alpha" / "receipts", "sess-wedge",
+                   entries=2)
+        time.sleep(1.2)
+        write_transcript(self.witness, self.root / "alpha", "sess-wedge",
+                         event_times=[ago(300), ago(290),
+                                      ago(0), ago(0), ago(0)])
+
+        result = self.scan(env={**os.environ,
+                                "SUPERVISOR_GRACE_SECONDS": "0"})
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        wedged = self.states(result)["sess-wedge"]
+        self.assertEqual(wedged["state"], "ALARM-SILENT")
+
+    def test_sibling_continuation_is_ok_and_sibling_genesis_not_counted(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-sib", entries=2)
+        make_chain(self.root / "alpha" / "receipts", "sess-sib-002",
+                   entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-sib",
+                         event_times=[ago(300), ago(290), ago(280)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        story = self.states(result)["sess-sib"]
+        self.assertEqual(story["state"], "OK")
+        self.assertEqual(story["receipts"], 3,
+                         "family counted, administrative geneses not")
+
+    def test_chat_only_and_failed_tools_never_alarm(self):
+        # A chat-only session expects nothing; a failed tool call fires
+        # no hook (the field's suppression finding), so it is owed no
+        # receipt and must not create a deficit.
+        write_transcript(self.witness, self.root / "alpha", "sess-chat",
+                         error_times=[ago(60), ago(50)], chatter=5)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chat = self.states(result)["sess-chat"]
+        self.assertEqual(chat["state"], "QUIET")
+        self.assertEqual(chat["tools"], 0)
+
+    def test_a_clean_end_clears_cleanly(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-done", entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-done",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.states(result)["sess-done"]["state"],
+                         "ENDED-CLEAN")
+
+    def test_an_ended_deficit_is_evidence_not_a_live_alarm(self):
+        # Missing forever: reported so the operator sees it, but never a
+        # siren that sounds for the rest of time (the dogfood's lesson).
+        make_chain(self.root / "alpha" / "receipts", "sess-lost", entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-lost",
+                         event_times=[ago(7200), ago(7100), ago(7000)],
+                         idle=6900)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lost = self.states(result)["sess-lost"]
+        self.assertEqual(lost["state"], "ENDED-DEFICIT")
+        self.assertIn("evidence", lost["words"])
+
+    def test_a_deficit_inside_the_grace_window_only_lags(self):
+        # An honest lock wait must never alarm: 30 seconds of grace.
+        make_chain(self.root / "alpha" / "receipts", "sess-lag", entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-lag",
+                         event_times=[ago(300), ago(2)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.states(result)["sess-lag"]["state"],
+                         "LAGGING")
+
+    def test_surplus_is_an_investigate_flag_never_a_verdict(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-plus", entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-plus",
+                         event_times=[ago(60)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plus = self.states(result)["sess-plus"]
+        self.assertEqual(plus["state"], "SURPLUS")
+        self.assertIn("investigate", plus["words"])
+
+    def test_an_absent_witness_is_reported_never_guessed_at(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = self.scan()  # self.witness was never created
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertIn("witness absent", report["completeness"]["note"])
+        self.assertEqual(self.states(result)["sess-aaaa"]["state"],
+                         "UNWITNESSED")
+
+    def test_alarm_language_claims_detection_never_more(self):
+        write_transcript(self.witness, self.root / "alpha", "sess-ghost",
+                         event_times=[ago(120), ago(110)])
+
+        result = self.scan()
+
+        words = json.dumps(
+            json.loads(result.stdout)["completeness"]).lower()
+        self.assertIn("accident", words)
+        for overclaim in ("prevent", "guarantee", "complete record"):
+            self.assertNotIn(overclaim, words)
 
 
 if __name__ == "__main__":
