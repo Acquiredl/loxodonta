@@ -16,7 +16,8 @@ root, a verdict for each, a baseline diff against the last look,
 machine-readable JSON on stdout, and an exit code cron can shout about —
 0 when nothing demands attention, 1–4 for the worst verify exit found,
 5 when the baseline saw a change appends cannot explain (a reason to
-investigate, never a verdict).
+investigate, never a verdict), 6 when a session is demonstrably active
+but its chain is behind the witness (the completeness alarm).
 
 `serve` is the face: a localhost-only stdlib HTTP server serving one
 inline HTML page — no framework, no build step. The page opens on
@@ -31,8 +32,10 @@ Nothing is ever offered off-machine.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -202,17 +205,182 @@ def diff_baseline(remembered, relpath, entries):
     return "rewritten"
 
 
+# --- Completeness -------------------------------------------------------------
+# The flagship (issue #22): pair what the harness transcript witnessed
+# with what the chain received, per session, and shout while the session
+# is still live. Honest scope, carried from the grill: this catches
+# accidents — the disabled hook, the wedged lock, the silent fork — and
+# shortens the window between loss and discovery. The transcript is
+# testimony too; a writer shaping both is beyond this alarm.
+# Completeness itself stays the integration's job.
+
+# Ratified thresholds; the env knobs are the test suite's clock handle.
+GRACE_SECONDS = int(os.environ.get("SUPERVISOR_GRACE_SECONDS", 30))
+IDLE_END_SECONDS = int(os.environ.get("SUPERVISOR_IDLE_END_SECONDS", 1800))
+
+WITNESS_ROOT = Path.home() / ".claude" / "projects"
+
+WATCH_WORDS = {
+    "ALARM-SILENT": "the witness saw tools run but no receipt has arrived "
+                    "since the deficit began — recording stopped (disabled "
+                    "hook? wedged lock?). An accident detector: investigate "
+                    "while the session is live.",
+    "ALARM-DEFICIT": "receipts still arrive but fewer than the witness saw "
+                     "— the fork-shaped hole, where a chain reads intact "
+                     "with entries missing. An accident detector: "
+                     "investigate while the session is live.",
+    "ENDED-DEFICIT": "the session ended short of the witness's count — "
+                     "those receipts are missing forever; kept as "
+                     "evidence, not as a siren.",
+    "SURPLUS": "more receipts than witnessed tools — witness lag, or "
+               "receipts arriving unwitnessed; investigate. A flag, "
+               "never a verdict.",
+    "LAGGING": "behind the witness inside the grace window — an honest "
+               "lock wait looks like this; no shout yet.",
+    "UNWITNESSED": "no transcript pairs with this session — completeness "
+                   "cannot be watched for it; nothing is assumed "
+                   "either way.",
+}
+
+
+def munge(path):
+    """A project path the way the harness names its transcript folder:
+    every character that isn't a letter, digit, or dash becomes a dash."""
+    return re.sub(r"[^A-Za-z0-9-]", "-", str(path))
+
+
+def parse_when(ts):
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def read_witness(transcript):
+    """The witness signal: timestamps of tool events — lines recording a
+    tool that ran and returned. Failed calls are excluded because the
+    hook never fires for them (the field's suppression finding), so no
+    receipt is ever owed. Chatter is never counted: a chat-only session
+    can never alarm."""
+    events = []
+    with open(transcript, encoding="utf-8", errors="replace") as lines:
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            result = record.get("toolUseResult")
+            if result is None:
+                continue
+            if isinstance(result, dict) and result.get("is_error"):
+                continue
+            events.append(record.get("timestamp"))
+    return events
+
+
+def classify(tools, receipts, ended, idle, deficit_age, silent):
+    """The ratified alarm state machine (issue #22, from the #15
+    prototype) — a pure reading of the evidence. Deficit is sticky:
+    lost receipts never arrive later, so a session keeps its scar until
+    end-of-session reconciliation reports it as evidence."""
+    deficit = max(0, tools - receipts)
+    if ended:
+        return "ENDED-CLEAN" if deficit == 0 else "ENDED-DEFICIT"
+    if idle:
+        return "IDLE-CLEAN" if deficit == 0 else "IDLE-DEFICIT"
+    if receipts > tools:
+        return "SURPLUS"
+    if tools == 0:
+        return "QUIET"
+    if deficit == 0:
+        return "OK"
+    if deficit_age is not None and deficit_age < GRACE_SECONDS:
+        return "LAGGING"
+    return "ALARM-SILENT" if silent else "ALARM-DEFICIT"
+
+
+def watch_session(transcript, receipts, last_receipt, now):
+    """One session against its witness. deficit_since needs no stored
+    state: receipts pair with tool events in order, so the first
+    unpaired event's timestamp is when the deficit began."""
+    events = read_witness(transcript)
+    tools = len(events)
+    quiet_for = now.timestamp() - transcript.stat().st_mtime
+    # Today both flags read from the idle window ("witness quiet this
+    # long ⇒ session treated as ended"); they separate if the harness
+    # ever writes an explicit end marker.
+    ended = idle = quiet_for >= IDLE_END_SECONDS
+    deficit_since = (parse_when(events[receipts])
+                     if tools > receipts else None)
+    deficit_age = ((now - deficit_since).total_seconds()
+                   if deficit_since else None)
+    arrived = parse_when(last_receipt)
+    silent = arrived is None or (deficit_since is not None
+                                 and arrived < deficit_since)
+    state = classify(tools, receipts, ended, idle, deficit_age, silent)
+    return state, tools
+
+
+def watch_completeness(root, witness, families):
+    """The completeness half of a tick: every census session paired with
+    its transcript, plus witnessed sessions that never grew a chain at
+    all — the disabled-hook case the census alone can never see."""
+    now = datetime.now(timezone.utc)
+    watch = {"witness": witness.as_posix(), "sessions": []}
+    ours = munge(root)
+    transcripts = {}
+    if witness.is_dir():
+        transcripts = {t.stem: t for t in sorted(witness.glob("*/*.jsonl"))}
+    else:
+        watch["note"] = (f"witness absent — no transcript layout at "
+                         f"{witness.as_posix()}; completeness cannot be "
+                         "watched this look")
+
+    def add(repo, session, state, tools, receipts):
+        entry = {"repo": repo, "session": session, "state": state,
+                 "tools": tools, "receipts": receipts,
+                 "deficit": max(0, tools - receipts)}
+        if state in WATCH_WORDS:
+            entry["words"] = WATCH_WORDS[state]
+        watch["sessions"].append(entry)
+
+    for (repo, session), family in sorted(families.items()):
+        transcript = transcripts.pop(session, None)
+        if transcript is None:
+            add(repo, session, "UNWITNESSED", 0, family["receipts"])
+            continue
+        state, tools = watch_session(transcript, family["receipts"],
+                                     family["last"], now)
+        add(repo, session, state, tools, family["receipts"])
+
+    # Chainless sessions: only transcript folders under this root are
+    # this scan's business; a folder's name past the root prefix is the
+    # best name the witness has for the project.
+    for stem, transcript in transcripts.items():
+        folder = transcript.parent.name
+        if not folder.startswith(ours):
+            continue
+        state, tools = watch_session(transcript, 0, None, now)
+        add(folder[len(ours):].strip("-") or root.name, stem, state,
+            tools, 0)
+
+    return watch
+
+
 # --- Scan ---------------------------------------------------------------------
 
-def scan_root(root):
-    """One tick without timers: census + verdicts + baseline diff as a
-    report dict — what `scan` prints and what the status endpoint
-    serves. The baseline is remembered anew after diffing, so an alarm
-    belongs to the tick that caught it."""
+def scan_root(root, witness=WITNESS_ROOT):
+    """One tick without timers: census + verdicts + baseline diff +
+    completeness watch as a report dict — what `scan` prints and what
+    the status endpoint serves. The baseline is remembered anew after
+    diffing, so an alarm belongs to the tick that caught it."""
     baseline_path = root / BASELINE_NAME
     remembered, note = read_baseline(baseline_path)
     events = []
     heads = {}
+    families = {}
     # Walk in display order — repo, then session, then sibling sequence —
     # so the grouping below is plain insertion, no re-sorting.
     census = sorted((chain_identity(root, log), log)
@@ -251,6 +419,16 @@ def scan_root(root):
             heads[relpath] = {"n": entries[-1].get("n"),
                               "head": entries[-1].get("entry_hash")}
 
+        # The session's receipt tally for the completeness watch: the
+        # whole sibling family counts; each genesis is administrative.
+        family = families.setdefault((repo, session),
+                                     {"receipts": 0, "last": None})
+        logged = [e for e in entries if e.get("n") != 0]
+        family["receipts"] += len(logged)
+        stamps = [e["ts"] for e in logged if isinstance(e.get("ts"), str)]
+        if stamps:
+            family["last"] = max(family["last"] or "", max(stamps))
+
     for relpath in remembered:
         if relpath not in heads and not (root / relpath).exists():
             repo_name, session, _ = chain_identity(root, root / relpath)
@@ -266,6 +444,14 @@ def scan_root(root):
     if events:
         worst = max(worst, 5)
 
+    completeness = watch_completeness(root, witness, families)
+    # Only a live alarm raises the exit: an ended deficit is evidence,
+    # and a siren that never stops sounding trains the operator to
+    # ignore the band (the dogfood's lesson).
+    if any(s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")
+           for s in completeness["sessions"]):
+        worst = max(worst, 6)
+
     baseline = {"file": baseline_path.as_posix(), "events": events}
     if note:
         baseline["note"] = note
@@ -273,6 +459,7 @@ def scan_root(root):
         "root": root.as_posix(),
         "exit": worst,
         "baseline": baseline,
+        "completeness": completeness,
         "repos": [
             {"repo": repo,
              "sessions": [{"session": session, "chains": chains}
@@ -283,7 +470,8 @@ def scan_root(root):
 
 
 def cmd_scan(args):
-    report = scan_root(Path(args.root).resolve())
+    report = scan_root(Path(args.root).resolve(),
+                       witness=Path(args.witness))
     print(json.dumps(report, indent=None if args.json else 2))
     return report["exit"]
 
@@ -401,8 +589,10 @@ class Face(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         if url.path == "/api/status":
-            body = json.dumps(scan_root(self.server.root)).encode("utf-8")
-            self.reply(body, "application/json")
+            report = scan_root(self.server.root,
+                               witness=self.server.witness)
+            self.reply(json.dumps(report).encode("utf-8"),
+                       "application/json")
         elif url.path == "/api/recall":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
@@ -438,6 +628,7 @@ def cmd_serve(args):
     # activity is ever offered to another one.
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Face)
     server.root = root
+    server.witness = Path(args.witness)
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
@@ -553,6 +744,18 @@ PAGE = """<!doctype html>
   .trip .chip { background: #6d28a8; color: #fff; }
   .trip .claim { flex-basis: 100%; margin: 0; font-size: 0.9rem;
                  opacity: 0.9; }
+
+  /* The completeness watch: live alarms in their own amber voice;
+     ended deficits and flags kept quiet, as evidence. */
+  .watch-row { display: flex; flex-wrap: wrap; gap: 0.6rem;
+               align-items: baseline; padding: 0.5rem 0.8rem;
+               margin: 0.4rem 0; border-radius: 0.5rem;
+               border: 1px solid color-mix(in srgb, currentColor 25%, transparent); }
+  .watch-row.live { border: 3px solid #b45309; background: #b453091a; }
+  .watch-row.live .chip { background: #b45309; color: #fff; }
+  .watch-row.quiet { opacity: 0.6; }
+  .watch-row.quiet .chip { color: inherit;
+                           border-color: color-mix(in srgb, currentColor 40%, transparent); }
 </style>
 </head>
 <body>
@@ -586,6 +789,7 @@ PAGE = """<!doctype html>
 <section id="alarms">
   <h2>status band</h2>
   <div id="tripwire"></div>
+  <div id="watch"></div>
   <div id="band"></div>
 </section>
 <script>
@@ -690,6 +894,27 @@ function render(report) {
   }
   if (report.baseline.note) {
     tripwire.appendChild(el("p", "claim", report.baseline.note));
+  }
+
+  // The completeness watch: only sessions worth a second look get a
+  // row — the alarm layer must never bury its own signal in OK rows.
+  const watch = document.getElementById("watch");
+  watch.replaceChildren();
+  const LIVE = ["ALARM-SILENT", "ALARM-DEFICIT"];
+  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "SURPLUS", "LAGGING",
+                                  "IDLE-DEFICIT"]);
+  for (const s of report.completeness.sessions) {
+    if (!NOTEWORTHY.includes(s.state)) continue;
+    const live = LIVE.includes(s.state);
+    const row = el("div", "watch-row " + (live ? "live" : "quiet"));
+    row.appendChild(el("span", "chip", s.state));
+    row.appendChild(el("span", "file", s.repo + " · " + s.session +
+      " · witnessed " + s.tools + ", received " + s.receipts));
+    if (s.words) row.appendChild(el("p", "claim", s.words));
+    watch.appendChild(row);
+  }
+  if (report.completeness.note) {
+    watch.appendChild(el("p", "claim", report.completeness.note));
   }
 
   const band = document.getElementById("band");
@@ -878,6 +1103,9 @@ def main(argv):
                       help="the folder your repos live in")
     scan.add_argument("--json", action="store_true",
                       help="compact machine output (default pretty-prints)")
+    scan.add_argument("--witness", default=str(WITNESS_ROOT),
+                      help="the harness transcript layout (the liveness "
+                           "witness for completeness)")
     scan.set_defaults(func=cmd_scan)
     serve = sub.add_parser(
         "serve", help="the face: status band on a localhost-only server")
@@ -886,6 +1114,9 @@ def main(argv):
     serve.add_argument("--port", type=int, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
+    serve.add_argument("--witness", default=str(WITNESS_ROOT),
+                       help="the harness transcript layout (the liveness "
+                            "witness for completeness)")
     serve.set_defaults(func=cmd_serve)
     args = parser.parse_args(argv)
     return args.func(args)

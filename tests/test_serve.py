@@ -194,6 +194,14 @@ class ServeTest(ServerFixture):
         self.assertIn("CHANGED SINCE LAST LOOK", page)
         self.assertIn('id="tripwire"', page)
 
+    def test_front_page_watches_completeness_in_its_own_voice(self):
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn('id="watch"', page)
+        self.assertIn("witnessed", page)
+
     def test_no_anti_terms_in_the_user_visible_surface(self):
         self.serve()
 
