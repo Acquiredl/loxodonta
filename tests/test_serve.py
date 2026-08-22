@@ -295,6 +295,47 @@ class WalkerTest(ServerFixture):
         self.assertIn("verify", page)
 
 
+class DrillSurfaceTest(ServerFixture):
+    """The drill from the frontend: a POST runs the battery on sandbox
+    copies, and the checklist — including the walker check no test can
+    automate — is served where the surface links to it."""
+
+    def test_the_drill_runs_over_http_and_reports_rehearsal(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=3)
+        self.serve()
+
+        request = urllib.request.Request(
+            self.url + "/api/drill?log="
+            + urllib.parse.quote("alpha/receipts/receipts-sess-aaaa.jsonl"),
+            method="POST")
+        with OPENER.open(request, timeout=60) as response:
+            report = json.loads(response.read().decode("utf-8"))
+
+        self.assertTrue(report["all_fired"])
+        self.assertEqual(len(report["drills"]), 4)
+        self.assertIn("sandbox", report["rehearsal"])
+
+    def test_the_checklist_is_served_where_the_surface_links_to_it(self):
+        self.serve()
+
+        status, ctype, body = self.get("/checklist")
+
+        self.assertEqual(status, 200)
+        self.assertIn("text/plain", ctype)
+        self.assertIn("WebCrypto", body)
+        self.assertIn("walker", body)
+
+    def test_the_front_page_carries_the_drill_surface(self):
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn('id="firedrill"', page)
+        self.assertIn("rehearsal", page)
+        self.assertIn("/checklist", page)
+
+
 class RecallTest(ServerFixture):
     """The memory surface (GLOSSARY: Recall): the timeline endpoint reads
     chains as testimony — what was attempted, when, in which repo — and
