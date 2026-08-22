@@ -307,6 +307,21 @@ class AnchorTest(unittest.TestCase):
         self.assertIn("ANCHOR-INVALID", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_record_without_a_head_is_anchor_invalid_not_none_mismatch(self):
+        # A record lacking its head is malformed evidence (ANCHOR-INVALID),
+        # not a mismatch against a head called "None".
+        self.sidecar.write_text(
+            json.dumps({"n": 1, "ts": "2026-08-13T14:00:00Z",
+                        "calendar": self.server.url, "proof": "AA=="}) + "\n",
+            encoding="utf-8",
+        )
+
+        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("ANCHOR-INVALID", result.stdout)
+        self.assertNotIn("None", result.stdout)
+
     def test_garbage_proof_bytes_are_anchor_invalid_not_traceback(self):
         self.sidecar.write_text(
             json.dumps({
