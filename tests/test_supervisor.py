@@ -964,5 +964,85 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertTrue(anchored["anchors"]["head"]["anchored"])
 
 
+class DrillTest(unittest.TestCase):
+    """The fire drill (issue #24): the tamper playground graduated into
+    its honest job — rehearse detection on sandbox copies so the
+    operator can trust the alarms before ever needing them."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def drill(self, log):
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), "drill", "--root",
+             str(self.root), "--log", str(log), "--json"],
+            capture_output=True, text=True)
+
+    def test_the_four_way_battery_fires_every_expected_alarm(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+
+        result = self.drill("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        outcomes = {d["tamper"]: d for d in report["drills"]}
+        self.assertEqual(set(outcomes), {"edit", "delete", "reorder",
+                                         "regenerate"})
+        for tamper in ("edit", "delete", "reorder"):
+            self.assertEqual(outcomes[tamper]["expected"], "BROKEN")
+            self.assertEqual(outcomes[tamper]["verdict"], "BROKEN", tamper)
+            self.assertTrue(outcomes[tamper]["fired"], tamper)
+        regen = outcomes["regenerate"]
+        self.assertEqual(regen["expected"], "HEAD-MISMATCH")
+        self.assertEqual(regen["verdict"], "HEAD-MISMATCH")
+        self.assertTrue(regen["fired"])
+        self.assertTrue(report["all_fired"])
+        self.assertIn("sandbox", report["rehearsal"],
+                      "results present as rehearsal, never verdicts")
+
+    def test_the_real_chain_is_byte_for_byte_untouched(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        before = log.read_bytes()
+
+        result = self.drill("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(log.read_bytes(), before)
+
+    def test_the_sandbox_is_invisible_to_the_census(self):
+        # Broken-on-purpose copies must never show up as alarms.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=3)
+        self.drill("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        self.assertEqual(set(sessions), {("alpha", "sess-aaaa")})
+
+    def test_a_chain_too_short_to_play_with_is_refused(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-tiny",
+                   entries=1)
+
+        result = self.drill("alpha/receipts/receipts-sess-tiny.jsonl")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("too short", result.stdout + result.stderr)
+        self.assertFalse((self.root / ".supervisor-drill").exists(),
+                         "a refused drill writes nothing")
+
+    def test_a_chain_outside_the_root_is_refused(self):
+        elsewhere = Path(self._tmp.name).parent
+
+        result = self.drill(elsewhere / "receipts-nope.jsonl")
+
+        self.assertEqual(result.returncode, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -690,24 +691,35 @@ def recall_root(root, repo=None, since=None, until=None, path=None):
             "sessions": sessions}
 
 
-def walk_chain(root, asked):
-    """One chain, line by line, for the walker: parsed entries where
-    lines parse, raw damage kept where it sits — a broken chain is
-    still a readable log. Display only (ADR-0005): the browser
-    recomputes hashes itself, and verify owns the verdict. Only chains
-    under the root are served; anything else is None (404)."""
+def resolve_chain(root, asked):
+    """A chain path under the root, or None — the shared gate for the
+    walker and the drill. Sidecars and anything that escapes the root
+    are refused."""
     path = Path(asked)
     if not path.is_absolute():
         path = root / path
     try:
         path = path.resolve()
-        relpath = path.relative_to(root.resolve()).as_posix()
+        path.relative_to(root.resolve())
     except (ValueError, OSError):
         return None
     if (not path.name.endswith(".jsonl")
             or path.name.endswith(".anchors.jsonl")
             or not path.is_file()):
         return None
+    return path
+
+
+def walk_chain(root, asked):
+    """One chain, line by line, for the walker: parsed entries where
+    lines parse, raw damage kept where it sits — a broken chain is
+    still a readable log. Display only (ADR-0005): the browser
+    recomputes hashes itself, and verify owns the verdict. Only chains
+    under the root are served; anything else is None (404)."""
+    path = resolve_chain(root, asked)
+    if path is None:
+        return None
+    relpath = path.relative_to(root.resolve()).as_posix()
     lines = []
     with open(path, encoding="utf-8", errors="replace") as chain:
         for raw in chain:
@@ -750,6 +762,114 @@ def search_root(root, query):
     return {"root": root.as_posix(), "testimony": TESTIMONY,
             "query": query or "", "matched": len(hits),
             "hits": hits[:SEARCH_CAP]}
+
+
+# --- Fire drill ---------------------------------------------------------------
+# The tamper playground graduated into its honest job: copy one chain
+# into a sandbox, run the four-way battery, and show every expected
+# alarm firing — detection rehearsed before it is ever needed. Real
+# chains are never touched; the sandbox sits under the root (so the
+# walker can inspect the copies) but outside every census pattern (so
+# broken-on-purpose copies never alarm).
+
+DRILL_DIR = ".supervisor-drill"
+
+DRILL_EXPECTED = {"edit": ("BROKEN", 1), "delete": ("BROKEN", 1),
+                  "reorder": ("BROKEN", 1),
+                  "regenerate": ("HEAD-MISMATCH", 3)}
+
+REHEARSAL = ("rehearsal on sandbox copies — nothing here is a verdict "
+             "about the real chain; the checklist (including the "
+             "walker's in-browser check) is at /checklist")
+
+
+def receipts_cli(*args):
+    return subprocess.run(
+        [sys.executable, str(RECEIPTS), *args],
+        capture_output=True, encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+
+def write_lines(path, lines):
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("".join(line + "\n" for line in lines))
+
+
+def run_drill(root, asked):
+    """The battery. Returns (report, exit) — exit 0 only when every
+    alarm fired; a refusal reports why and writes nothing."""
+    log = resolve_chain(root, asked)
+    if log is None:
+        return None, 1
+    lines = log.read_text(encoding="utf-8").splitlines()
+    if len(lines) < 3:
+        return {"log": asked, "refused": "too short to drill — the "
+                "battery plays with middle entries; give it at least "
+                "two receipts past genesis"}, 1
+
+    sandbox = root / DRILL_DIR
+    if sandbox.exists():
+        shutil.rmtree(sandbox)
+    sandbox.mkdir()
+    write_lines(sandbox / "pristine.jsonl", lines)
+    known_head = receipts_cli(
+        "head", "--log", str(sandbox / "pristine.jsonl")).stdout.strip()
+
+    edited = json.loads(lines[1])
+    edited["action"] = "REHEARSAL: this text was rewritten after the fact"
+    write_lines(sandbox / "edit.jsonl",
+                [lines[0], json.dumps(edited, sort_keys=True,
+                                      separators=(",", ":")), *lines[2:]])
+    write_lines(sandbox / "delete.jsonl", [lines[0], *lines[2:]])
+    write_lines(sandbox / "reorder.jsonl",
+                [lines[0], lines[2], lines[1], *lines[3:]])
+    regenerated = sandbox / "regenerate.jsonl"
+    receipts_cli("init", "--log", str(regenerated))
+    for i in range(len(lines) - 1):
+        receipts_cli("log", "--log", str(regenerated), "--actor",
+                     "claude-code",
+                     "--action", f"REHEARSAL: innocent-looking work {i}")
+
+    drills = []
+    for tamper, (expected, expected_exit) in DRILL_EXPECTED.items():
+        command = ["verify", "--log", str(sandbox / f"{tamper}.jsonl")]
+        if tamper == "regenerate":
+            command += ["--expect-head", known_head]
+        judged = receipts_cli(*command)
+        spoken = judged.stdout.strip().splitlines()
+        verdict = (spoken[-1].split(":")[0].split(" at ")[0]
+                   if spoken else "NO-VERDICT")
+        drills.append({
+            "tamper": tamper,
+            "expected": expected,
+            "verdict": verdict,
+            "fired": verdict == expected
+            and judged.returncode == expected_exit,
+            "copy": (sandbox / f"{tamper}.jsonl")
+            .relative_to(root).as_posix(),
+        })
+
+    all_fired = all(d["fired"] for d in drills)
+    report = {
+        "log": log.relative_to(root.resolve()).as_posix(),
+        "sandbox": sandbox.relative_to(root).as_posix(),
+        "known_head": known_head,
+        "rehearsal": REHEARSAL,
+        "drills": drills,
+        "all_fired": all_fired,
+    }
+    return report, 0 if all_fired else 1
+
+
+def cmd_drill(args):
+    root = Path(args.root).resolve()
+    report, code = run_drill(root, args.log)
+    if report is None:
+        print(f"error: {args.log} is not a chain under {root}",
+              file=sys.stderr)
+        return 1
+    print(json.dumps(report, indent=None if args.json else 2))
+    return code
 
 
 # --- Serve --------------------------------------------------------------------
@@ -795,10 +915,29 @@ class Face(BaseHTTPRequestHandler):
             report = search_root(self.server.root, asked.get("q"))
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
+        elif url.path == "/checklist":
+            doc = HERE / "docs" / "FIRE-DRILL.md"
+            if not doc.is_file():
+                self.send_error(404)
+                return
+            self.reply(doc.read_bytes(), "text/plain; charset=utf-8")
         elif url.path == "/":
             self.reply(PAGE.encode("utf-8"), "text/html; charset=utf-8")
         else:
             self.send_error(404)
+
+    def do_POST(self):
+        url = urlparse(self.path)
+        if url.path != "/api/drill":
+            self.send_error(404)
+            return
+        asked = {key: values[0]
+                 for key, values in parse_qs(url.query).items()}
+        report, _ = run_drill(self.server.root, asked.get("log", ""))
+        if report is None:
+            self.send_error(404)
+            return
+        self.reply(json.dumps(report).encode("utf-8"), "application/json")
 
     def reply(self, body, content_type):
         self.send_response(200)
@@ -980,6 +1119,21 @@ PAGE = """<!doctype html>
                 border-radius: 0.4rem; padding: 0.1rem 0.6rem;
                 border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
                 background: transparent; color: inherit; }
+
+  /* The fire drill: rehearsal results, never verdicts. */
+  .drill-row { display: flex; flex-wrap: wrap; gap: 0.7rem;
+               align-items: baseline; padding: 0.4rem 0.8rem;
+               margin: 0.3rem 0; border-radius: 0.5rem;
+               border: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
+  .drill-row .fired { color: #1d7a3e; font-weight: 700; }
+  .drill-row .misfired { background: #b3261e; color: #fff;
+                         font-weight: 700; padding: 0.1rem 0.5rem;
+                         border-radius: 0.4rem; }
+  #drill-banner.quiet, #drill-banner.shouting { padding: 0.5rem 1rem;
+               border-radius: 0.5rem; font-weight: 600; margin: 0.5rem 0; }
+  #drill-banner.quiet { background: #1d7a3e22; border: 1px solid #1d7a3e; }
+  #drill-banner.shouting { background: #b3261e22;
+                           border: 1px solid #b3261e; }
 </style>
 </head>
 <body>
@@ -1023,6 +1177,16 @@ PAGE = """<!doctype html>
   <div id="watch"></div>
   <div id="band"></div>
 </section>
+<section id="firedrill" hidden>
+  <h2>fire drill</h2>
+  <p class="testimony">rehearsal on sandbox copies — nothing here is a
+  verdict about a real chain. The manual checklist, including the
+  walker's in-browser WebCrypto check, lives at
+  <a href="/checklist">/checklist</a></p>
+  <div id="drill-banner"></div>
+  <div id="drill-results"></div>
+</section>
+
 <section id="walker" hidden>
   <h2>walker</h2>
   <p class="testimony">entry by entry, each hash recomputed in your
@@ -1091,6 +1255,10 @@ function chainRow(chain) {
   walk.type = "button";
   walk.addEventListener("click", () => openWalker(chain.log));
   row.appendChild(walk);
+  const drill = el("button", "walk", "drill (sandbox)");
+  drill.type = "button";
+  drill.addEventListener("click", () => runDrill(chain.log));
+  row.appendChild(drill);
   const anchoredLine =
     chain.detail.find(line => line.startsWith("ANCHORED"));
   row.appendChild(el("p", "claim",
@@ -1189,6 +1357,58 @@ function render(report) {
       option.value = option.textContent = repo.repo;
       ask.appendChild(option);
     }
+  }
+}
+
+// --- the fire drill -------------------------------------------------
+
+async function runDrill(logPath) {
+  const section = document.getElementById("firedrill");
+  const banner = document.getElementById("drill-banner");
+  const results = document.getElementById("drill-results");
+  section.hidden = false;
+  banner.className = "";
+  banner.textContent = "drilling a sandbox copy of " + logPath + "…";
+  results.replaceChildren();
+  section.scrollIntoView({behavior: "smooth"});
+  let report;
+  try {
+    const response = await fetch(
+      "/api/drill?log=" + encodeURIComponent(logPath),
+      {method: "POST"});
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    report = await response.json();
+  } catch (error) {
+    banner.className = "shouting";
+    banner.textContent = "the drill could not run: " + error;
+    return;
+  }
+  if (report.refused) {
+    banner.className = "shouting";
+    banner.textContent = "refused: " + report.refused;
+    return;
+  }
+  if (report.all_fired) {
+    banner.className = "quiet";
+    banner.textContent = "every alarm fired — rehearsal passed. Now the "
+      + "manual half: walk the edit copy and watch your browser catch it.";
+  } else {
+    banner.className = "shouting";
+    banner.textContent = "AN ALARM DID NOT FIRE — detection is broken; "
+      + "do not trust the band until you know why.";
+  }
+  for (const d of report.drills) {
+    const row = el("div", "drill-row");
+    row.appendChild(el("strong", "", d.tamper));
+    row.appendChild(el("span", "", "expected " + d.expected +
+                       " · saw " + d.verdict));
+    row.appendChild(el("span", d.fired ? "fired" : "misfired",
+                       d.fired ? "alarm fired" : "ALARM DID NOT FIRE"));
+    const walk = el("button", "walk", "walk this copy");
+    walk.type = "button";
+    walk.addEventListener("click", () => openWalker(d.copy));
+    row.appendChild(walk);
+    results.appendChild(row);
   }
 }
 
@@ -1526,6 +1746,17 @@ def main(argv):
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
     serve.set_defaults(func=cmd_serve)
+    drill = sub.add_parser(
+        "drill", help="rehearse detection: four-way tamper battery on a "
+                      "sandbox copy — real chains untouched")
+    drill.add_argument("--root", required=True,
+                       help="the folder your repos live in")
+    drill.add_argument("--log", required=True,
+                       help="the chain to copy and drill")
+    drill.add_argument("--json", action="store_true",
+                       help="compact machine output (default "
+                            "pretty-prints)")
+    drill.set_defaults(func=cmd_drill)
     args = parser.parse_args(argv)
     return args.func(args)
 
