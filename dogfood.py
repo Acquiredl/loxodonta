@@ -106,6 +106,31 @@ def fold(lines):
     return [(key, count) for key, count in folded]
 
 
+def sibling_of(log):
+    """Where recording moved when this chain's tail tore (ADR-0004):
+    receipts-<session>.jsonl continues in receipts-<session>-002.jsonl,
+    and -002 continues in -003."""
+    stem = log.name[:-len(".jsonl")]
+    prefix, dash, tail = stem.rpartition("-")
+    if dash and len(tail) == 3 and tail.isdigit():
+        stem = f"{prefix}-{int(tail) + 1:03d}"
+    else:
+        stem += "-002"
+    return log.with_name(stem + ".jsonl")
+
+
+def superseded(log, verdict_lines):
+    """True when this chain's only damage is the honest crash pattern — a
+    torn final line — and a sibling exists beside it: ADR-0004 already
+    handled this tear, and recording continued. The tear stays printed as
+    evidence; only the exit code stands down, or the dashboard becomes an
+    alarm that never stops sounding. Any other damage is tampering to
+    shout about, sibling or not."""
+    broken = [l for l in verdict_lines if l.startswith("BROKEN")]
+    return (len(broken) == 1 and "torn tail" in broken[0]
+            and sibling_of(log).exists())
+
+
 def cmd_status(args):
     logs = chains()
     if not logs:
@@ -128,6 +153,10 @@ def cmd_status(args):
         for note, count in fold(l for l in lines[:-1] if l.startswith("ANCHOR")):
             print(f"     {count}x  {note}" if count > 1 else f"     {note}")
         if result.returncode != 0:
+            if superseded(log, lines):
+                print(f"     ended here — recording continued in "
+                      f"{sibling_of(log).name} (ADR-0004)")
+                continue
             # A failing chain is the whole point of the tool — surface it in
             # the exit code too, so a scheduled run can shout.
             worst = max(worst, result.returncode)
