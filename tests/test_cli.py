@@ -556,6 +556,20 @@ class HeadTest(ReceiptsCliTest):
                 self.assertNotIn(verdict, result.stdout, bad)
 
 
+class ReportEmptyLogTest(ReceiptsCliTest):
+    def test_report_on_an_empty_log_errors_like_verify(self):
+        # verify calls an empty file "not a receipt log"; report used to
+        # print a straight-faced "(0 entries)" timeline for the same file.
+        # The two readers keep one opinion about what a log is.
+        self.log_path.write_text("", encoding="utf-8")
+
+        result = run_receipts("report", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("empty", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+
 class TamperTest(ReceiptsCliTest):
     """The core battery: each way a writer might rewrite history is caught."""
 

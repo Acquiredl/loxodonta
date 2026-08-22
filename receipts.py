@@ -47,7 +47,14 @@ def now_ts():
 
 
 def entry_line(entry):
-    """One complete log line for a finished entry (hash included)."""
+    """One complete log line for a finished entry (hash included).
+
+    Stored with ASCII escapes (json.dumps's default) — deliberately unlike
+    the raw-UTF-8 canonical form the hash is computed over. The canonical
+    form is the entry's identity (SPEC §4, frozen); the stored line is its
+    travel armor, pure-ASCII bytes that survive any editor or codepage.
+    The two never conflict: verification re-parses the JSON and re-derives
+    the canonical form fresh, never comparing file bytes."""
     return json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
 
 
@@ -134,10 +141,8 @@ class ChainLock:
         try:
             if time.time() - os.path.getmtime(self.path) > LOCK_STALE_SECONDS:
                 os.unlink(self.path)
-                return True
         except OSError:
-            return True  # it vanished under us — try to take it
-        return False
+            pass  # it vanished under us — the retry loop will take it
 
     def __exit__(self, *exc):
         if self.fd is not None:
@@ -687,6 +692,11 @@ def check_anchors(log, entries):
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
         head = record.get("head")
+        if head is None:
+            # No head at all is malformed evidence, not a mismatch
+            # against a head called "None".
+            judged.append((record, "invalid", "record has no head"))
+            continue
         if head not in hash_to_n:
             judged.append((record, "mismatch", None))
             continue
@@ -884,6 +894,12 @@ def cmd_report(args):
         lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+
+    if not lines:
+        # One opinion between the two readers: verify calls this "not a
+        # receipt log", so report must not narrate it as a quiet night.
+        print(f"error: {args.log} is empty — not a receipt log", file=sys.stderr)
+        return 1
 
     entries, breaks, warns = walk(lines)
     print(f"receipt log: {args.log} ({len(lines)} entries)")
@@ -1271,6 +1287,9 @@ if __name__ == "__main__":
     except OSError as e:
         # The reader hung up (`receipts report | head`) — no verdict was
         # asked of the lines that went unread; die quietly, not loudly.
+        # (This exit 1 — like argparse's exit 2 for usage errors — reuses
+        # a verdict number; scripts should trust the stdout verdict line,
+        # never the exit code alone.)
         # POSIX raises BrokenPipeError (EPIPE); Windows reports a plain
         # EINVAL from the closed handle instead, so match on both or the
         # quiet death is a traceback on half the platforms.
