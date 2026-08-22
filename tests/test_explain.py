@@ -19,7 +19,10 @@ RECEIPTS = REPO_ROOT / "receipts.py"
 
 FAKE_LLM = """\
 import sys, pathlib
-pathlib.Path({capture!r}).write_text(sys.stdin.read(), encoding="utf-8")
+# Read stdin as UTF-8 bytes, the way a real LLM CLI does — the prompt's
+# encoding across the pipe is part of the contract under test.
+prompt = sys.stdin.buffer.read().decode("utf-8")
+pathlib.Path({capture!r}).write_text(prompt, encoding="utf-8")
 print("NARRATION: three steps, nothing anomalous.")
 """
 
@@ -98,6 +101,23 @@ class ExplainTest(unittest.TestCase):
         self.assertIn("ignore previous instructions", prompt)
         # ...but the prompt tells the model the timeline is data to describe.
         self.assertIn("data", prompt.lower())
+
+    def test_explain_survives_non_ascii_actions(self):
+        # Actions routinely carry characters outside the console codepage
+        # (arrows, em-dashes, CJK). The prompt must cross the pipe as
+        # UTF-8, not the locale encoding — found in the 2026-08-21
+        # readability walk: an action with "→" crashed explain with
+        # UnicodeEncodeError on Windows and stranded the narrator process.
+        run_receipts("log", "--actor", "agent",
+                     "--action", "renamed pipeline: ingest → transform",
+                     cwd=self.workdir)
+
+        result = run_receipts("explain", "--llm", self.llm, cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("ingest → transform",
+                      self.capture.read_text(encoding="utf-8"))
 
     def test_explain_when_llm_command_fails_errors_cleanly(self):
         failing = self.workdir / "failing_llm.py"

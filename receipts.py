@@ -47,7 +47,14 @@ def now_ts():
 
 
 def entry_line(entry):
-    """One complete log line for a finished entry (hash included)."""
+    """One complete log line for a finished entry (hash included).
+
+    Stored with ASCII escapes (json.dumps's default) — deliberately unlike
+    the raw-UTF-8 canonical form the hash is computed over. The canonical
+    form is the entry's identity (SPEC §4, frozen); the stored line is its
+    travel armor, pure-ASCII bytes that survive any editor or codepage.
+    The two never conflict: verification re-parses the JSON and re-derives
+    the canonical form fresh, never comparing file bytes."""
     return json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
 
 
@@ -134,10 +141,8 @@ class ChainLock:
         try:
             if time.time() - os.path.getmtime(self.path) > LOCK_STALE_SECONDS:
                 os.unlink(self.path)
-                return True
         except OSError:
-            return True  # it vanished under us — try to take it
-        return False
+            pass  # it vanished under us — the retry loop will take it
 
     def __exit__(self, *exc):
         if self.fd is not None:
@@ -264,7 +269,10 @@ def append_locked(log, actor, action, files):
         return 1
 
     # SPEC §3: case-insensitivity belongs to filesystems, not the format.
-    # Catch a case-only respelling here, on the machine that knows.
+    # Catch a case-only respelling here, on the machine that knows. This
+    # re-parses the whole log on every append — fine at session scale
+    # (hundreds of entries), but it makes each append O(chain length) in
+    # the hook's hot path; revisit if chains ever grow long.
     known_paths = {ref["path"] for line in lines for ref in json.loads(line)["files"]}
     for ref in files:
         for known in known_paths:
@@ -320,7 +328,13 @@ def cmd_head(args):
     if not lines:
         print(f"error: {args.log} is empty — no chain head to print", file=sys.stderr)
         return 1
-    print(json.loads(lines[-1])["entry_hash"])
+    last = tail_entry(lines)
+    if last is None:
+        print(f"error: {args.log} has a damaged final line — run "
+              "`receipts verify` (a torn tail has no head to record)",
+              file=sys.stderr)
+        return 1
+    print(last["entry_hash"])
     return 0
 
 
@@ -346,6 +360,7 @@ BRANCH_MARKER = 0xFF
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
 MAX_PROOF_BYTES = 8192  # generous; real calendar proofs are a few hundred
+MAX_PROOF_DEPTH = 512   # ops nest one level each; real proofs stay under ~100
 
 
 class ProofError(ValueError):
@@ -404,10 +419,17 @@ def write_varbytes(b):
     return write_varint(len(b)) + b
 
 
-def parse_timestamp(reader):
+def parse_timestamp(reader, depth=0):
     """One node of the proof tree: attestations that hold at the current
     digest, plus operations that each transform it and continue into a
-    child node. Wire format: every element but the last is 0xff-prefixed."""
+    child node. Wire format: every element but the last is 0xff-prefixed.
+
+    Depth is capped: each chained op nests one level, so without a cap a
+    crafted proof a few KB long could exhaust the interpreter's recursion
+    limit — a crash where a verdict belongs. Malformed evidence is judged
+    (ANCHOR-INVALID), never guessed at and never crashed on."""
+    if depth > MAX_PROOF_DEPTH:
+        raise ProofError(f"proof nests deeper than {MAX_PROOF_DEPTH} operations")
     node = {"attestations": [], "ops": []}
     while True:
         tag = reader.byte()
@@ -420,9 +442,9 @@ def parse_timestamp(reader):
             )
         elif tag in (OP_APPEND, OP_PREPEND):
             arg = bytes(reader.varbytes())
-            node["ops"].append((tag, arg, parse_timestamp(reader)))
+            node["ops"].append((tag, arg, parse_timestamp(reader, depth + 1)))
         elif tag == OP_SHA256:
-            node["ops"].append((tag, None, parse_timestamp(reader)))
+            node["ops"].append((tag, None, parse_timestamp(reader, depth + 1)))
         else:
             raise ProofError(
                 f"proof uses operation 0x{tag:02x}, "
@@ -670,6 +692,11 @@ def check_anchors(log, entries):
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
         head = record.get("head")
+        if head is None:
+            # No head at all is malformed evidence, not a mismatch
+            # against a head called "None".
+            judged.append((record, "invalid", "record has no head"))
+            continue
         if head not in hash_to_n:
             judged.append((record, "mismatch", None))
             continue
@@ -868,6 +895,12 @@ def cmd_report(args):
     except FileNotFoundError:
         return missing_log(args.log)
 
+    if not lines:
+        # One opinion between the two readers: verify calls this "not a
+        # receipt log", so report must not narrate it as a quiet night.
+        print(f"error: {args.log} is empty — not a receipt log", file=sys.stderr)
+        return 1
+
     entries, breaks, warns = walk(lines)
     print(f"receipt log: {args.log} ({len(lines)} entries)")
     print()
@@ -951,8 +984,13 @@ def cmd_explain(args):
               "or install the `claude` CLI", file=sys.stderr)
         return 1
     try:
+        # The prompt crosses the pipe as UTF-8 whatever the console
+        # speaks — actions carry arbitrary characters, and the locale
+        # codec would crash on the first one it cannot spell, stranding
+        # the narrator on a half-open pipe.
         completed = subprocess.run(
-            command, input=prompt, capture_output=True, text=True
+            command, input=prompt, capture_output=True, text=True,
+            encoding="utf-8", errors="replace"
         )
     except OSError:
         print(f"error: LLM command not found: {command[0]} — pass --llm "
@@ -1249,6 +1287,9 @@ if __name__ == "__main__":
     except OSError as e:
         # The reader hung up (`receipts report | head`) — no verdict was
         # asked of the lines that went unread; die quietly, not loudly.
+        # (This exit 1 — like argparse's exit 2 for usage errors — reuses
+        # a verdict number; scripts should trust the stdout verdict line,
+        # never the exit code alone.)
         # POSIX raises BrokenPipeError (EPIPE); Windows reports a plain
         # EINVAL from the closed handle instead, so match on both or the
         # quiet death is a traceback on half the platforms.

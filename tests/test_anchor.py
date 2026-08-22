@@ -284,6 +284,44 @@ class AnchorTest(unittest.TestCase):
         # "VALID" as a verdict line, not as a substring of "ANCHOR-INVALID".
         self.assertNotRegex(result.stdout, r"(?m)^VALID$")
 
+    def test_deeply_nested_proof_is_anchor_invalid_not_a_crash(self):
+        # Each chained op nests one level of recursion; ~1500 sha256 ops fit
+        # well under the 8KB field cap but sail past Python's default
+        # recursion limit. The sidecar is writer-reachable, so a crafted
+        # proof must earn a verdict (ANCHOR-INVALID), never a crash — found
+        # in the 2026-08-21 readability walk.
+        deep = (b"\x08" * 1500
+                + b"\x00" + TAG_BITCOIN + ots_varbytes(ots_varint(1)))
+        self.sidecar.write_text(
+            json.dumps({
+                "head": self.head, "n": 1, "ts": "2026-08-13T14:00:00Z",
+                "calendar": self.server.url,
+                "proof": base64.b64encode(deep).decode(),
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("ANCHOR-INVALID", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_record_without_a_head_is_anchor_invalid_not_none_mismatch(self):
+        # A record lacking its head is malformed evidence (ANCHOR-INVALID),
+        # not a mismatch against a head called "None".
+        self.sidecar.write_text(
+            json.dumps({"n": 1, "ts": "2026-08-13T14:00:00Z",
+                        "calendar": self.server.url, "proof": "AA=="}) + "\n",
+            encoding="utf-8",
+        )
+
+        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("ANCHOR-INVALID", result.stdout)
+        self.assertNotIn("None", result.stdout)
+
     def test_garbage_proof_bytes_are_anchor_invalid_not_traceback(self):
         self.sidecar.write_text(
             json.dumps({
