@@ -861,6 +861,93 @@ class AnchorKeeperTest(unittest.TestCase):
                          [{"upto": 2, "height": 850000}])
         self.assertEqual(first.returncode, 0, first.stderr)
 
+    def test_a_fresh_head_older_than_the_cadence_is_anchored_on_tick(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        head = chain_head(log)
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [bytes.fromhex(head)],
+                         "the head itself went to the calendar")
+        chain = self.chain_report(result, "alpha", "sess-aaaa")
+        self.assertEqual(len(chain["anchors"]["pending"]), 1,
+                         "the panel reflects the submission this tick")
+
+        again = run_scan(self.root, "--anchor-every", "0s",
+                         "--calendar", calendar.url,
+                         env=keeper_env(SUPERVISOR_UPGRADE_EVERY_SECONDS="0"))
+
+        self.assertEqual(len(calendar.submitted), 1,
+                         "a head already submitted is not resubmitted")
+        self.assertEqual(again.returncode, 0, again.stderr)
+
+    def test_default_is_off_and_nothing_is_submitted_without_opt_in(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run_scan(self.root, "--calendar", calendar.url,
+                          env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [])
+        self.assertFalse(Path(str(log) + ".anchors.jsonl").exists())
+
+    def test_a_young_head_waits_for_its_cadence(self):
+        calendar = self.start_calendar()
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run_scan(self.root, "--anchor-every", "1d",
+                          "--calendar", calendar.url, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [])
+
+    def test_sibling_chains_are_anchored_individually(self):
+        calendar = self.start_calendar()
+        base = make_chain(self.root / "alpha" / "receipts", "sess-sib")
+        sibling = make_chain(self.root / "alpha" / "receipts",
+                             "sess-sib-002", entries=1)
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=keeper_env())
+
+        self.assertEqual(sorted(calendar.submitted),
+                         sorted([bytes.fromhex(chain_head(base)),
+                                 bytes.fromhex(chain_head(sibling))]),
+                         "no chain skipped because its session already "
+                         "anchored another")
+        sessions = chains_by_session(json.loads(result.stdout))
+        for chain in sessions[("alpha", "sess-sib")]:
+            self.assertEqual(len(chain["anchors"]["pending"]), 1)
+
+    def test_all_calendars_failing_is_loud_never_silent(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", "http://127.0.0.1:1",
+                          env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-aaaa")
+        self.assertTrue(chain["anchors"]["failed"])
+        self.assertIn("anchoring failed", chain["anchors"]["note"])
+        self.assertFalse(chain["anchors"]["head"]["anchored"])
+
+    def test_an_already_anchored_head_is_left_alone(self):
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [])
+
     def test_every_sibling_chain_is_assessed_separately(self):
         base = make_chain(self.root / "alpha" / "receipts", "sess-sib")
         sibling = make_chain(self.root / "alpha" / "receipts",
