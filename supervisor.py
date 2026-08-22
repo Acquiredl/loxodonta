@@ -377,6 +377,9 @@ WATCH_WORDS = {
     "UNWITNESSED": "no transcript pairs with this session — completeness "
                    "cannot be watched for it; nothing is assumed "
                    "either way.",
+    "UNWATCHED": "no receipts hook is wired into the harness settings — "
+                 "nothing owes a receipt, so there is nothing to be "
+                 "behind.",
 }
 
 
@@ -386,12 +389,52 @@ def munge(path):
     return re.sub(r"[^A-Za-z0-9-]", "-", str(path))
 
 
-def read_witness(transcript):
-    """The witness signal: timestamps of tool events — lines recording a
-    tool that ran and returned. Failed calls are excluded because the
-    hook never fires for them (the field's suppression finding), so no
-    receipt is ever owed. Chatter is never counted: a chat-only session
-    can never alarm."""
+def hook_matchers(witness):
+    """Which tools owe a receipt: the PostToolUse matchers wired to
+    receipts, read from the harness settings beside the witness layout.
+    No wired hook means nothing owes a receipt — a session can never be
+    behind a recorder that was never asked to record."""
+    try:
+        settings = json.loads((witness.parent / "settings.json")
+                              .read_text(encoding="utf-8"))
+        rules = settings["hooks"]["PostToolUse"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    matchers = []
+    for rule in rules if isinstance(rules, list) else []:
+        if not isinstance(rule, dict):
+            continue
+        commands = rule.get("hooks")
+        wired = isinstance(commands, list) and any(
+            isinstance(hook, dict)
+            and "receipts" in str(hook.get("command", ""))
+            for hook in commands)
+        if wired:
+            matchers.append(str(rule.get("matcher", "*")))
+    return matchers
+
+
+def owes_receipt(name, matchers):
+    for matcher in matchers:
+        if matcher in ("", "*"):
+            return True
+        try:
+            if re.fullmatch(matcher, name or ""):
+                return True
+        except re.error:
+            continue
+    return False
+
+
+def read_witness(transcript, matchers):
+    """The witness signal: timestamps of tool events that owe a receipt.
+    A tool event is a tool_use block paired by id with its result line;
+    only completed results count (failed calls fire no hook — the
+    field's suppression finding) and only tools the wired matchers
+    cover (the calibration finding: an all-tools witness over an
+    Edit|Write|Bash hook manufactures deficits). Chatter is never
+    counted: a chat-only session can never alarm."""
+    names = {}
     events = []
     with open(transcript, encoding="utf-8", errors="replace") as lines:
         for line in lines:
@@ -401,12 +444,25 @@ def read_witness(transcript):
                 continue
             if not isinstance(record, dict):
                 continue
+            message = record.get("message")
+            blocks = (message.get("content")
+                      if isinstance(message, dict) else None)
+            if not isinstance(blocks, list):
+                blocks = []
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    names[block.get("id")] = block.get("name")
             result = record.get("toolUseResult")
             if result is None:
                 continue
             if isinstance(result, dict) and result.get("is_error"):
                 continue
-            events.append(record.get("timestamp"))
+            name = next((names.get(block.get("tool_use_id"))
+                         for block in blocks
+                         if isinstance(block, dict)
+                         and block.get("type") == "tool_result"), None)
+            if owes_receipt(name, matchers):
+                events.append(record.get("timestamp"))
     return events
 
 
@@ -431,11 +487,11 @@ def classify(tools, receipts, ended, idle, deficit_age, silent):
     return "ALARM-SILENT" if silent else "ALARM-DEFICIT"
 
 
-def watch_session(transcript, receipts, last_receipt, now):
+def watch_session(transcript, receipts, last_receipt, now, matchers):
     """One session against its witness. deficit_since needs no stored
     state: receipts pair with tool events in order, so the first
     unpaired event's timestamp is when the deficit began."""
-    events = read_witness(transcript)
+    events = read_witness(transcript, matchers)
     tools = len(events)
     quiet_for = now.timestamp() - transcript.stat().st_mtime
     # Today both flags read from the idle window ("witness quiet this
@@ -460,6 +516,7 @@ def watch_completeness(root, witness, families):
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
     ours = munge(root)
+    matchers = hook_matchers(witness)
     transcripts = {}
     if witness.is_dir():
         transcripts = {t.stem: t for t in sorted(witness.glob("*/*.jsonl"))}
@@ -467,6 +524,10 @@ def watch_completeness(root, witness, families):
         watch["note"] = (f"witness absent — no transcript layout at "
                          f"{witness.as_posix()}; completeness cannot be "
                          "watched this look")
+    if witness.is_dir() and not matchers:
+        watch["note"] = ("no receipts hook is wired into the harness "
+                         "settings beside this witness — nothing owes a "
+                         "receipt, so completeness has nothing to watch")
 
     def add(repo, session, state, tools, receipts):
         entry = {"repo": repo, "session": session, "state": state,
@@ -481,8 +542,11 @@ def watch_completeness(root, witness, families):
         if transcript is None:
             add(repo, session, "UNWITNESSED", 0, family["receipts"])
             continue
+        if not matchers:
+            add(repo, session, "UNWATCHED", 0, family["receipts"])
+            continue
         state, tools = watch_session(transcript, family["receipts"],
-                                     family["last"], now)
+                                     family["last"], now, matchers)
         add(repo, session, state, tools, family["receipts"])
 
     # Chainless sessions: only transcript folders under this root are
@@ -490,9 +554,9 @@ def watch_completeness(root, witness, families):
     # best name the witness has for the project.
     for stem, transcript in transcripts.items():
         folder = transcript.parent.name
-        if not folder.startswith(ours):
+        if not matchers or not folder.startswith(ours):
             continue
-        state, tools = watch_session(transcript, 0, None, now)
+        state, tools = watch_session(transcript, 0, None, now, matchers)
         add(folder[len(ours):].strip("-") or root.name, stem, state,
             tools, 0)
 
