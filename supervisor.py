@@ -233,31 +233,83 @@ PENDING_LINE = re.compile(
     r"^ANCHOR-PENDING: head (\S+) submitted (\S+) via (\S+)")
 
 
+def parse_cadence(text):
+    """A duration the operator can say out loud: 30s, 15m, 6h, 1d, or
+    bare seconds. Used by --anchor-every."""
+    match = re.fullmatch(r"(\d+)([smhd]?)", text.strip())
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a cadence (try 6h, 1d, or seconds)")
+    return int(match.group(1)) * {"": 1, "s": 1, "m": 60,
+                                  "h": 3600, "d": 86400}[match.group(2)]
+
+
 def upgrade_due(last_attempt, now):
     attempted = parse_when(last_attempt)
     return (attempted is None
             or (now - attempted).total_seconds() >= UPGRADE_EVERY_SECONDS)
 
 
-def keep_anchors(log, last_attempt, now):
-    """One chain's turn with the keeper: if a sidecar exists and the
-    log's turn has come around, drive `receipts anchor --upgrade` —
-    completions come from the record's own calendar, judgment stays with
-    verify. Returns (attempted, note)."""
-    if not Path(str(log) + ".anchors.jsonl").exists():
-        return False, None
+def sidecar_heads(sidecar):
+    """Heads that already have a record, read tolerantly and for
+    scheduling only — judging the proofs stays with verify."""
+    heads = set()
+    try:
+        with open(sidecar, encoding="utf-8", errors="replace") as lines:
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (isinstance(record, dict)
+                        and isinstance(record.get("head"), str)):
+                    heads.add(record["head"])
+    except FileNotFoundError:
+        pass
+    return heads
+
+
+def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
+    """One chain's turn with the keeper, at most once per throttle
+    window: pending proofs are driven through `receipts anchor
+    --upgrade` (the record's own calendar; judgment stays with verify),
+    and — only when the operator opted in with a cadence — a fresh head
+    that has aged past it is anchored. Off by default: nothing leaves
+    the machine without the say-so. Returns (attempted, note, failed)."""
+    sidecar = Path(str(log) + ".anchors.jsonl")
     if not upgrade_due(last_attempt, now):
-        return False, None
-    finished = subprocess.run(
-        [sys.executable, str(RECEIPTS), "anchor", "--upgrade",
-         "--log", str(log)],
-        capture_output=True, encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        return False, None, False
+    attempted = False
     note = None
-    if finished.returncode != 0:
-        note = ("upgrade attempted; a calendar did not answer — proofs "
-                "stay pending and the keeper will try again")
-    return True, note
+    failed = False
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    if sidecar.exists():
+        finished = subprocess.run(
+            [sys.executable, str(RECEIPTS), "anchor", "--upgrade",
+             "--log", str(log)],
+            capture_output=True, encoding="utf-8", env=env)
+        attempted = True
+        if finished.returncode != 0:
+            note = ("upgrade attempted; a calendar did not answer — "
+                    "proofs stay pending and the keeper will try again")
+    if cadence is not None and entries:
+        head = entries[-1].get("entry_hash")
+        born = parse_when(entries[-1].get("ts"))
+        ripe = born is not None and (now - born).total_seconds() >= cadence
+        if head and ripe and head not in sidecar_heads(sidecar):
+            command = [sys.executable, str(RECEIPTS), "anchor",
+                       "--log", str(log)]
+            for calendar in calendars:
+                command += ["--calendar", calendar]
+            finished = subprocess.run(command, capture_output=True,
+                                      encoding="utf-8", env=env)
+            attempted = True
+            if finished.returncode != 0:
+                failed = True
+                note = ("anchoring failed — no calendar accepted this "
+                        "head; it stays unanchored and the keeper will "
+                        "try again")
+    return attempted, note, failed
 
 
 def assess_anchors(detail, entries):
@@ -446,7 +498,7 @@ def watch_completeness(root, witness, families):
 
 # --- Scan ---------------------------------------------------------------------
 
-def scan_root(root, witness=WITNESS_ROOT):
+def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
@@ -466,7 +518,9 @@ def scan_root(root, witness=WITNESS_ROOT):
     for (repo, session, _), log in census:
         relpath = log.relative_to(root).as_posix()
         entries = read_entries(log)
-        attempted, keeper_note = keep_anchors(log, keeper.get(relpath), now)
+        attempted, keeper_note, anchor_failed = keep_anchors(
+            log, keeper.get(relpath), now, entries,
+            anchor_every, calendars)
         if attempted:
             keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         verdict, exit_code, detail = verify(log)
@@ -488,6 +542,8 @@ def scan_root(root, witness=WITNESS_ROOT):
         }
         if keeper_note:
             chain["anchors"]["note"] = keeper_note
+        if anchor_failed:
+            chain["anchors"]["failed"] = True
         repos.setdefault(repo, {}).setdefault(session, []).append(chain)
         if not stood_down:
             worst = max(worst, exit_code)
@@ -554,7 +610,9 @@ def scan_root(root, witness=WITNESS_ROOT):
 
 def cmd_scan(args):
     report = scan_root(Path(args.root).resolve(),
-                       witness=Path(args.witness))
+                       witness=Path(args.witness),
+                       anchor_every=args.anchor_every,
+                       calendars=args.calendar or ())
     print(json.dumps(report, indent=None if args.json else 2))
     return report["exit"]
 
@@ -673,7 +731,9 @@ class Face(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/api/status":
             report = scan_root(self.server.root,
-                               witness=self.server.witness)
+                               witness=self.server.witness,
+                               anchor_every=self.server.anchor_every,
+                               calendars=self.server.calendars)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/api/recall":
@@ -712,6 +772,8 @@ def cmd_serve(args):
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Face)
     server.root = root
     server.witness = Path(args.witness)
+    server.anchor_every = args.anchor_every
+    server.calendars = args.calendar or ()
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
@@ -851,6 +913,7 @@ PAGE = """<!doctype html>
   .berth .pending-proof { color: #8a6d00; }
   .berth .bare { opacity: 0.75; }
   .berth .stale { color: #b45309; font-weight: 700; }
+  .berth .shout { color: #b3261e; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -1097,7 +1160,10 @@ function renderAnchors(report) {
             "head (entry " + a.head.n + ") unanchored" +
             (a.head.ts ? " for " + since(a.head.ts) : "")));
         }
-        if (a.note) row.appendChild(el("p", "claim", a.note));
+        if (a.note) {
+          row.appendChild(el("p", "claim" + (a.failed ? " shout" : ""),
+                             a.note));
+        }
         panel.appendChild(row);
       }
     }
@@ -1258,26 +1324,33 @@ def main(argv):
     parser = argparse.ArgumentParser(prog="supervisor",
                                      description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+    watching = argparse.ArgumentParser(add_help=False)
+    watching.add_argument("--root", required=True,
+                          help="the folder your repos live in")
+    watching.add_argument("--witness", default=str(WITNESS_ROOT),
+                          help="the harness transcript layout (the "
+                               "liveness witness for completeness)")
+    watching.add_argument("--anchor-every", type=parse_cadence,
+                          default=None, metavar="AGE",
+                          help="opt in: anchor a fresh head once it is "
+                               "this old (e.g. 6h, 1d). Off by default — "
+                               "nothing leaves the machine without it")
+    watching.add_argument("--calendar", action="append", default=None,
+                          metavar="URL",
+                          help="calendar for auto-anchoring (repeatable; "
+                               "default: receipts' public pools)")
     scan = sub.add_parser(
-        "scan", help="one tick: census + verdicts, JSON out, exit code")
-    scan.add_argument("--root", required=True,
-                      help="the folder your repos live in")
+        "scan", parents=[watching],
+        help="one tick: census + verdicts, JSON out, exit code")
     scan.add_argument("--json", action="store_true",
                       help="compact machine output (default pretty-prints)")
-    scan.add_argument("--witness", default=str(WITNESS_ROOT),
-                      help="the harness transcript layout (the liveness "
-                           "witness for completeness)")
     scan.set_defaults(func=cmd_scan)
     serve = sub.add_parser(
-        "serve", help="the face: status band on a localhost-only server")
-    serve.add_argument("--root", required=True,
-                       help="the folder your repos live in")
+        "serve", parents=[watching],
+        help="the face: status band on a localhost-only server")
     serve.add_argument("--port", type=int, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
-    serve.add_argument("--witness", default=str(WITNESS_ROOT),
-                       help="the harness transcript layout (the liveness "
-                            "witness for completeness)")
     serve.set_defaults(func=cmd_serve)
     args = parser.parse_args(argv)
     return args.func(args)
