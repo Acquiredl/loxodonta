@@ -356,4 +356,66 @@ that is prompt injection aimed through the log, named before it can
 happen. Second: *you are testimony, not a verdict* — the narrator may
 notice; only arithmetic decides.
 
-*(Clusters 6–7 are added as the walk covers them.)*
+## 6. The hook — the printer wired to the stove
+
+Everything earlier had a loose end: tickets were written because someone
+chose to write them, and a cook who simply does not print beats the
+whole apparatus — completeness is the property no seal can enforce
+(SPEC §8). The hook closes it by moving the printer: the harness fires
+`receipts hook` after every tool call, one fresh process per action.
+*The log call sits outside the writer's volition — the agent cannot
+skip its own receipt.* The burner firing is the print command.
+
+One rule shapes every function here: **never fail a session over the
+log.** A hook that errors a tool call teaches the operator to turn the
+hook off, and a disabled printer is the worst outcome the design
+acknowledges. The posture everywhere is degrade, skip, fall back — keep
+the kitchen running, keep printing.
+
+- **`one_line` — receipts are not transcripts.** The ticket says
+  "grilled the salmon," not the recipe: one line, 160 characters. The
+  summary comes from `HOOK_SUMMARY_KEYS`, a preference order over the
+  most descriptive scalar a tool call carries (a file path beats a
+  command beats a pattern beats a prompt).
+- **`main_repo_root` — the pop-up kitchen problem.** A git worktree is
+  a pop-up kitchen that hygiene dismantles once its branch merges — the
+  sessions most worth keeping are exactly the ones whose worktree gets
+  pruned. So a worktree session's chain goes to the permanent
+  restaurant's office: the main repository. It reads git's own files
+  (`.git` → `gitdir` → `commondir`) rather than shelling out, because
+  this runs on every tool call and a hook that spawns a process per
+  call is a hook the operator eventually turns off. Anything unexpected
+  falls back to the project directory — never fail over path layout.
+- **`writable_chain` — the fresh pad.** The sibling logic of ADR-0004,
+  living in the hook (not the format, not `append_entry`) because
+  routing around damage is unattended-integration behavior: a human at
+  the CLI is refused; the hook walks `-002`, `-003`, … until it finds
+  an undamaged pad. Damage ends a chain, never the recording; the
+  damaged chain is left as it lies — evidence, with no repair path.
+- **`ensure_chain` — the startup race.** Genesis is written under the
+  lock, guarding both "missing" and "exists but empty": two hook
+  processes racing to create the same chain must not leave one dying on
+  "run `receipts init` first" against a file that was about to be a
+  chain.
+- **`cmd_hook` — the assembly line.** The payload is read from stdin as
+  UTF-8 bytes and decoded explicitly (JSON's interchange encoding —
+  never the console codepage). Chain placement, most specific wins:
+  `--log-dir` flag, else `$CLAUDE_PROJECT_DIR/receipts` through
+  `main_repo_root`, else the working directory — with the env var read
+  *in Python, not the shell*, which is why one installed hook command
+  works under every shell on every platform. The session id is
+  sanitized before it may name a file. A directory the hook creates
+  gets a protective `.gitignore` (`*` + `!.gitignore`): action lines
+  record every command a session ran, and that history must not ride
+  into a commit by accident. Files are fingerprinted only when they sit
+  under the log's directory and still exist — anything else is skipped,
+  never fatal.
+
+A deliberate scope boundary, worth knowing: the hook reads `tool_input`
+and ignores `tool_response` — a hook ticket records what was attempted
+on what, never how it went (only the `run` wrapper records exit codes).
+Capturing outputs would drag tool output — secrets included — toward
+the log. The cost: a hook chain cannot distinguish a failed command
+from a successful one.
+
+*(Cluster 7 is added as the walk covers it.)*
