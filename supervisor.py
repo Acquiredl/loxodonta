@@ -265,6 +265,34 @@ def recall_root(root, repo=None, since=None, until=None, path=None):
             "sessions": sessions}
 
 
+SEARCH_CAP = 500  # hits returned; `matched` still counts every one
+
+
+def search_root(root, query):
+    """Free-text search over action lines, machine-wide. Finds what was
+    *written* — the writer's word, testimony like all of recall — and
+    hands back the context the timeline links on. Newest first; an empty
+    query matches nothing rather than everything."""
+    needle = (query or "").lower()
+    hits = []
+    if needle:
+        for log in find_chains(root):
+            repo_name, session, _ = chain_identity(root, log)
+            for entry in read_entries(log):
+                action = str(entry.get("action", ""))
+                if needle in action.lower():
+                    hits.append({
+                        "repo": repo_name, "session": session,
+                        "chain": log.name, "n": entry.get("n"),
+                        "ts": entry.get("ts"), "actor": entry.get("actor"),
+                        "action": action,
+                    })
+    hits.sort(key=lambda hit: str(hit["ts"] or ""), reverse=True)
+    return {"root": root.as_posix(), "testimony": TESTIMONY,
+            "query": query or "", "matched": len(hits),
+            "hits": hits[:SEARCH_CAP]}
+
+
 # --- Serve --------------------------------------------------------------------
 # The face. Serialization only, zero decisions (ADR-0005): every request
 # answers from a fresh scan, and the page below renders what the scan
@@ -287,6 +315,12 @@ class Face(BaseHTTPRequestHandler):
                                  since=asked.get("from") or None,
                                  until=asked.get("to") or None,
                                  path=asked.get("path") or None)
+            self.reply(json.dumps(report).encode("utf-8"),
+                       "application/json")
+        elif url.path == "/api/search":
+            asked = {key: values[0]
+                     for key, values in parse_qs(url.query).items()}
+            report = search_root(self.server.root, asked.get("q"))
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/":
@@ -367,6 +401,23 @@ PAGE = """<!doctype html>
   .story .count { opacity: 0.85; }
   .story .sibling { flex-basis: 100%; margin: 0; font-size: 0.85rem;
                     opacity: 0.7; }
+  .story.found-you { border-left-color: #1d7a3e;
+                     background: #1d7a3e1f; }
+  #ask-search { width: 100%; box-sizing: border-box; font: inherit;
+                padding: 0.45rem 0.7rem; border-radius: 0.5rem;
+                border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+                background: transparent; color: inherit; margin: 0.6rem 0; }
+  #found .tally { font-size: 0.85rem; opacity: 0.7; margin: 0.2rem 0; }
+  .hit { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: baseline;
+         width: 100%; text-align: left; font: inherit; color: inherit;
+         background: color-mix(in srgb, currentColor 7%, transparent);
+         border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+         border-radius: 0.5rem; padding: 0.4rem 0.7rem; margin: 0.3rem 0;
+         cursor: pointer; }
+  .hit .where { font-weight: 700; }
+  .hit .entry { font-family: monospace; font-size: 0.8rem; opacity: 0.7; }
+  .hit .said { flex-basis: 100%; margin: 0; font-family: monospace;
+               font-size: 0.85rem; overflow-wrap: anywhere; }
   .session { margin: 0.8rem 0 0.8rem 0.5rem; }
   .session > .name { font-family: monospace; opacity: 0.8; }
   .chain { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: baseline;
@@ -411,6 +462,9 @@ PAGE = """<!doctype html>
   <h2>recall</h2>
   <p class="testimony">testimony, not a verdict — what was attempted, as
   the writer told it; run <code>receipts verify</code> for the verdict</p>
+  <input type="search" id="ask-search"
+         placeholder="search every action line on this machine">
+  <div id="found"></div>
   <div id="filters">
     <label>repo
       <select id="ask-repo"><option value="">every repo</option></select>
@@ -552,6 +606,7 @@ function spanText(story) {
 
 function storyRow(story) {
   const row = el("div", "story");
+  row.dataset.where = story.repo + "/" + story.session;
   row.appendChild(el("span", "repo", story.repo));
   row.appendChild(el("span", "id", story.session));
   row.appendChild(el("span", "span", spanText(story)));
@@ -598,6 +653,65 @@ async function loadRecall() {
       "recall did not answer: " + error;
   }
 }
+
+// --- search: the writer's word, findable ----------------------------
+
+// A hit links into the timeline: focus the session's repo, then scroll
+// to its story once the timeline has re-answered.
+async function visit(hit) {
+  document.getElementById("ask-repo").value = hit.repo;
+  await loadRecall();
+  const where = hit.repo + "/" + hit.session;
+  for (const row of document.querySelectorAll("#timeline .story")) {
+    if (row.dataset.where === where) {
+      row.classList.add("found-you");
+      row.scrollIntoView({behavior: "smooth", block: "center"});
+      setTimeout(() => row.classList.remove("found-you"), 2500);
+    }
+  }
+}
+
+function hitRow(hit) {
+  const row = el("button", "hit");
+  row.type = "button";
+  row.appendChild(el("span", "where", hit.repo + " · " + hit.session));
+  row.appendChild(el("span", "entry",
+    "entry " + hit.n + (hit.ts ? " · " + hit.ts : "")));
+  row.appendChild(el("p", "said", hit.action));
+  row.addEventListener("click", () => visit(hit));
+  return row;
+}
+
+async function runSearch() {
+  const found = document.getElementById("found");
+  const query = document.getElementById("ask-search").value.trim();
+  if (!query) {
+    found.replaceChildren();
+    return;
+  }
+  try {
+    const response =
+      await fetch("/api/search?q=" + encodeURIComponent(query));
+    const report = await response.json();
+    found.replaceChildren();
+    found.appendChild(el("p", "tally", report.matched
+      ? "found in " + report.matched + " action line(s)" +
+        (report.matched > report.hits.length
+          ? " — showing the newest " + report.hits.length : "")
+      : "nothing written matches — the writer never said it"));
+    for (const hit of report.hits) {
+      found.appendChild(hitRow(hit));
+    }
+  } catch (error) {
+    found.textContent = "search did not answer: " + error;
+  }
+}
+
+let searchPause;
+document.getElementById("ask-search").addEventListener("input", () => {
+  clearTimeout(searchPause);
+  searchPause = setTimeout(runSearch, 300);
+});
 
 async function loadStatus() {
   try {

@@ -317,6 +317,90 @@ class RecallTest(ServerFixture):
             self.assertNotIn(verdict_word, body)
 
 
+class SearchTest(ServerFixture):
+    """Free-text recall search: one box over every action line on the
+    machine. Search finds what was *written* — the writer's word — so it
+    is testimony like the rest of recall, and each hit carries the
+    context (repo, session, chain, entry) the timeline links on."""
+
+    def search(self, **params):
+        query = "?" + urllib.parse.urlencode(params) if params else ""
+        _, _, body = self.get("/api/search" + query)
+        return json.loads(body)
+
+    def test_search_finds_action_lines_across_repos_with_context(self):
+        alpha = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        log_entry(alpha, "deploy the albatross")
+        beta = make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        log_entry(beta, "feed the elephant")
+        self.serve()
+
+        report = self.search(q="albatross")
+
+        (hit,) = report["hits"]
+        self.assertEqual(hit["repo"], "alpha")
+        self.assertEqual(hit["session"], "sess-aaaa")
+        self.assertEqual(hit["chain"], "receipts-sess-aaaa.jsonl")
+        self.assertIsInstance(hit["n"], int)
+        self.assertIn("albatross", hit["action"])
+        self.assertEqual(report["matched"], 1)
+
+        both = self.search(q="the")
+        self.assertEqual({h["repo"] for h in both["hits"]},
+                         {"alpha", "beta"})
+
+    def test_search_is_case_insensitive(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        log_entry(log, "Write: Notes.md")
+        self.serve()
+
+        report = self.search(q="write: notes")
+
+        self.assertEqual(report["matched"], 1)
+
+    def test_hits_read_newest_first(self):
+        old = make_chain(self.root / "alpha" / "receipts", "sess-old")
+        log_entry(old, "shared word, older")
+        time.sleep(1.2)  # receipts stamps whole seconds; force an order
+        new = make_chain(self.root / "beta" / "receipts", "sess-new")
+        log_entry(new, "shared word, newer")
+        self.serve()
+
+        report = self.search(q="shared word")
+
+        self.assertEqual([h["session"] for h in report["hits"]],
+                         ["sess-new", "sess-old"])
+
+    def test_empty_query_and_no_match_are_graceful(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        for report in (self.search(), self.search(q=""),
+                       self.search(q="no such words anywhere")):
+            self.assertEqual(report["hits"], [])
+            self.assertEqual(report["matched"], 0)
+
+    def test_search_is_testimony_and_owns_no_verdicts(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        log_entry(log, "an ordinary step")
+        self.serve()
+
+        _, _, body = self.get("/api/search?q=ordinary")
+
+        report = json.loads(body)
+        self.assertIn("what was attempted", report["testimony"])
+        for verdict_word in ("VALID", "BROKEN", "ANCHORED"):
+            self.assertNotIn(verdict_word, body)
+
+    def test_front_page_carries_the_search_box(self):
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn("/api/search", page, "the box asks the endpoint")
+        self.assertIn('id="ask-search"', page)
+
+
 if __name__ == "__main__":
     unittest.main()
 
