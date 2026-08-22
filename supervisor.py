@@ -18,6 +18,7 @@ worst verify exit found.
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -70,10 +71,16 @@ def chain_identity(root, log):
 
 def verify(log):
     """The single seam to receipts (ADR-0005): one subprocess per chain,
-    verdict read from the exit code and the documented verdict lines."""
+    verdict read from the exit code and the documented verdict lines.
+
+    Both ends of the pipe are pinned to UTF-8 — PYTHONIOENCODING for the
+    child, encoding= for this side — because `text=True` alone decodes
+    with the locale codec (cp1252 on Windows), and a verdict lost to a
+    UnicodeDecodeError is a supervisor that missed its one job."""
     result = subprocess.run(
         [sys.executable, str(RECEIPTS), "verify", "--log", str(log)],
-        capture_output=True, text=True)
+        capture_output=True, encoding="utf-8", errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     lines = result.stdout.strip().splitlines()
     if lines:
         verdict = lines[-1].split(":")[0].split(" at ")[0]

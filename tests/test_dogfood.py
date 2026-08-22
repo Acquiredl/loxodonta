@@ -24,9 +24,14 @@ RECEIPTS = REPO_ROOT / "receipts.py"
 def run_dogfood(*args, root):
     env = dict(os.environ)
     env["RECEIPTS_DOGFOOD_ROOT"] = str(root)
+    # Pin both ends of the pipe to UTF-8: PYTHONIOENCODING makes the child
+    # emit it, encoding= makes this parent decode it. `text=True` alone
+    # decodes with the locale codec (cp1252 on Windows), which crashes on
+    # UTF-8 bytes whenever the invoking shell sets the child's encoding.
+    env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [sys.executable, str(DOGFOOD), *args],
-        capture_output=True, text=True, env=env,
+        capture_output=True, encoding="utf-8", env=env,
     )
 
 
@@ -200,7 +205,8 @@ class DogfoodStatusTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         head = subprocess.run(
             [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
-            capture_output=True, text=True, check=True).stdout.strip()
+            capture_output=True, encoding="utf-8", check=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
         write_pending_anchor(log, head)
 
         result = run_dogfood("status", root=self.root)
@@ -248,8 +254,9 @@ class DogfoodDefaultRootTest(unittest.TestCase):
 
         env = dict(os.environ)
         env.pop("RECEIPTS_DOGFOOD_ROOT", None)
+        env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run([sys.executable, str(script), "status"],
-                                capture_output=True, text=True, env=env)
+                                capture_output=True, encoding="utf-8", env=env)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("sess-next-door", result.stdout)
@@ -263,8 +270,9 @@ class DogfoodDefaultRootTest(unittest.TestCase):
 
         env = dict(os.environ)
         env.pop("RECEIPTS_DOGFOOD_ROOT", None)
+        env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run([sys.executable, str(script), "status"],
-                                capture_output=True, text=True, env=env)
+                                capture_output=True, encoding="utf-8", env=env)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("sess-next-door", result.stdout)

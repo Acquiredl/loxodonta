@@ -27,11 +27,14 @@ TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 
 def clean_env():
     """Subprocess env with proxy variables stripped, so urllib in the CLI
-    talks straight to the fake calendar on 127.0.0.1."""
+    talks straight to the fake calendar on 127.0.0.1 — and with the child
+    pinned to UTF-8 output, so it agrees with the encoding= below no matter
+    what the invoking shell's locale is (cp1252 on Windows)."""
     env = dict(os.environ)
     for key in list(env):
         if key.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
             del env[key]
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
@@ -40,7 +43,7 @@ def run_receipts(*args, cwd):
         [sys.executable, str(RECEIPTS), *args],
         cwd=cwd,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         env=clean_env(),
     )
 
