@@ -517,20 +517,45 @@ def ago(seconds):
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash"):
+    """The harness settings beside the witness layout, wiring a receipts
+    PostToolUse hook for the given tools — what tells the watch which
+    tool events owe a receipt."""
+    witness.mkdir(parents=True, exist_ok=True)
+    (witness.parent / "settings.json").write_text(json.dumps({
+        "hooks": {"PostToolUse": [{"matcher": matcher, "hooks": [
+            {"type": "command", "command": "python receipts.py hook"},
+        ]}]},
+    }), encoding="utf-8")
+
+
 def write_transcript(witness, project, session, event_times=(),
-                     error_times=(), chatter=0, idle=0):
-    """A synthetic harness transcript: tool-result lines (the witness
-    signal), failed tool results (excluded — the hook never fires for
-    them), and plain chatter lines (never counted)."""
+                     error_times=(), chatter=0, idle=0, tool="Bash"):
+    """A synthetic harness transcript shaped like the real one: each
+    tool event is a tool_use block (carrying the tool's name) paired by
+    id with a tool-result line (the witness signal). Failed results are
+    excluded by the watch — the hook never fires for them — and plain
+    chatter lines are never counted."""
     folder = witness / munge(project)
     folder.mkdir(parents=True, exist_ok=True)
     lines = []
-    for ts in event_times:
+
+    def event(i, ts, name, failed):
+        use_id = f"tu_{session}_{i}"
+        lines.append({"type": "assistant", "timestamp": ts, "message": {
+            "content": [{"type": "tool_use", "id": use_id, "name": name}],
+        }})
+        result = {"is_error": True} if failed else {"stdout": "ok"}
         lines.append({"type": "user", "timestamp": ts,
-                      "toolUseResult": {"stdout": "ok"}})
-    for ts in error_times:
-        lines.append({"type": "user", "timestamp": ts,
-                      "toolUseResult": {"is_error": True}})
+                      "toolUseResult": result, "message": {
+                          "content": [{"type": "tool_result",
+                                       "tool_use_id": use_id}]}})
+
+    for i, ts in enumerate(event_times):
+        event(i, ts, tool if isinstance(tool, str) else tool[i], False)
+    for i, ts in enumerate(error_times):
+        event(1000 + i, ts, tool if isinstance(tool, str) else "Bash",
+              True)
     for _ in range(chatter):
         lines.append({"type": "assistant", "timestamp": ago(10),
                       "message": "just talk"})
@@ -556,6 +581,7 @@ class CompletenessTest(unittest.TestCase):
         self.root = Path(self._tmp.name) / "repos"
         self.root.mkdir()
         self.witness = Path(self._tmp.name) / "witness"
+        install_witness_hook(self.witness)
 
     def scan(self, *extra, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -699,14 +725,52 @@ class CompletenessTest(unittest.TestCase):
 
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        nowhere = Path(self._tmp.name) / "no-such-layout" / "projects"
 
-        result = self.scan()  # self.witness was never created
+        result = run_scan(self.root, "--witness", str(nowhere))
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout)
         self.assertIn("witness absent", report["completeness"]["note"])
         self.assertEqual(self.states(result)["sess-aaaa"]["state"],
                          "UNWITNESSED")
+
+    def test_tools_the_hook_never_records_owe_no_receipts(self):
+        # The calibration finding: an all-tools witness over an
+        # Edit|Write|Bash hook manufactures deficits. Reads and browser
+        # tools were witnessed, but the recorder was never asked to
+        # record them — only matched tools count.
+        make_chain(self.root / "alpha" / "receipts", "sess-mixed",
+                   entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-mixed",
+                         event_times=[ago(300), ago(290), ago(280),
+                                      ago(270), ago(260)],
+                         tool=["Read", "Grep", "Bash", "Edit",
+                               "mcp__browser__computer"])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        watched = self.states(result)["sess-mixed"]
+        self.assertEqual(watched["tools"], 2,
+                         "only Bash and Edit owed a receipt")
+        self.assertEqual(watched["state"], "OK")
+
+    def test_no_wired_hook_means_nothing_owes_a_receipt(self):
+        # A machine without the receipts hook has sessions that owe
+        # nothing — expecting receipts there would alarm forever.
+        (self.witness.parent / "settings.json").unlink()
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_transcript(self.witness, self.root / "alpha", "sess-aaaa",
+                         event_times=[ago(300), ago(290)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertIn("no receipts hook", report["completeness"]["note"])
+        self.assertEqual(self.states(result)["sess-aaaa"]["state"],
+                         "UNWATCHED")
 
     def test_alarm_language_claims_detection_never_more(self):
         write_transcript(self.witness, self.root / "alpha", "sess-ghost",
