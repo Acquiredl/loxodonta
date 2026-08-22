@@ -52,7 +52,13 @@ DOGFOOD_ROOT = Path(
 
 
 def receipts(*args, **kwargs):
-    return subprocess.run([sys.executable, str(RECEIPTS), *args], **kwargs)
+    # The child is pinned to UTF-8 output so it always agrees with the
+    # encoding="utf-8" the text-mode call sites pass — the invoking shell's
+    # locale (cp1252 on Windows) never gets to sit between the two.
+    env = dict(kwargs.pop("env", os.environ))
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run([sys.executable, str(RECEIPTS), *args],
+                          env=env, **kwargs)
 
 
 def chains():
@@ -142,7 +148,8 @@ def cmd_status(args):
         repo, session = describe(log)
         entries = sum(1 for _ in open(log, encoding="utf-8"))
         result = receipts("verify", "--log", str(log), "--anchors",
-                          capture_output=True, text=True)
+                          capture_output=True, encoding="utf-8",
+                          errors="replace")
         lines = (result.stdout.strip() or "?").splitlines()
         # verify prints its verdict last, with anchor and warning lines
         # above it. Showing only the verdict hides exactly the half the
@@ -214,7 +221,7 @@ def cmd_drill(args):
             receipts("log", "--log", str(log), "--actor", "drill",
                      "--action", action, capture_output=True)
         head = receipts("head", "--log", str(log), capture_output=True,
-                        text=True).stdout.strip()
+                        encoding="utf-8").stdout.strip()
         pristine = log.read_text(encoding="utf-8")
 
         def verify(path, *extra):

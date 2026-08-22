@@ -29,11 +29,15 @@ def run_receipts(*args, cwd, extra_env=None):
     env = dict(os.environ)
     env.pop("CLAUDE_PROJECT_DIR", None)
     env.pop("RECEIPTS_LOCK_TIMEOUT", None)
+    # Both ends of the pipe pinned to UTF-8 (PYTHONIOENCODING for the child,
+    # encoding= for the parent) — `text=True` alone decodes with the locale
+    # codec, cp1252 on Windows, and disagrees with a UTF-8-emitting child.
+    env["PYTHONIOENCODING"] = "utf-8"
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(RECEIPTS), *args],
-        cwd=cwd, capture_output=True, text=True, env=env,
+        cwd=cwd, capture_output=True, encoding="utf-8", env=env,
     )
 
 
@@ -93,7 +97,8 @@ class ConcurrentAppendTest(unittest.TestCase):
                 [sys.executable, str(RECEIPTS), "hook",
                  "--log-dir", str(log_dir)],
                 cwd=self.workdir, input=hook_payload(command=f"cmd {i}"),
-                capture_output=True, text=True,
+                capture_output=True, encoding="utf-8",
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
 
         with ThreadPoolExecutor(max_workers=calls) as pool:
@@ -162,7 +167,8 @@ class SiblingChainTest(unittest.TestCase):
             [sys.executable, str(RECEIPTS), "hook",
              "--log-dir", str(self.log_dir)],
             cwd=self.workdir, input=hook_payload(command=command),
-            capture_output=True, text=True,
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
 
     def chain(self, suffix=""):

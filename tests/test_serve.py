@@ -11,6 +11,7 @@ the claims the page is built from are strings we can hold still here.
 import base64
 import datetime
 import json
+import os
 import re
 import subprocess
 import sys
@@ -61,9 +62,14 @@ def write_completed_anchor(log, height=850000):
     """A minimal but genuine OTS timestamp: one sha256 op, then a Bitcoin
     attestation — enough for `verify --anchors` to replay offline and
     report ANCHORED, with no network and no calendar (ANCHORING.md §4)."""
+    # Both ends of every pipe in this file pinned to UTF-8 (PYTHONIOENCODING
+    # for the child, encoding= for the parent) — `text=True` alone decodes
+    # with the locale codec, cp1252 on Windows, and disagrees with a
+    # UTF-8-emitting child.
     head = subprocess.run(
         [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
-        capture_output=True, text=True, check=True).stdout.strip()
+        capture_output=True, encoding="utf-8", check=True,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
     payload = ots_varint(height)
     proof = (b"\x08"
              + b"\x00" + TAG_BITCOIN + ots_varint(len(payload)) + payload)
@@ -97,7 +103,8 @@ class ServerFixture(unittest.TestCase):
         self.proc = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--root",
              str(self.root), "--port", "0"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
@@ -156,7 +163,8 @@ class ServeTest(ServerFixture):
         cli = subprocess.run(
             [sys.executable, str(SUPERVISOR), "scan", "--root",
              str(self.root), "--json"],
-            capture_output=True, text=True)
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         self.assertEqual(json.loads(body), json.loads(cli.stdout))
 
     def test_front_page_is_inline_html_with_no_outside_dependencies(self):

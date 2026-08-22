@@ -118,11 +118,13 @@ def verify(log):
     ANCHORED are different claims (ADR-0002) and an anchor contradicting
     the log is the gravest finding there is."""
     # Both ends of the pipe pinned to UTF-8: verdict lines land in the
-    # frontend, and a shell's codepage must never garble evidence.
+    # frontend, and a shell's codepage must never garble evidence —
+    # errors="replace" because a verdict lost to a decode error is a
+    # supervisor that missed its one job.
     result = subprocess.run(
         [sys.executable, str(RECEIPTS), "verify", "--anchors",
          "--log", str(log)],
-        capture_output=True, encoding="utf-8",
+        capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     lines = result.stdout.strip().splitlines()
     if lines:
