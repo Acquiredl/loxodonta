@@ -24,6 +24,9 @@ def run_hook(payload, cwd, *args, extra_env=None):
     # a test is exercising that resolution.
     env = dict(os.environ)
     env.pop("CLAUDE_PROJECT_DIR", None)
+    # The decode below assumes UTF-8, so tell the child to emit UTF-8 —
+    # otherwise a cp1252 console codepage on Windows breaks the agreement.
+    env["PYTHONIOENCODING"] = "utf-8"
     if extra_env:
         env.update(extra_env)
     # The harness pipes the payload as raw UTF-8 bytes; feeding the hook the
@@ -49,11 +52,15 @@ def run_hook(payload, cwd, *args, extra_env=None):
 
 
 def run_receipts(*args, cwd):
+    # Both ends of the pipe pinned to UTF-8 (PYTHONIOENCODING for the child,
+    # encoding= for the parent) — `text=True` alone decodes with the locale
+    # codec, cp1252 on Windows, and disagrees with a UTF-8-emitting child.
     return subprocess.run(
         [sys.executable, str(RECEIPTS), *args],
         cwd=cwd,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
 
 

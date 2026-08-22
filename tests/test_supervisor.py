@@ -42,7 +42,8 @@ def ots_varint(n):
 def chain_head(log):
     return subprocess.run(
         [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
-        capture_output=True, text=True, check=True).stdout.strip()
+        capture_output=True, encoding="utf-8", check=True,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
 
 
 def ots_varbytes(b):
@@ -76,10 +77,15 @@ def write_completed_anchor(log, head, height=850000):
 
 
 def run_scan(root, *extra, env=None):
+    # Pin both ends of the pipe to UTF-8 (PYTHONIOENCODING for the child,
+    # encoding= for this parent): `text=True` alone decodes with the locale
+    # codec — cp1252 on Windows — and crashes on a UTF-8-emitting child.
     return subprocess.run(
         [sys.executable, str(SUPERVISOR), "scan", "--root", str(root),
          "--json", *extra],
-        capture_output=True, text=True, env=env)
+        capture_output=True, encoding="utf-8",
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8"})
 
 
 def make_chain(log_dir, session, entries=2):
@@ -200,7 +206,8 @@ class ScanCensusTest(unittest.TestCase):
         machine = run_scan(self.root)
         human = subprocess.run(
             [sys.executable, str(SUPERVISOR), "scan", "--root", str(self.root)],
-            capture_output=True, text=True)
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
         self.assertEqual(human.returncode, 0, human.stderr)
         self.assertEqual(json.loads(human.stdout), json.loads(machine.stdout))
@@ -978,7 +985,8 @@ class DrillTest(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(SUPERVISOR), "drill", "--root",
              str(self.root), "--log", str(log), "--json"],
-            capture_output=True, text=True)
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
     def test_the_four_way_battery_fires_every_expected_alarm(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
