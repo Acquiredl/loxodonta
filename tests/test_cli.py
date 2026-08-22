@@ -8,6 +8,7 @@ there.
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -29,12 +30,16 @@ def spec_hash(entry_without_hash):
 
 
 def run_receipts(*args, cwd):
-    """Invoke the receipts CLI as an operator would."""
+    """Invoke the receipts CLI as an operator would — with both ends of the
+    pipe pinned to UTF-8 (PYTHONIOENCODING for the child, encoding= for this
+    parent). `text=True` alone decodes with the locale codec — cp1252 on
+    Windows — which crashes on the UTF-8 the golden fixture emits."""
     return subprocess.run(
         [sys.executable, str(RECEIPTS), *args],
         cwd=cwd,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
 
 
@@ -977,7 +982,8 @@ class BrokenPipeTest(ReceiptsCliTest):
             cwd=self.workdir,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         process.stdout.close()  # reader hangs up, like `| head` does
         _, stderr = process.communicate()

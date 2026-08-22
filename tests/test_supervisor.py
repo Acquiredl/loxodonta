@@ -8,6 +8,7 @@ CLI in temp directories. No mocks, no internals.
 """
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,10 +21,14 @@ RECEIPTS = REPO_ROOT / "receipts.py"
 
 
 def run_scan(root, *extra):
+    # Pin both ends of the pipe to UTF-8 (PYTHONIOENCODING for the child,
+    # encoding= for this parent): `text=True` alone decodes with the locale
+    # codec — cp1252 on Windows — and crashes on a UTF-8-emitting child.
     return subprocess.run(
         [sys.executable, str(SUPERVISOR), "scan", "--root", str(root),
          "--json", *extra],
-        capture_output=True, text=True)
+        capture_output=True, encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
 
 def make_chain(log_dir, session, entries=2):
@@ -142,7 +147,8 @@ class ScanCensusTest(unittest.TestCase):
         machine = run_scan(self.root)
         human = subprocess.run(
             [sys.executable, str(SUPERVISOR), "scan", "--root", str(self.root)],
-            capture_output=True, text=True)
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
         self.assertEqual(human.returncode, 0, human.stderr)
         self.assertEqual(json.loads(human.stdout), json.loads(machine.stdout))
