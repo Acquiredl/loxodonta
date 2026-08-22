@@ -202,6 +202,17 @@ class ServeTest(ServerFixture):
         self.assertIn('id="watch"', page)
         self.assertIn("witnessed", page)
 
+    def test_front_page_carries_the_anchor_panel(self):
+        # Block heights are the headline: the operator's half of the
+        # regeneration defense should be the easiest read on the page.
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn('id="anchors"', page)
+        self.assertIn("block", page)
+        self.assertIn("regeneration defense", page)
+
     def test_no_anti_terms_in_the_user_visible_surface(self):
         self.serve()
 

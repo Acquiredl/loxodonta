@@ -101,6 +101,13 @@ def read_entries(log):
     return entries
 
 
+def parse_when(ts):
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 # --- Verdict runner -----------------------------------------------------------
 
 def verify(log):
@@ -170,22 +177,25 @@ CHANGE_WORDS = {
 
 
 def read_baseline(path):
-    """The remembered heads, plus a note when the file could not be read.
-    An unreadable memory is reported and replaced, never repaired and
-    never trusted — this look simply remembers afresh."""
+    """The remembered heads and the keeper's attempt times, plus a note
+    when the file could not be read. An unreadable memory is reported
+    and replaced, never repaired and never trusted — this look simply
+    remembers afresh."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         chains = data["chains"]
         if not all(isinstance(known, dict) and "head" in known
                    and "n" in known for known in chains.values()):
             raise ValueError("baseline rows must remember a head and an n")
-        return chains, None
+        keeper = data.get("keeper")
+        return chains, keeper if isinstance(keeper, dict) else {}, None
     except FileNotFoundError:
-        return {}, None  # cold start: seed silently
+        return {}, {}, None  # cold start: seed silently
     except (ValueError, KeyError, TypeError, AttributeError,
             json.JSONDecodeError, OSError):
-        return {}, ("the baseline could not be read — remembering afresh "
-                    "from this look; it was trusted for nothing either way")
+        return {}, {}, ("the baseline could not be read — remembering "
+                        "afresh from this look; it was trusted for "
+                        "nothing either way")
 
 
 def diff_baseline(remembered, relpath, entries):
@@ -203,6 +213,78 @@ def diff_baseline(remembered, relpath, entries):
     if not entries:
         return "regressed"
     return "rewritten"
+
+
+# --- Anchor keeper ------------------------------------------------------------
+# Freshness assessed every tick; pending proofs completed by driving the
+# public CLI's upgrade path — the ritual the dogfood proved nobody
+# remembers, absorbed. Staleness is quiet evidence, never an exit shout:
+# an aging head is not news the operator can act on every tick, and a
+# siren that never stops sounding trains them to ignore the band.
+
+# How often the keeper may ask a calendar about the same log. The env
+# knob is the test suite's clock handle.
+UPGRADE_EVERY_SECONDS = int(
+    os.environ.get("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600))
+
+ANCHORED_LINE = re.compile(
+    r"^ANCHORED: entries 0\.\.(\d+) existed by Bitcoin block (\d+)")
+PENDING_LINE = re.compile(
+    r"^ANCHOR-PENDING: head (\S+) submitted (\S+) via (\S+)")
+
+
+def upgrade_due(last_attempt, now):
+    attempted = parse_when(last_attempt)
+    return (attempted is None
+            or (now - attempted).total_seconds() >= UPGRADE_EVERY_SECONDS)
+
+
+def keep_anchors(log, last_attempt, now):
+    """One chain's turn with the keeper: if a sidecar exists and the
+    log's turn has come around, drive `receipts anchor --upgrade` —
+    completions come from the record's own calendar, judgment stays with
+    verify. Returns (attempted, note)."""
+    if not Path(str(log) + ".anchors.jsonl").exists():
+        return False, None
+    if not upgrade_due(last_attempt, now):
+        return False, None
+    finished = subprocess.run(
+        [sys.executable, str(RECEIPTS), "anchor", "--upgrade",
+         "--log", str(log)],
+        capture_output=True, encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    note = None
+    if finished.returncode != 0:
+        note = ("upgrade attempted; a calendar did not answer — proofs "
+                "stay pending and the keeper will try again")
+    return True, note
+
+
+def assess_anchors(detail, entries):
+    """The panel's data, read from verify's own words (the documented
+    verdict lines are the seam, ADR-0005): anchored spans with their
+    block heights, pending proofs with their submission times, and the
+    chain head with whether any anchor covers it. Ages are the reader's
+    to compute — the report carries timestamps, not clocks."""
+    anchored = []
+    pending = []
+    for line in detail:
+        span = ANCHORED_LINE.match(line)
+        if span:
+            anchored.append({"upto": int(span.group(1)),
+                             "height": int(span.group(2))})
+        wait = PENDING_LINE.match(line)
+        if wait:
+            pending.append({"head": wait.group(1),
+                            "submitted": wait.group(2),
+                            "calendar": wait.group(3)})
+    head = None
+    if entries:
+        n = entries[-1].get("n")
+        head = {"n": n, "ts": entries[-1].get("ts"),
+                "anchored": isinstance(n, int)
+                and any(span["upto"] >= n for span in anchored)}
+    return {"anchored": anchored, "pending": pending, "head": head}
 
 
 # --- Completeness -------------------------------------------------------------
@@ -247,13 +329,6 @@ def munge(path):
     """A project path the way the harness names its transcript folder:
     every character that isn't a letter, digit, or dash becomes a dash."""
     return re.sub(r"[^A-Za-z0-9-]", "-", str(path))
-
-
-def parse_when(ts):
-    try:
-        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 def read_witness(transcript):
@@ -376,8 +451,9 @@ def scan_root(root, witness=WITNESS_ROOT):
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
     diffing, so an alarm belongs to the tick that caught it."""
+    now = datetime.now(timezone.utc)
     baseline_path = root / BASELINE_NAME
-    remembered, note = read_baseline(baseline_path)
+    remembered, keeper, note = read_baseline(baseline_path)
     events = []
     heads = {}
     families = {}
@@ -388,6 +464,11 @@ def scan_root(root, witness=WITNESS_ROOT):
     repos = {}
     worst = 0
     for (repo, session, _), log in census:
+        relpath = log.relative_to(root).as_posix()
+        entries = read_entries(log)
+        attempted, keeper_note = keep_anchors(log, keeper.get(relpath), now)
+        if attempted:
+            keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         verdict, exit_code, detail = verify(log)
         stood_down = exit_code != 0 and superseded(log, detail)
         chain = {
@@ -403,13 +484,14 @@ def scan_root(root, witness=WITNESS_ROOT):
             "anchored": any(line.startswith("ANCHORED") for line in detail),
             "superseded": stood_down,
             "detail": detail,
+            "anchors": assess_anchors(detail, entries),
         }
+        if keeper_note:
+            chain["anchors"]["note"] = keeper_note
         repos.setdefault(repo, {}).setdefault(session, []).append(chain)
         if not stood_down:
             worst = max(worst, exit_code)
 
-        relpath = log.relative_to(root).as_posix()
-        entries = read_entries(log)
         change = diff_baseline(remembered, relpath, entries)
         if change:
             events.append({"repo": repo, "session": session, "log": relpath,
@@ -440,6 +522,7 @@ def scan_root(root, witness=WITNESS_ROOT):
         "purpose": "the supervisor's memory between looks — "
                    "writer-reachable, trusted for nothing",
         "chains": heads,
+        "keeper": keeper,
     }, indent=2) + "\n", encoding="utf-8")
     if events:
         worst = max(worst, 5)
@@ -756,6 +839,18 @@ PAGE = """<!doctype html>
   .watch-row.quiet { opacity: 0.6; }
   .watch-row.quiet .chip { color: inherit;
                            border-color: color-mix(in srgb, currentColor 40%, transparent); }
+
+  /* The anchor panel: the block height is the operator's half of the
+     regeneration defense, so it is the biggest thing in each row. */
+  .berth { display: flex; flex-wrap: wrap; gap: 0.7rem;
+           align-items: baseline; padding: 0.5rem 0.8rem; margin: 0.4rem 0;
+           border-left: 3px solid color-mix(in srgb, currentColor 30%, transparent);
+           background: color-mix(in srgb, currentColor 5%, transparent);
+           border-radius: 0 0.5rem 0.5rem 0; }
+  .berth .height { font-size: 1.35rem; font-weight: 800; color: #1d7a3e; }
+  .berth .pending-proof { color: #8a6d00; }
+  .berth .bare { opacity: 0.75; }
+  .berth .stale { color: #b45309; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -784,6 +879,13 @@ PAGE = """<!doctype html>
     </label>
   </div>
   <div id="timeline">remembering…</div>
+</section>
+
+<section id="anchors">
+  <h2>anchors</h2>
+  <p class="testimony">the block height is your half of the regeneration
+  defense — confirm it against a Bitcoin block source you trust</p>
+  <div id="panel"></div>
 </section>
 
 <section id="alarms">
@@ -917,6 +1019,8 @@ function render(report) {
     watch.appendChild(el("p", "claim", report.completeness.note));
   }
 
+  renderAnchors(report);
+
   const band = document.getElementById("band");
   band.replaceChildren();
   for (const repo of report.repos) {
@@ -943,6 +1047,63 @@ function render(report) {
       option.value = option.textContent = repo.repo;
       ask.appendChild(option);
     }
+  }
+}
+
+// --- the anchor panel -----------------------------------------------
+
+// Ages are computed here, from the report's timestamps — the report
+// itself carries no clock.
+function since(ts) {
+  const seconds = (Date.now() - Date.parse(ts)) / 1000;
+  if (!isFinite(seconds)) return "";
+  if (seconds < 5400) return Math.max(0, Math.round(seconds / 60)) + "m";
+  if (seconds < 129600) return Math.round(seconds / 3600) + "h";
+  return Math.round(seconds / 86400) + "d";
+}
+
+const PENDING_STALE = 24 * 3600 * 1000;
+const BARE_STALE = 7 * 24 * 3600 * 1000;
+
+function renderAnchors(report) {
+  const panel = document.getElementById("panel");
+  panel.replaceChildren();
+  for (const repo of report.repos) {
+    for (const session of repo.sessions) {
+      for (const chain of session.chains) {
+        const a = chain.anchors;
+        if (!a) continue;
+        const row = el("div", "berth");
+        row.appendChild(el("span", "file",
+          repo.repo + " · " + session.session + " · " +
+          chain.log.split("/").pop()));
+        for (const span of a.anchored) {
+          row.appendChild(el("span", "height", "block " + span.height));
+          row.appendChild(el("span", "bare",
+                             "covers entries 0.." + span.upto));
+        }
+        for (const proof of a.pending) {
+          const old = Date.now() - Date.parse(proof.submitted)
+                      > PENDING_STALE;
+          row.appendChild(el("span",
+            "pending-proof" + (old ? " stale" : ""),
+            "pending " + since(proof.submitted) + " via " +
+            proof.calendar));
+        }
+        if (a.head && !a.head.anchored) {
+          const old = a.head.ts &&
+            Date.now() - Date.parse(a.head.ts) > BARE_STALE;
+          row.appendChild(el("span", "bare" + (old ? " stale" : ""),
+            "head (entry " + a.head.n + ") unanchored" +
+            (a.head.ts ? " for " + since(a.head.ts) : "")));
+        }
+        if (a.note) row.appendChild(el("p", "claim", a.note));
+        panel.appendChild(row);
+      }
+    }
+  }
+  if (!panel.children.length) {
+    panel.appendChild(el("p", "", "no chains to keep anchors for yet."));
   }
 }
 
