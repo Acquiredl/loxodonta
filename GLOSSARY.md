@@ -77,6 +77,10 @@ A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one 
 
 The walk defined in `docs/SPEC.md` §6: schema → sequence → recomputed hash → chain rule → timestamp sanity (warning only), optionally file checks, optionally head comparison (`--expect-head`). Produces a verdict, never repairs anything. Verdicts come only from mechanical facts; writer-supplied testimony (`ts`, `actor`, `action`) can at most raise warnings.
 
+### Recall
+
+The everyday reading of chains as *memory* rather than *evidence*: answering "what happened, when, in which repo" from what the chains already hold — session spans, files touched, action lines. Recall is testimony at machine scale: it renders writer-supplied lines and must say so, exactly as `report` does — the [verify](#verify) walk owns verdicts, recall owns none. The two readings share one log and serve different mornings: suspicion reads for broken seals; recall reads because the operator forgot. ADR-0002 called this operator forensics and predicted it "falls out for free"; the dogfood found it is the daily value that keeps the log watched.
+
 ### Tamper-evident
 
 The precise security claim of this tool: modifications to history are *always detectable*, never *prevented*. Deliberately weaker than "immutable" — see Anti-terms. Scope in v0.1: *surgical* tampering (edit / delete / reorder / file swap) is detectable unconditionally; *whole-chain regeneration* is detectable only against a head record (`--expect-head`) or, in Stage B, an anchor.
