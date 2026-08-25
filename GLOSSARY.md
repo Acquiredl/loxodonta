@@ -51,7 +51,7 @@ One line of the receipt log: a JSON object with exactly `n`, `ts`, `actor`, `act
 
 ### Genesis
 
-The entry with `n == 0` and `prev == null` — the only entry allowed a null `prev`, and the only entry carrying `v`, the format version. Written by `receipts init` with pinned contents (`actor: "receipts"`, `action: "genesis"`, `files: []`); only its timestamp varies. The chain's title page: who started it, when, and under which rulebook — all hash-committed, so a chain can't be relabeled to a different version without breaking.
+The entry with `n == 0` and `prev == null` — the only entry allowed a null `prev`, and the only entry carrying `v`, the format version. Written by `receipts init` with pinned contents (`actor: "receipts"`, `action: "genesis"`, `files: []`); only its timestamp varies. The chain's title page: who started it, when, and under which rulebook — all hash-committed, so a chain can't be relabeled to a different version without breaking. Derived trail designs extend the title page: their genesis payload must commit every ingredient whose change alters output (format version, engine identity, prompt hash, check-catalog version, evaluation-suite version), so "why did this assessment change" always has a recorded answer (ADR-0006, provenance corollary).
 
 ### Canonical form
 
@@ -76,6 +76,14 @@ A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one 
 ### Verify
 
 The walk defined in `docs/SPEC.md` §6: schema → sequence → recomputed hash → chain rule → timestamp sanity (warning only), optionally file checks, optionally head comparison (`--expect-head`). Produces a verdict, never repairs anything. Verdicts come only from mechanical facts; writer-supplied testimony (`ts`, `actor`, `action`) can at most raise warnings.
+
+### Testimony
+
+Any writer-supplied content the verifier cannot recompute: `ts`, `actor`, `action` in this repo's entries, and the whole recorded payload in derived trail designs. Testimony is recorded faithfully and trusted for nothing — it can at most raise warnings (ADR-0002). The opposite end is a *mechanical fact*: something [verify](#verify) recomputes itself (hashes, sequence, chain rule, head). The two are the endpoints of the [evidence grade](#evidence-grade) scale.
+
+### Evidence grade
+
+An ordered label on a claim in a derived trail design saying what *kind* of evidence backs it: `self_reported` (0) → `document_evidenced` (1) → `artifact_inspected` (2) → `independently_observed` (3). A grade qualifies a claim's status, never changes it; it measures the independence of the evidence, not the correctness of the conclusion. Loxodonta's own entries are the two-endpoint case (testimony at 0, the chain at 3) and its frozen format does not carry the field. Canonical scale and rules: ADR-0006.
 
 ### Recall
 
@@ -131,9 +139,9 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`
 - Related out-of-scope decisions: none yet.
 
 ---
 
-*Last updated: 2026-08-21*
+*Last updated: 2026-08-25*
