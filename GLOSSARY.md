@@ -79,7 +79,7 @@ The `entry_hash` of the last entry. Commits to the entire history — this is th
 
 ### File reference
 
-A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one file at log time. Paths are relative to the log's directory, forward slashes, sorted by path within the entry.
+A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one file at log time. Paths are relative to the log's directory, forward slashes, sorted by path within the entry. Derived designs recording external evidence generalize this into the [source reference](#source-reference).
 
 ### Verify
 
@@ -92,6 +92,10 @@ Any writer-supplied content the verifier cannot recompute: `ts`, `actor`, `actio
 ### Evidence grade
 
 An ordered label on a claim in a derived trail design saying what *kind* of evidence backs it: `self_reported` (0) → `document_evidenced` (1) → `artifact_inspected` (2) → `independently_observed` (3). A grade qualifies a claim's status, never changes it; it measures the independence of the evidence, not the correctness of the conclusion. Loxodonta's own entries are the two-endpoint case (testimony at 0, the chain at 3) and its frozen format does not carry the field. Canonical scale and rules: ADR-0006.
+
+### Source reference
+
+A derived design's generalization of the [file reference](#file-reference): the record, inside an entry, of an external source consumed as evidence — where it came from (URL or origin), when it was retrieved, the SHA256 of the **archived copy**, and optionally a locator pinning the exact passage a finding rests on. The honesty rule carries the entry: the origin and retrieval time are [testimony](#testimony), and the hash binds the copy in the package's evidence archive, *never* the live source — a hostile reading ("the writer hashed whatever it chose to save") is survivable only when the claim is worded that way. A source reference is what makes [evidence grade](#evidence-grade) 2 (`artifact_inspected`) *defensible* rather than asserted: a recorded fingerprint and locator of the artifact examined; a claim without one caps at grade 1. Committed in entries, per ADR-0007's one-commitment-home rule — which is also why the chain is the evidence index: walking the entries and collecting source references yields exactly the set the archive must contain, no extras. Loxodonta's own file reference is the degenerate case: a local file, path and hash, no retrieval story needed.
 
 ### Package
 
