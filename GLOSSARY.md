@@ -37,6 +37,14 @@ An operator-side reader process that continuously verifies receipt logs against 
 
 The supervisor's remembered copy of chain heads, used to detect change between looks. Writer-reachable by definition, therefore trusted for nothing: a baseline that disagrees with the log is a reason to shout, never a verdict about which side is true — verdicts still come only from `verify` and its inputs. Named after the Tripwire/AIDE convention, where the same weakness (an adversary who can reach the baseline) has the same documented answer: the trustworthy copy lives out of reach (here, the anchor).
 
+### Issuer
+
+The party who seals a [package](#package) and ships it across a trust boundary under its own name — the one taking responsibility for the deliverable. The issuer holds the signing key **out of the writer's reach** (the head-record property, applied to a second object) and applies the [issuer signature](#issuer-signature) at package close, after the manifest is written. In a solo deployment the operator and issuer are the same person wearing two hats; the roles diverge the moment issuing becomes a service, exactly as writer and operator diverged to found this project (ADR-0008).
+
+### Recipient
+
+The party across the trust boundary who receives a [package](#package) and verifies it with nothing running: checks the seals, walks the chain, and owns the one job the verifier cannot do — comparing the printed key fingerprint against a channel the package cannot rewrite. Math is the verifier's job; identity is the recipient's (ADR-0008).
+
 ---
 
 ## Core domain
@@ -95,7 +103,11 @@ The package's sidecar list: a small document, **written last**, holding the chai
 
 ### Seal
 
-An outer commitment applied to the [manifest](#manifest) hash from beyond the package. Two kinds, answering orthogonal questions: the **anchor** (ADR-0003, pointed at the manifest hash) says *when* — the only seal the issuer cannot forge later; an **issuer signature** would say *who* (deferred to its own ADR). The manifest commits its declared seal set, so a stripped seal is `SEAL-MISSING`, never a silent downgrade. An unsealed package can verify at most `SELF-CONSISTENT` — indistinguishable from a wholesale regeneration. Package verdicts name the mechanism, never the conclusion — see Anti-terms.
+An outer commitment applied to the [manifest](#manifest) hash from beyond the package. Two kinds, answering orthogonal questions: the **anchor** (ADR-0003, pointed at the manifest hash) says *when* — the only seal the issuer cannot forge later, because a signature has no clock and no one can anchor into the past; the [**issuer signature**](#issuer-signature) says *who* (ADR-0008). The manifest commits its declared seal set, so a stripped seal is `SEAL-MISSING`, never a silent downgrade. An unsealed package can verify at most `SELF-CONSISTENT` — indistinguishable from a wholesale regeneration. Package verdicts name the mechanism, never the conclusion — see Anti-terms.
+
+### Issuer signature
+
+The *who*-[seal](#seal): a detached signature over the [manifest](#manifest)'s exact shipped bytes, made once at package close by the [issuer](#issuer)'s key — held out of the writer's reach, or the adversary's forgery ships under the issuer's own fingerprint. Its claim, verbatim and caged: *this manifest, and transitively every artifact it lists, was issued by the holder of key K and has not changed since signing.* Never "original" (the issuer can re-sign; only the anchor orders time), never "correct" (garbage in, faithfully signed garbage out), never "signed by \<name\>" (the verifier prints the key fingerprint; the key↔name binding lives out-of-band, in a channel the package cannot rewrite). Distinct from the **writer signature** — the adversary signing its own history — which remains rejected (ADR-0001). Canonical rules, custody, rotation: ADR-0008.
 
 ### Recall
 
@@ -145,14 +157,14 @@ An external commitment of the chain head to a system the log owner doesn't contr
 - ~~blockchain~~ — implies consensus, multiple writers, and tokens. This is a single-writer hash chain; say *hash chain*.
 - ~~immutable~~ — overclaims. Nothing prevents mutation; mutation is detected. Say *tamper-evident* (and *anchored* once Stage B applies).
 - ~~audit log / audit trail~~ — Acu's term for its *non-chained* JSONL gate log, the system this project improves on. Using it here blurs exactly the distinction the project exists to make. Say *receipt log*.
-- ~~signature~~ — no keys exist in v0.1 (ADR-0001). If signatures ever arrive they get their own ADR and glossary entry.
+- ~~signature~~ *(unqualified)*, and ~~writer signature~~ in any form — no keys exist in v0.1, and the writer signing its own history proves nothing: the signer is the adversary (ADR-0001, unamended). The word now requires its qualifier: the [issuer signature](#issuer-signature) exists for derived packages (ADR-0008); no other signature does.
 - ~~authentic / verified / genuine~~ *(in verdict output only)* — a verifier that prints these draws the operator's conclusion for them, the same overclaim as "immutable". Verdicts name the mechanism: `SELF-CONSISTENT`, `ANCHORED`, `SIGNED` (ADR-0007). Ordinary prose is unaffected.
 
 ---
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`
 - Related out-of-scope decisions: none yet.
 
 ---
