@@ -85,6 +85,18 @@ Any writer-supplied content the verifier cannot recompute: `ts`, `actor`, `actio
 
 An ordered label on a claim in a derived trail design saying what *kind* of evidence backs it: `self_reported` (0) → `document_evidenced` (1) → `artifact_inspected` (2) → `independently_observed` (3). A grade qualifies a claim's status, never changes it; it measures the independence of the evidence, not the correctness of the conclusion. Loxodonta's own entries are the two-endpoint case (testimony at 0, the chain at 3) and its frozen format does not carry the field. Canonical scale and rules: ADR-0006.
 
+### Package
+
+The delivered whole of a derived trail design that ships more than a chain: the trail, its post-close artifacts (report), the evidence archive, the [manifest](#manifest), and the [seals](#seal) — crossing a trust boundary to a recipient who verifies it with nothing running and no issuer cooperation. Loxodonta's own deliverable is the degenerate one-artifact case: a receipt log whose "manifest" is its own chain head. Canonical rules: ADR-0007.
+
+### Manifest
+
+The package's sidecar list: a small document, **written last**, holding the chain head and the hash of every post-close artifact. The manifest's hash is the package's **single sealing surface** — every seal applies to it and to nothing else, and it vouches for the whole package transitively. It commits only what the chain cannot (post-close artifacts); everything else it carries is displayed convenience, testimony whose committed truth is reachable through the head. The chain is the evidence index — the manifest carries no second one. Because it is written last, nothing may reference it: the report may print the assessment id and chain head, never the manifest's own hash. (ADR-0007; the word means what it means on a ship: a list of cargo, not cargo.)
+
+### Seal
+
+An outer commitment applied to the [manifest](#manifest) hash from beyond the package. Two kinds, answering orthogonal questions: the **anchor** (ADR-0003, pointed at the manifest hash) says *when* — the only seal the issuer cannot forge later; an **issuer signature** would say *who* (deferred to its own ADR). The manifest commits its declared seal set, so a stripped seal is `SEAL-MISSING`, never a silent downgrade. An unsealed package can verify at most `SELF-CONSISTENT` — indistinguishable from a wholesale regeneration. Package verdicts name the mechanism, never the conclusion — see Anti-terms.
+
 ### Recall
 
 The everyday reading of chains as *memory* rather than *evidence*: answering "what happened, when, in which repo" from what the chains already hold — session spans, files touched, action lines. Recall is testimony at machine scale: it renders writer-supplied lines and must say so, exactly as `report` does — the [verify](#verify) walk owns verdicts, recall owns none. The two readings share one log and serve different mornings: suspicion reads for broken seals; recall reads because the operator forgot. ADR-0002 called this operator forensics and predicted it "falls out for free"; the dogfood found it is the daily value that keeps the log watched.
@@ -134,12 +146,13 @@ An external commitment of the chain head to a system the log owner doesn't contr
 - ~~immutable~~ — overclaims. Nothing prevents mutation; mutation is detected. Say *tamper-evident* (and *anchored* once Stage B applies).
 - ~~audit log / audit trail~~ — Acu's term for its *non-chained* JSONL gate log, the system this project improves on. Using it here blurs exactly the distinction the project exists to make. Say *receipt log*.
 - ~~signature~~ — no keys exist in v0.1 (ADR-0001). If signatures ever arrive they get their own ADR and glossary entry.
+- ~~authentic / verified / genuine~~ *(in verdict output only)* — a verifier that prints these draws the operator's conclusion for them, the same overclaim as "immutable". Verdicts name the mechanism: `SELF-CONSISTENT`, `ANCHORED`, `SIGNED` (ADR-0007). Ordinary prose is unaffected.
 
 ---
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`
 - Related out-of-scope decisions: none yet.
 
 ---
