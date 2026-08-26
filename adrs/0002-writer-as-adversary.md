@@ -37,6 +37,6 @@ This one reframing drove five v0.1 features, all decided in the same session:
 ## References
 
 - Related ADRs: `0001-hash-chain-not-signatures.md` (the mechanism; this ADR names the adversary).
-- Prior-art landscape: `docs/PRIOR-ART.md` (2026-08-09 survey; the agent-as-adversary framing is absent from the competitive niche).
+- Prior-art landscape: the 2026-08-09 operator-side survey ( the agent-as-adversary framing is absent from the competitive niche).
 - Glossary terms **added or sharpened**: *Operator*, *Writer*, *Head record*, *Completeness*, *Tamper-evident* (tier scoping), *Genesis* (pinned, versioned).
 - Discussion: design grill session, 2026-08-09 (this repo, branch `claude/project-design-grill-8c20e2`).

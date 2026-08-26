@@ -3,7 +3,7 @@
 
 Stdlib only, runs anywhere Python does (Windows PowerShell included).
 The experiment itself — the bet, the decision date, the journal — is
-DOGFOOD.md.
+DOGFOOD.md (a local, operator-side journal; gitignored).
 
   python dogfood.py                 status: verdict for every session chain
                                     found across every repo (see below)
@@ -11,7 +11,7 @@ DOGFOOD.md.
   python dogfood.py anchor          anchor every chain head to Bitcoin
   python dogfood.py upgrade         complete pending anchor proofs
   python dogfood.py drill           tamper fire drill on a scratch chain
-  python dogfood.py note "..."      append a line to the DOGFOOD.md journal
+  python dogfood.py note "..."      append a line to the local DOGFOOD.md journal
   python dogfood.py install-global  wire the hook into ~/.claude/settings.json
                                     so every Claude Code session on this
                                     machine logs to <project>/receipts/

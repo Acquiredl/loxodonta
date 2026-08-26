@@ -3,3 +3,6 @@
 .venv/
 receipts.jsonl
 *.ots
+
+# operator-side journal - never shipped
+DOGFOOD.md
