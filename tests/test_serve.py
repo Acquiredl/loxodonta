@@ -98,13 +98,14 @@ class ServerFixture(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
 
-    def serve(self):
+    def serve(self, extra_env=None):
         """Start `serve` on an ephemeral port and read the announced URL."""
         self.proc = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--root",
              str(self.root), "--port", "0"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                 **(extra_env or {})})
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
@@ -547,3 +548,19 @@ class SearchTest(ServerFixture):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class ScanBatchingTest(ServerFixture):
+    """ADR-0005: one verify per chain per tick, never per HTTP request —
+    and never two scans racing each other over the baseline file."""
+
+    def test_rapid_status_requests_answer_from_one_scan(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        # a generous TTL so this test's two looks land inside one tick
+        self.serve(extra_env={"SUPERVISOR_SCAN_TTL_SECONDS": "300"})
+        _, _, first = self.get("/api/status")
+        # a chain born between rapid looks is invisible until the next
+        # tick: the second answer comes from the same scan, not a new one
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        _, _, second = self.get("/api/status")
+        self.assertEqual(first, second)
