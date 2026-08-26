@@ -131,6 +131,11 @@ def verify(log):
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     lines = result.stdout.strip().splitlines()
     if lines:
+        # Last line is the verdict — true for every combination this
+        # command can produce. Tripwire: if the tick ever gains --files
+        # (.out-of-scope/002's reopening), FILES-DIVERGED prints before
+        # the anchor lines and this parse breaks; fix the parse and the
+        # print ordering in the same PR that adds the flag.
         verdict = lines[-1].split(":")[0].split(" at ")[0]
     else:
         # verify refused without a verdict line (an empty or unopenable
@@ -1167,7 +1172,6 @@ PAGE = """<!doctype html>
   .tier-broken { border-color: #b3261e; background: #b3261e14; }
   .tier-broken .chip { color: #b3261e; border-color: #b3261e; }
   .tier-refused .chip { color: #8a6d00; border-color: #8a6d00; }
-  .tier-diverged .chip { color: #8a6d00; border-color: #8a6d0055; }
   .tier-anchored .chip { background: #1d7a3e; color: #fff; }
   .tier-valid .chip { color: #1d7a3e; border-color: #1d7a3e; }
   .tier-superseded { opacity: 0.55; }
@@ -1316,7 +1320,9 @@ function tier(chain) {
   if (chain.superseded) return "superseded";
   if (chain.exit === 3) return "regenerated";
   if (chain.verdict === "BROKEN") return "broken";
-  if (chain.verdict === "FILES-DIVERGED") return "diverged";
+  // No diverged tier: the tick never passes --files
+  // (.out-of-scope/002), so the files-diverged verdict cannot reach
+  // this page — anything unexpected falls to "refused", failing loud.
   if (chain.verdict === "VALID") {
     return chain.anchored ? "anchored" : "valid";
   }
@@ -1330,7 +1336,6 @@ const CLAIM = {
                "contradicts this chain",
   broken: "chain integrity failed — history was altered after the fact",
   refused: "no verdict — a chain nobody can judge still demands attention",
-  diverged: "chain intact, but files differ from their logged fingerprints",
   valid: "intact against itself — tamper-evident, not yet anchored",
   anchored: "intact and anchored — this history existed by the named " +
             "Bitcoin block",
@@ -1340,7 +1345,7 @@ const CLAIM = {
 
 const CHIP = {
   regenerated: c => c.verdict, broken: () => "BROKEN",
-  refused: c => c.verdict, diverged: () => "FILES-DIVERGED",
+  refused: c => c.verdict,
   valid: () => "VALID", anchored: () => "ANCHORED",
   superseded: () => "BROKEN · superseded",
 };
