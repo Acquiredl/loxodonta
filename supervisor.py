@@ -25,7 +25,8 @@ inline HTML page — no framework, no build step. The page opens on
 sessions, filterable by repo, date range, and file path, labeled as
 testimony because it renders what the writer said happened. Around it
 sits the alarm layer — the status band: every chain on the machine, its
-verdict drawn by tier, answered fresh from a scan on every request.
+verdict drawn by tier, answered from the newest scan no older than the
+tick (one verify per chain per tick, never per request — ADR-0005).
 Nothing is ever offered off-machine.
 """
 
@@ -36,6 +37,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -249,8 +252,13 @@ def parse_cadence(text):
 
 def upgrade_due(last_attempt, now):
     attempted = parse_when(last_attempt)
-    return (attempted is None
-            or (now - attempted).total_seconds() >= UPGRADE_EVERY_SECONDS)
+    # A memory from the future is nonsense and reads as no memory: the
+    # throttle lives in a writer-reachable file, and a nonsense value
+    # must never stand the keeper down — it would do so silently and
+    # forever, which is exactly what an adversary would want from it.
+    if attempted is None or attempted > now:
+        return True
+    return (now - attempted).total_seconds() >= UPGRADE_EVERY_SECONDS
 
 
 def sidecar_heads(sidecar):
@@ -545,8 +553,16 @@ def watch_completeness(root, witness, families):
         if not matchers:
             add(repo, session, "UNWATCHED", 0, family["receipts"])
             continue
-        state, tools = watch_session(transcript, family["receipts"],
-                                     family["last"], now, matchers)
+        try:
+            state, tools = watch_session(transcript, family["receipts"],
+                                         family["last"], now, matchers)
+        except OSError:
+            # A transcript that cannot be read (vanished mid-scan, or a
+            # path that is not a readable file) costs this one session
+            # its watch, never the whole scan. UNWITNESSED says it
+            # honestly: completeness cannot be watched, nothing assumed.
+            add(repo, session, "UNWITNESSED", 0, family["receipts"])
+            continue
         add(repo, session, state, tools, family["receipts"])
 
     # Chainless sessions: only transcript folders under this root are
@@ -556,7 +572,10 @@ def watch_completeness(root, witness, families):
         folder = transcript.parent.name
         if not matchers or not folder.startswith(ours):
             continue
-        state, tools = watch_session(transcript, 0, None, now, matchers)
+        try:
+            state, tools = watch_session(transcript, 0, None, now, matchers)
+        except OSError:
+            continue  # unreadable and chainless: nothing to say about it
         add(folder[len(ours):].strip("-") or root.name, stem, state,
             tools, 0)
 
@@ -597,7 +616,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
             # Stranded in a worktree: still this repo's history, but pruning
             # the worktree deletes it — worth saying, not worth hiding.
             "worktree": ".claude" in log.relative_to(root).parts,
-            "entries": sum(1 for _ in open(log, encoding="utf-8")),
+            # Parsed entries, not raw lines: a torn line is damage, not an
+            # entry (GLOSSARY), and verify names the damage.
+            "entries": len(entries),
             "verdict": verdict,
             "exit": exit_code,
             # VALID says the chain agrees with itself; ANCHORED says it
@@ -939,9 +960,35 @@ def cmd_drill(args):
 
 
 # --- Serve --------------------------------------------------------------------
-# The face. Serialization only, zero decisions (ADR-0005): every request
-# answers from a fresh scan, and the page below renders what the scan
-# said — verdicts still come from `receipts verify`, nowhere else.
+# The face. Serialization only, zero decisions (ADR-0005): requests are
+# answered from the newest scan no older than the tick, and the page
+# below renders what the scan said — verdicts still come from
+# `receipts verify`, nowhere else.
+
+# How long one scan's answer stays the answer. The batching clause of
+# ADR-0005 — one verify per chain per tick, never per HTTP request —
+# and the reason two requests must never race: a scan diffs the
+# baseline and then rewrites it, so concurrent scans could swallow a
+# tripwire event between them. The env knob is the test suite's handle.
+SCAN_TTL_SECONDS = float(os.environ.get("SUPERVISOR_SCAN_TTL_SECONDS", 3))
+
+
+class Watchtower(ThreadingHTTPServer):
+    """The threading server, with its one scan serialized: requests
+    share the current tick's report instead of each spawning their own
+    census of verify subprocesses."""
+
+    def fresh_status(self):
+        with self.scan_lock:
+            if (self.scan_body is None
+                    or time.monotonic() - self.scan_at >= SCAN_TTL_SECONDS):
+                report = scan_root(self.root, witness=self.witness,
+                                   anchor_every=self.anchor_every,
+                                   calendars=self.calendars)
+                self.scan_body = json.dumps(report).encode("utf-8")
+                self.scan_at = time.monotonic()
+            return self.scan_body
+
 
 class Face(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -950,12 +997,7 @@ class Face(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         if url.path == "/api/status":
-            report = scan_root(self.server.root,
-                               witness=self.server.witness,
-                               anchor_every=self.server.anchor_every,
-                               calendars=self.server.calendars)
-            self.reply(json.dumps(report).encode("utf-8"),
-                       "application/json")
+            self.reply(self.server.fresh_status(), "application/json")
         elif url.path == "/api/recall":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
@@ -1017,11 +1059,14 @@ def cmd_serve(args):
     root = Path(args.root).resolve()
     # 127.0.0.1 is the whole posture: nothing about this machine's
     # activity is ever offered to another one.
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Face)
+    server = Watchtower(("127.0.0.1", args.port), Face)
     server.root = root
     server.witness = Path(args.witness)
     server.anchor_every = args.anchor_every
     server.calendars = args.calendar or ()
+    server.scan_lock = threading.Lock()
+    server.scan_body = None
+    server.scan_at = 0.0
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
