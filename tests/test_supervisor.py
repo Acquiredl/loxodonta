@@ -1118,3 +1118,62 @@ class DrillTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WalkFindingsTest(unittest.TestCase):
+    """Findings from the 2026-08-25 supervisor walk (issue #25 prep)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+
+    def test_scan_counts_entries_not_raw_lines(self):
+        # GLOSSARY: an entry is a parsed record; a torn line is damage,
+        # not an entry — the count must not launder damage into entries.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-torn",
+                         entries=2)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write('{"n": 3, "torn')
+        finished = run_scan(self.root)
+        report = json.loads(finished.stdout)
+        chain = chains_by_session(report)[("alpha", "sess-torn")][0]
+        self.assertEqual(chain["entries"], 3)   # genesis + 2, damage aside
+        self.assertEqual(chain["verdict"], "BROKEN")
+
+    def test_scan_survives_a_directory_shaped_transcript(self):
+        # A transcript path that cannot be read (here: a directory whose
+        # name matches the layout) must cost one session's watch, never
+        # the whole scan.
+        make_chain(self.root / "alpha" / "receipts", "sess-dirx")
+        witness = Path(self._tmp.name) / "witness"
+        install_witness_hook(witness)
+        (witness / "anyproj").mkdir(parents=True)
+        (witness / "anyproj" / "sess-dirx.jsonl").mkdir()
+        finished = run_scan(self.root, "--witness", str(witness))
+        self.assertNotIn("Traceback", finished.stderr)
+        report = json.loads(finished.stdout)
+        states = {s["session"]: s["state"]
+                  for s in report["completeness"]["sessions"]}
+        self.assertEqual(states["sess-dirx"], "UNWITNESSED")
+
+    def test_keeper_treats_a_memory_from_the_future_as_no_memory(self):
+        # The keeper's throttle memory is writer-reachable. A timestamp
+        # from the future must read as "no memory" — otherwise one edit
+        # stands the keeper down forever, silently.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-futr")
+        write_pending_anchor(log, chain_head(log), "2026-08-22T09:00:00Z")
+        relpath = log.relative_to(self.root).as_posix()
+        (self.root / ".supervisor-baseline.json").write_text(json.dumps({
+            "chains": {},
+            "keeper": {relpath: "2099-01-01T00:00:00Z"}}), encoding="utf-8")
+        finished = run_scan(self.root)
+        report = json.loads(finished.stdout)
+        chain = chains_by_session(report)[("alpha", "sess-futr")][0]
+        # the upgrade was attempted (and failed fast, offline): the note
+        # is the observable
+        self.assertIn("note", chain["anchors"])
+        baseline = json.loads(
+            (self.root / ".supervisor-baseline.json").read_text("utf-8"))
+        self.assertLess(baseline["keeper"][relpath], "2099")
