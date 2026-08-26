@@ -192,6 +192,10 @@ class ServeTest(ServerFixture):
         self.assertIn("not the recorded history", page)
         self.assertIn("superseded", page)
         self.assertIn("verify", page, "verdicts come from receipts verify")
+        # The band renders only what the scan can say: the tick never
+        # passes --files (.out-of-scope/002), so a FILES-DIVERGED tier
+        # would be dead display code wearing a claim nothing can earn.
+        self.assertNotIn("FILES-DIVERGED", page)
 
     def test_front_page_gives_the_tripwire_its_own_voice(self):
         # A change event is a reason to investigate, never a verdict —
