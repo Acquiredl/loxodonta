@@ -125,6 +125,10 @@ The budget-capped rendering of the current repo's recent entries, injected at se
 
 The short prefix of an entry's [entry hash](#entry-hash) (displayed at 8 hex chars) used to name that entry everywhere in the recall surface — digest rows, search results, `show`, `timeline`. Globally unique across all chains on the machine by construction, with git's prefix rules: any unambiguous prefix is accepted; an ambiguous one errors listing the candidates. The address is the fingerprint: `show` recomputes the fetched entry's canonical hash and confirms it matches, so recall's pointers are self-verifying. Chosen over positional `chain:n` (two-part, session-UUID noise) and over timestamps (writer-supplied [testimony](#testimony) — an identifier must be a mechanical fact).
 
+### Unlisted
+
+A repo-level visibility declaration for cross-repo [recall](#recall): a marker file beside the chains (`receipts/.unlisted`) meaning *this repo's entries never appear in recall rendered outside this repo*. Inside its own repo, recall works normally; the marker only governs `--all` surfaces (search, timeline). The default is listed — memory exists to be found, and the operator opts specific repos out. The [digest](#digest) needs no such control: it is local-only by construction, so injection cannot leak across repos. Note the honesty scope: unlisted is an output-rendering courtesy for the operator's own hygiene (e.g. keeping a private repo's name out of transcripts that feed public work), not a security boundary — the chains remain plain files any local process can read.
+
 ### Tamper-evident
 
 The precise security claim of this tool: modifications to history are *always detectable*, never *prevented*. Deliberately weaker than "immutable" — see Anti-terms. Scope in v0.1: *surgical* tampering (edit / delete / reorder / file swap) is detectable unconditionally; *whole-chain regeneration* is detectable only against a head record (`--expect-head`) or, in Stage B, an anchor.
