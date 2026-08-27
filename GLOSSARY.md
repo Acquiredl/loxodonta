@@ -31,7 +31,7 @@ An operator-held copy of the chain head, stored **outside the writer's reach** �
 
 ### Supervisor
 
-An operator-side reader process that continuously verifies receipt logs against its [baseline](#baseline) and shouts on change — **a tripwire with a memory**. Its claim is detection latency only: it shortens the window between tampering and discovery and raises the cost of tampering; it is never a wall. Everything it stores is writer-reachable, so nothing it holds is a [head record](#head-record); anchors remain the only hard boundary (ADR-0002 stands unamended). It may drive anchoring — keeping heads anchored and proofs upgraded — and that is how the head-record ritual is honestly automated: the out-of-reach property comes from the anchor, never from the supervisor. The tripwire watches the *log*, not the machine: this is a flight-recorder accessory, not an intrusion-detection system.
+An operator-side reader process that continuously verifies receipt logs against its [baseline](#baseline) and shouts on change — **a tripwire with a memory**. Its claim is detection latency only: it shortens the window between tampering and discovery and raises the cost of tampering; it is never a wall. Everything it stores is writer-reachable, so nothing it holds is a [head record](#head-record); anchors remain the only hard boundary (ADR-0002 stands unamended). It may drive anchoring — keeping heads anchored and proofs upgraded — and that is how the head-record ritual is honestly automated: the out-of-reach property comes from the anchor, never from the supervisor. The tripwire watches the *log*, not the machine: this is a flight-recorder accessory, not an intrusion-detection system. The supervisor is the repo's *reader* tool, serving two mornings from one file: suspicion (`scan`, the alarm band) and memory ([recall](#recall) — the front page, and the agent-facing digest/search/show surface of ADR-0009).
 
 ### Baseline
 
@@ -168,9 +168,9 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`
 - Related out-of-scope decisions: none yet.
 
 ---
 
-*Last updated: 2026-08-25*
+*Last updated: 2026-08-26*
