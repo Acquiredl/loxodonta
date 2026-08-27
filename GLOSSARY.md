@@ -117,6 +117,14 @@ The *who*-[seal](#seal): a detached signature over the [manifest](#manifest)'s e
 
 The everyday reading of chains as *memory* rather than *evidence*: answering "what happened, when, in which repo" from what the chains already hold — session spans, files touched, action lines. Recall is testimony at machine scale: it renders writer-supplied lines and must say so, exactly as `report` does — the [verify](#verify) walk owns verdicts, recall owns none. The two readings share one log and serve different mornings: suspicion reads for broken seals; recall reads because the operator forgot. ADR-0002 called this operator forensics and predicted it "falls out for free"; the dogfood found it is the daily value that keeps the log watched.
 
+### Digest
+
+The budget-capped rendering of the current repo's recent entries, injected at session start by the SessionStart hook (Stage E, ADR-0009). Count-limited (default ~30 rows), grouped by session, each recent session's final entry tagged `last recorded action` — a fact, never an inference about how the session ended. The digest is [recall](#recall), so it carries recall's honesty labels: it cites the supervisor's last scan as testimony and owns no verdicts. Its rows are pointers, not content — each carries an [entry address](#entry-address) for pulling the full entry on demand. Local by design: other repos' memory is reached through search, never injected ("all memory" means all *reachable*, not all *injected* — a flat machine-wide injection would poison the context and evict the local signal).
+
+### Entry address
+
+The short prefix of an entry's [entry hash](#entry-hash) (displayed at 8 hex chars) used to name that entry everywhere in the recall surface — digest rows, search results, `show`, `timeline`. Globally unique across all chains on the machine by construction, with git's prefix rules: any unambiguous prefix is accepted; an ambiguous one errors listing the candidates. The address is the fingerprint: `show` recomputes the fetched entry's canonical hash and confirms it matches, so recall's pointers are self-verifying. Chosen over positional `chain:n` (two-part, session-UUID noise) and over timestamps (writer-supplied [testimony](#testimony) — an identifier must be a mechanical fact).
+
 ### Tamper-evident
 
 The precise security claim of this tool: modifications to history are *always detectable*, never *prevented*. Deliberately weaker than "immutable" — see Anti-terms. Scope in v0.1: *surgical* tampering (edit / delete / reorder / file swap) is detectable unconditionally; *whole-chain regeneration* is detectable only against a head record (`--expect-head`) or, in Stage B, an anchor.
