@@ -6,7 +6,7 @@
 
 ## Context
 
-Stage E gives agents a recall surface: a budget-capped digest of recent history injected at session start, plus `show` / `search` / `timeline` commands for pulling detail on demand. The design was provoked by a code study of the category leader (claude-mem, ~92k stars), whose architecture validates the injection loop — memory that arrives without being asked for is the feature that makes an episodic-memory tool sticky — but implements it with a resident daemon, an observer LLM, and external storage. This repo's version is deterministic rendering over chains that are already structured, so none of that machinery is needed. The open question was where the code lives.
+Stage E gives agents a recall surface: a budget-capped digest of recent history injected at session start, plus `show` / `search` / `timeline` commands for pulling detail on demand. The design was provoked by a code study of the category-leading session-memory plugin (~92k stars), whose architecture validates the injection loop — memory that arrives without being asked for is the feature that makes an episodic-memory tool sticky — but implements it with a resident daemon, an observer LLM, and external storage. This repo's version is deterministic rendering over chains that are already structured, so none of that machinery is needed. The open question was where the code lives.
 
 Three homes were possible: grow `receipts.py` (git's shape — one tool owns read and write), a third sibling `recall.py` (journald's shape — writer and reader as separate binaries), or grow `supervisor.py`. Two facts settled it:
 
@@ -47,5 +47,5 @@ The supervisor's role statement widens accordingly: it is the *reader* tool — 
 
 - Related ADRs: `0005-supervisor-as-sibling-tool.md` (extended: the supervisor's read-side role widens to include agent-facing recall; its revisit trigger — "a second sibling tool appears" — fired here and resolved to *no third file*); `0002-writer-as-adversary.md` (recall renders testimony and owns no verdicts); `0004-serialize-hook-appends.md` (the SessionStart hook is read-only and needs no lock).
 - Glossary terms: *Recall* (unchanged, load-bearing here); *Supervisor* (role statement widened by this ADR).
-- Prior art: claude-mem (injection loop and progressive disclosure validated; daemon/observer-LLM/external-storage shape rejected — see the Stage E grill), journald/journalctl (rejected shape), Go `net/http/pprof` (carried over from ADR-0005 for the inline front end).
+- Prior art: the category-leading session-memory plugin (injection loop and progressive disclosure validated; daemon/observer-LLM/external-storage shape rejected), journald/journalctl (rejected shape), Go `net/http/pprof` (carried over from ADR-0005 for the inline front end).
 - Discussion: Stage E recall-surface grill, 2026-08-26.
