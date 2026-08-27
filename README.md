@@ -34,6 +34,18 @@ The chain isn't only for humans checking up on agents. It feeds the agents thems
 
 I tested this instead of assuming it. Fresh agents had to orient in a repo from either the chain, the git log, or both, and the chain was the only source that caught the work happening off main: a local branch that was never pushed, operations that produce no commit at all, the exact action that was in flight when the last session ended. Git log held its own on committed work, so the honest summary is that the chain doesn't replace git or reading the code. It answers "what was going on here recently, which files were hot, and what was left mid-flight" before any code gets read, and it's the only record that survives when a session crashes or the work never got committed.
 
+That reading now ships as a surface of its own. A `SessionStart` hook injects a **digest** at the top of every session: the repo's recent receipts as one-line rows, each session's final entry tagged as the last recorded action, capped at a fixed row budget so a long history can't flood the context. Every row carries an **entry address** — a short prefix of the entry's own hash — and three commands climb from there:
+
+```
+python supervisor.py digest                   # what the hook injects, by hand
+python supervisor.py show 413d5fdf            # one full entry by address
+python supervisor.py search "torn tail"       # the whole repo's chains, not just the window
+python supervisor.py search "lock" --all      # every repo under your root
+python supervisor.py timeline 413d5fdf        # what happened around that entry
+```
+
+Because the address is a hash prefix, `show` re-hashes what it fetched and confirms it matches — the pointers into your memory are self-verifying. And because recall is reading, not judging, none of this runs `verify` or prints a verdict: the digest cites the supervisor's last scan and labels it testimony, and the real verdict stays one command away. A repo can opt out of cross-repo results by dropping a `receipts/.unlisted` marker beside its chains — its memory then renders only inside that repo.
+
 ## quickstart
 
 One file, stdlib only, Python 3.9+ (`alias receipts='python3 /path/to/receipts.py'`):
@@ -108,7 +120,7 @@ A few places this has already earned its keep for me, beyond the daily timeline:
 
 ## planned
 
-Adapters for other agent frameworks, so recording isn't tied to my stack. A query surface so agents can ask the chains questions directly instead of shelling out. New work happens on the `dev` branch; `main` stays stable and everything on it holds the claims above.
+Adapters for other agent frameworks, so recording isn't tied to my stack. A richer query surface if shelling out ever proves insufficient — filters and aggregation are deliberately not built until the plain commands above fall short. Navigation for the recall page in `supervisor serve`, so browsing memory doesn't require the CLI. New work happens on the `dev` branch; `main` stays stable and everything on it holds the claims above.
 
 ## license
 
