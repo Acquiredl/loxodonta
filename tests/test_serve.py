@@ -130,6 +130,71 @@ class ServerFixture(unittest.TestCase):
         return json.loads(body)
 
 
+class StoreServeTest(ServerFixture):
+    """serve over the central store (ADR-0011/0013): no --root, the
+    drawers are the universe, repos label themselves through their
+    project records."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.root / "storehome"
+
+    def serve_store(self):
+        witness = self.root / "no-witness"
+        witness.mkdir(exist_ok=True)
+        self.proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
+             "--witness", str(witness)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                 "LOXODONTA_HOME": str(self.home)})
+        self.addCleanup(self._stop)
+        line = self.proc.stdout.readline()
+        match = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if match is None:
+            self.proc.kill()
+            _, err = self.proc.communicate()
+            self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        self.url = match.group()
+
+    def drawer(self, slug, project_path):
+        d = self.home / "receipts" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "project.json").write_text(
+            json.dumps({"path": str(project_path)}), encoding="utf-8")
+        return d
+
+    def test_status_and_recall_read_the_drawers(self):
+        alpha = self.drawer("alpha-11111111", r"C:\work\alpha")
+        make_chain(alpha, "sess-aaaa", entries=3)
+        self.serve_store()
+
+        _, _, body = self.get("/api/status")
+        report = json.loads(body)
+        self.assertEqual([r["repo"] for r in report["repos"]], ["alpha"])
+
+        timeline = self.recall()
+        self.assertEqual([s["repo"] for s in timeline["sessions"]],
+                         ["alpha"])
+        self.assertEqual(timeline["sessions"][0]["session"], "sess-aaaa")
+
+    def test_search_and_walker_reach_drawer_chains(self):
+        alpha = self.drawer("alpha-11111111", r"C:\work\alpha")
+        log = make_chain(alpha, "sess-aaaa")
+        log_entry(log, "the drawer needle")
+        self.serve_store()
+
+        _, _, body = self.get("/api/search?q=drawer+needle")
+        report = json.loads(body)
+        self.assertEqual(report["matched"], 1)
+        self.assertEqual(report["hits"][0]["repo"], "alpha")
+
+        _, _, body = self.get(
+            "/api/chain?log=" + urllib.parse.quote(log.as_posix()))
+        walked = json.loads(body)
+        self.assertEqual(walked["lines"][0]["entry"]["action"], "genesis")
+
+
 class ServeTest(ServerFixture):
     def test_serve_binds_localhost_only(self):
         # The announcement is the bind: an ephemeral port on 127.0.0.1,

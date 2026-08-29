@@ -847,13 +847,25 @@ def mentions(entries, needle):
     return False
 
 
-def recall_root(root, repo=None, since=None, until=None, path=None):
+def universe(root, store):
+    """(repo, session, seq, log) for every chain in the serving
+    universe: the store's drawers, or a legacy folder of repos under an
+    explicit --root (ADR-0011/0013)."""
+    if store:
+        found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
+                        if not p.name.endswith(".anchors.jsonl"))
+                 if root.is_dir() else [])
+        return [(*store_identity(log), log) for log in found]
+    return [(*chain_identity(root, log), log) for log in find_chains(root)]
+
+
+def recall_root(root, repo=None, since=None, until=None, path=None,
+                store=False):
     """The timeline: one story per session, sibling chains folded in
     (ADR-0004 — one session, one story), newest first. Dates compare as
     ISO prefixes; a session is in range when its span overlaps."""
     stories = {}
-    for log in find_chains(root):
-        repo_name, session, _ = chain_identity(root, log)
+    for repo_name, session, _, log in universe(root, store):
         if repo and repo_name != repo:
             continue
         entries = read_entries(log)
@@ -941,7 +953,7 @@ def walk_chain(root, asked):
 SEARCH_CAP = 500  # hits returned; `matched` still counts every one
 
 
-def search_root(root, query):
+def search_root(root, query, store=False):
     """Free-text search over action lines, machine-wide. Finds what was
     *written* — the writer's word, testimony like all of recall — and
     hands back the context the timeline links on. Newest first; an empty
@@ -949,8 +961,7 @@ def search_root(root, query):
     needle = (query or "").lower()
     hits = []
     if needle:
-        for log in find_chains(root):
-            repo_name, session, _ = chain_identity(root, log)
+        for repo_name, session, _, log in universe(root, store):
             for entry in read_entries(log):
                 action = str(entry.get("action", ""))
                 if needle in action.lower():
@@ -1553,7 +1564,8 @@ class Watchtower(ThreadingHTTPServer):
                     or time.monotonic() - self.scan_at >= SCAN_TTL_SECONDS):
                 report = scan_root(self.root, witness=self.witness,
                                    anchor_every=self.anchor_every,
-                                   calendars=self.calendars)
+                                   calendars=self.calendars,
+                                   store=self.store)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
             return self.scan_body
@@ -1574,7 +1586,8 @@ class Face(BaseHTTPRequestHandler):
                                  repo=asked.get("repo") or None,
                                  since=asked.get("from") or None,
                                  until=asked.get("to") or None,
-                                 path=asked.get("path") or None)
+                                 path=asked.get("path") or None,
+                                 store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/api/chain":
@@ -1589,7 +1602,8 @@ class Face(BaseHTTPRequestHandler):
         elif url.path == "/api/search":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
-            report = search_root(self.server.root, asked.get("q"))
+            report = search_root(self.server.root, asked.get("q"),
+                                 store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/checklist":
@@ -1625,11 +1639,13 @@ class Face(BaseHTTPRequestHandler):
 
 
 def cmd_serve(args):
-    root = Path(args.root).resolve()
+    store = args.root is None
+    root = store_receipts() if store else Path(args.root).resolve()
     # 127.0.0.1 is the whole posture: nothing about this machine's
     # activity is ever offered to another one.
     server = Watchtower(("127.0.0.1", args.port), Face)
     server.root = root
+    server.store = store
     server.witness = Path(args.witness)
     server.anchor_every = args.anchor_every
     server.calendars = args.calendar or ()
@@ -2424,10 +2440,10 @@ def main(argv):
     serve = sub.add_parser(
         "serve", parents=[watching],
         help="the face: status band on a localhost-only server")
-    serve.add_argument("--root", required=True,
-                       help="the folder your repos live in (store-wide "
-                            "serving arrives with the dashboard arc, "
-                            "issue #48)")
+    serve.add_argument("--root", default=None,
+                       help="legacy/explicit mode: serve this folder of "
+                            "repos instead of the store (default: the "
+                            "store, ADR-0011)")
     serve.add_argument("--port", type=int, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
