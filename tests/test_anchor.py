@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RECEIPTS = REPO_ROOT / "receipts.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
@@ -40,7 +40,7 @@ def clean_env():
 
 def run_receipts(*args, cwd):
     return subprocess.run(
-        [sys.executable, str(RECEIPTS), *args],
+        [sys.executable, str(LOXODONTA), *args],
         cwd=cwd,
         capture_output=True,
         encoding="utf-8",

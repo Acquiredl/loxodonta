@@ -21,8 +21,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
-RECEIPTS = REPO_ROOT / "receipts.py"
-DOGFOOD = REPO_ROOT / "dogfood.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
 def run_py(script, *args, env_extra=None, cwd=None):
@@ -171,8 +170,8 @@ class DigestTest(RecallBase):
                                    "cdcd8888-8888-8888-8888-888888888888"
                                    ".jsonl")
         log.parent.mkdir(parents=True)
-        run_py(RECEIPTS, "init", "--log", str(log))
-        run_py(RECEIPTS, "log", "--log", str(log), "--actor", "tester",
+        run_py(LOXODONTA, "init", "--log", str(log))
+        run_py(LOXODONTA, "log", "--log", str(log), "--actor", "tester",
                "--action", "cli-built entry")
         out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
         self.assertIn("cli-built entry", out)
@@ -295,7 +294,7 @@ class ShowTest(RecallBase):
         self.assertNotEqual(result.returncode, 0)
         out = result.stdout + result.stderr
         self.assertIn("does not verify", out)
-        self.assertIn("receipts verify", out)
+        self.assertIn("loxodonta verify", out)
 
 
 class SearchTest(RecallBase):
@@ -385,10 +384,10 @@ class ScanSummaryTest(RecallBase):
 
 
 class InstallerTest(RecallBase):
-    def run_dogfood(self, *args):
+    def run_installer(self, *args):
         home = self.root / "home"
         home.mkdir(exist_ok=True)
-        return run_py(DOGFOOD, *args, env_extra={
+        return run_py(LOXODONTA, *args, env_extra={
             "HOME": str(home), "USERPROFILE": str(home)}), home
 
     def settings(self, home):
@@ -396,12 +395,12 @@ class InstallerTest(RecallBase):
             encoding="utf-8"))
 
     def test_install_wires_recording_and_digest_hooks(self):
-        result, home = self.run_dogfood("install-global")
+        result, home = self.run_installer("install-hook")
         self.assertEqual(result.returncode, 0, result.stderr)
         settings = self.settings(home)
         post = json.dumps(settings["hooks"]["PostToolUse"])
         start = json.dumps(settings["hooks"]["SessionStart"])
-        self.assertIn("receipts.py", post)
+        self.assertIn("loxodonta.py", post)
         # Every shell the harness offers is matched — omitting one
         # (PowerShell, on Windows desktop) silently loses sessions.
         self.assertIn("PowerShell", post)
@@ -411,26 +410,41 @@ class InstallerTest(RecallBase):
                       json.dumps(settings["hooks"]["SessionStart"]))
 
     def test_install_is_idempotent(self):
-        _, home = self.run_dogfood("install-global")
-        again, _ = self.run_dogfood("install-global")
+        _, home = self.run_installer("install-hook")
+        again, _ = self.run_installer("install-hook")
         self.assertEqual(again.returncode, 0)
         settings = self.settings(home)
         self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
         self.assertEqual(len(settings["hooks"]["SessionStart"]), 1)
 
+    def test_install_respects_a_pre_rename_recorder_hook(self):
+        # An install from the receipts.py era still owes receipts
+        # (ADR-0010): it is recognised, not doubled beside itself.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        for block in settings["hooks"]["PostToolUse"]:
+            for hook in block["hooks"]:
+                hook["command"] = hook["command"].replace(
+                    "loxodonta.py", "receipts.py")
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        again, _ = self.run_installer("install-hook")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(len(self.settings(home)["hooks"]["PostToolUse"]), 1)
+
     def test_uninstall_removes_both_and_leaves_others(self):
-        _, home = self.run_dogfood("install-global")
+        _, home = self.run_installer("install-hook")
         path = home / ".claude" / "settings.json"
         settings = self.settings(home)
         settings["hooks"]["PostToolUse"].append(
             {"matcher": "*", "hooks": [{"type": "command",
                                         "command": "somebody-else"}]})
         path.write_text(json.dumps(settings), encoding="utf-8")
-        result, _ = self.run_dogfood("uninstall-global")
+        result, _ = self.run_installer("uninstall-hook")
         self.assertEqual(result.returncode, 0, result.stderr)
         settings = self.settings(home)
         text = json.dumps(settings)
-        self.assertNotIn("receipts.py", text)
+        self.assertNotIn("loxodonta.py", text)
         self.assertNotIn("supervisor.py", text)
         self.assertIn("somebody-else", text)
 

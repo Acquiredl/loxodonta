@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """supervisor.py — the operator that never sleeps (ADR-0005).
 
-A reader-side companion to receipts.py: it watches every receipt log
+A reader-side companion to loxodonta.py: it watches every receipt log
 under a root full of repos and shouts on change — a tripwire with a
 memory, never a wall. It drives receipts exclusively through the public
-CLI and judges nothing itself: verdicts come from `receipts verify`,
+CLI and judges nothing itself: verdicts come from `loxodonta verify`,
 and everything the supervisor holds is writer-reachable, so nothing
 here is a head record (GLOSSARY: Supervisor, Baseline).
 
@@ -50,7 +50,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
-RECEIPTS = HERE / "receipts.py"
+LOXODONTA = HERE / "loxodonta.py"
 
 
 # --- Census -------------------------------------------------------------------
@@ -130,7 +130,7 @@ def verify(log):
     # errors="replace" because a verdict lost to a decode error is a
     # supervisor that missed its one job.
     result = subprocess.run(
-        [sys.executable, str(RECEIPTS), "verify", "--anchors",
+        [sys.executable, str(LOXODONTA), "verify", "--anchors",
          "--log", str(log)],
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
@@ -181,7 +181,7 @@ def superseded(log, detail):
 BASELINE_NAME = ".supervisor-baseline.json"
 
 INVESTIGATE = ("investigate — this memory is writer-reachable and decides "
-               "nothing; run receipts verify and check your anchors")
+               "nothing; run loxodonta verify and check your anchors")
 
 CHANGE_WORDS = {
     "rewritten": "the head seen last look is no longer in this chain's "
@@ -292,7 +292,7 @@ def sidecar_heads(sidecar):
 
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     """One chain's turn with the keeper, at most once per throttle
-    window: pending proofs are driven through `receipts anchor
+    window: pending proofs are driven through `loxodonta anchor
     --upgrade` (the record's own calendar; judgment stays with verify),
     and — only when the operator opted in with a cadence — a fresh head
     that has aged past it is anchored. Off by default: nothing leaves
@@ -306,7 +306,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     if sidecar.exists():
         finished = subprocess.run(
-            [sys.executable, str(RECEIPTS), "anchor", "--upgrade",
+            [sys.executable, str(LOXODONTA), "anchor", "--upgrade",
              "--log", str(log)],
             capture_output=True, encoding="utf-8", env=env)
         attempted = True
@@ -318,7 +318,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
         born = parse_when(entries[-1].get("ts"))
         ripe = born is not None and (now - born).total_seconds() >= cadence
         if head and ripe and head not in sidecar_heads(sidecar):
-            command = [sys.executable, str(RECEIPTS), "anchor",
+            command = [sys.executable, str(LOXODONTA), "anchor",
                        "--log", str(log)]
             for calendar in calendars:
                 command += ["--calendar", calendar]
@@ -395,7 +395,7 @@ WATCH_WORDS = {
     "UNWITNESSED": "no transcript pairs with this session — completeness "
                    "cannot be watched for it; nothing is assumed "
                    "either way.",
-    "UNWATCHED": "no receipts hook is wired into the harness settings — "
+    "UNWATCHED": "no recorder hook is wired into the harness settings — "
                  "nothing owes a receipt, so there is nothing to be "
                  "behind.",
 }
@@ -425,7 +425,10 @@ def hook_matchers(witness):
         commands = rule.get("hooks")
         wired = isinstance(commands, list) and any(
             isinstance(hook, dict)
-            and "receipts" in str(hook.get("command", ""))
+            # Either era's name (ADR-0010): an install that predates the
+            # rename still owes receipts, and is still watched.
+            and any(marker in str(hook.get("command", ""))
+                    for marker in ("receipts", "loxodonta"))
             for hook in commands)
         if wired:
             matchers.append(str(rule.get("matcher", "*")))
@@ -548,7 +551,7 @@ def watch_completeness(root, witness, families):
                          f"{witness.as_posix()}; completeness cannot be "
                          "watched this look")
     if witness.is_dir() and not matchers:
-        watch["note"] = ("no receipts hook is wired into the harness "
+        watch["note"] = ("no recorder hook is wired into the harness "
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
 
@@ -732,7 +735,7 @@ def cmd_scan(args):
 # writer-supplied testimony and says so, exactly as `report` does.
 
 TESTIMONY = ("testimony, not a verdict — what was attempted, as the writer "
-             "told it; run receipts verify for the verdict")
+             "told it; run loxodonta verify for the verdict")
 
 
 def mentions(entries, needle):
@@ -1065,10 +1068,10 @@ def cmd_digest(args):
             summary = ", ".join(f"{n} {v}"
                                 for v, n in sorted(counts.items()))
         lines.append(f"last scan: {scanned} - {summary} "
-                     "(testimony; run receipts verify to judge)")
+                     "(testimony; run loxodonta verify to judge)")
     else:
         lines.append("last scan: none recorded - "
-                     "run receipts verify for a verdict")
+                     "run loxodonta verify for a verdict")
 
     groups = {}
     for row in shown:
@@ -1169,7 +1172,7 @@ def cmd_show(args):
     if not verified:
         print("WARNING: this entry does not verify against its own hash - "
               "the chain is damaged or edited here; run "
-              f"receipts verify --log {log.as_posix()}", file=sys.stderr)
+              f"loxodonta verify --log {log.as_posix()}", file=sys.stderr)
         return 1
     return 0
 
@@ -1249,7 +1252,7 @@ REHEARSAL = ("rehearsal on sandbox copies — nothing here is a verdict "
 
 def receipts_cli(*args):
     return subprocess.run(
-        [sys.executable, str(RECEIPTS), *args],
+        [sys.executable, str(LOXODONTA), *args],
         capture_output=True, encoding="utf-8",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
@@ -1340,7 +1343,7 @@ def cmd_drill(args):
 # The face. Serialization only, zero decisions (ADR-0005): requests are
 # answered from the newest scan no older than the tick, and the page
 # below renders what the scan said — verdicts still come from
-# `receipts verify`, nowhere else.
+# `loxodonta verify`, nowhere else.
 
 # How long one scan's answer stays the answer. The batching clause of
 # ADR-0005 — one verify per chain per tick, never per HTTP request —

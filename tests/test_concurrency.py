@@ -22,13 +22,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RECEIPTS = REPO_ROOT / "receipts.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
 def run_receipts(*args, cwd, extra_env=None):
     env = dict(os.environ)
     env.pop("CLAUDE_PROJECT_DIR", None)
-    env.pop("RECEIPTS_LOCK_TIMEOUT", None)
+    env.pop("LOXODONTA_LOCK_TIMEOUT", None)
     # Both ends of the pipe pinned to UTF-8 (PYTHONIOENCODING for the child,
     # encoding= for the parent) — `text=True` alone decodes with the locale
     # codec, cp1252 on Windows, and disagrees with a UTF-8-emitting child.
@@ -36,7 +36,7 @@ def run_receipts(*args, cwd, extra_env=None):
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        [sys.executable, str(RECEIPTS), *args],
+        [sys.executable, str(LOXODONTA), *args],
         cwd=cwd, capture_output=True, encoding="utf-8", env=env,
     )
 
@@ -94,7 +94,7 @@ class ConcurrentAppendTest(unittest.TestCase):
 
         def fire(i):
             return subprocess.run(
-                [sys.executable, str(RECEIPTS), "hook",
+                [sys.executable, str(LOXODONTA), "hook",
                  "--log-dir", str(log_dir)],
                 cwd=self.workdir, input=hook_payload(command=f"cmd {i}"),
                 capture_output=True, encoding="utf-8",
@@ -145,7 +145,7 @@ class ConcurrentAppendTest(unittest.TestCase):
 
         result = run_receipts("log", "--actor", "agent", "--action", "lost",
                               cwd=self.workdir,
-                              extra_env={"RECEIPTS_LOCK_TIMEOUT": "0.5"})
+                              extra_env={"LOXODONTA_LOCK_TIMEOUT": "0.5"})
 
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("Traceback", result.stderr)
@@ -164,7 +164,7 @@ class SiblingChainTest(unittest.TestCase):
 
     def fire_hook(self, command="ls"):
         return subprocess.run(
-            [sys.executable, str(RECEIPTS), "hook",
+            [sys.executable, str(LOXODONTA), "hook",
              "--log-dir", str(self.log_dir)],
             cwd=self.workdir, input=hook_payload(command=command),
             capture_output=True, encoding="utf-8",

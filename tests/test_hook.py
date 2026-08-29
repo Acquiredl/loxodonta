@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RECEIPTS = REPO_ROOT / "receipts.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
 def run_hook(payload, cwd, *args, extra_env=None):
@@ -40,7 +40,7 @@ def run_hook(payload, cwd, *args, extra_env=None):
     else:
         stdin = json.dumps(payload).encode("utf-8")
     result = subprocess.run(
-        [sys.executable, str(RECEIPTS), "hook", *args],
+        [sys.executable, str(LOXODONTA), "hook", *args],
         cwd=cwd,
         input=stdin,
         capture_output=True,
@@ -56,7 +56,7 @@ def run_receipts(*args, cwd):
     # encoding= for the parent) — `text=True` alone decodes with the locale
     # codec, cp1252 on Windows, and disagrees with a UTF-8-emitting child.
     return subprocess.run(
-        [sys.executable, str(RECEIPTS), *args],
+        [sys.executable, str(LOXODONTA), *args],
         cwd=cwd,
         capture_output=True,
         encoding="utf-8",

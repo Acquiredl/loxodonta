@@ -23,7 +23,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
-RECEIPTS = REPO_ROOT / "receipts.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
@@ -41,7 +41,7 @@ def ots_varint(n):
 
 def chain_head(log):
     return subprocess.run(
-        [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
+        [sys.executable, str(LOXODONTA), "head", "--log", str(log)],
         capture_output=True, encoding="utf-8", check=True,
         env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
 
@@ -93,11 +93,11 @@ def make_chain(log_dir, session, entries=2):
     fixture — so the supervisor is tested against what the tool writes."""
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"receipts-{session}.jsonl"
-    subprocess.run([sys.executable, str(RECEIPTS), "init", "--log", str(log)],
+    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log", str(log)],
                    capture_output=True, check=True)
     for i in range(entries):
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", f"step {i}"],
             capture_output=True, check=True)
     return log
@@ -395,7 +395,7 @@ class BaselineTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         first = run_scan(self.root)  # cold start seeds silently
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", "one more step"],
             capture_output=True, check=True)
 
@@ -415,14 +415,14 @@ class BaselineTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root)
         log.unlink()
-        subprocess.run([sys.executable, str(RECEIPTS), "init",
+        subprocess.run([sys.executable, str(LOXODONTA), "init",
                         "--log", str(log)], capture_output=True, check=True)
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", "innocent-looking work"],
             capture_output=True, check=True)
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", "nothing to see here"],
             capture_output=True, check=True)
 
@@ -524,7 +524,7 @@ def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash"):
     witness.mkdir(parents=True, exist_ok=True)
     (witness.parent / "settings.json").write_text(json.dumps({
         "hooks": {"PostToolUse": [{"matcher": matcher, "hooks": [
-            {"type": "command", "command": "python receipts.py hook"},
+            {"type": "command", "command": "python loxodonta.py hook"},
         ]}]},
     }), encoding="utf-8")
 
@@ -791,7 +791,7 @@ class CompletenessTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout)
-        self.assertIn("no receipts hook", report["completeness"]["note"])
+        self.assertIn("no recorder hook", report["completeness"]["note"])
         self.assertEqual(self.states(result)["sess-aaaa"]["state"],
                          "UNWATCHED")
 
@@ -915,7 +915,7 @@ class AnchorKeeperTest(unittest.TestCase):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "anchor", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
              "--calendar", calendar.url],
             capture_output=True, check=True, env=keeper_env())
         calendar.mode = "complete"
@@ -935,7 +935,7 @@ class AnchorKeeperTest(unittest.TestCase):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "anchor", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
              "--calendar", calendar.url],
             capture_output=True, check=True, env=keeper_env())
 
