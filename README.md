@@ -105,7 +105,7 @@ Tampering only gets caught if something actually looks at the chains, and nobody
 
 ```
 python supervisor.py scan                     # one tick: every chain in the store, verdicts, exit code for cron
-python supervisor.py serve --root ~/repos     # localhost-only page: the recall timeline with search, plus the alarm band
+python supervisor.py serve                    # localhost-only dashboard: verdict strip, drawers, memory navigation
 python supervisor.py drill --root ~/repos --log <chain>   # rehearse detection on a sandbox copy, real chains untouched
 python supervisor.py adopt --root ~/repos     # one-time move of pre-store chains into the store (--dry-run to preview)
 ```
