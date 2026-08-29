@@ -1404,7 +1404,8 @@ def cmd_install_hook(args):
         print(f"  healed {healed} hook command(s) whose script had "
               "moved — now pointing at this install")
     print("every NEW Claude Code session on this machine now leaves a chain")
-    print("in <project>/receipts/. Restart open sessions.")
+    print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
+    print("drawer per project. Restart open sessions.")
     return 0
 
 
