@@ -2,6 +2,8 @@
 
 *An elephant never forgets.*
 
+> **Status: work in progress.** I chose to publish this early rather than polish it privately. The code is real and the test suite holds every claim below, but this README has not had its final editing pass — some sections will still be rewritten. Read it as an honest draft.
+
 **receipts** is a flight recorder for AI agents. I run agents on my machine all day, and at some point the obvious question hit me: if anyone ever asks "what exactly did the agent do", all I have is a plain log file. And a plain log proves nothing. Anyone can edit it after the fact, delete the embarrassing line, backdate an entry. Including the agent itself, which has filesystem access and every reason to look good.
 
 So this tool makes every action an agent takes leave a receipt, and every receipt contains the SHA256 hash of the one before it. That single change turns a log into a hash chain: edit, delete, or reorder any line and every later hash stops matching. One command tells you whether history was touched. Not prevented, detected. That distinction matters and the docs never blur it: this is tamper-evident, not immutable.
@@ -33,6 +35,18 @@ That second part is the point. The timeline is useful every day, and honestly it
 The chain isn't only for humans checking up on agents. It feeds the agents themselves. A fresh session's first problem is figuring out what happened before it arrived: git only shows what got committed, and the raw transcripts are megabytes. The chain sits in the middle, a few KB per session, every action and every file touched, across every repo on the machine.
 
 I tested this instead of assuming it. Fresh agents had to orient in a repo from either the chain, the git log, or both, and the chain was the only source that caught the work happening off main: a local branch that was never pushed, operations that produce no commit at all, the exact action that was in flight when the last session ended. Git log held its own on committed work, so the honest summary is that the chain doesn't replace git or reading the code. It answers "what was going on here recently, which files were hot, and what was left mid-flight" before any code gets read, and it's the only record that survives when a session crashes or the work never got committed.
+
+That reading now ships as a surface of its own. A `SessionStart` hook injects a **digest** at the top of every session: the repo's recent receipts as one-line rows, each session's final entry tagged as the last recorded action, capped at a fixed row budget so a long history can't flood the context. Every row carries an **entry address** — a short prefix of the entry's own hash — and three commands climb from there:
+
+```
+python supervisor.py digest                   # what the hook injects, by hand
+python supervisor.py show 413d5fdf            # one full entry by address
+python supervisor.py search "torn tail"       # the whole repo's chains, not just the window
+python supervisor.py search "lock" --all      # every repo under your root
+python supervisor.py timeline 413d5fdf        # what happened around that entry
+```
+
+Because the address is a hash prefix, `show` re-hashes what it fetched and confirms it matches — the pointers into your memory are self-verifying. And because recall is reading, not judging, none of this runs `verify` or prints a verdict: the digest cites the supervisor's last scan and labels it testimony, and the real verdict stays one command away. A repo can opt out of cross-repo results by dropping a `receipts/.unlisted` marker beside its chains — its memory then renders only inside that repo.
 
 ## quickstart
 
@@ -108,7 +122,7 @@ A few places this has already earned its keep for me, beyond the daily timeline:
 
 ## planned
 
-Adapters for other agent frameworks, so recording isn't tied to my stack. A query surface so agents can ask the chains questions directly instead of shelling out. New work happens on the `dev` branch; `main` stays stable and everything on it holds the claims above.
+Adapters for other agent frameworks, so recording isn't tied to my stack. A richer query surface if shelling out ever proves insufficient — filters and aggregation are deliberately not built until the plain commands above fall short. Navigation for the recall page in `supervisor serve`, so browsing memory doesn't require the CLI. New work happens on the `dev` branch; `main` stays stable and everything on it holds the claims above.
 
 ## license
 

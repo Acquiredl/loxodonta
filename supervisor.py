@@ -10,6 +10,10 @@ here is a head record (GLOSSARY: Supervisor, Baseline).
 
   python supervisor.py scan --root DIR --json
   python supervisor.py serve --root DIR
+  python supervisor.py digest [--repo DIR]      # the session-start injection
+  python supervisor.py show ADDRESS             # one entry, self-verifying
+  python supervisor.py search TEXT [--all]      # the ladder past the digest
+  python supervisor.py timeline ADDRESS         # context around one entry
 
 `scan` is one tick without timers: a census of every chain under the
 root, a verdict for each, a baseline diff against the last look,
@@ -31,6 +35,7 @@ Nothing is ever offered off-machine.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -648,7 +653,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
                            "investigate": CHANGE_WORDS[change]})
         if entries:
             heads[relpath] = {"n": entries[-1].get("n"),
-                              "head": entries[-1].get("entry_hash")}
+                              "head": entries[-1].get("entry_hash"),
+                              # For the digest's last-scan line (Stage E):
+                              # a remembered verdict is testimony like the
+                              # rest of this file, never the verdict itself.
+                              "verdict": verdict}
 
         # The session's receipt tally for the completeness watch: the
         # whole sibling family counts; each genesis is administrative.
@@ -670,6 +679,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
     baseline_path.write_text(json.dumps({
         "purpose": "the supervisor's memory between looks — "
                    "writer-reachable, trusted for nothing",
+        "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "chains": heads,
         "keeper": keeper,
     }, indent=2) + "\n", encoding="utf-8")
@@ -854,6 +864,337 @@ def search_root(root, query):
     return {"root": root.as_posix(), "testimony": TESTIMONY,
             "query": query or "", "matched": len(hits),
             "hits": hits[:SEARCH_CAP]}
+
+
+# --- Recall CLI (Stage E, ADR-0009) -------------------------------------------
+# The agent-facing mouths on the recall organ: `digest` renders the
+# session-start injection, `show` fetches one entry by entry address,
+# `search` and `timeline` are the ladder past the digest window. All of
+# it is recall — testimony rendered from chains, verdicts owned by
+# nobody here (GLOSSARY: Digest, Entry address, Unlisted). Output is
+# plain ASCII on purpose: it lands in hook-injected context and in
+# whatever console encoding the operator's shell dealt.
+
+UNLISTED_NAME = ".unlisted"
+
+ADDRESS_RE = re.compile(r"^[0-9a-f]{4,64}$")
+
+DIGEST_LIMIT = 30    # rows, not entries: the budget is the honesty cap
+ACTION_WIDTH = 110
+
+
+def repo_chains(repo):
+    """Every chain belonging to one repo: its receipts/ plus chains
+    stranded in its own worktrees — still this repo's history."""
+    patterns = ("receipts/*.jsonl", ".claude/worktrees/*/receipts/*.jsonl")
+    return sorted(p.resolve() for pattern in patterns
+                  for p in repo.glob(pattern)
+                  if not p.name.endswith(".anchors.jsonl"))
+
+
+def session_of(log):
+    stem = log.stem
+    if stem.startswith("receipts-"):
+        stem = stem[len("receipts-"):]
+    session, _ = split_seq(stem)
+    return session
+
+
+def invoking_repo(args):
+    return Path(args.repo or os.environ.get("CLAUDE_PROJECT_DIR")
+                or Path.cwd()).resolve()
+
+
+def recall_scope(args):
+    """The chains a recall command may read: the invoking repo's own,
+    plus — under --all — every repo under the root, minus unlisted
+    repos other than the invoking one. Unlisted is an output courtesy,
+    never a security boundary: the chains stay plain files."""
+    repo = invoking_repo(args)
+    logs = repo_chains(repo)
+    if getattr(args, "all", False):
+        root = Path(args.root or repo.parent).resolve()
+        known = set(logs)
+        for log in find_chains(root):
+            log = log.resolve()
+            if log in known:
+                continue
+            if (log.parent / UNLISTED_NAME).exists():
+                try:
+                    repo.relative_to(log.parent.parent)
+                except ValueError:
+                    continue  # unlisted, and we are outside it
+            logs.append(log)
+    return repo, logs
+
+
+def address_of(entry):
+    h = entry.get("entry_hash")
+    return h[:8] if isinstance(h, str) and len(h) >= 8 else "????????"
+
+
+def clip(text, width=ACTION_WIDTH):
+    text = " ".join(str(text).split())
+    return text if len(text) <= width else text[:width - 3] + "..."
+
+
+def hhmm(ts):
+    return ts[11:16] + "Z" if isinstance(ts, str) and len(ts) >= 16 else str(ts)
+
+
+def day_span(ts):
+    return f"{ts[:10]} {hhmm(ts)}" if isinstance(ts, str) and len(ts) >= 16 \
+        else str(ts)
+
+
+def gather(logs):
+    """(families, rows): sibling chains folded per session (ADR-0004),
+    genesis excluded — administrative, not memory. Rows arrive sorted
+    oldest-first; ties break on chain name then n, deterministically."""
+    families = {}
+    rows = []
+    for log in logs:
+        session = session_of(log)
+        family = families.setdefault(
+            session, {"count": 0, "first": None, "last": None,
+                      "final": None})
+        for entry in read_entries(log):
+            if entry.get("n") == 0:
+                continue
+            ts = entry.get("ts") if isinstance(entry.get("ts"), str) else ""
+            rows.append({"session": session, "log": log, "ts": ts,
+                         "entry": entry})
+            family["count"] += 1
+            if family["first"] is None or ts < family["first"]:
+                family["first"] = ts
+            if family["last"] is None or ts > family["last"]:
+                family["last"] = ts
+    rows.sort(key=lambda r: (r["ts"], r["log"].name,
+                             r["entry"].get("n") or 0))
+    for row in rows:
+        families[row["session"]]["final"] = row["entry"].get("entry_hash")
+    return families, rows
+
+
+def scan_testimony(repo):
+    """The last scan's verdicts for this repo's chains, read from
+    whichever baseline covers it (the repo itself, or the folder of
+    repos above it). The baseline is trusted for nothing — which is
+    exactly why recall may cite it: testimony citing testimony."""
+    for base_dir in (repo, repo.parent):
+        try:
+            data = json.loads((base_dir / BASELINE_NAME).read_text(
+                encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        scanned = data.get("scanned")
+        chains = data.get("chains")
+        if not isinstance(scanned, str) or not isinstance(chains, dict):
+            continue
+        verdicts = []
+        for relpath, row in chains.items():
+            if not isinstance(row, dict) or "verdict" not in row:
+                continue
+            try:
+                (base_dir / relpath).resolve().relative_to(repo)
+            except (ValueError, OSError):
+                continue
+            verdicts.append(str(row["verdict"]))
+        if verdicts:
+            return scanned, verdicts
+    return None, []
+
+
+def cmd_digest(args):
+    """The session-start injection: local by design ("all memory" means
+    all reachable, never all injected), budget-capped, zero subprocess
+    spawns — recall owns no verdicts, so nothing here runs verify."""
+    repo = invoking_repo(args)
+    families, rows = gather(repo_chains(repo))
+    if args.since:
+        rows = [r for r in rows if r["ts"][:10] >= args.since]
+    total = len(rows)
+    if not total:
+        return 0  # nothing to recall; the hook must stay silent, not nag
+    shown = rows[-max(args.limit, 1):]
+
+    lines = [f"== recall digest -- {repo.name} ({repo.as_posix()}) =="]
+    memory = f"memory: {len(families)} sessions, {total} entries"
+    if len(shown) < total:
+        memory += f"; showing last {len(shown)} (search reaches the rest)"
+    lines.append(memory)
+    scanned, verdicts = scan_testimony(repo)
+    if scanned:
+        counts = {}
+        for verdict in verdicts:
+            counts[verdict] = counts.get(verdict, 0) + 1
+        if set(counts) == {"VALID"}:
+            summary = f"all {len(verdicts)} chains VALID"
+        else:
+            summary = ", ".join(f"{n} {v}"
+                                for v, n in sorted(counts.items()))
+        lines.append(f"last scan: {scanned} - {summary} "
+                     "(testimony; run receipts verify to judge)")
+    else:
+        lines.append("last scan: none recorded - "
+                     "run receipts verify for a verdict")
+
+    groups = {}
+    for row in shown:
+        groups.setdefault(row["session"], []).append(row)
+    for session in sorted(groups, key=lambda s: groups[s][-1]["ts"]):
+        family = families[session]
+        lines.append("")
+        lines.append(f"-- session {session[:8]} "
+                     f"({day_span(family['first'])} .. "
+                     f"{day_span(family['last'])}, "
+                     f"{family['count']} entries) --")
+        for row in groups[session]:
+            entry = row["entry"]
+            line = (f"{address_of(entry)}  {hhmm(row['ts'])}  "
+                    f"{clip(entry.get('actor', '?'), 16)}  "
+                    f"{clip(entry.get('action', ''))}")
+            if entry.get("entry_hash") == family["final"]:
+                line += "   <- last recorded action"
+            lines.append(line)
+
+    me = Path(__file__).resolve().as_posix()
+    lines.append("")
+    lines.append("this digest is testimony rendered from receipt chains; "
+                 "it owns no verdicts.")
+    lines.append(f'detail: python "{me}" show <address> '
+                 f'--repo "{repo.as_posix()}"')
+    lines.append(f'search: python "{me}" search "text" '
+                 f'--repo "{repo.as_posix()}" [--all]')
+    print("\n".join(lines))
+    return 0
+
+
+def resolve_address(args):
+    """Entry-address resolution, git's rules (GLOSSARY: Entry address):
+    lowercase hex, 4 to 64 chars; any unambiguous prefix resolves; an
+    ambiguous one is refused with the candidates named. Returns
+    (match, exit_code) — exactly one of the two is meaningful."""
+    prefix = args.address.lower()
+    if not ADDRESS_RE.match(prefix):
+        print(f"error: {args.address!r} is not an entry address - "
+              "4 to 64 lowercase hex characters of an entry hash",
+              file=sys.stderr)
+        return None, 1
+    repo, logs = recall_scope(args)
+    matches = [(log, entry) for log in logs
+               for entry in read_entries(log)
+               if isinstance(entry.get("entry_hash"), str)
+               and entry["entry_hash"].startswith(prefix)]
+    if not matches:
+        where = "the root" if getattr(args, "all", False) \
+            else repo.as_posix()
+        print(f"no entry under {where} matches {prefix} - "
+              "widen with --all, or search instead", file=sys.stderr)
+        return None, 1
+    if len(matches) > 1:
+        print(f"ambiguous: {prefix} names {len(matches)} entries - "
+              "lengthen the prefix:", file=sys.stderr)
+        for log, entry in matches[:20]:
+            print(f"  {address_of(entry)}  {entry.get('ts', '')}  "
+                  f"session {session_of(log)[:8]}  "
+                  f"{clip(entry.get('action', ''), 60)}", file=sys.stderr)
+        return None, 1
+    return matches[0], 0
+
+
+def cmd_show(args):
+    """One full entry by address. The address is the fingerprint: the
+    fetched entry is re-hashed against it, so recall's pointers are
+    self-verifying — the one place recall touches a hash, and still not
+    a verdict: a mismatch is a warning that names the real judge."""
+    match, code = resolve_address(args)
+    if match is None:
+        return code
+    log, entry = match
+    stored = entry["entry_hash"]
+    unhashed = {k: v for k, v in entry.items() if k != "entry_hash"}
+    recomputed = hashlib.sha256(json.dumps(
+        unhashed, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False).encode("utf-8")).hexdigest()
+    verified = recomputed == stored
+
+    print(f"entry {stored}" + (" (self-verified)" if verified else ""))
+    print(f"chain: {log.name}  session: {session_of(log)[:8]}  "
+          f"n: {entry.get('n')}")
+    print(f"ts: {entry.get('ts', '')}  actor: {entry.get('actor', '')}")
+    print(f"action: {entry.get('action', '')}")
+    refs = entry.get("files") or []
+    if refs:
+        print("files:")
+        for ref in refs:
+            if isinstance(ref, dict):
+                print(f"  {ref.get('path', '?')}  {ref.get('sha256', '')}")
+    else:
+        print("files: (none)")
+    me = Path(__file__).resolve().as_posix()
+    print(f'context: python "{me}" timeline {stored[:8]} '
+          f'--repo "{invoking_repo(args).as_posix()}"')
+    if not verified:
+        print("WARNING: this entry does not verify against its own hash - "
+              "the chain is damaged or edited here; run "
+              f"receipts verify --log {log.as_posix()}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_search_cli(args):
+    """Free-text search over action lines — the whole repo's memory,
+    or the whole root's with --all. Finds what was written, the
+    writer's word; matched counts everything, the limit only caps
+    what is shown (no silent caps)."""
+    repo, logs = recall_scope(args)
+    needle = args.text.lower()
+    hits = []
+    for log in logs:
+        session = session_of(log)
+        repo_name = log.parent.parent.name
+        for entry in read_entries(log):
+            if entry.get("n") == 0:
+                continue
+            action = str(entry.get("action", ""))
+            if needle and needle in action.lower():
+                hits.append((str(entry.get("ts") or ""), repo_name,
+                             session, entry))
+    hits.sort(key=lambda hit: hit[0], reverse=True)
+    shown = hits[:max(args.limit, 1)]
+    print(f'search: "{args.text}" - matched {len(hits)}, '
+          f"showing {len(shown)} ({TESTIMONY})")
+    for ts, repo_name, session, entry in shown:
+        print(f"{address_of(entry)}  {ts[:10]} {hhmm(ts)}  "
+              f"{repo_name}/{session[:8]}  "
+              f"{clip(entry.get('actor', ''), 16)}  "
+              f"{clip(entry.get('action', ''))}")
+    return 0
+
+
+def cmd_timeline(args):
+    """Context rows around one address: how the moment unfolded, from
+    the same chain, testimony like all of recall."""
+    match, code = resolve_address(args)
+    if match is None:
+        return code
+    log, entry = match
+    entries = read_entries(log)
+    idx = next(i for i, e in enumerate(entries)
+               if e.get("entry_hash") == entry.get("entry_hash")
+               and e.get("n") == entry.get("n"))
+    lo = max(0, idx - max(args.before, 0))
+    hi = min(len(entries), idx + max(args.after, 0) + 1)
+    print(f"timeline around {address_of(entry)} - "
+          f"session {session_of(log)[:8]}, chain {log.name} "
+          f"({TESTIMONY})")
+    for e in entries[lo:hi]:
+        mark = "   <- here" if e is entries[idx] else ""
+        print(f"{address_of(e)}  {hhmm(str(e.get('ts', '')))}  "
+              f"{clip(e.get('actor', ''), 16)}  "
+              f"{clip(e.get('action', ''))}{mark}")
+    return 0
 
 
 # --- Fire drill ---------------------------------------------------------------
@@ -1873,6 +2214,54 @@ def main(argv):
                        help="compact machine output (default "
                             "pretty-prints)")
     drill.set_defaults(func=cmd_drill)
+
+    # The recall surface (Stage E, ADR-0009): digest is local by design;
+    # show / search / timeline take --all to reach the whole root.
+    recall_common = argparse.ArgumentParser(add_help=False)
+    recall_common.add_argument(
+        "--repo", default=None,
+        help="repo directory (default: CLAUDE_PROJECT_DIR, else the "
+             "current directory)")
+    recall_common.add_argument(
+        "--all", action="store_true",
+        help="reach every repo under the root (unlisted repos stay "
+             "invisible from outside themselves)")
+    recall_common.add_argument(
+        "--root", default=None,
+        help="folder of repos for --all (default: the repo's parent)")
+    digest = sub.add_parser(
+        "digest",
+        help="the session-start injection: this repo's recent history, "
+             "budget-capped, testimony-labeled")
+    digest.add_argument("--repo", default=None,
+                        help="repo directory (default: CLAUDE_PROJECT_DIR, "
+                             "else the current directory)")
+    digest.add_argument("--limit", type=int, default=DIGEST_LIMIT,
+                        help=f"most rows shown (default {DIGEST_LIMIT})")
+    digest.add_argument("--since", default=None, metavar="YYYY-MM-DD",
+                        help="only entries on or after this date")
+    digest.set_defaults(func=cmd_digest)
+    show = sub.add_parser(
+        "show", parents=[recall_common],
+        help="one full entry by entry address (self-verifying)")
+    show.add_argument("address", help="entry-hash prefix, 4+ hex chars")
+    show.set_defaults(func=cmd_show)
+    search = sub.add_parser(
+        "search", parents=[recall_common],
+        help="free-text search over action lines, this repo or --all")
+    search.add_argument("text", help="text to find in action lines")
+    search.add_argument("--limit", type=int, default=20,
+                        help="most hits shown (default 20; matched "
+                             "always counts all)")
+    search.set_defaults(func=cmd_search_cli)
+    timeline = sub.add_parser(
+        "timeline", parents=[recall_common],
+        help="context rows around one entry address")
+    timeline.add_argument("address", help="entry-hash prefix, 4+ hex chars")
+    timeline.add_argument("--before", type=int, default=3)
+    timeline.add_argument("--after", type=int, default=3)
+    timeline.set_defaults(func=cmd_timeline)
+
     args = parser.parse_args(argv)
     return args.func(args)
 
