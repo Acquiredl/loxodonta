@@ -4,7 +4,7 @@
 
 > **Status: work in progress.** I chose to publish this early rather than polish it privately. The code is real and the test suite holds every claim below, but this README has not had its final editing pass — some sections will still be rewritten. Read it as an honest draft.
 
-**receipts** is a flight recorder for AI agents. I run agents on my machine all day, and at some point the obvious question hit me: if anyone ever asks "what exactly did the agent do", all I have is a plain log file. And a plain log proves nothing. Anyone can edit it after the fact, delete the embarrassing line, backdate an entry. Including the agent itself, which has filesystem access and every reason to look good.
+**loxodonta** is a flight recorder for AI agents. I run agents on my machine all day, and at some point the obvious question hit me: if anyone ever asks "what exactly did the agent do", all I have is a plain log file. And a plain log proves nothing. Anyone can edit it after the fact, delete the embarrassing line, backdate an entry. Including the agent itself, which has filesystem access and every reason to look good.
 
 So this tool makes every action an agent takes leave a receipt, and every receipt contains the SHA256 hash of the one before it. That single change turns a log into a hash chain: edit, delete, or reorder any line and every later hash stops matching. One command tells you whether history was touched. Not prevented, detected. That distinction matters and the docs never blur it: this is tamper-evident, not immutable.
 
@@ -50,33 +50,33 @@ Because the address is a hash prefix, `show` re-hashes what it fetched and confi
 
 ## quickstart
 
-One file, stdlib only, Python 3.9+ (`alias receipts='python3 /path/to/receipts.py'`):
+One file, stdlib only, Python 3.9+ (`alias loxodonta='python3 /path/to/loxodonta.py'`):
 
 ```
-receipts init                                                   # start a chain (writes the genesis entry)
-receipts log --actor agent --action "wrote draft" --file report.md
-receipts run --actor agent --file report.md -- python make_draft.py
+loxodonta init                                                   # start a chain (writes the genesis entry)
+loxodonta log --actor agent --action "wrote draft" --file report.md
+loxodonta run --actor agent --file report.md -- python make_draft.py
                                  # run a command; it cannot skip its own receipt
-receipts verify                  # walk the chain; exit 1 on any break
-receipts head                    # print the chain head — record it out of the agent's reach
-receipts verify --expect-head <hex>   # catch a wholesale rewrite, against your recorded head
-receipts report                  # the timeline you saw above
+loxodonta verify                  # walk the chain; exit 1 on any break
+loxodonta head                    # print the chain head — record it out of the agent's reach
+loxodonta verify --expect-head <hex>   # catch a wholesale rewrite, against your recorded head
+loxodonta report                  # the timeline you saw above
 ```
 
 Then the outer layers:
 
 ```
-receipts anchor                  # commit the head to Bitcoin via OpenTimestamps (free, no wallet)
-receipts anchor --upgrade        # complete the proof once Bitcoin has it (a few hours later)
-receipts verify --anchors        # judge anchor proofs, offline
-receipts explain                 # LLM narration of the log (testimony, not a verdict)
+loxodonta anchor                  # commit the head to Bitcoin via OpenTimestamps (free, no wallet)
+loxodonta anchor --upgrade        # complete the proof once Bitcoin has it (a few hours later)
+loxodonta verify --anchors        # judge anchor proofs, offline
+loxodonta explain                 # LLM narration of the log (testimony, not a verdict)
 ```
 
 ## hooking it into an agent
 
 For Claude Code, a `PostToolUse` hook turns every tool call into a receipt automatically, which is how the timeline above got written. Wiring in [docs/HOOK.md](docs/HOOK.md).
 
-The recorder itself doesn't care who writes to it. Anything that can run a command can leave a receipt, so `receipts run` and `receipts log` work with any framework today, and wiring another stack in automatically means writing one small adapter against its tool-call events. Claude Code is the only shipped adapter right now because it's what I use daily. Adapters for other frameworks are on the planned list below.
+The recorder itself doesn't care who writes to it. Anything that can run a command can leave a receipt, so `loxodonta run` and `loxodonta log` work with any framework today, and wiring another stack in automatically means writing one small adapter against its tool-call events. Claude Code is the only shipped adapter right now because it's what I use daily. Adapters for other frameworks are on the planned list below.
 
 ## the supervisor
 

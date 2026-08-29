@@ -2,7 +2,7 @@
 
 explain pipes the mechanical verdict and timeline to an external LLM
 command (default: `claude -p`) and prints the narration, clearly labeled
-as testimony — verdicts come only from `receipts verify` (ADR-0002).
+as testimony — verdicts come only from `loxodonta verify` (ADR-0002).
 Tests use a fake LLM command that captures its stdin; no model, no
 network, no dependency.
 """
@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RECEIPTS = REPO_ROOT / "receipts.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 FAKE_LLM = """\
 import sys, pathlib
@@ -33,7 +33,7 @@ def run_receipts(*args, cwd):
     # encoding= for the parent) — `text=True` alone decodes with the locale
     # codec, cp1252 on Windows, and disagrees with a UTF-8-emitting child.
     return subprocess.run(
-        [sys.executable, str(RECEIPTS), *args],
+        [sys.executable, str(LOXODONTA), *args],
         cwd=cwd,
         capture_output=True,
         encoding="utf-8",

@@ -1,6 +1,6 @@
-# A guided reading of receipts.py
+# A guided reading of loxodonta.py
 
-This document walks `receipts.py` top to bottom, in file order, the way a
+This document walks `loxodonta.py` top to bottom, in file order, the way a
 first reader meets it. It grew out of the 2026-08-21 readability walk
 (issue #10) and is kept as reference documentation: each section explains
 what the code does, what controls what, and — most importantly — *why it

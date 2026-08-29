@@ -25,7 +25,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
-RECEIPTS = REPO_ROOT / "receipts.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 
@@ -38,11 +38,11 @@ def make_chain(log_dir, session, entries=2):
     fixture — so the face is tested against what the tool writes."""
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"receipts-{session}.jsonl"
-    subprocess.run([sys.executable, str(RECEIPTS), "init", "--log", str(log)],
+    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log", str(log)],
                    capture_output=True, check=True)
     for i in range(entries):
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", f"step {i}"],
             capture_output=True, check=True)
     return log
@@ -67,7 +67,7 @@ def write_completed_anchor(log, height=850000):
     # with the locale codec, cp1252 on Windows, and disagrees with a
     # UTF-8-emitting child.
     head = subprocess.run(
-        [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
+        [sys.executable, str(LOXODONTA), "head", "--log", str(log)],
         capture_output=True, encoding="utf-8", check=True,
         env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
     payload = ots_varint(height)
@@ -85,7 +85,7 @@ def log_entry(log, action, actor="claude-code", files=()):
     files (which must exist — receipts hashes them at log time)."""
     file_args = [arg for f in files for arg in ("--file", str(f))]
     subprocess.run(
-        [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+        [sys.executable, str(LOXODONTA), "log", "--log", str(log),
          "--actor", actor, "--action", action, *file_args],
         capture_output=True, check=True)
 
@@ -191,7 +191,7 @@ class ServeTest(ServerFixture):
         self.assertIn("VALID", page)
         self.assertIn("not the recorded history", page)
         self.assertIn("superseded", page)
-        self.assertIn("verify", page, "verdicts come from receipts verify")
+        self.assertIn("verify", page, "verdicts come from loxodonta verify")
         # The band renders only what the scan can say: the tick never
         # passes --files (.out-of-scope/002), so a FILES-DIVERGED tier
         # would be dead display code wearing a claim nothing can earn.
