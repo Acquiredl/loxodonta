@@ -192,6 +192,128 @@ class StoreScanTest(unittest.TestCase):
         self.assertIn(("mystery-33333333", "sess-cccc"), sessions)
 
 
+def run_adopt(store_home, root, *extra):
+    return subprocess.run(
+        [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root),
+         *extra],
+        capture_output=True, encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8",
+             "LOXODONTA_HOME": str(store_home)})
+
+
+class AdoptTest(unittest.TestCase):
+    """`supervisor adopt` (ADR-0011): the one-time move of legacy chains
+    into the store. Move not copy, sidecars and .unlisted travel,
+    nothing is ever overwritten, running it twice is a no-op."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+        self.home = Path(self._tmp.name) / "storehome"
+
+    def drawers(self):
+        receipts = self.home / "receipts"
+        return sorted(p.name for p in receipts.iterdir()) \
+            if receipts.is_dir() else []
+
+    def test_adopt_moves_chains_sidecars_and_unlisted_into_drawers(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+        (self.root / "alpha" / "receipts" / ".unlisted").write_text(
+            "", encoding="utf-8")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        names = self.drawers()
+        self.assertEqual(len(names), 2, names)
+        alpha = next(self.home / "receipts" / n for n in names
+                     if n.startswith("alpha-"))
+        self.assertTrue((alpha / "receipts-sess-aaaa.jsonl").exists())
+        self.assertTrue(
+            (alpha / "receipts-sess-aaaa.jsonl.anchors.jsonl").exists(),
+            "the proof travels with its chain")
+        self.assertTrue((alpha / ".unlisted").exists())
+        record = json.loads((alpha / "project.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(Path(record["path"]).resolve(),
+                         (self.root / "alpha").resolve())
+        self.assertFalse(
+            list((self.root / "alpha" / "receipts").glob("*.jsonl")),
+            "moved, not copied — two copies of evidence is worse than one")
+
+    def test_adopt_resolves_stranded_worktree_chains_to_the_main_repo(self):
+        make_chain(self.root / "alpha" / ".claude" / "worktrees" / "wt"
+                   / "receipts", "sess-stranded")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (name,) = self.drawers()
+        self.assertTrue(name.startswith("alpha-"), name)
+
+    def test_adopt_never_overwrites_and_reports_the_refusal(self):
+        # The same session name already in the drawer: evidence is never
+        # clobbered by housekeeping.
+        legacy = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        before = legacy.read_bytes()
+        first = run_adopt(self.home, self.root)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        # Forge a *different* chain under the same name back in the
+        # legacy spot.
+        clash = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                           entries=5)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertNotEqual(before, clash.read_bytes())
+        self.assertIn("refus", result.stdout.lower())
+        self.assertTrue(clash.exists(), "the refused chain stays put")
+        (name,) = self.drawers()
+        adopted = (self.home / "receipts" / name
+                   / "receipts-sess-aaaa.jsonl")
+        self.assertEqual(adopted.read_bytes(), before,
+                         "the adopted copy is untouched by the clash")
+
+    def test_adopt_twice_is_a_quiet_no_op(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_adopt(self.home, self.root)
+
+        again = run_adopt(self.home, self.root)
+
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("nothing to adopt", again.stdout.lower())
+
+    def test_dry_run_plans_and_moves_nothing(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run_adopt(self.home, self.root, "--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("sess-aaaa", result.stdout)
+        self.assertTrue(log.exists(), "dry-run moves nothing")
+        self.assertEqual(self.drawers(), [])
+
+    def test_adopted_chains_are_scanned_and_recalled(self):
+        # The move is an end-to-end success only if the store's readers
+        # pick the history up where it landed.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=3)
+        run_adopt(self.home, self.root)
+        witness = Path(self._tmp.name) / "no-witness"
+        witness.mkdir()
+
+        result = run_store_scan(self.home, witness)
+
+        sessions = chains_by_session(json.loads(result.stdout))
+        self.assertIn(("alpha", "sess-aaaa"), sessions)
+        (chain,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "VALID")
+
+
 class ScanCensusTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

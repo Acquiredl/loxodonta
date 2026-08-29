@@ -747,6 +747,67 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     }
 
 
+def adoption_project(root, log):
+    """Which project owns a legacy chain: the folder holding its
+    receipts/; a stranded worktree chain belongs to the repo the
+    worktree served; a receipts/ at the root's own top level means the
+    root itself is the project."""
+    parts = log.relative_to(root).parts
+    if ".claude" in parts:
+        idx = parts.index(".claude")
+        return root.joinpath(*parts[:idx]) if idx else root
+    if parts[0] == "receipts":
+        return root
+    return root / parts[0]
+
+
+def cmd_adopt(args):
+    """The one-time move of legacy chains into the store (ADR-0011).
+    Move, not copy — two copies of evidence is worse than one; the
+    chain, its anchor sidecars, and the folder's .unlisted marker
+    travel together; a name collision is refused and reported, never
+    overwritten; running it twice is a quiet no-op; --dry-run prints
+    the plan. Empty legacy folders are left for the operator to
+    prune."""
+    root = Path(args.root).resolve()
+    moves, refused = [], []
+    for log in find_chains(root):
+        project = adoption_project(root, log)
+        drawer = store_receipts() / project_slug(project)
+        (refused if (drawer / log.name).exists() else moves).append(
+            (log, drawer, project))
+    if not moves and not refused:
+        print(f"nothing to adopt under {root.as_posix()}")
+        return 0
+    for log, drawer, project in moves:
+        line = f"{log.relative_to(root).as_posix()} -> {drawer.name}/"
+        if args.dry_run:
+            print(f"would adopt {line}")
+            continue
+        os.makedirs(drawer, exist_ok=True)
+        record = drawer / "project.json"
+        if not record.exists():
+            record.write_text(json.dumps(
+                {"path": str(project.resolve()).replace(os.sep, "/")})
+                + "\n", encoding="utf-8")
+        sidecar = log.parent / (log.name + ".anchors.jsonl")
+        marker = log.parent / UNLISTED_NAME
+        shutil.move(str(log), str(drawer / log.name))
+        if sidecar.exists() and not (drawer / sidecar.name).exists():
+            shutil.move(str(sidecar), str(drawer / sidecar.name))
+        if marker.exists() and not (drawer / UNLISTED_NAME).exists():
+            shutil.copy2(str(marker), str(drawer / UNLISTED_NAME))
+        print(f"adopted {line}")
+    for log, drawer, _ in refused:
+        print(f"refused {log.relative_to(root).as_posix()}: "
+              f"{drawer.name}/{log.name} already exists in the store — "
+              "evidence is never overwritten; reconcile by hand")
+    if not args.dry_run and moves:
+        print(f"{len(moves)} chain(s) adopted into "
+              f"{store_receipts().as_posix()}")
+    return 0
+
+
 def cmd_scan(args):
     store = args.root is None
     root = store_receipts() if store else Path(args.root).resolve()
@@ -2371,6 +2432,15 @@ def main(argv):
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
     serve.set_defaults(func=cmd_serve)
+    adopt = sub.add_parser(
+        "adopt", help="one-time move of legacy chains into the store "
+                      "(ADR-0011): sidecars and .unlisted travel, "
+                      "nothing is ever overwritten")
+    adopt.add_argument("--root", required=True,
+                       help="the legacy folder of repos to adopt from")
+    adopt.add_argument("--dry-run", action="store_true",
+                       help="print the plan, move nothing")
+    adopt.set_defaults(func=cmd_adopt)
     drill = sub.add_parser(
         "drill", help="rehearse detection: four-way tamper battery on a "
                       "sandbox copy — real chains untouched")
