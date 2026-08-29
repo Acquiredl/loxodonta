@@ -342,6 +342,9 @@ class InstallerTest(RecallBase):
         post = json.dumps(settings["hooks"]["PostToolUse"])
         start = json.dumps(settings["hooks"]["SessionStart"])
         self.assertIn("receipts.py", post)
+        # Every shell the harness offers is matched — omitting one
+        # (PowerShell, on Windows desktop) silently loses sessions.
+        self.assertIn("PowerShell", post)
         self.assertIn("supervisor.py", start)
         self.assertIn("digest", start)
         self.assertIn("startup|clear|compact",
