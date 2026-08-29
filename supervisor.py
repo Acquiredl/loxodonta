@@ -900,9 +900,35 @@ def session_of(log):
     return session
 
 
+def main_repo_of(project):
+    """A git worktree holds no chains: the hook writes them to the
+    repository the worktree belongs to (receipts.main_repo_root — this
+    is its reader-side twin, same file walk). A worktree's `.git` is a
+    file reading `gitdir: <main>/.git/worktrees/<name>`, and that
+    directory's `commondir` points back at `<main>/.git`. Anything
+    unexpected returns `project` unchanged — recall never fails over
+    path layout."""
+    dot_git = project / ".git"
+    if not dot_git.is_file():
+        return project  # a normal checkout (.git/ dir), or not a repo
+    try:
+        line = dot_git.read_text(encoding="utf-8").strip()
+        if not line.startswith("gitdir:"):
+            return project
+        gitdir = Path(line[len("gitdir:"):].strip())
+        if not gitdir.is_absolute():
+            gitdir = project / gitdir
+        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        root = Path(os.path.normpath(gitdir / common)).parent
+        return root if root.is_dir() else project
+    except OSError:
+        return project
+
+
 def invoking_repo(args):
-    return Path(args.repo or os.environ.get("CLAUDE_PROJECT_DIR")
-                or Path.cwd()).resolve()
+    return main_repo_of(Path(args.repo
+                             or os.environ.get("CLAUDE_PROJECT_DIR")
+                             or Path.cwd()).resolve())
 
 
 def recall_scope(args):

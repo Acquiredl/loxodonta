@@ -178,6 +178,66 @@ class DigestTest(RecallBase):
         self.assertIn("cli-built entry", out)
 
 
+class WorktreeRecallTest(RecallBase):
+    """A session in a git worktree logs to the main repository
+    (receipts hook, main_repo_root); recall invoked from that worktree
+    must read from the same place, or the digest a worktree session
+    injects at start is empty."""
+
+    def worktree_of(self, main_repo, name="wt"):
+        # The exact layout git writes: the worktree's .git is a file
+        # pointing at <main>/.git/worktrees/<name>, which holds a
+        # commondir pointing back at <main>/.git.
+        gitdir = main_repo / ".git" / "worktrees" / name
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        wt = main_repo / ".claude" / "worktrees" / name
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        return wt
+
+    def test_digest_from_worktree_reads_main_repo_chains(self):
+        repo = self.repo("alpha")
+        wt = self.worktree_of(repo)
+        _, hashes = forge_chain(repo, "9f9f0000-0000-0000-0000-000000000000",
+                                [("2026-08-25T10:00:00Z", "main-repo work")])
+        result = run_py(SUPERVISOR, "digest", "--repo", str(wt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(hashes[1][:8], result.stdout)
+        self.assertIn("main-repo work", result.stdout)
+
+    def test_digest_from_worktree_via_project_dir_env(self):
+        # The SessionStart hook's exact invocation: no --repo, only
+        # CLAUDE_PROJECT_DIR, which points at the worktree.
+        repo = self.repo("alpha")
+        wt = self.worktree_of(repo)
+        forge_chain(repo, "8e8e1111-1111-1111-1111-111111111111",
+                    [("2026-08-25T10:00:00Z", "hook-visible work")])
+        result = run_py(SUPERVISOR, "digest",
+                        env_extra={"CLAUDE_PROJECT_DIR": str(wt)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("hook-visible work", result.stdout)
+
+    def test_search_from_worktree_reads_main_repo_chains(self):
+        repo = self.repo("alpha")
+        wt = self.worktree_of(repo)
+        forge_chain(repo, "7d7d2222-2222-2222-2222-222222222222",
+                    [("2026-08-25T10:00:00Z", "needle in main")])
+        result = run_py(SUPERVISOR, "search", "needle", "--repo", str(wt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("needle in main", result.stdout)
+
+    def test_malformed_worktree_link_falls_back_silently(self):
+        # A .git file that leads nowhere: recall treats the directory as
+        # itself (chainless -> silent digest), never an error.
+        stray = self.repo("stray")
+        (stray / ".git").write_text("gitdir: does/not/exist\n",
+                                    encoding="utf-8")
+        result = run_py(SUPERVISOR, "digest", "--repo", str(stray))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+
 class ShowTest(RecallBase):
     def test_full_entry_self_verified(self):
         repo = self.repo("alpha")
