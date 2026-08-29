@@ -475,10 +475,15 @@ def read_witness(transcript, matchers):
                 continue
             if isinstance(result, dict) and result.get("is_error"):
                 continue
-            name = next((names.get(block.get("tool_use_id"))
-                         for block in blocks
-                         if isinstance(block, dict)
-                         and block.get("type") == "tool_result"), None)
+            found = next((block for block in blocks
+                          if isinstance(block, dict)
+                          and block.get("type") == "tool_result"), None)
+            if found is not None and found.get("is_error"):
+                # A failed call, as the harness really writes it: the
+                # result collapses to an error string and the flag sits
+                # on the tool_result block (field capture, 2026-08-29).
+                continue
+            name = names.get(found.get("tool_use_id")) if found else None
             if owes_receipt(name, matchers):
                 events.append(record.get("timestamp"))
     return events
@@ -900,9 +905,35 @@ def session_of(log):
     return session
 
 
+def main_repo_of(project):
+    """A git worktree holds no chains: the hook writes them to the
+    repository the worktree belongs to (receipts.main_repo_root — this
+    is its reader-side twin, same file walk). A worktree's `.git` is a
+    file reading `gitdir: <main>/.git/worktrees/<name>`, and that
+    directory's `commondir` points back at `<main>/.git`. Anything
+    unexpected returns `project` unchanged — recall never fails over
+    path layout."""
+    dot_git = project / ".git"
+    if not dot_git.is_file():
+        return project  # a normal checkout (.git/ dir), or not a repo
+    try:
+        line = dot_git.read_text(encoding="utf-8").strip()
+        if not line.startswith("gitdir:"):
+            return project
+        gitdir = Path(line[len("gitdir:"):].strip())
+        if not gitdir.is_absolute():
+            gitdir = project / gitdir
+        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        root = Path(os.path.normpath(gitdir / common)).parent
+        return root if root.is_dir() else project
+    except OSError:
+        return project
+
+
 def invoking_repo(args):
-    return Path(args.repo or os.environ.get("CLAUDE_PROJECT_DIR")
-                or Path.cwd()).resolve()
+    return main_repo_of(Path(args.repo
+                             or os.environ.get("CLAUDE_PROJECT_DIR")
+                             or Path.cwd()).resolve())
 
 
 def recall_scope(args):
