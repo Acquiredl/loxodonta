@@ -1250,7 +1250,30 @@ def cmd_install_hook(args):
     hooks = settings.setdefault("hooks", {})
     installed = []
 
+    def heal(blocks, markers, command):
+        """Replace our hook commands whose script no longer exists —
+        the migration path after a rename or a move: honoring a
+        dangling command as 'already installed' would leave recording
+        silently dead. A command whose script is still on disk is
+        someone's working install and is left alone."""
+        count = 0
+        for block in blocks:
+            for hook in block.get("hooks", []):
+                old = hook.get("command", "")
+                if old == command or not any(m in old for m in markers):
+                    continue
+                try:
+                    script = next((p for p in shlex.split(old)
+                                   if any(m in p for m in markers)), None)
+                except ValueError:
+                    continue
+                if script and not os.path.isfile(script):
+                    hook["command"] = command
+                    count += 1
+        return count
+
     post = hooks.setdefault("PostToolUse", [])
+    healed = heal(post, RECORDER_MARKERS, record)
     if not any(marker in h.get("command", "")
                for b in post for h in b.get("hooks", [])
                for marker in RECORDER_MARKERS):
@@ -1268,6 +1291,7 @@ def cmd_install_hook(args):
 
     if os.path.isfile(supervisor):
         start = hooks.setdefault("SessionStart", [])
+        healed += heal(start, (DIGEST_MARKER,), digest)
         if not any(DIGEST_MARKER in h.get("command", "")
                    for b in start for h in b.get("hooks", [])):
             start.append({
@@ -1281,7 +1305,7 @@ def cmd_install_hook(args):
               "wired without the session-start digest; put supervisor.py "
               "next to loxodonta.py and re-run to add it")
 
-    if not installed:
+    if not installed and not healed:
         print(f"already installed in {path}")
         return 0
 
@@ -1292,6 +1316,9 @@ def cmd_install_hook(args):
              if had_backup else ""))
     for line in installed:
         print(f"  {line}")
+    if healed:
+        print(f"  healed {healed} hook command(s) whose script had "
+              "moved — now pointing at this install")
     print("every NEW Claude Code session on this machine now leaves a chain")
     print("in <project>/receipts/. Restart open sessions.")
     return 0

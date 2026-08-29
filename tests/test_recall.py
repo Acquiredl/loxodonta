@@ -417,9 +417,33 @@ class InstallerTest(RecallBase):
         self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
         self.assertEqual(len(settings["hooks"]["SessionStart"]), 1)
 
-    def test_install_respects_a_pre_rename_recorder_hook(self):
-        # An install from the receipts.py era still owes receipts
-        # (ADR-0010): it is recognised, not doubled beside itself.
+    def test_install_honors_a_live_pre_rename_recorder_hook(self):
+        # An install from the receipts.py era whose script still exists
+        # is recognised and left alone (ADR-0010): never doubled.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        legacy = self.root / "elsewhere" / "receipts.py"
+        legacy.parent.mkdir()
+        legacy.write_text(LOXODONTA.read_text(encoding="utf-8"),
+                          encoding="utf-8")
+        settings = self.settings(home)
+        for block in settings["hooks"]["PostToolUse"]:
+            for hook in block["hooks"]:
+                hook["command"] = (f'"{Path(sys.executable).as_posix()}" '
+                                   f'"{legacy.as_posix()}" hook')
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        again, _ = self.run_installer("install-hook")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        settings = self.settings(home)
+        self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
+        self.assertIn("receipts.py",
+                      json.dumps(settings["hooks"]["PostToolUse"]))
+
+    def test_install_heals_a_recorder_hook_whose_script_is_gone(self):
+        # The rename's migration path: settings still point at a
+        # receipts.py that no longer exists. "Already installed" would
+        # mean recording is silently dead; install-hook replaces the
+        # dangling command with the living one instead.
         _, home = self.run_installer("install-hook")
         path = home / ".claude" / "settings.json"
         settings = self.settings(home)
@@ -430,7 +454,11 @@ class InstallerTest(RecallBase):
         path.write_text(json.dumps(settings), encoding="utf-8")
         again, _ = self.run_installer("install-hook")
         self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertEqual(len(self.settings(home)["hooks"]["PostToolUse"]), 1)
+        settings = self.settings(home)
+        post = json.dumps(settings["hooks"]["PostToolUse"])
+        self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
+        self.assertIn("loxodonta.py", post)
+        self.assertNotIn("receipts.py", post)
 
     def test_uninstall_removes_both_and_leaves_others(self):
         _, home = self.run_installer("install-hook")
