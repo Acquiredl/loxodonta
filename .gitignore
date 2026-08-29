@@ -6,3 +6,4 @@ receipts.jsonl
 
 # operator-side journal - never shipped
 DOGFOOD.md
+dogfood.py
