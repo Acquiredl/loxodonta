@@ -545,11 +545,16 @@ def write_transcript(witness, project, session, event_times=(),
         lines.append({"type": "assistant", "timestamp": ts, "message": {
             "content": [{"type": "tool_use", "id": use_id, "name": name}],
         }})
-        result = {"is_error": True} if failed else {"stdout": "ok"}
+        # Failure as the harness really writes it (field capture,
+        # 2026-08-29): toolUseResult collapses to a plain string and
+        # the error flag sits on the tool_result block, not the result.
+        result = "Error: Exit code 1\nboom" if failed else {"stdout": "ok"}
+        block = {"type": "tool_result", "tool_use_id": use_id}
+        if failed:
+            block["is_error"] = True
         lines.append({"type": "user", "timestamp": ts,
                       "toolUseResult": result, "message": {
-                          "content": [{"type": "tool_result",
-                                       "tool_use_id": use_id}]}})
+                          "content": [block]}})
 
     for i, ts in enumerate(event_times):
         event(i, ts, tool if isinstance(tool, str) else tool[i], False)
@@ -672,6 +677,24 @@ class CompletenessTest(unittest.TestCase):
         chat = self.states(result)["sess-chat"]
         self.assertEqual(chat["state"], "QUIET")
         self.assertEqual(chat["tools"], 0)
+
+    def test_a_failed_call_among_successes_owes_no_receipt(self):
+        # The calibration finding, live (2026-08-29): three commands
+        # succeeded and were receipted, one failed and fired no hook.
+        # The failure is witnessed in the transcript but owes nothing —
+        # counting it manufactures a phantom deficit that never clears.
+        make_chain(self.root / "alpha" / "receipts", "sess-mixed",
+                   entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-mixed",
+                         event_times=[ago(180), ago(170), ago(160)],
+                         error_times=[ago(165)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        mixed = self.states(result)["sess-mixed"]
+        self.assertEqual(mixed["tools"], 3)
+        self.assertEqual(mixed["deficit"], 0)
 
     def test_a_clean_end_clears_cleanly(self):
         make_chain(self.root / "alpha" / "receipts", "sess-done", entries=2)

@@ -475,10 +475,15 @@ def read_witness(transcript, matchers):
                 continue
             if isinstance(result, dict) and result.get("is_error"):
                 continue
-            name = next((names.get(block.get("tool_use_id"))
-                         for block in blocks
-                         if isinstance(block, dict)
-                         and block.get("type") == "tool_result"), None)
+            found = next((block for block in blocks
+                          if isinstance(block, dict)
+                          and block.get("type") == "tool_result"), None)
+            if found is not None and found.get("is_error"):
+                # A failed call, as the harness really writes it: the
+                # result collapses to an error string and the flag sits
+                # on the tool_result block (field capture, 2026-08-29).
+                continue
+            name = names.get(found.get("tool_use_id")) if found else None
             if owes_receipt(name, matchers):
                 events.append(record.get("timestamp"))
     return events
