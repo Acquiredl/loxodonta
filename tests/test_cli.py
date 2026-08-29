@@ -435,6 +435,60 @@ class FileReferenceTest(ReceiptsCliTest):
         self.assertIn("CURRENT: report.md", result.stdout)
 
 
+class ProjectRecordFilesTest(ReceiptsCliTest):
+    """SPEC §3 as amended v0.1.1 (ADR-0012): a chain that lives beside a
+    project record resolves file references against the recorded
+    project, not against its own directory — the rule that lets a store
+    chain fingerprint the files its project actually holds."""
+
+    def drawer_log(self):
+        project = self.workdir / "theproject"
+        project.mkdir(exist_ok=True)
+        drawer = self.workdir / "drawer"
+        drawer.mkdir(exist_ok=True)
+        (drawer / "project.json").write_text(
+            json.dumps({"path": str(project).replace("\\", "/")}),
+            encoding="utf-8")
+        return project, drawer / "receipts-sess-rec.jsonl"
+
+    def test_log_and_verify_files_resolve_through_the_record(self):
+        project, log = self.drawer_log()
+        (project / "report.md").write_text("original\n", encoding="utf-8")
+        run_receipts("init", "--log", str(log), cwd=self.workdir)
+        result = run_receipts(
+            "log", "--log", str(log), "--actor", "agent",
+            "--action", "wrote report", "--file", "report.md",
+            cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        (project / "report.md").write_text("changed after\n",
+                                           encoding="utf-8")
+        verify = run_receipts("verify", "--log", str(log), "--files",
+                              cwd=self.workdir)
+        self.assertEqual(verify.returncode, 2, verify.stdout + verify.stderr)
+        self.assertIn("MODIFIED-SINCE-LOGGED", verify.stdout)
+
+    def test_dangling_record_reports_unresolved_not_diverged(self):
+        project, log = self.drawer_log()
+        (project / "report.md").write_text("original\n", encoding="utf-8")
+        run_receipts("init", "--log", str(log), cwd=self.workdir)
+        run_receipts("log", "--log", str(log), "--actor", "agent",
+                     "--action", "wrote report", "--file", "report.md",
+                     cwd=self.workdir)
+        # The project moves away; the record dangles. That is honest
+        # unresolvability, a different sentence from "file diverged".
+        (project / "report.md").unlink()
+        project.rmdir()
+
+        verify = run_receipts("verify", "--log", str(log), "--files",
+                              cwd=self.workdir)
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertIn("FILES-UNRESOLVED", verify.stdout)
+        self.assertNotIn("MODIFIED-SINCE-LOGGED", verify.stdout)
+        self.assertNotIn("FILES-DIVERGED", verify.stdout)
+        self.assertIn("VALID", verify.stdout)
+
+
 class HeadTest(ReceiptsCliTest):
     def test_head_prints_last_entry_hash(self):
         run_receipts("init", cwd=self.workdir)

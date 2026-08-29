@@ -72,7 +72,7 @@ loxodonta verify                                      # walk the chain; exit 1 o
 
 Now open `receipts.jsonl`, change one word in a past entry, and run `verify` again — that's the whole idea, demonstrated in under a minute. (`loxodonta log` appends an entry by hand; `loxodonta head` prints the chain head, which you record somewhere the agent can't reach and later check with `verify --expect-head <hex>`.)
 
-**3. Wire it into your agent.** For Claude Code, one command sets up the whole machine — every session then leaves a chain in its project's `receipts/` and starts with a recall digest:
+**3. Wire it into your agent.** For Claude Code, one command sets up the whole machine — every session then leaves a chain in the store (`~/.loxodonta/receipts/`, one drawer per project, so history survives even when a repo gets deleted) and starts with a recall digest:
 
 ```
 python loxodonta.py install-hook
@@ -104,12 +104,13 @@ The recorder itself doesn't care who writes to it. Anything that can run a comma
 Tampering only gets caught if something actually looks at the chains, and nobody reads logs every day. So `supervisor.py` does the looking. Same rules as the recorder: one file, stdlib only, readable in a sitting. It drives the recorder through the public CLI and decides nothing itself:
 
 ```
-python supervisor.py scan  --root ~/repos     # one tick: every chain under your repos folder, verdicts, exit code for cron
+python supervisor.py scan                     # one tick: every chain in the store, verdicts, exit code for cron
 python supervisor.py serve --root ~/repos     # localhost-only page: the recall timeline with search, plus the alarm band
 python supervisor.py drill --root ~/repos --log <chain>   # rehearse detection on a sandbox copy, real chains untouched
+python supervisor.py adopt --root ~/repos     # one-time move of pre-store chains into the store (--dry-run to preview)
 ```
 
-`--root` is the folder your repos live in; the scan finds every `<repo>/receipts/` under it (plus a `receipts/` in the root itself, and chains stranded in old worktrees). Scan adds two exit codes of its own: `5`, the baseline tripwire (a chain changed in a way appends can't explain since the last look) and `6`, the completeness alarm (a session is visibly active while receipts stop arriving — the failure nothing else watches for).
+`scan` needs no arguments: the store is its universe. `--root <folder>` scans a legacy folder-of-repos layout instead (every `<repo>/receipts/` under it, plus chains stranded in old worktrees) — the mode `adopt` migrates you out of. Scan adds two exit codes of its own: `5`, the baseline tripwire (a chain changed in a way appends can't explain since the last look) and `6`, the completeness alarm (a session is visibly active while receipts stop arriving — the failure nothing else watches for).
 
 Between looks it remembers every chain's last position, and it shouts when the difference can't be explained by normal appends: a chain that shrank, a head that vanished from its own history, a silently dead hook. It also keeps anchor proofs fresh, and the page re-verifies every chain in your browser via WebCrypto, so the verdicts you see don't depend on trusting the server that drew them.
 

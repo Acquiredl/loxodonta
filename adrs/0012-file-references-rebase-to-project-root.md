@@ -1,4 +1,4 @@
-# ADR-0012: File references are relative to the project root (SPEC §5 amendment)
+# ADR-0012: File references are relative to the project root (SPEC §3 amendment)
 
 **Status:** accepted 2026-08-29 (grilled with ADR-0011; SPEC text change
 lands with the implementing slice, so the spec never describes behavior
@@ -6,7 +6,7 @@ the tool does not yet have)
 
 ## Context
 
-SPEC §5 v0.1 makes file references relative to **the log's directory**
+SPEC §3 v0.1 makes file references relative to **the log's directory**
 and rejects paths that reach outside it — "a file outside the log's
 directory usually means the log is in the wrong place." That rule was
 written for the manual workflow, where `receipts.jsonl` sits at the
@@ -27,7 +27,7 @@ reach its project's files by log-relative paths.
 
 > **The reference base becomes the project root.** A file reference's
 > path is the file's forward-slash path relative to the project the
-> chain records, not to the log's location. Everything else in §5 —
+> chain records, not to the log's location. Everything else in §3 —
 > forward slashes normalized on intake, no absolute paths, no `..`,
 > byte-exact identity, sorted within the entry — is unchanged, and the
 > entry schema and hashing are untouched. SPEC becomes **v0.1.1** with
@@ -64,7 +64,7 @@ integration — necessity, not convenience.
   true for hook-recorded sessions for the first time.
 - `verify --files` gains project-record resolution and the honest
   "cannot resolve" report.
-- SPEC §5 text updates to v0.1.1 in the implementing slice; README
+- SPEC §3 text updates to v0.1.1 in the implementing slice; README
   claims stay as they are (they finally become accurate).
 - Files outside the project (a hook edit to `~/.claude/settings.json`,
   say) remain unreferenced — the boundary moved from "the log's
@@ -78,7 +78,7 @@ integration — necessity, not convenience.
 - **Move hook logs to the project root** so the old rule works —
   rejected: clutters every repo, breaks discovery, and dies again the
   moment chains centralize (ADR-0011).
-- **Record absolute paths in entries** — rejected by §5's own
+- **Record absolute paths in entries** — rejected by §3's own
   reasoning, which stands: absolute paths leak machine layout into a
   log that may be shown to others, and the project record already
   carries the machine-specific part exactly once, as testimony.

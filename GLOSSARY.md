@@ -79,7 +79,7 @@ The `entry_hash` of the last entry. Commits to the entire history — this is th
 
 ### File reference
 
-A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one file at log time. Paths are relative to the **project root** (SPEC §5 as amended v0.1.1, ADR-0012 — originally the log's directory, a rule the hook's layout silently defeated), forward slashes, sorted by path within the entry. A [store](#store) chain resolves them through its [project record](#project-record); a local chain resolves against its own directory, which for a log at the project root is the same base. Derived designs recording external evidence generalize this into the [source reference](#source-reference).
+A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one file at log time. Paths are relative to the **project root** (SPEC §3 as amended v0.1.1, ADR-0012 — originally the log's directory, a rule the hook's layout silently defeated), forward slashes, sorted by path within the entry. A [store](#store) chain resolves them through its [project record](#project-record); a local chain resolves against its own directory, which for a log at the project root is the same base. Derived designs recording external evidence generalize this into the [source reference](#source-reference).
 
 ### Verify
 

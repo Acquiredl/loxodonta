@@ -535,10 +535,13 @@ def watch_session(transcript, receipts, last_receipt, now, matchers):
     return state, tools
 
 
-def watch_completeness(root, witness, families):
+def watch_completeness(root, witness, families, everywhere=False):
     """The completeness half of a tick: every census session paired with
     its transcript, plus witnessed sessions that never grew a chain at
-    all — the disabled-hook case the census alone can never see."""
+    all — the disabled-hook case the census alone can never see.
+    `everywhere` is store mode (ADR-0011): the store covers the whole
+    machine, so every witnessed project is this scan's business, not
+    just folders under one root."""
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
     ours = munge(root)
@@ -588,35 +591,52 @@ def watch_completeness(root, witness, families):
     # best name the witness has for the project.
     for stem, transcript in transcripts.items():
         folder = transcript.parent.name
-        if not matchers or not folder.startswith(ours):
+        if not matchers or (not everywhere and not folder.startswith(ours)):
             continue
         try:
             state, tools = watch_session(transcript, 0, None, now, matchers)
         except OSError:
             continue  # unreadable and chainless: nothing to say about it
-        add(folder[len(ours):].strip("-") or root.name, stem, state,
-            tools, 0)
+        name = (folder if everywhere
+                else folder[len(ours):].strip("-") or root.name)
+        add(name, stem, state, tools, 0)
 
     return watch
 
 
 # --- Scan ---------------------------------------------------------------------
 
-def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
+def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
+              store=False):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
-    diffing, so an alarm belongs to the tick that caught it."""
+    diffing, so an alarm belongs to the tick that caught it.
+
+    Two universes, one walk: the store (ADR-0011 — root is the store's
+    receipts folder, drawers name their repos, the baseline lives
+    beside the store) or a legacy folder of repos under an explicit
+    --root."""
     now = datetime.now(timezone.utc)
-    baseline_path = root / BASELINE_NAME
+    if store:
+        os.makedirs(root.parent, exist_ok=True)
+        baseline_path = root.parent / "baseline.json"
+    else:
+        baseline_path = root / BASELINE_NAME
     remembered, keeper, note = read_baseline(baseline_path)
     events = []
     heads = {}
     families = {}
     # Walk in display order — repo, then session, then sibling sequence —
     # so the grouping below is plain insertion, no re-sorting.
-    census = sorted((chain_identity(root, log), log)
-                    for log in find_chains(root))
+    if store:
+        found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
+                        if not p.name.endswith(".anchors.jsonl"))
+                 if root.is_dir() else [])
+        census = sorted((store_identity(log), log) for log in found)
+    else:
+        census = sorted((chain_identity(root, log), log)
+                        for log in find_chains(root))
     repos = {}
     worst = 0
     for (repo, session, _), log in census:
@@ -679,7 +699,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
 
     for relpath in remembered:
         if relpath not in heads and not (root / relpath).exists():
-            repo_name, session, _ = chain_identity(root, root / relpath)
+            repo_name, session, _ = (store_identity(root / relpath) if store
+                                     else chain_identity(root, root / relpath))
             events.append({"repo": repo_name, "session": session,
                            "log": relpath, "change": "vanished",
                            "investigate": CHANGE_WORDS["vanished"]})
@@ -694,7 +715,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
     if events:
         worst = max(worst, 5)
 
-    completeness = watch_completeness(root, witness, families)
+    completeness = watch_completeness(root, witness, families,
+                                      everywhere=store)
     # Only a live alarm raises the exit: an ended deficit is evidence,
     # and a siren that never stops sounding trains the operator to
     # ignore the band (the dogfood's lesson).
@@ -705,7 +727,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
     baseline = {"file": baseline_path.as_posix(), "events": events}
     if note:
         baseline["note"] = note
+    report_note = None
+    if store and not repos:
+        report_note = (f"store empty at {root.as_posix()} — run "
+                       "`loxodonta install-hook` to wire recording, or "
+                       "scan a legacy layout with --root")
     return {
+        **({"note": report_note} if report_note else {}),
         "root": root.as_posix(),
         "exit": worst,
         "baseline": baseline,
@@ -719,11 +747,75 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
     }
 
 
+def adoption_project(root, log):
+    """Which project owns a legacy chain: the folder holding its
+    receipts/; a stranded worktree chain belongs to the repo the
+    worktree served; a receipts/ at the root's own top level means the
+    root itself is the project."""
+    parts = log.relative_to(root).parts
+    if ".claude" in parts:
+        idx = parts.index(".claude")
+        return root.joinpath(*parts[:idx]) if idx else root
+    if parts[0] == "receipts":
+        return root
+    return root / parts[0]
+
+
+def cmd_adopt(args):
+    """The one-time move of legacy chains into the store (ADR-0011).
+    Move, not copy — two copies of evidence is worse than one; the
+    chain, its anchor sidecars, and the folder's .unlisted marker
+    travel together; a name collision is refused and reported, never
+    overwritten; running it twice is a quiet no-op; --dry-run prints
+    the plan. Empty legacy folders are left for the operator to
+    prune."""
+    root = Path(args.root).resolve()
+    moves, refused = [], []
+    for log in find_chains(root):
+        project = adoption_project(root, log)
+        drawer = store_receipts() / project_slug(project)
+        (refused if (drawer / log.name).exists() else moves).append(
+            (log, drawer, project))
+    if not moves and not refused:
+        print(f"nothing to adopt under {root.as_posix()}")
+        return 0
+    for log, drawer, project in moves:
+        line = f"{log.relative_to(root).as_posix()} -> {drawer.name}/"
+        if args.dry_run:
+            print(f"would adopt {line}")
+            continue
+        os.makedirs(drawer, exist_ok=True)
+        record = drawer / "project.json"
+        if not record.exists():
+            record.write_text(json.dumps(
+                {"path": str(project.resolve()).replace(os.sep, "/")})
+                + "\n", encoding="utf-8")
+        sidecar = log.parent / (log.name + ".anchors.jsonl")
+        marker = log.parent / UNLISTED_NAME
+        shutil.move(str(log), str(drawer / log.name))
+        if sidecar.exists() and not (drawer / sidecar.name).exists():
+            shutil.move(str(sidecar), str(drawer / sidecar.name))
+        if marker.exists() and not (drawer / UNLISTED_NAME).exists():
+            shutil.copy2(str(marker), str(drawer / UNLISTED_NAME))
+        print(f"adopted {line}")
+    for log, drawer, _ in refused:
+        print(f"refused {log.relative_to(root).as_posix()}: "
+              f"{drawer.name}/{log.name} already exists in the store — "
+              "evidence is never overwritten; reconcile by hand")
+    if not args.dry_run and moves:
+        print(f"{len(moves)} chain(s) adopted into "
+              f"{store_receipts().as_posix()}")
+    return 0
+
+
 def cmd_scan(args):
-    report = scan_root(Path(args.root).resolve(),
+    store = args.root is None
+    root = store_receipts() if store else Path(args.root).resolve()
+    report = scan_root(root,
                        witness=Path(args.witness),
                        anchor_every=args.anchor_every,
-                       calendars=args.calendar or ())
+                       calendars=args.calendar or (),
+                       store=store)
     print(json.dumps(report, indent=None if args.json else 2))
     return report["exit"]
 
@@ -939,12 +1031,109 @@ def invoking_repo(args):
                              or Path.cwd()).resolve())
 
 
+def store_home():
+    """The machine-wide home of hook-written chains (ADR-0011):
+    ~/.loxodonta, or wherever LOXODONTA_HOME points. Duplicated from
+    loxodonta.py — like project_slug below, the two copies must agree,
+    and the recall tests hold them together behaviorally (hook in,
+    digest out)."""
+    return (os.environ.get("LOXODONTA_HOME")
+            or os.path.join(os.path.expanduser("~"), ".loxodonta"))
+
+
+def project_slug(project):
+    """The store drawer name for a project: basename plus 8 hex of the
+    normalized full path's SHA256 (ADR-0011)."""
+    p = os.path.abspath(str(project))
+    key = os.path.normcase(p).replace(os.sep, "/")
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    base = os.path.basename(p.rstrip("/\\")) or "root"
+    safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in base)
+    return f"{safe}-{digest}"
+
+
+def store_receipts():
+    return Path(store_home()) / "receipts"
+
+
+def drawer_chains(drawer):
+    return sorted(p for p in drawer.glob("receipts-*.jsonl")
+                  if not p.name.endswith(".anchors.jsonl"))
+
+
+def drawer_name(drawer):
+    """A drawer's display name: the project record's basename, else the
+    drawer's own slug — a damaged or missing record degrades the label,
+    never the census."""
+    try:
+        record = json.loads((Path(drawer) / "project.json").read_text(
+            encoding="utf-8"))
+        base = os.path.basename(str(record.get("path", "")).rstrip("/\\"))
+        return base or Path(drawer).name
+    except (OSError, ValueError):
+        return Path(drawer).name
+
+
+def store_identity(log):
+    """(repo, session, seq) for a chain in the store: the repo is the
+    drawer's display name; session and sibling sequence come from the
+    filename exactly as in the legacy layout."""
+    stem = log.stem
+    if stem.startswith("receipts-"):
+        stem = stem[len("receipts-"):]
+    session, seq = split_seq(stem)
+    return drawer_name(log.parent), session, seq
+
+
+def repo_label(log):
+    """The repo name a recall row prints for a chain, wherever it
+    lives: a store drawer labels itself; a legacy path is named by the
+    folder that holds its receipts/."""
+    parent = log.parent
+    if (parent / "project.json").exists() or parent.parent == store_receipts():
+        return drawer_name(parent)
+    return parent.parent.name
+
+
+def project_chains(repo):
+    """One project's chains, wherever they live: its store drawer
+    (ADR-0011) — or, when the drawer holds nothing yet (pre-adopt),
+    the legacy repo layout, so the transition never blanks anyone's
+    memory. The drawer outranks a stale legacy folder once it holds
+    anything."""
+    drawer = store_receipts() / project_slug(repo)
+    logs = drawer_chains(drawer) if drawer.is_dir() else []
+    return logs or repo_chains(repo)
+
+
 def recall_scope(args):
-    """The chains a recall command may read: the invoking repo's own,
-    plus — under --all — every repo under the root, minus unlisted
-    repos other than the invoking one. Unlisted is an output courtesy,
-    never a security boundary: the chains stay plain files."""
+    """The chains a recall command may read: the invoking project's
+    drawer in the store (ADR-0011) — or, when the drawer holds nothing
+    yet (pre-adopt), the legacy repo layout, so the transition never
+    blanks anyone's memory. Under --all, every drawer in the store (or
+    every repo under the legacy root), minus unlisted ones other than
+    our own. Unlisted is an output courtesy, never a security
+    boundary: the chains stay plain files."""
     repo = invoking_repo(args)
+    drawer = store_receipts() / project_slug(repo)
+    logs = drawer_chains(drawer) if drawer.is_dir() else []
+    if logs:
+        if getattr(args, "all", False):
+            known = set(logs)
+            for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
+                if log.name.endswith(".anchors.jsonl") or log in known:
+                    continue
+                if (log.parent / UNLISTED_NAME).exists() \
+                        and log.parent != drawer:
+                    continue
+                logs.append(log)
+        return repo, logs
+    return legacy_recall_scope(args, repo)
+
+
+def legacy_recall_scope(args, repo):
+    """The pre-store reading (kept for un-adopted layouts): the repo's
+    own receipts/, plus — under --all — every repo under the root."""
     logs = repo_chains(repo)
     if getattr(args, "all", False):
         root = Path(args.root or repo.parent).resolve()
@@ -1044,7 +1233,7 @@ def cmd_digest(args):
     all reachable, never all injected), budget-capped, zero subprocess
     spawns — recall owns no verdicts, so nothing here runs verify."""
     repo = invoking_repo(args)
-    families, rows = gather(repo_chains(repo))
+    families, rows = gather(project_chains(repo))
     if args.since:
         rows = [r for r in rows if r["ts"][:10] >= args.since]
     total = len(rows)
@@ -1187,7 +1376,7 @@ def cmd_search_cli(args):
     hits = []
     for log in logs:
         session = session_of(log)
-        repo_name = log.parent.parent.name
+        repo_name = repo_label(log)
         for entry in read_entries(log):
             if entry.get("n") == 0:
                 continue
@@ -2210,8 +2399,6 @@ def main(argv):
                                      description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     watching = argparse.ArgumentParser(add_help=False)
-    watching.add_argument("--root", required=True,
-                          help="the folder your repos live in")
     watching.add_argument("--witness", default=str(WITNESS_ROOT),
                           help="the harness transcript layout (the "
                                "liveness witness for completeness)")
@@ -2227,16 +2414,33 @@ def main(argv):
     scan = sub.add_parser(
         "scan", parents=[watching],
         help="one tick: census + verdicts, JSON out, exit code")
+    scan.add_argument("--root", default=None,
+                      help="legacy/explicit mode: scan this folder of "
+                           "repos instead of the store (default: the "
+                           "store, ADR-0011)")
     scan.add_argument("--json", action="store_true",
                       help="compact machine output (default pretty-prints)")
     scan.set_defaults(func=cmd_scan)
     serve = sub.add_parser(
         "serve", parents=[watching],
         help="the face: status band on a localhost-only server")
+    serve.add_argument("--root", required=True,
+                       help="the folder your repos live in (store-wide "
+                            "serving arrives with the dashboard arc, "
+                            "issue #48)")
     serve.add_argument("--port", type=int, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
     serve.set_defaults(func=cmd_serve)
+    adopt = sub.add_parser(
+        "adopt", help="one-time move of legacy chains into the store "
+                      "(ADR-0011): sidecars and .unlisted travel, "
+                      "nothing is ever overwritten")
+    adopt.add_argument("--root", required=True,
+                       help="the legacy folder of repos to adopt from")
+    adopt.add_argument("--dry-run", action="store_true",
+                       help="print the plan, move nothing")
+    adopt.set_defaults(func=cmd_adopt)
     drill = sub.add_parser(
         "drill", help="rehearse detection: four-way tamper battery on a "
                       "sandbox copy — real chains untouched")

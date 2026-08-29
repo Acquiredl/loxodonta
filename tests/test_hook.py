@@ -24,6 +24,7 @@ def run_hook(payload, cwd, *args, extra_env=None):
     # a test is exercising that resolution.
     env = dict(os.environ)
     env.pop("CLAUDE_PROJECT_DIR", None)
+    env.pop("LOXODONTA_HOME", None)
     # The decode below assumes UTF-8, so tell the child to emit UTF-8 —
     # otherwise a cp1252 console codepage on Windows breaks the agreement.
     env["PYTHONIOENCODING"] = "utf-8"
@@ -72,6 +73,18 @@ def payload(session="sess-1234abcd", tool="Write", tool_input=None):
         "tool_input": tool_input if tool_input is not None else {},
         "tool_response": {},
     }
+
+
+def drawer_of(store_home, project_name):
+    """The store subfolder for a project, found behaviorally: exactly one
+    drawer whose name is the project's basename plus a dash and 8 hex —
+    tests never re-implement the slug math."""
+    drawers = [p for p in (Path(store_home) / "receipts").iterdir()
+               if p.is_dir() and p.name.startswith(project_name + "-")]
+    assert len(drawers) == 1, [p.name for p in drawers]
+    suffix = drawers[0].name.rsplit("-", 1)[1]
+    assert len(suffix) == 8 and all(c in "0123456789abcdef" for c in suffix)
+    return drawers[0]
 
 
 class HookTest(unittest.TestCase):
@@ -211,24 +224,121 @@ class HookTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("Traceback", result.stderr)
 
-    def test_claude_project_dir_env_places_chains_without_any_flags(self):
+    def test_claude_project_dir_env_routes_chains_to_the_store(self):
         # The global wiring passes no arguments at all: the hook reads
         # CLAUDE_PROJECT_DIR from the environment (set by the harness) and
-        # logs to <project>/receipts. No shell expansion, so the same
-        # settings command works on every platform.
+        # logs to the store's drawer for that project (ADR-0011). No shell
+        # expansion, so the same settings command works on every platform.
         project = self.workdir / "someproject"
         project.mkdir()
+        store = self.workdir / "storehome"
 
         result = run_hook(
             payload(tool="Bash", tool_input={"command": "ls"}),
             self.workdir,  # cwd differs from the project dir on purpose
-            extra_env={"CLAUDE_PROJECT_DIR": str(project)},
+            extra_env={"CLAUDE_PROJECT_DIR": str(project),
+                       "LOXODONTA_HOME": str(store)},
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        log_dir = project / "receipts"
-        self.assertTrue((log_dir / "receipts-sess-1234abcd.jsonl").exists())
-        self.assertTrue((log_dir / ".gitignore").exists())
+        drawer = drawer_of(store, "someproject")
+        self.assertTrue((drawer / "receipts-sess-1234abcd.jsonl").exists())
+        self.assertFalse((project / "receipts").exists(),
+                         "nothing is written into the project any more")
+
+    def test_first_receipt_writes_the_project_record(self):
+        project = self.workdir / "someproject"
+        project.mkdir()
+        store = self.workdir / "storehome"
+        env = {"CLAUDE_PROJECT_DIR": str(project),
+               "LOXODONTA_HOME": str(store)}
+
+        run_hook(payload(session="sess-aaaa"), self.workdir, extra_env=env)
+        drawer = drawer_of(store, "someproject")
+        record = json.loads((drawer / "project.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(Path(record["path"]).resolve(), project.resolve())
+
+        # A second session appends beside the first and never rewrites
+        # the record.
+        before = (drawer / "project.json").read_bytes()
+        run_hook(payload(session="sess-bbbb"), self.workdir, extra_env=env)
+        self.assertEqual((drawer / "project.json").read_bytes(), before)
+        chains = sorted(p.name for p in drawer.glob("receipts-*.jsonl"))
+        self.assertEqual(chains, ["receipts-sess-aaaa.jsonl",
+                                  "receipts-sess-bbbb.jsonl"])
+
+    def test_store_receipt_fingerprints_files_relative_to_the_project(self):
+        # ADR-0012: the reference base is the project root, so a chain
+        # far away in the store still fingerprints the files the agent
+        # touched — the claim the old log-relative rule silently broke.
+        project = self.workdir / "someproject"
+        target = project / "src" / "main.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("print('hi')\n", encoding="utf-8")
+        store = self.workdir / "storehome"
+
+        result = run_hook(
+            payload(tool="Write", tool_input={"file_path": str(target)}),
+            self.workdir,
+            extra_env={"CLAUDE_PROJECT_DIR": str(project),
+                       "LOXODONTA_HOME": str(store)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        drawer = drawer_of(store, "someproject")
+        entries = [json.loads(line) for line in
+                   (drawer / "receipts-sess-1234abcd.jsonl").read_text(
+                       encoding="utf-8").splitlines()]
+        (ref,) = entries[1]["files"]
+        self.assertEqual(ref["path"], "src/main.py")
+        self.assertEqual(len(ref["sha256"]), 64)
+
+    def test_store_receipt_skips_files_outside_the_project(self):
+        # The boundary moved from the log's folder to the project, not
+        # to the machine (ADR-0012): an edit to something like the
+        # harness settings is recorded as an action, never fingerprinted.
+        project = self.workdir / "someproject"
+        project.mkdir()
+        outside = self.workdir / "elsewhere.txt"
+        outside.write_text("out\n", encoding="utf-8")
+        store = self.workdir / "storehome"
+
+        run_hook(
+            payload(tool="Write", tool_input={"file_path": str(outside)}),
+            self.workdir,
+            extra_env={"CLAUDE_PROJECT_DIR": str(project),
+                       "LOXODONTA_HOME": str(store)},
+        )
+
+        drawer = drawer_of(store, "someproject")
+        entries = [json.loads(line) for line in
+                   (drawer / "receipts-sess-1234abcd.jsonl").read_text(
+                       encoding="utf-8").splitlines()]
+        self.assertEqual(entries[1]["files"], [])
+        self.assertIn("elsewhere.txt", entries[1]["action"])
+
+    def test_two_projects_with_the_same_name_get_distinct_drawers(self):
+        # The slug carries a hash of the full path: two folders both named
+        # "app" can never interleave chains in one drawer (ADR-0011).
+        first = self.workdir / "clients" / "app"
+        second = self.workdir / "internal" / "app"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        store = self.workdir / "storehome"
+
+        run_hook(payload(session="sess-aaaa"), self.workdir,
+                 extra_env={"CLAUDE_PROJECT_DIR": str(first),
+                            "LOXODONTA_HOME": str(store)})
+        run_hook(payload(session="sess-bbbb"), self.workdir,
+                 extra_env={"CLAUDE_PROJECT_DIR": str(second),
+                            "LOXODONTA_HOME": str(store)})
+
+        drawers = sorted(p.name for p in (store / "receipts").iterdir()
+                         if p.is_dir())
+        self.assertEqual(len(drawers), 2, drawers)
+        self.assertTrue(all(d.startswith("app-") for d in drawers))
+        self.assertNotEqual(drawers[0], drawers[1])
 
     def test_explicit_log_dir_flag_outranks_the_env(self):
         result = run_hook(
@@ -288,19 +398,25 @@ class HookTest(unittest.TestCase):
 
 
 class HookWorktreeTest(unittest.TestCase):
-    """A session run in a git worktree must leave its chain in the main
-    repository, not in the worktree.
+    """A session run in a git worktree must leave its chain in its main
+    repository's drawer, never in the worktree.
 
     Worktrees are disposable by convention — pruned once their branch
     merges — so a chain written inside one is deleted by routine hygiene.
-    A flight recorder that stores recordings in the most disposable
-    directory on the machine loses exactly the sessions worth keeping.
+    With the store (ADR-0011) the resolution survives one step further:
+    the drawer is keyed by the *main repo's* path, so however many
+    worktrees a project runs, its history collects in one place.
     """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.workdir = Path(self._tmp.name)
+        self.store = self.workdir / "storehome"
+
+    def env_for(self, project):
+        return {"CLAUDE_PROJECT_DIR": str(project),
+                "LOXODONTA_HOME": str(self.store)}
 
     def make_worktree(self, main_name="mainrepo", worktree_name="feature"):
         """Lay out on disk exactly what `git worktree add` produces: the
@@ -318,70 +434,75 @@ class HookWorktreeTest(unittest.TestCase):
             f"gitdir: {gitdir.as_posix()}\n", encoding="utf-8")
         return main, worktree
 
-    def test_worktree_session_logs_to_the_main_repo(self):
+    def test_worktree_session_logs_to_the_main_repos_drawer(self):
         main, worktree = self.make_worktree()
 
         result = run_hook(
             payload(tool="Bash", tool_input={"command": "ls"}),
             self.workdir,
-            extra_env={"CLAUDE_PROJECT_DIR": str(worktree)},
+            extra_env=self.env_for(worktree),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        drawer = drawer_of(self.store, "mainrepo")
         self.assertTrue(
-            (main / "receipts" / "receipts-sess-1234abcd.jsonl").exists(),
-            "chain should land in the main repo",
+            (drawer / "receipts-sess-1234abcd.jsonl").exists(),
+            "chain should land in the main repo's drawer",
         )
+        record = json.loads((drawer / "project.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(Path(record["path"]).resolve(), main.resolve())
         self.assertFalse(
             (worktree / "receipts").exists(),
             "nothing should be written into the disposable worktree",
         )
 
-    def test_sessions_from_two_worktrees_collect_in_one_place(self):
-        main, first = self.make_worktree(worktree_name="feature-one")
+    def test_sessions_from_two_worktrees_collect_in_one_drawer(self):
+        _, first = self.make_worktree(worktree_name="feature-one")
         _, second = self.make_worktree(main_name="mainrepo",
                                        worktree_name="feature-two")
 
         run_hook(payload(session="sess-aaaa"), self.workdir,
-                 extra_env={"CLAUDE_PROJECT_DIR": str(first)})
+                 extra_env=self.env_for(first))
         run_hook(payload(session="sess-bbbb"), self.workdir,
-                 extra_env={"CLAUDE_PROJECT_DIR": str(second)})
+                 extra_env=self.env_for(second))
 
-        chains = sorted(p.name for p in (main / "receipts").glob("*.jsonl"))
+        drawer = drawer_of(self.store, "mainrepo")
+        chains = sorted(p.name for p in drawer.glob("receipts-*.jsonl"))
         self.assertEqual(
             chains, ["receipts-sess-aaaa.jsonl", "receipts-sess-bbbb.jsonl"])
 
-    def test_ordinary_repo_still_logs_to_its_own_root(self):
+    def test_ordinary_repo_gets_its_own_drawer(self):
         project = self.workdir / "plainrepo"
         (project / ".git").mkdir(parents=True)
 
         result = run_hook(
             payload(tool="Bash", tool_input={"command": "ls"}),
             self.workdir,
-            extra_env={"CLAUDE_PROJECT_DIR": str(project)},
+            extra_env=self.env_for(project),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(
-            (project / "receipts" / "receipts-sess-1234abcd.jsonl").exists())
+        drawer = drawer_of(self.store, "plainrepo")
+        self.assertTrue((drawer / "receipts-sess-1234abcd.jsonl").exists())
 
-    def test_project_outside_any_repo_still_logs(self):
+    def test_project_outside_any_repo_still_logs_to_the_store(self):
         project = self.workdir / "notarepo"
         project.mkdir()
 
         result = run_hook(
             payload(tool="Bash", tool_input={"command": "ls"}),
             self.workdir,
-            extra_env={"CLAUDE_PROJECT_DIR": str(project)},
+            extra_env=self.env_for(project),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(
-            (project / "receipts" / "receipts-sess-1234abcd.jsonl").exists())
+        drawer = drawer_of(self.store, "notarepo")
+        self.assertTrue((drawer / "receipts-sess-1234abcd.jsonl").exists())
 
     def test_unreadable_git_linkage_falls_back_to_the_project_dir(self):
         # Never fail a session over path layout (SPEC §8): a .git file the
-        # hook cannot follow degrades to logging in place.
+        # hook cannot follow degrades to the project dir's own drawer.
         project = self.workdir / "brokenlink"
         project.mkdir()
         (project / ".git").write_text("gitdir: nowhere-at-all\n",
@@ -390,25 +511,27 @@ class HookWorktreeTest(unittest.TestCase):
         result = run_hook(
             payload(tool="Bash", tool_input={"command": "ls"}),
             self.workdir,
-            extra_env={"CLAUDE_PROJECT_DIR": str(project)},
+            extra_env=self.env_for(project),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(
-            (project / "receipts" / "receipts-sess-1234abcd.jsonl").exists())
+        drawer = drawer_of(self.store, "brokenlink")
+        self.assertTrue((drawer / "receipts-sess-1234abcd.jsonl").exists())
 
-    def test_explicit_log_dir_flag_outranks_worktree_resolution(self):
+    def test_explicit_log_dir_flag_outranks_the_store(self):
         main, worktree = self.make_worktree()
 
         result = run_hook(
             payload(tool="Bash", tool_input={"command": "ls"}),
             self.workdir, "--log-dir", str(self.workdir / "chosen"),
-            extra_env={"CLAUDE_PROJECT_DIR": str(worktree)},
+            extra_env=self.env_for(worktree),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(
             (self.workdir / "chosen" / "receipts-sess-1234abcd.jsonl").exists())
+        self.assertFalse((self.store / "receipts").exists(),
+                         "an explicit --log-dir bypasses the store entirely")
         self.assertFalse((main / "receipts").exists())
 
 
