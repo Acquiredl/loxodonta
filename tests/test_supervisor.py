@@ -23,7 +23,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
-RECEIPTS = REPO_ROOT / "receipts.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
@@ -41,7 +41,7 @@ def ots_varint(n):
 
 def chain_head(log):
     return subprocess.run(
-        [sys.executable, str(RECEIPTS), "head", "--log", str(log)],
+        [sys.executable, str(LOXODONTA), "head", "--log", str(log)],
         capture_output=True, encoding="utf-8", check=True,
         env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
 
@@ -93,11 +93,11 @@ def make_chain(log_dir, session, entries=2):
     fixture — so the supervisor is tested against what the tool writes."""
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"receipts-{session}.jsonl"
-    subprocess.run([sys.executable, str(RECEIPTS), "init", "--log", str(log)],
+    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log", str(log)],
                    capture_output=True, check=True)
     for i in range(entries):
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", f"step {i}"],
             capture_output=True, check=True)
     return log
@@ -108,6 +108,210 @@ def chains_by_session(report):
     assertions while leaving the grouping itself observable."""
     return {(repo["repo"], sess["session"]): sess["chains"]
             for repo in report["repos"] for sess in repo["sessions"]}
+
+
+def run_store_scan(store_home, witness, *extra, env=None):
+    """`scan` with no --root: the store is the default universe
+    (ADR-0011), reached through LOXODONTA_HOME. The witness is always
+    pinned — store mode watches every transcript on the machine, so an
+    unpinned test would read the developer's real sessions."""
+    return subprocess.run(
+        [sys.executable, str(SUPERVISOR), "scan", "--json",
+         "--witness", str(witness), *extra],
+        capture_output=True, encoding="utf-8",
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8",
+             "LOXODONTA_HOME": str(store_home)})
+
+
+class StoreScanTest(unittest.TestCase):
+    """The census over the central store. Drawers are laid out by hand —
+    the scan never recomputes slugs, it reads what the store holds, so
+    these tests own the layout the same way the writer does."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / "storehome"
+        self.witness = Path(self._tmp.name) / "no-witness"
+        self.witness.mkdir()
+
+    def drawer(self, slug, project_path):
+        d = self.home / "receipts" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "project.json").write_text(
+            json.dumps({"path": str(project_path)}), encoding="utf-8")
+        return d
+
+    def test_scan_with_no_root_sweeps_the_store(self):
+        alpha = self.drawer("alpha-11111111", r"C:\work\alpha")
+        beta = self.drawer("beta-22222222", r"C:\work\beta")
+        make_chain(alpha, "sess-aaaa", entries=3)
+        make_chain(beta, "sess-bbbb")
+
+        result = run_store_scan(self.home, self.witness)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        sessions = chains_by_session(report)
+        self.assertIn(("alpha", "sess-aaaa"), sessions)
+        self.assertIn(("beta", "sess-bbbb"), sessions)
+        (chain,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "VALID")
+        self.assertEqual(chain["entries"], 4)
+
+    def test_store_scan_keeps_its_baseline_beside_the_store(self):
+        drawer = self.drawer("alpha-11111111", r"C:\work\alpha")
+        make_chain(drawer, "sess-aaaa")
+
+        run_store_scan(self.home, self.witness)
+
+        self.assertTrue((self.home / "baseline.json").exists(),
+                        "one baseline per machine, beside the store — "
+                        "not inside it (ADR-0011)")
+
+    def test_empty_store_scan_is_a_note_not_an_error(self):
+        result = run_store_scan(self.home, self.witness)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["repos"], [])
+        self.assertIn("install-hook", json.dumps(report),
+                      "an empty store tells the newcomer what wires it")
+
+    def test_drawer_without_record_still_scans_under_its_slug(self):
+        # A hand-made or damaged drawer (no project.json) is still
+        # someone's history: censused under the drawer's own name.
+        drawer = self.home / "receipts" / "mystery-33333333"
+        drawer.mkdir(parents=True)
+        make_chain(drawer, "sess-cccc")
+
+        result = run_store_scan(self.home, self.witness)
+
+        sessions = chains_by_session(json.loads(result.stdout))
+        self.assertIn(("mystery-33333333", "sess-cccc"), sessions)
+
+
+def run_adopt(store_home, root, *extra):
+    return subprocess.run(
+        [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root),
+         *extra],
+        capture_output=True, encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8",
+             "LOXODONTA_HOME": str(store_home)})
+
+
+class AdoptTest(unittest.TestCase):
+    """`supervisor adopt` (ADR-0011): the one-time move of legacy chains
+    into the store. Move not copy, sidecars and .unlisted travel,
+    nothing is ever overwritten, running it twice is a no-op."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+        self.home = Path(self._tmp.name) / "storehome"
+
+    def drawers(self):
+        receipts = self.home / "receipts"
+        return sorted(p.name for p in receipts.iterdir()) \
+            if receipts.is_dir() else []
+
+    def test_adopt_moves_chains_sidecars_and_unlisted_into_drawers(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+        (self.root / "alpha" / "receipts" / ".unlisted").write_text(
+            "", encoding="utf-8")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        names = self.drawers()
+        self.assertEqual(len(names), 2, names)
+        alpha = next(self.home / "receipts" / n for n in names
+                     if n.startswith("alpha-"))
+        self.assertTrue((alpha / "receipts-sess-aaaa.jsonl").exists())
+        self.assertTrue(
+            (alpha / "receipts-sess-aaaa.jsonl.anchors.jsonl").exists(),
+            "the proof travels with its chain")
+        self.assertTrue((alpha / ".unlisted").exists())
+        record = json.loads((alpha / "project.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(Path(record["path"]).resolve(),
+                         (self.root / "alpha").resolve())
+        self.assertFalse(
+            list((self.root / "alpha" / "receipts").glob("*.jsonl")),
+            "moved, not copied — two copies of evidence is worse than one")
+
+    def test_adopt_resolves_stranded_worktree_chains_to_the_main_repo(self):
+        make_chain(self.root / "alpha" / ".claude" / "worktrees" / "wt"
+                   / "receipts", "sess-stranded")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (name,) = self.drawers()
+        self.assertTrue(name.startswith("alpha-"), name)
+
+    def test_adopt_never_overwrites_and_reports_the_refusal(self):
+        # The same session name already in the drawer: evidence is never
+        # clobbered by housekeeping.
+        legacy = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        before = legacy.read_bytes()
+        first = run_adopt(self.home, self.root)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        # Forge a *different* chain under the same name back in the
+        # legacy spot.
+        clash = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                           entries=5)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertNotEqual(before, clash.read_bytes())
+        self.assertIn("refus", result.stdout.lower())
+        self.assertTrue(clash.exists(), "the refused chain stays put")
+        (name,) = self.drawers()
+        adopted = (self.home / "receipts" / name
+                   / "receipts-sess-aaaa.jsonl")
+        self.assertEqual(adopted.read_bytes(), before,
+                         "the adopted copy is untouched by the clash")
+
+    def test_adopt_twice_is_a_quiet_no_op(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_adopt(self.home, self.root)
+
+        again = run_adopt(self.home, self.root)
+
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("nothing to adopt", again.stdout.lower())
+
+    def test_dry_run_plans_and_moves_nothing(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run_adopt(self.home, self.root, "--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("sess-aaaa", result.stdout)
+        self.assertTrue(log.exists(), "dry-run moves nothing")
+        self.assertEqual(self.drawers(), [])
+
+    def test_adopted_chains_are_scanned_and_recalled(self):
+        # The move is an end-to-end success only if the store's readers
+        # pick the history up where it landed.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=3)
+        run_adopt(self.home, self.root)
+        witness = Path(self._tmp.name) / "no-witness"
+        witness.mkdir()
+
+        result = run_store_scan(self.home, witness)
+
+        sessions = chains_by_session(json.loads(result.stdout))
+        self.assertIn(("alpha", "sess-aaaa"), sessions)
+        (chain,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "VALID")
 
 
 class ScanCensusTest(unittest.TestCase):
@@ -395,7 +599,7 @@ class BaselineTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         first = run_scan(self.root)  # cold start seeds silently
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", "one more step"],
             capture_output=True, check=True)
 
@@ -415,14 +619,14 @@ class BaselineTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root)
         log.unlink()
-        subprocess.run([sys.executable, str(RECEIPTS), "init",
+        subprocess.run([sys.executable, str(LOXODONTA), "init",
                         "--log", str(log)], capture_output=True, check=True)
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", "innocent-looking work"],
             capture_output=True, check=True)
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "log", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", "nothing to see here"],
             capture_output=True, check=True)
 
@@ -524,7 +728,7 @@ def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash"):
     witness.mkdir(parents=True, exist_ok=True)
     (witness.parent / "settings.json").write_text(json.dumps({
         "hooks": {"PostToolUse": [{"matcher": matcher, "hooks": [
-            {"type": "command", "command": "python receipts.py hook"},
+            {"type": "command", "command": "python loxodonta.py hook"},
         ]}]},
     }), encoding="utf-8")
 
@@ -545,11 +749,16 @@ def write_transcript(witness, project, session, event_times=(),
         lines.append({"type": "assistant", "timestamp": ts, "message": {
             "content": [{"type": "tool_use", "id": use_id, "name": name}],
         }})
-        result = {"is_error": True} if failed else {"stdout": "ok"}
+        # Failure as the harness really writes it (field capture,
+        # 2026-08-29): toolUseResult collapses to a plain string and
+        # the error flag sits on the tool_result block, not the result.
+        result = "Error: Exit code 1\nboom" if failed else {"stdout": "ok"}
+        block = {"type": "tool_result", "tool_use_id": use_id}
+        if failed:
+            block["is_error"] = True
         lines.append({"type": "user", "timestamp": ts,
                       "toolUseResult": result, "message": {
-                          "content": [{"type": "tool_result",
-                                       "tool_use_id": use_id}]}})
+                          "content": [block]}})
 
     for i, ts in enumerate(event_times):
         event(i, ts, tool if isinstance(tool, str) else tool[i], False)
@@ -673,6 +882,24 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(chat["state"], "QUIET")
         self.assertEqual(chat["tools"], 0)
 
+    def test_a_failed_call_among_successes_owes_no_receipt(self):
+        # The calibration finding, live (2026-08-29): three commands
+        # succeeded and were receipted, one failed and fired no hook.
+        # The failure is witnessed in the transcript but owes nothing —
+        # counting it manufactures a phantom deficit that never clears.
+        make_chain(self.root / "alpha" / "receipts", "sess-mixed",
+                   entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-mixed",
+                         event_times=[ago(180), ago(170), ago(160)],
+                         error_times=[ago(165)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        mixed = self.states(result)["sess-mixed"]
+        self.assertEqual(mixed["tools"], 3)
+        self.assertEqual(mixed["deficit"], 0)
+
     def test_a_clean_end_clears_cleanly(self):
         make_chain(self.root / "alpha" / "receipts", "sess-done", entries=2)
         write_transcript(self.witness, self.root / "alpha", "sess-done",
@@ -768,7 +995,7 @@ class CompletenessTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout)
-        self.assertIn("no receipts hook", report["completeness"]["note"])
+        self.assertIn("no recorder hook", report["completeness"]["note"])
         self.assertEqual(self.states(result)["sess-aaaa"]["state"],
                          "UNWATCHED")
 
@@ -892,7 +1119,7 @@ class AnchorKeeperTest(unittest.TestCase):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "anchor", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
              "--calendar", calendar.url],
             capture_output=True, check=True, env=keeper_env())
         calendar.mode = "complete"
@@ -912,7 +1139,7 @@ class AnchorKeeperTest(unittest.TestCase):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         subprocess.run(
-            [sys.executable, str(RECEIPTS), "anchor", "--log", str(log),
+            [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
              "--calendar", calendar.url],
             capture_output=True, check=True, env=keeper_env())
 

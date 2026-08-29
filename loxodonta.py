@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""receipts — a tamper-evident, hash-chained receipt log for AI agent pipelines.
+"""loxodonta — a tamper-evident, hash-chained receipt log for AI agent pipelines.
 
 Stdlib only. Format spec: docs/SPEC.md (v0.1, frozen).
 """
@@ -65,7 +65,7 @@ def read_log(path):
 
 
 def missing_log(path):
-    print(f"error: {path} not found — run `receipts init` first", file=sys.stderr)
+    print(f"error: {path} not found — run `loxodonta init` first", file=sys.stderr)
     return 1
 
 
@@ -77,7 +77,7 @@ def missing_log(path):
 # does, because a harness fires one hook process per tool call and runs tool
 # calls in parallel — the integration supplies the mutual exclusion.
 
-LOCK_TIMEOUT_SECONDS = 10.0   # override: RECEIPTS_LOCK_TIMEOUT
+LOCK_TIMEOUT_SECONDS = 10.0   # override: LOXODONTA_LOCK_TIMEOUT
 LOCK_STALE_SECONDS = 60.0
 
 
@@ -87,7 +87,7 @@ class LockTimeout(Exception):
 
 def lock_timeout():
     try:
-        return float(os.environ.get("RECEIPTS_LOCK_TIMEOUT",
+        return float(os.environ.get("LOXODONTA_LOCK_TIMEOUT",
                                     LOCK_TIMEOUT_SECONDS))
     except ValueError:
         return LOCK_TIMEOUT_SECONDS
@@ -215,9 +215,32 @@ def sha256_file(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def file_reference(log_dir, raw_path):
-    """Build a {path, sha256} reference per SPEC §3. Paths are stored and
-    hashed relative to the log's directory."""
+def files_base(log):
+    """The directory file references resolve against (SPEC §3 as
+    amended v0.1.1, ADR-0012): the project named by a project record
+    beside the log (a store chain), else the log's own directory (a
+    local log at the project root — the two rules agree there).
+    Returns (base, problem): problem is the honest sentence when a
+    record exists but cannot lead anywhere."""
+    log_dir = os.path.dirname(os.path.abspath(log))
+    record = os.path.join(log_dir, "project.json")
+    if not os.path.exists(record):
+        return log_dir, None
+    try:
+        with open(record, encoding="utf-8") as f:
+            path = json.load(f).get("path")
+    except (OSError, ValueError):
+        return None, f"project record unreadable: {record}"
+    if isinstance(path, str) and os.path.isdir(path):
+        return path, None
+    return None, (f"project record points at a missing project ({path}) — "
+                  "references cannot be resolved")
+
+
+def file_reference(base, raw_path):
+    """Build a {path, sha256} reference per SPEC §3 (v0.1.1): paths are
+    stored and hashed relative to the reference base — the project
+    root, which for a local log is the log's own directory."""
     path = raw_path.replace("\\", "/")
     # SPEC §3: absolute and `..` paths are rejected, never silently rewritten —
     # a file outside the log's directory usually means the log is misplaced.
@@ -226,7 +249,7 @@ def file_reference(log_dir, raw_path):
     if ".." in path.split("/"):
         raise ValueError(f"path may not contain '..': {raw_path}")
     try:
-        sha256 = sha256_file(os.path.join(log_dir, path))
+        sha256 = sha256_file(os.path.join(base, path))
     except FileNotFoundError:
         raise ValueError(f"file not found: {raw_path}")
     return {"path": path, "sha256": sha256}
@@ -235,9 +258,12 @@ def file_reference(log_dir, raw_path):
 def append_entry(log, actor, action, file_paths):
     """Append one chained entry. Shared by `log` and `run` — run introduces
     no new schema fields (SPEC §7)."""
-    log_dir = os.path.dirname(os.path.abspath(log))
+    base, problem = files_base(log)
+    if problem and file_paths:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
     try:
-        files = [file_reference(log_dir, p) for p in file_paths]
+        files = [file_reference(base, p) for p in file_paths]
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -259,12 +285,12 @@ def append_locked(log, actor, action, files):
     except FileNotFoundError:
         return missing_log(log)
     if not lines:
-        print(f"error: {log} is empty — run `receipts init` first", file=sys.stderr)
+        print(f"error: {log} is empty — run `loxodonta init` first", file=sys.stderr)
         return 1
     # A new entry chains to the tail; a damaged tail cannot anchor one.
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {log} has a damaged final line — run `receipts verify` "
+        print(f"error: {log} has a damaged final line — run `loxodonta verify` "
               "(appending would bury the damage)", file=sys.stderr)
         return 1
 
@@ -331,7 +357,7 @@ def cmd_head(args):
     last = tail_entry(lines)
     if last is None:
         print(f"error: {args.log} has a damaged final line — run "
-              "`receipts verify` (a torn tail has no head to record)",
+              "`loxodonta verify` (a torn tail has no head to record)",
               file=sys.stderr)
         return 1
     print(last["entry_hash"])
@@ -551,7 +577,7 @@ def calendar_request(url, data=None):
     request = urllib.request.Request(
         url, data=data,
         headers={"Accept": "application/vnd.opentimestamps.v1",
-                 "User-Agent": "receipts"},
+                 "User-Agent": "loxodonta"},
     )
     with urllib.request.urlopen(request, timeout=15) as response:
         return response.read(MAX_PROOF_BYTES)
@@ -565,7 +591,7 @@ def cmd_anchor(args):
     except FileNotFoundError:
         return missing_log(args.log)
     if not lines:
-        print(f"error: {args.log} is empty — run `receipts init` first",
+        print(f"error: {args.log} is empty — run `loxodonta init` first",
               file=sys.stderr)
         return 1
     try:
@@ -574,7 +600,7 @@ def cmd_anchor(args):
         last = None
     if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
         print(f"error: {args.log} has a damaged final line — run "
-              "`receipts verify` before anchoring", file=sys.stderr)
+              "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
     head, n = last["entry_hash"], last["n"]
     digest = bytes.fromhex(head)
@@ -595,7 +621,7 @@ def cmd_anchor(args):
         print("error: no calendar accepted the digest — head not anchored",
               file=sys.stderr)
         return 1
-    print("proof is pending — run `receipts anchor --upgrade` "
+    print("proof is pending — run `loxodonta anchor --upgrade` "
           "after a few hours to complete it")
     return 0
 
@@ -604,7 +630,7 @@ def upgrade_anchors(args):
     records = read_anchor_records(args.log)
     if not records:
         print(f"error: no anchors found at {anchors_path(args.log)} — "
-              "run `receipts anchor` first", file=sys.stderr)
+              "run `loxodonta anchor` first", file=sys.stderr)
         return 1
     # A head+calendar pair that already has a completed record needs nothing.
     completed = set()
@@ -682,7 +708,7 @@ def check_anchors(log, entries):
     records = read_anchor_records(log)
     if records is None:
         print(f"NO-ANCHORS: {anchors_path(log)} not found — anchoring is "
-              "optional; run `receipts anchor` to add one")
+              "optional; run `loxodonta anchor` to add one")
         return False
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
 
@@ -721,7 +747,7 @@ def check_anchors(log, entries):
                 continue  # superseded by an upgraded record for the same head
             print(f"ANCHOR-PENDING: head {record['head'][:12]}… submitted "
                   f"{record.get('ts')} via {record.get('calendar')} — run "
-                  "`receipts anchor --upgrade`")
+                  "`loxodonta anchor --upgrade`")
         elif kind == "mismatch":
             bad = True
             print(f"ANCHOR-MISMATCH: anchored head {record.get('head')} "
@@ -834,10 +860,16 @@ def cmd_verify(args):
         for entry in entries:
             for ref in entry["files"]:
                 latest[ref["path"]] = ref["sha256"]
-        log_dir = os.path.dirname(os.path.abspath(args.log))
+        base, problem = files_base(args.log)
+        if problem:
+            # Honest unresolvability, a different sentence from "file
+            # diverged" (ADR-0012): the check could not run, and
+            # nothing is claimed about the files either way.
+            print(f"FILES-UNRESOLVED: {problem} — file checks skipped")
+            latest = {}
         for path in sorted(latest):
             try:
-                on_disk = sha256_file(os.path.join(log_dir, path))
+                on_disk = sha256_file(os.path.join(base, path))
             except FileNotFoundError:
                 print(f"MISSING (not on disk): {path}")
                 continue
@@ -909,11 +941,11 @@ def cmd_report(args):
     if breaks:
         print()
         print("chain integrity: BROKEN — this timeline is testimony only "
-              "(run `receipts verify` for the verdict)")
+              "(run `loxodonta verify` for the verdict)")
     return 0
 
 
-# `receipts explain` hands the mechanical facts to a language model for a
+# `loxodonta explain` hands the mechanical facts to a language model for a
 # plain-language narration and anomaly pass. The output is testimony, never
 # a verdict (ADR-0002): the chain's integrity is decided by verify alone.
 # The model is reached by piping a prompt to an external command — default
@@ -932,7 +964,7 @@ Write, for the human operator:
 ordering, repeated failures, files touched unexpectedly, integrity warnings.
 
 Be concrete and brief. You are testimony, not a verdict — the chain's \
-integrity is decided by `receipts verify`, not by you.
+integrity is decided by `loxodonta verify`, not by you.
 
 mechanical verdict:
 {verdict}
@@ -962,7 +994,7 @@ def cmd_explain(args):
     except FileNotFoundError:
         return missing_log(args.log)
     if not lines:
-        print(f"error: {args.log} is empty — run `receipts init` first",
+        print(f"error: {args.log} is empty — run `loxodonta init` first",
               file=sys.stderr)
         return 1
 
@@ -1002,7 +1034,7 @@ def cmd_explain(args):
         return 1
 
     print("narration (model testimony — the verdict comes from "
-          "`receipts verify`):")
+          "`loxodonta verify`):")
     print()
     print(completed.stdout.rstrip("\n"))
     return 0
@@ -1010,7 +1042,7 @@ def cmd_explain(args):
 
 # --- Harness hook (Stage C) ---------------------------------------------------
 #
-# `receipts hook` turns one Claude Code PostToolUse payload (JSON on stdin)
+# `loxodonta hook` turns one Claude Code PostToolUse payload (JSON on stdin)
 # into one chained entry. This is the completeness mechanism of SPEC §8:
 # the harness fires the hook on every tool call, so the log call sits
 # outside the writer's volition — the agent cannot skip its own receipt.
@@ -1068,6 +1100,45 @@ def main_repo_root(project):
         return root if os.path.isdir(root) else project
     except OSError:
         return project
+
+
+def store_home():
+    """The machine-wide home of hook-written chains (ADR-0011):
+    ~/.loxodonta, or wherever LOXODONTA_HOME points."""
+    return (os.environ.get("LOXODONTA_HOME")
+            or os.path.join(os.path.expanduser("~"), ".loxodonta"))
+
+
+def project_slug(project):
+    """The store drawer name for a project: its basename plus 8 hex of
+    the normalized full path's SHA256 — readable at a glance, and two
+    same-named projects can never share a drawer (ADR-0011). The math
+    must match supervisor.py's copy exactly; the recall tests hold the
+    two together behaviorally (hook in, digest out)."""
+    p = os.path.abspath(str(project))
+    key = os.path.normcase(p).replace(os.sep, "/")
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    base = os.path.basename(p.rstrip("/\\")) or "root"
+    safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in base)
+    return f"{safe}-{digest}"
+
+
+def record_project(log_dir, project):
+    """The drawer's project record (GLOSSARY): project.json, written on
+    the first receipt and never rewritten, holding the real path a
+    file reference resolves against (ADR-0012). Testimony like
+    everything else writer-reachable. Failure to write it must never
+    fail the session (SPEC §8)."""
+    record = os.path.join(log_dir, "project.json")
+    if os.path.exists(record):
+        return
+    try:
+        with open(record, "x", encoding="utf-8", newline="\n") as f:
+            json.dump({"path": os.path.abspath(project).replace(os.sep, "/")},
+                      f)
+            f.write("\n")
+    except OSError:
+        pass
 
 
 def chain_is_damaged(log):
@@ -1129,16 +1200,23 @@ def cmd_hook(args):
         return 1
 
     # Where chains live, most specific wins: an explicit --log-dir; else
-    # <project>/receipts via the CLAUDE_PROJECT_DIR variable the harness
-    # sets for hooks (read here in Python — no shell expansion, so one
-    # settings command works on every platform); else the working directory.
-    # When the project is a git worktree, the chain goes to the repository
-    # it belongs to rather than the disposable copy (see main_repo_root).
+    # the store's drawer for the project named by CLAUDE_PROJECT_DIR
+    # (ADR-0011 — read here in Python, no shell expansion, so one
+    # settings command works on every platform); else the working
+    # directory. When the project is a git worktree, the drawer belongs
+    # to the repository the worktree serves (see main_repo_root), so a
+    # project's history collects in one place however many worktrees it
+    # runs.
     log_dir = args.log_dir
+    project = None
     if log_dir is None:
-        project = os.environ.get("CLAUDE_PROJECT_DIR")
-        log_dir = (os.path.join(main_repo_root(project), "receipts")
-                   if project else ".")
+        env_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        if env_project:
+            project = main_repo_root(env_project)
+            log_dir = os.path.join(store_home(), "receipts",
+                                   project_slug(project))
+        else:
+            log_dir = "."
 
     # Session id becomes part of a filename: keep only safe characters.
     safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(session))
@@ -1153,6 +1231,8 @@ def cmd_hook(args):
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
+    if project is not None:
+        record_project(log_dir, project)
     # A damaged chain is not extended and not repaired — recording moves to
     # a sibling so the session keeps leaving receipts (ADR-0004).
     log = writable_chain(log_dir, safe)
@@ -1171,23 +1251,205 @@ def cmd_hook(args):
             action = f"{tool}: {one_line(value)}"
             break
 
-    # Fingerprint files the tool touched — when they sit under the log's
-    # directory and still exist. Anything else is skipped, never fatal:
-    # a hook that fails the session over path layout would teach the
-    # operator to turn the hook off.
-    log_dir_abs = os.path.dirname(os.path.abspath(log))
+    # Fingerprint files the tool touched — when they sit under the
+    # project (SPEC §3 as amended v0.1.1, ADR-0012) and still exist.
+    # The boundary is the project, not the machine: an edit outside it
+    # (harness settings, another repo) is recorded as an action, never
+    # fingerprinted. Anything else is skipped, never fatal: a hook that
+    # fails the session over path layout would teach the operator to
+    # turn the hook off.
+    base = (os.path.abspath(project) if project is not None
+            else os.path.dirname(os.path.abspath(log)))
     file_paths = []
     for key in ("file_path", "notebook_path"):
         raw = tool_input.get(key)
         if not isinstance(raw, str) or not raw:
             continue
         resolved = os.path.abspath(raw)
-        relative = os.path.relpath(resolved, log_dir_abs)
+        relative = os.path.relpath(resolved, base)
         if relative.split(os.sep)[0] == ".." or not os.path.isfile(resolved):
             continue
         file_paths.append(relative.replace(os.sep, "/"))
 
     return append_entry(log, args.actor, action, file_paths)
+
+
+# --- Hook installer -----------------------------------------------------------
+# `loxodonta install-hook` wires this machine's Claude Code into the
+# recorder: a PostToolUse hook so every tool call leaves a receipt, and —
+# when supervisor.py sits beside this file — a SessionStart hook so every
+# session starts with a recall digest of its repo's recent history.
+
+def load_settings(path):
+    """The user-level settings, or None with the complaint printed —
+    shared by install and uninstall so both refuse broken JSON the
+    same way instead of clobbering it."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"refusing to touch {path}: it is not valid JSON ({e}) — "
+              "fix it by hand first", file=sys.stderr)
+        return None
+
+
+def backup_settings(path):
+    if os.path.exists(path):
+        with open(path, "rb") as src, open(path + ".bak", "wb") as dst:
+            dst.write(src.read())
+        return True
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return False
+
+
+# Both the current name and the one this tool carried before the rename
+# (ADR-0010): an install from either era is recognised, never doubled.
+RECORDER_MARKERS = ("loxodonta.py", "receipts.py")
+DIGEST_MARKER = "supervisor.py"
+
+
+def cmd_install_hook(args):
+    """Merge the hooks into the user-level Claude Code settings,
+    idempotently and without clobbering anything already there. Each
+    hook is checked separately, so an older install gains what it is
+    missing on re-run. The commands carry no shell expansion — both
+    tools read CLAUDE_PROJECT_DIR themselves — and the digest is
+    fail-open: a short timeout, and a chainless repo renders nothing.
+    Restart open sessions afterwards: hooks load at start."""
+    python = sys.executable.replace(os.sep, "/")
+    here = os.path.dirname(os.path.abspath(__file__))
+    self_path = os.path.abspath(__file__).replace(os.sep, "/")
+    supervisor = os.path.join(here, "supervisor.py")
+    record = f'"{python}" "{self_path}" hook'
+    digest = f'"{python}" "{supervisor.replace(os.sep, "/")}" digest'
+    path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+
+    settings = load_settings(path)
+    if settings is None:
+        return 1
+    had_backup = backup_settings(path)
+
+    hooks = settings.setdefault("hooks", {})
+    installed = []
+
+    def heal(blocks, markers, command):
+        """Replace our hook commands whose script no longer exists —
+        the migration path after a rename or a move: honoring a
+        dangling command as 'already installed' would leave recording
+        silently dead. A command whose script is still on disk is
+        someone's working install and is left alone."""
+        count = 0
+        for block in blocks:
+            for hook in block.get("hooks", []):
+                old = hook.get("command", "")
+                if old == command or not any(m in old for m in markers):
+                    continue
+                try:
+                    script = next((p for p in shlex.split(old)
+                                   if any(m in p for m in markers)), None)
+                except ValueError:
+                    continue
+                if script and not os.path.isfile(script):
+                    hook["command"] = command
+                    count += 1
+        return count
+
+    post = hooks.setdefault("PostToolUse", [])
+    healed = heal(post, RECORDER_MARKERS, record)
+    if not any(marker in h.get("command", "")
+               for b in post for h in b.get("hooks", [])
+               for marker in RECORDER_MARKERS):
+        post.append({
+            # State-changing tools only — and every shell the harness
+            # offers: the desktop app on Windows runs most commands
+            # through a PowerShell tool, and a matcher without it
+            # sleeps through exactly the sessions it should record
+            # (found in the field: this repo's own launch left almost
+            # no receipts).
+            "matcher": "Edit|Write|NotebookEdit|Bash|PowerShell",
+            "hooks": [{"type": "command", "command": record}],
+        })
+        installed.append(f"PostToolUse: {record}")
+
+    if os.path.isfile(supervisor):
+        start = hooks.setdefault("SessionStart", [])
+        healed += heal(start, (DIGEST_MARKER,), digest)
+        if not any(DIGEST_MARKER in h.get("command", "")
+                   for b in start for h in b.get("hooks", [])):
+            start.append({
+                "matcher": "startup|clear|compact",
+                "hooks": [{"type": "command", "command": digest,
+                           "timeout": 5}],
+            })
+            installed.append(f"SessionStart: {digest}")
+    else:
+        print("note: supervisor.py not found beside this file — recorder "
+              "wired without the session-start digest; put supervisor.py "
+              "next to loxodonta.py and re-run to add it")
+
+    if not installed and not healed:
+        print(f"already installed in {path}")
+        return 0
+
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(settings, indent=2) + "\n")
+    print(f"installed in {path}"
+          + (" (previous version saved as settings.json.bak)"
+             if had_backup else ""))
+    for line in installed:
+        print(f"  {line}")
+    if healed:
+        print(f"  healed {healed} hook command(s) whose script had "
+              "moved — now pointing at this install")
+    print("every NEW Claude Code session on this machine now leaves a chain")
+    print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
+    print("drawer per project. Restart open sessions.")
+    return 0
+
+
+def cmd_uninstall_hook(args):
+    """Remove exactly our hooks — recorder (either era's name) and
+    digest — from the user-level settings, leaving everything else
+    untouched. The symmetric half of install-hook."""
+    path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    settings = load_settings(path)
+    if settings is None:
+        return 1
+    if not settings:
+        print("nothing installed: no user-level settings file")
+        return 0
+
+    ours = RECORDER_MARKERS + (DIGEST_MARKER,)
+    removed = []
+    hooks = settings.get("hooks", {})
+    for event in ("PostToolUse", "SessionStart"):
+        kept_blocks = []
+        for block in hooks.get(event, []):
+            entries = [h for h in block.get("hooks", [])
+                       if not any(marker in h.get("command", "")
+                                  for marker in ours)]
+            if len(entries) != len(block.get("hooks", [])):
+                removed.append(event)
+            if entries or "hooks" not in block:
+                block["hooks"] = entries
+                kept_blocks.append(block)
+        if kept_blocks:
+            hooks[event] = kept_blocks
+        elif event in hooks:
+            del hooks[event]
+
+    if not removed:
+        print(f"nothing of ours found in {path}")
+        return 0
+
+    backup_settings(path)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(settings, indent=2) + "\n")
+    print(f"removed from {path}: {', '.join(sorted(set(removed)))}"
+          " (previous version saved as settings.json.bak)")
+    return 0
 
 
 def head_record(value):
@@ -1201,7 +1463,7 @@ def head_record(value):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="receipts", description=__doc__)
+    parser = argparse.ArgumentParser(prog="loxodonta", description=__doc__)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--log", default=DEFAULT_LOG, help="receipt log path")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1262,6 +1524,15 @@ def main(argv=None):
                                 help="command the prompt is piped to "
                                      "(default: `claude -p`)")
     explain_parser.set_defaults(func=cmd_explain)
+    sub.add_parser(
+        "install-hook",
+        help="wire the Claude Code hooks machine-wide: every session "
+             "leaves receipts, and starts with a recall digest"
+        ).set_defaults(func=cmd_install_hook)
+    sub.add_parser(
+        "uninstall-hook",
+        help="remove exactly those hooks from the user settings again"
+        ).set_defaults(func=cmd_uninstall_hook)
 
     if argv is None:
         argv = sys.argv[1:]
@@ -1285,7 +1556,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except OSError as e:
-        # The reader hung up (`receipts report | head`) — no verdict was
+        # The reader hung up (`loxodonta report | head`) — no verdict was
         # asked of the lines that went unread; die quietly, not loudly.
         # (This exit 1 — like argparse's exit 2 for usage errors — reuses
         # a verdict number; scripts should trust the stdout verdict line,

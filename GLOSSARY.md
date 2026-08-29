@@ -79,7 +79,7 @@ The `entry_hash` of the last entry. Commits to the entire history — this is th
 
 ### File reference
 
-A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one file at log time. Paths are relative to the log's directory, forward slashes, sorted by path within the entry. Derived designs recording external evidence generalize this into the [source reference](#source-reference).
+A `{path, sha256}` pair inside an entry's `files` array: the fingerprint of one file at log time. Paths are relative to the **project root** (SPEC §3 as amended v0.1.1, ADR-0012 — originally the log's directory, a rule the hook's layout silently defeated), forward slashes, sorted by path within the entry. A [store](#store) chain resolves them through its [project record](#project-record); a local chain resolves against its own directory, which for a log at the project root is the same base. Derived designs recording external evidence generalize this into the [source reference](#source-reference).
 
 ### Verify
 
@@ -127,7 +127,15 @@ The short prefix of an entry's [entry hash](#entry-hash) (displayed at 8 hex cha
 
 ### Unlisted
 
-A repo-level visibility declaration for cross-repo [recall](#recall): a marker file beside the chains (`receipts/.unlisted`) meaning *this repo's entries never appear in recall rendered outside this repo*. Inside its own repo, recall works normally; the marker only governs `--all` surfaces (search, timeline). The default is listed — memory exists to be found, and the operator opts specific repos out. The [digest](#digest) needs no such control: it is local-only by construction, so injection cannot leak across repos. Note the honesty scope: unlisted is an output-rendering courtesy for the operator's own hygiene (e.g. keeping a private repo's name out of transcripts that feed public work), not a security boundary — the chains remain plain files any local process can read.
+A repo-level visibility declaration for cross-repo [recall](#recall): a marker file beside the chains (the project's [store](#store) subfolder; `receipts/.unlisted` in the legacy layout) meaning *this repo's entries never appear in recall rendered outside this repo*. Inside its own repo, recall works normally; the marker only governs `--all` surfaces (search, timeline). The default is listed — memory exists to be found, and the operator opts specific repos out. The [digest](#digest) needs no such control: it is local-only by construction, so injection cannot leak across repos. Note the honesty scope: unlisted is an output-rendering courtesy for the operator's own hygiene (e.g. keeping a private repo's name out of transcripts that feed public work), not a security boundary — the chains remain plain files any local process can read.
+
+### Store
+
+The one machine-wide home of every hook-written chain: `~/.loxodonta/receipts/<project-slug>/` (override: `LOXODONTA_HOME`), one subfolder per project, slug = `<basename>-<8 hex of the normalized project path's SHA256>` so two same-named projects can never share a drawer (ADR-0011). The store is the read side's unnamed default universe — `scan` with no arguments sweeps it; `--root` remains the explicit legacy mode. Chains in the store outlive their projects: the sessions most worth keeping are exactly the ones whose folder got deleted. The quickstart's cwd-local log is the deliberate exception — the sandbox stays touchable. Deleting the store is itself detectable from outside it: the baseline sits beside it, the witness lives at a different address, the anchor is unreachable.
+
+### Project record
+
+The small `project.json` written into a [store](#store) subfolder on first receipt, holding the project's real absolute path — what lets a [file reference](#file-reference) resolve years after the chain moved away from the work (ADR-0012). Writer-reachable, therefore [testimony](#testimony), trusted for nothing beyond pointing. Deliberately not called a manifest: that word is taken (ADR-0007).
 
 ### Tamper-evident
 

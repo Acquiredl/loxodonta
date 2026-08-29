@@ -1,0 +1,84 @@
+# Experiments — what was actually tested, and how it came out
+
+Claims in the README about agents using the chain are backed by runs,
+not intuition. This file is the record: protocol, numbers, and the
+caveats that keep the conclusions honest. Everything here was measured
+against this repo's real chains; the chains themselves are the ground
+truth the answers were graded against.
+
+## 1. Orientation test (2026-08, informal)
+
+Fresh agents had to orient in a repo from the chain, the git log, or
+both. The chain was the only source that caught work happening off
+main: a local branch never pushed, operations that produce no commit,
+the action in flight when the last session ended. Git log held its own
+on committed work. This shaped the README's framing: the chain doesn't
+replace git; it answers what git structurally can't.
+
+## 2. The recall quiz (2026-08-29, pre-registered)
+
+**Protocol.** Six questions about this repo's real history. Ground
+truth was derived from the chains and written down, with a scoring
+rubric (2 = correct and specific, 1 = partial or an honest "cannot
+determine" where the source truly can't know, 0 = wrong), *before* any
+agent launched. Four fresh agents, no session context, 15-tool-call
+budget each:
+
+- **Arm A** (×2): the session-start digest, the read-only recall
+  commands (`digest` / `show` / `search` / `timeline`), plus git and
+  the working tree.
+- **Arm B** (×2): git and the working tree only — the world without
+  the recorder. Told explicitly that an honest "cannot determine"
+  beats a guess.
+
+**Results.**
+
+| Agent | Sources | Score | Tool calls | Confabulations |
+|---|---|---|---|---|
+| A1 | digest + recall + git | 12/12 | 7 | 0 |
+| A2 | digest + recall + git | 12/12 | 8 | 0 |
+| B1 | git only | 10/12 | 4 | 0 |
+| B2 | git only | 10/12 | 2 | 0 |
+
+Both git-only agents dropped exactly the same two points — the two
+questions whose answers exist only in the chain: the sub-commit final
+action of a session (the chain knows the exact edit and minute; git's
+best answer is the nearest commit), and whether any recorded history
+is damaged (the chain shows a crash-truncated tail; git cannot see it).
+Both said "cannot determine" rather than guessing, so the measured
+difference is coverage, not honesty.
+
+The single best artifact: asked to name activity git cannot show, both
+digest agents independently produced a receipt recording an edit to a
+throwaway prototype in a since-pruned worktree — and showed that
+`git log --all` has no trace of that file on any branch, ever. The
+prototype's design survived into the supervisor; the record that it
+happened survives only in the receipts.
+
+**Caveats, stated plainly.** N = 2 per arm; one repo, and that repo
+builds the tool; all agents share a model family; the git-only arms
+were *faster* on git-visible facts (2–4 tool calls). The supported
+claim is precisely the README's — the chain answers what git can't —
+not "agents with the chain are faster". Productivity is a separate,
+harder experiment, deliberately not claimed here.
+
+## 3. The adversary battery (2026-08-29)
+
+Run against the public `main` snapshot with a copy of a real 118-entry
+chain, through the public CLI only:
+
+| Attack | Result | Exit |
+|---|---|---|
+| edit one entry's action | `BROKEN at entry 60: entry_hash does not match canonical form` | 1 |
+| delete a middle entry | `BROKEN at entry 60: sequence number is 61, expected 60` | 1 |
+| reorder two entries | `BROKEN at entry 40: sequence number is 41, expected 40` | 1 |
+| splice a forged entry | `BROKEN at entry 31: sequence number is 30, expected 31` | 1 |
+| regenerate (internally valid) | `VALID` — the documented gap | 0 |
+| regenerate vs recorded head | `HEAD-MISMATCH` | 3 |
+
+The automated drill agreed (4/4 alarms, exit 0), the baseline tripwire
+caught a chain regenerated between two scan ticks (exit 5), and `show`
+on a tampered entry refused to bless it (warning, exit 1). A separate
+fresh agent followed the README with no prior context; every recorder
+claim held as written — including, unplanned, the flagship one: the
+agent mistyped a `run` command, and the failure was receipted anyway.

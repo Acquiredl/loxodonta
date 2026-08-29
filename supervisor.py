@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """supervisor.py — the operator that never sleeps (ADR-0005).
 
-A reader-side companion to receipts.py: it watches every receipt log
+A reader-side companion to loxodonta.py: it watches every receipt log
 under a root full of repos and shouts on change — a tripwire with a
 memory, never a wall. It drives receipts exclusively through the public
-CLI and judges nothing itself: verdicts come from `receipts verify`,
+CLI and judges nothing itself: verdicts come from `loxodonta verify`,
 and everything the supervisor holds is writer-reachable, so nothing
 here is a head record (GLOSSARY: Supervisor, Baseline).
 
@@ -50,7 +50,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
-RECEIPTS = HERE / "receipts.py"
+LOXODONTA = HERE / "loxodonta.py"
 
 
 # --- Census -------------------------------------------------------------------
@@ -130,7 +130,7 @@ def verify(log):
     # errors="replace" because a verdict lost to a decode error is a
     # supervisor that missed its one job.
     result = subprocess.run(
-        [sys.executable, str(RECEIPTS), "verify", "--anchors",
+        [sys.executable, str(LOXODONTA), "verify", "--anchors",
          "--log", str(log)],
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
@@ -181,7 +181,7 @@ def superseded(log, detail):
 BASELINE_NAME = ".supervisor-baseline.json"
 
 INVESTIGATE = ("investigate — this memory is writer-reachable and decides "
-               "nothing; run receipts verify and check your anchors")
+               "nothing; run loxodonta verify and check your anchors")
 
 CHANGE_WORDS = {
     "rewritten": "the head seen last look is no longer in this chain's "
@@ -292,7 +292,7 @@ def sidecar_heads(sidecar):
 
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     """One chain's turn with the keeper, at most once per throttle
-    window: pending proofs are driven through `receipts anchor
+    window: pending proofs are driven through `loxodonta anchor
     --upgrade` (the record's own calendar; judgment stays with verify),
     and — only when the operator opted in with a cadence — a fresh head
     that has aged past it is anchored. Off by default: nothing leaves
@@ -306,7 +306,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     if sidecar.exists():
         finished = subprocess.run(
-            [sys.executable, str(RECEIPTS), "anchor", "--upgrade",
+            [sys.executable, str(LOXODONTA), "anchor", "--upgrade",
              "--log", str(log)],
             capture_output=True, encoding="utf-8", env=env)
         attempted = True
@@ -318,7 +318,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
         born = parse_when(entries[-1].get("ts"))
         ripe = born is not None and (now - born).total_seconds() >= cadence
         if head and ripe and head not in sidecar_heads(sidecar):
-            command = [sys.executable, str(RECEIPTS), "anchor",
+            command = [sys.executable, str(LOXODONTA), "anchor",
                        "--log", str(log)]
             for calendar in calendars:
                 command += ["--calendar", calendar]
@@ -395,7 +395,7 @@ WATCH_WORDS = {
     "UNWITNESSED": "no transcript pairs with this session — completeness "
                    "cannot be watched for it; nothing is assumed "
                    "either way.",
-    "UNWATCHED": "no receipts hook is wired into the harness settings — "
+    "UNWATCHED": "no recorder hook is wired into the harness settings — "
                  "nothing owes a receipt, so there is nothing to be "
                  "behind.",
 }
@@ -425,7 +425,10 @@ def hook_matchers(witness):
         commands = rule.get("hooks")
         wired = isinstance(commands, list) and any(
             isinstance(hook, dict)
-            and "receipts" in str(hook.get("command", ""))
+            # Either era's name (ADR-0010): an install that predates the
+            # rename still owes receipts, and is still watched.
+            and any(marker in str(hook.get("command", ""))
+                    for marker in ("receipts", "loxodonta"))
             for hook in commands)
         if wired:
             matchers.append(str(rule.get("matcher", "*")))
@@ -475,10 +478,15 @@ def read_witness(transcript, matchers):
                 continue
             if isinstance(result, dict) and result.get("is_error"):
                 continue
-            name = next((names.get(block.get("tool_use_id"))
-                         for block in blocks
-                         if isinstance(block, dict)
-                         and block.get("type") == "tool_result"), None)
+            found = next((block for block in blocks
+                          if isinstance(block, dict)
+                          and block.get("type") == "tool_result"), None)
+            if found is not None and found.get("is_error"):
+                # A failed call, as the harness really writes it: the
+                # result collapses to an error string and the flag sits
+                # on the tool_result block (field capture, 2026-08-29).
+                continue
+            name = names.get(found.get("tool_use_id")) if found else None
             if owes_receipt(name, matchers):
                 events.append(record.get("timestamp"))
     return events
@@ -527,10 +535,13 @@ def watch_session(transcript, receipts, last_receipt, now, matchers):
     return state, tools
 
 
-def watch_completeness(root, witness, families):
+def watch_completeness(root, witness, families, everywhere=False):
     """The completeness half of a tick: every census session paired with
     its transcript, plus witnessed sessions that never grew a chain at
-    all — the disabled-hook case the census alone can never see."""
+    all — the disabled-hook case the census alone can never see.
+    `everywhere` is store mode (ADR-0011): the store covers the whole
+    machine, so every witnessed project is this scan's business, not
+    just folders under one root."""
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
     ours = munge(root)
@@ -543,7 +554,7 @@ def watch_completeness(root, witness, families):
                          f"{witness.as_posix()}; completeness cannot be "
                          "watched this look")
     if witness.is_dir() and not matchers:
-        watch["note"] = ("no receipts hook is wired into the harness "
+        watch["note"] = ("no recorder hook is wired into the harness "
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
 
@@ -580,35 +591,52 @@ def watch_completeness(root, witness, families):
     # best name the witness has for the project.
     for stem, transcript in transcripts.items():
         folder = transcript.parent.name
-        if not matchers or not folder.startswith(ours):
+        if not matchers or (not everywhere and not folder.startswith(ours)):
             continue
         try:
             state, tools = watch_session(transcript, 0, None, now, matchers)
         except OSError:
             continue  # unreadable and chainless: nothing to say about it
-        add(folder[len(ours):].strip("-") or root.name, stem, state,
-            tools, 0)
+        name = (folder if everywhere
+                else folder[len(ours):].strip("-") or root.name)
+        add(name, stem, state, tools, 0)
 
     return watch
 
 
 # --- Scan ---------------------------------------------------------------------
 
-def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
+def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
+              store=False):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
-    diffing, so an alarm belongs to the tick that caught it."""
+    diffing, so an alarm belongs to the tick that caught it.
+
+    Two universes, one walk: the store (ADR-0011 — root is the store's
+    receipts folder, drawers name their repos, the baseline lives
+    beside the store) or a legacy folder of repos under an explicit
+    --root."""
     now = datetime.now(timezone.utc)
-    baseline_path = root / BASELINE_NAME
+    if store:
+        os.makedirs(root.parent, exist_ok=True)
+        baseline_path = root.parent / "baseline.json"
+    else:
+        baseline_path = root / BASELINE_NAME
     remembered, keeper, note = read_baseline(baseline_path)
     events = []
     heads = {}
     families = {}
     # Walk in display order — repo, then session, then sibling sequence —
     # so the grouping below is plain insertion, no re-sorting.
-    census = sorted((chain_identity(root, log), log)
-                    for log in find_chains(root))
+    if store:
+        found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
+                        if not p.name.endswith(".anchors.jsonl"))
+                 if root.is_dir() else [])
+        census = sorted((store_identity(log), log) for log in found)
+    else:
+        census = sorted((chain_identity(root, log), log)
+                        for log in find_chains(root))
     repos = {}
     worst = 0
     for (repo, session, _), log in census:
@@ -671,7 +699,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
 
     for relpath in remembered:
         if relpath not in heads and not (root / relpath).exists():
-            repo_name, session, _ = chain_identity(root, root / relpath)
+            repo_name, session, _ = (store_identity(root / relpath) if store
+                                     else chain_identity(root, root / relpath))
             events.append({"repo": repo_name, "session": session,
                            "log": relpath, "change": "vanished",
                            "investigate": CHANGE_WORDS["vanished"]})
@@ -686,7 +715,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
     if events:
         worst = max(worst, 5)
 
-    completeness = watch_completeness(root, witness, families)
+    completeness = watch_completeness(root, witness, families,
+                                      everywhere=store)
     # Only a live alarm raises the exit: an ended deficit is evidence,
     # and a siren that never stops sounding trains the operator to
     # ignore the band (the dogfood's lesson).
@@ -697,8 +727,15 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
     baseline = {"file": baseline_path.as_posix(), "events": events}
     if note:
         baseline["note"] = note
+    report_note = None
+    if store and not repos:
+        report_note = (f"store empty at {root.as_posix()} — run "
+                       "`loxodonta install-hook` to wire recording, or "
+                       "scan a legacy layout with --root")
     return {
+        **({"note": report_note} if report_note else {}),
         "root": root.as_posix(),
+        "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "exit": worst,
         "baseline": baseline,
         "completeness": completeness,
@@ -711,11 +748,75 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=()):
     }
 
 
+def adoption_project(root, log):
+    """Which project owns a legacy chain: the folder holding its
+    receipts/; a stranded worktree chain belongs to the repo the
+    worktree served; a receipts/ at the root's own top level means the
+    root itself is the project."""
+    parts = log.relative_to(root).parts
+    if ".claude" in parts:
+        idx = parts.index(".claude")
+        return root.joinpath(*parts[:idx]) if idx else root
+    if parts[0] == "receipts":
+        return root
+    return root / parts[0]
+
+
+def cmd_adopt(args):
+    """The one-time move of legacy chains into the store (ADR-0011).
+    Move, not copy — two copies of evidence is worse than one; the
+    chain, its anchor sidecars, and the folder's .unlisted marker
+    travel together; a name collision is refused and reported, never
+    overwritten; running it twice is a quiet no-op; --dry-run prints
+    the plan. Empty legacy folders are left for the operator to
+    prune."""
+    root = Path(args.root).resolve()
+    moves, refused = [], []
+    for log in find_chains(root):
+        project = adoption_project(root, log)
+        drawer = store_receipts() / project_slug(project)
+        (refused if (drawer / log.name).exists() else moves).append(
+            (log, drawer, project))
+    if not moves and not refused:
+        print(f"nothing to adopt under {root.as_posix()}")
+        return 0
+    for log, drawer, project in moves:
+        line = f"{log.relative_to(root).as_posix()} -> {drawer.name}/"
+        if args.dry_run:
+            print(f"would adopt {line}")
+            continue
+        os.makedirs(drawer, exist_ok=True)
+        record = drawer / "project.json"
+        if not record.exists():
+            record.write_text(json.dumps(
+                {"path": str(project.resolve()).replace(os.sep, "/")})
+                + "\n", encoding="utf-8")
+        sidecar = log.parent / (log.name + ".anchors.jsonl")
+        marker = log.parent / UNLISTED_NAME
+        shutil.move(str(log), str(drawer / log.name))
+        if sidecar.exists() and not (drawer / sidecar.name).exists():
+            shutil.move(str(sidecar), str(drawer / sidecar.name))
+        if marker.exists() and not (drawer / UNLISTED_NAME).exists():
+            shutil.copy2(str(marker), str(drawer / UNLISTED_NAME))
+        print(f"adopted {line}")
+    for log, drawer, _ in refused:
+        print(f"refused {log.relative_to(root).as_posix()}: "
+              f"{drawer.name}/{log.name} already exists in the store — "
+              "evidence is never overwritten; reconcile by hand")
+    if not args.dry_run and moves:
+        print(f"{len(moves)} chain(s) adopted into "
+              f"{store_receipts().as_posix()}")
+    return 0
+
+
 def cmd_scan(args):
-    report = scan_root(Path(args.root).resolve(),
+    store = args.root is None
+    root = store_receipts() if store else Path(args.root).resolve()
+    report = scan_root(root,
                        witness=Path(args.witness),
                        anchor_every=args.anchor_every,
-                       calendars=args.calendar or ())
+                       calendars=args.calendar or (),
+                       store=store)
     print(json.dumps(report, indent=None if args.json else 2))
     return report["exit"]
 
@@ -727,7 +828,7 @@ def cmd_scan(args):
 # writer-supplied testimony and says so, exactly as `report` does.
 
 TESTIMONY = ("testimony, not a verdict — what was attempted, as the writer "
-             "told it; run receipts verify for the verdict")
+             "told it; run loxodonta verify for the verdict")
 
 
 def mentions(entries, needle):
@@ -747,21 +848,34 @@ def mentions(entries, needle):
     return False
 
 
-def recall_root(root, repo=None, since=None, until=None, path=None):
+def universe(root, store):
+    """(repo, session, seq, log) for every chain in the serving
+    universe: the store's drawers, or a legacy folder of repos under an
+    explicit --root (ADR-0011/0013)."""
+    if store:
+        found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
+                        if not p.name.endswith(".anchors.jsonl"))
+                 if root.is_dir() else [])
+        return [(*store_identity(log), log) for log in found]
+    return [(*chain_identity(root, log), log) for log in find_chains(root)]
+
+
+def recall_root(root, repo=None, since=None, until=None, path=None,
+                store=False):
     """The timeline: one story per session, sibling chains folded in
     (ADR-0004 — one session, one story), newest first. Dates compare as
     ISO prefixes; a session is in range when its span overlaps."""
     stories = {}
-    for log in find_chains(root):
-        repo_name, session, _ = chain_identity(root, log)
+    for repo_name, session, _, log in universe(root, store):
         if repo and repo_name != repo:
             continue
         entries = read_entries(log)
         story = stories.setdefault((repo_name, session), {
             "repo": repo_name, "session": session, "chains": [],
-            "entries": 0, "started": None, "ended": None,
+            "paths": [], "entries": 0, "started": None, "ended": None,
             "worktree": False, "_touched": False})
         story["chains"].append(log.name)
+        story["paths"].append(log.relative_to(root).as_posix())
         story["entries"] += len(entries)
         story["worktree"] = (story["worktree"]
                              or ".claude" in log.relative_to(root).parts)
@@ -841,7 +955,7 @@ def walk_chain(root, asked):
 SEARCH_CAP = 500  # hits returned; `matched` still counts every one
 
 
-def search_root(root, query):
+def search_root(root, query, store=False):
     """Free-text search over action lines, machine-wide. Finds what was
     *written* — the writer's word, testimony like all of recall — and
     hands back the context the timeline links on. Newest first; an empty
@@ -849,8 +963,7 @@ def search_root(root, query):
     needle = (query or "").lower()
     hits = []
     if needle:
-        for log in find_chains(root):
-            repo_name, session, _ = chain_identity(root, log)
+        for repo_name, session, _, log in universe(root, store):
             for entry in read_entries(log):
                 action = str(entry.get("action", ""))
                 if needle in action.lower():
@@ -900,17 +1013,140 @@ def session_of(log):
     return session
 
 
+def main_repo_of(project):
+    """A git worktree holds no chains: the hook writes them to the
+    repository the worktree belongs to (receipts.main_repo_root — this
+    is its reader-side twin, same file walk). A worktree's `.git` is a
+    file reading `gitdir: <main>/.git/worktrees/<name>`, and that
+    directory's `commondir` points back at `<main>/.git`. Anything
+    unexpected returns `project` unchanged — recall never fails over
+    path layout."""
+    dot_git = project / ".git"
+    if not dot_git.is_file():
+        return project  # a normal checkout (.git/ dir), or not a repo
+    try:
+        line = dot_git.read_text(encoding="utf-8").strip()
+        if not line.startswith("gitdir:"):
+            return project
+        gitdir = Path(line[len("gitdir:"):].strip())
+        if not gitdir.is_absolute():
+            gitdir = project / gitdir
+        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        root = Path(os.path.normpath(gitdir / common)).parent
+        return root if root.is_dir() else project
+    except OSError:
+        return project
+
+
 def invoking_repo(args):
-    return Path(args.repo or os.environ.get("CLAUDE_PROJECT_DIR")
-                or Path.cwd()).resolve()
+    return main_repo_of(Path(args.repo
+                             or os.environ.get("CLAUDE_PROJECT_DIR")
+                             or Path.cwd()).resolve())
+
+
+def store_home():
+    """The machine-wide home of hook-written chains (ADR-0011):
+    ~/.loxodonta, or wherever LOXODONTA_HOME points. Duplicated from
+    loxodonta.py — like project_slug below, the two copies must agree,
+    and the recall tests hold them together behaviorally (hook in,
+    digest out)."""
+    return (os.environ.get("LOXODONTA_HOME")
+            or os.path.join(os.path.expanduser("~"), ".loxodonta"))
+
+
+def project_slug(project):
+    """The store drawer name for a project: basename plus 8 hex of the
+    normalized full path's SHA256 (ADR-0011)."""
+    p = os.path.abspath(str(project))
+    key = os.path.normcase(p).replace(os.sep, "/")
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    base = os.path.basename(p.rstrip("/\\")) or "root"
+    safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in base)
+    return f"{safe}-{digest}"
+
+
+def store_receipts():
+    return Path(store_home()) / "receipts"
+
+
+def drawer_chains(drawer):
+    return sorted(p for p in drawer.glob("receipts-*.jsonl")
+                  if not p.name.endswith(".anchors.jsonl"))
+
+
+def drawer_name(drawer):
+    """A drawer's display name: the project record's basename, else the
+    drawer's own slug — a damaged or missing record degrades the label,
+    never the census."""
+    try:
+        record = json.loads((Path(drawer) / "project.json").read_text(
+            encoding="utf-8"))
+        base = os.path.basename(str(record.get("path", "")).rstrip("/\\"))
+        return base or Path(drawer).name
+    except (OSError, ValueError):
+        return Path(drawer).name
+
+
+def store_identity(log):
+    """(repo, session, seq) for a chain in the store: the repo is the
+    drawer's display name; session and sibling sequence come from the
+    filename exactly as in the legacy layout."""
+    stem = log.stem
+    if stem.startswith("receipts-"):
+        stem = stem[len("receipts-"):]
+    session, seq = split_seq(stem)
+    return drawer_name(log.parent), session, seq
+
+
+def repo_label(log):
+    """The repo name a recall row prints for a chain, wherever it
+    lives: a store drawer labels itself; a legacy path is named by the
+    folder that holds its receipts/."""
+    parent = log.parent
+    if (parent / "project.json").exists() or parent.parent == store_receipts():
+        return drawer_name(parent)
+    return parent.parent.name
+
+
+def project_chains(repo):
+    """One project's chains, wherever they live: its store drawer
+    (ADR-0011) — or, when the drawer holds nothing yet (pre-adopt),
+    the legacy repo layout, so the transition never blanks anyone's
+    memory. The drawer outranks a stale legacy folder once it holds
+    anything."""
+    drawer = store_receipts() / project_slug(repo)
+    logs = drawer_chains(drawer) if drawer.is_dir() else []
+    return logs or repo_chains(repo)
 
 
 def recall_scope(args):
-    """The chains a recall command may read: the invoking repo's own,
-    plus — under --all — every repo under the root, minus unlisted
-    repos other than the invoking one. Unlisted is an output courtesy,
-    never a security boundary: the chains stay plain files."""
+    """The chains a recall command may read: the invoking project's
+    drawer in the store (ADR-0011) — or, when the drawer holds nothing
+    yet (pre-adopt), the legacy repo layout, so the transition never
+    blanks anyone's memory. Under --all, every drawer in the store (or
+    every repo under the legacy root), minus unlisted ones other than
+    our own. Unlisted is an output courtesy, never a security
+    boundary: the chains stay plain files."""
     repo = invoking_repo(args)
+    drawer = store_receipts() / project_slug(repo)
+    logs = drawer_chains(drawer) if drawer.is_dir() else []
+    if logs:
+        if getattr(args, "all", False):
+            known = set(logs)
+            for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
+                if log.name.endswith(".anchors.jsonl") or log in known:
+                    continue
+                if (log.parent / UNLISTED_NAME).exists() \
+                        and log.parent != drawer:
+                    continue
+                logs.append(log)
+        return repo, logs
+    return legacy_recall_scope(args, repo)
+
+
+def legacy_recall_scope(args, repo):
+    """The pre-store reading (kept for un-adopted layouts): the repo's
+    own receipts/, plus — under --all — every repo under the root."""
     logs = repo_chains(repo)
     if getattr(args, "all", False):
         root = Path(args.root or repo.parent).resolve()
@@ -1010,7 +1246,7 @@ def cmd_digest(args):
     all reachable, never all injected), budget-capped, zero subprocess
     spawns — recall owns no verdicts, so nothing here runs verify."""
     repo = invoking_repo(args)
-    families, rows = gather(repo_chains(repo))
+    families, rows = gather(project_chains(repo))
     if args.since:
         rows = [r for r in rows if r["ts"][:10] >= args.since]
     total = len(rows)
@@ -1034,10 +1270,10 @@ def cmd_digest(args):
             summary = ", ".join(f"{n} {v}"
                                 for v, n in sorted(counts.items()))
         lines.append(f"last scan: {scanned} - {summary} "
-                     "(testimony; run receipts verify to judge)")
+                     "(testimony; run loxodonta verify to judge)")
     else:
         lines.append("last scan: none recorded - "
-                     "run receipts verify for a verdict")
+                     "run loxodonta verify for a verdict")
 
     groups = {}
     for row in shown:
@@ -1138,7 +1374,7 @@ def cmd_show(args):
     if not verified:
         print("WARNING: this entry does not verify against its own hash - "
               "the chain is damaged or edited here; run "
-              f"receipts verify --log {log.as_posix()}", file=sys.stderr)
+              f"loxodonta verify --log {log.as_posix()}", file=sys.stderr)
         return 1
     return 0
 
@@ -1153,7 +1389,7 @@ def cmd_search_cli(args):
     hits = []
     for log in logs:
         session = session_of(log)
-        repo_name = log.parent.parent.name
+        repo_name = repo_label(log)
         for entry in read_entries(log):
             if entry.get("n") == 0:
                 continue
@@ -1218,7 +1454,7 @@ REHEARSAL = ("rehearsal on sandbox copies — nothing here is a verdict "
 
 def receipts_cli(*args):
     return subprocess.run(
-        [sys.executable, str(RECEIPTS), *args],
+        [sys.executable, str(LOXODONTA), *args],
         capture_output=True, encoding="utf-8",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
@@ -1309,7 +1545,7 @@ def cmd_drill(args):
 # The face. Serialization only, zero decisions (ADR-0005): requests are
 # answered from the newest scan no older than the tick, and the page
 # below renders what the scan said — verdicts still come from
-# `receipts verify`, nowhere else.
+# `loxodonta verify`, nowhere else.
 
 # How long one scan's answer stays the answer. The batching clause of
 # ADR-0005 — one verify per chain per tick, never per HTTP request —
@@ -1330,7 +1566,8 @@ class Watchtower(ThreadingHTTPServer):
                     or time.monotonic() - self.scan_at >= SCAN_TTL_SECONDS):
                 report = scan_root(self.root, witness=self.witness,
                                    anchor_every=self.anchor_every,
-                                   calendars=self.calendars)
+                                   calendars=self.calendars,
+                                   store=self.store)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
             return self.scan_body
@@ -1351,7 +1588,8 @@ class Face(BaseHTTPRequestHandler):
                                  repo=asked.get("repo") or None,
                                  since=asked.get("from") or None,
                                  until=asked.get("to") or None,
-                                 path=asked.get("path") or None)
+                                 path=asked.get("path") or None,
+                                 store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/api/chain":
@@ -1366,7 +1604,8 @@ class Face(BaseHTTPRequestHandler):
         elif url.path == "/api/search":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
-            report = search_root(self.server.root, asked.get("q"))
+            report = search_root(self.server.root, asked.get("q"),
+                                 store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/checklist":
@@ -1402,11 +1641,13 @@ class Face(BaseHTTPRequestHandler):
 
 
 def cmd_serve(args):
-    root = Path(args.root).resolve()
+    store = args.root is None
+    root = store_receipts() if store else Path(args.root).resolve()
     # 127.0.0.1 is the whole posture: nothing about this machine's
     # activity is ever offered to another one.
     server = Watchtower(("127.0.0.1", args.port), Face)
     server.root = root
+    server.store = store
     server.witness = Path(args.witness)
     server.anchor_every = args.anchor_every
     server.calendars = args.calendar or ()
@@ -1437,7 +1678,8 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>supervisor — recall</title>
+<title>loxodonta — supervisor</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐘</text></svg>">
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, sans-serif; max-width: 64rem;
@@ -1445,10 +1687,48 @@ PAGE = """<!doctype html>
   header h1 { margin-bottom: 0.2rem; }
   header .stance { color: color-mix(in srgb, currentColor 60%, transparent);
                    margin-top: 0; }
-  #summary { padding: 0.6rem 1rem; border-radius: 0.5rem; margin: 1rem 0;
-             font-weight: 600; border: 1px solid transparent; }
-  #summary.quiet { background: #1d7a3e22; border-color: #1d7a3e; }
-  #summary.shouting { background: #b3261e22; border-color: #b3261e; }
+  /* The wordmark and the elephant are decoration, never information:
+     aria-hidden in the markup, and every state must read without them. */
+  .wordmark { font-family: ui-monospace, Consolas, monospace;
+              font-size: clamp(5px, 1.1vw, 9px); line-height: 1.15;
+              margin: 0 0 0.3rem; opacity: 0.8; overflow-x: auto;
+              user-select: none; }
+
+  /* The verdict strip: one condition, huge. Red is "not the recorded
+     history" or receipts stopping mid-session; amber is damage or a
+     tripwire event; green is the state the operator sees most mornings
+     — designed, not empty. */
+  #strip { padding: 1rem 1.2rem; border-radius: 0.6rem; margin: 1rem 0;
+           border: 2px solid color-mix(in srgb, currentColor 25%, transparent); }
+  #strip .state { font-size: 1.45rem; font-weight: 800; margin: 0;
+                  letter-spacing: 0.01em; }
+  #strip .why { margin: 0.25rem 0 0; opacity: 0.85; }
+  #strip.green { background: #1d7a3e1f; border-color: #1d7a3e; }
+  #strip.amber { background: #b453091f; border-color: #b45309; }
+  #strip.red { background: #b3261e22; border-color: #b3261e; }
+  #freshness { display: block; margin-top: 0.35rem; font-size: 0.8rem;
+               opacity: 0.7; font-variant-numeric: tabular-nums; }
+  #elephant { font-family: ui-monospace, Consolas, monospace;
+              font-size: 0.85rem; line-height: 1.1; margin: 0.5rem 0 0;
+              opacity: 0.75; user-select: none; }
+
+  /* The drawers: one tile per project, worst claim first, click for
+     that project's timeline. */
+  #tiles { display: grid; gap: 0.7rem; margin: 0.8rem 0;
+           grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); }
+  .tile { text-align: left; font: inherit; color: inherit; cursor: pointer;
+          display: flex; flex-direction: column; gap: 0.35rem;
+          padding: 0.7rem 0.9rem; border-radius: 0.6rem;
+          border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+          background: color-mix(in srgb, currentColor 5%, transparent); }
+  .tile:hover, .tile:focus-visible {
+          border-color: color-mix(in srgb, currentColor 60%, transparent); }
+  .tile .name { font-weight: 700; font-size: 1.05rem;
+                overflow-wrap: anywhere; }
+  .tile .meta { font-size: 0.82rem; opacity: 0.8;
+                font-variant-numeric: tabular-nums; }
+  .tile .row { display: flex; flex-wrap: wrap; gap: 0.5rem;
+               align-items: baseline; }
   h2 { border-bottom: 1px solid color-mix(in srgb, currentColor 25%, transparent);
        padding-bottom: 0.2rem; margin-top: 2rem; }
   .testimony { font-style: italic; margin-top: -0.4rem;
@@ -1594,11 +1874,46 @@ PAGE = """<!doctype html>
 </head>
 <body>
 <header>
+  <pre class="wordmark" aria-hidden="true">
+db       .d88b.  db    db  .d88b.  d8888b.  .d88b.  d8b   db d888888b  .d8b.
+88      .8P  Y8. `8b  d8' .8P  Y8. 88  `8D .8P  Y8. 888o  88 `~~88~~' d8' `8b
+88      88    88  `8bd8'  88    88 88   88 88    88 88V8o 88    88    88ooo88
+88      88    88  .dPYb.  88    88 88   88 88    88 88 V8o88    88    88~~~88
+88booo. `8b  d8' .8P  Y8. `8b  d8' 88  .8D `8b  d8' 88  V888    88    88   88
+Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</pre>
   <h1>supervisor</h1>
   <p class="stance">a tripwire with a memory — verdicts come from
   <code>receipts verify</code>; this page draws them and decides nothing</p>
 </header>
-<div id="summary">reading the scan…</div>
+<div id="strip">
+  <p class="state" id="stateline">reading the scan…</p>
+  <p class="why" id="statewhy"></p>
+  <span id="freshness"></span>
+  <pre id="elephant" aria-hidden="true" hidden>
+       __ ___
+   .--'  `   `''--..   ,-.
+  /   ()            `-'  /
+ |      ___.....____,--'`
+  \\    /       |    |
+  |    |       |    |
+  J    L       J    L
+ (__,__)      (__,__)</pre>
+</div>
+
+<section id="drawers">
+  <h2>drawers</h2>
+  <p class="testimony">one per project — the worst claim leads; click a
+  drawer for that project's timeline</p>
+  <div id="tiles">remembering…</div>
+</section>
+
+<section id="events">
+  <h2>events</h2>
+  <p class="testimony">what changed since the last look, and which
+  sessions are behind their witness — reasons to look, never verdicts</p>
+  <div id="tripwire"></div>
+  <div id="watch"></div>
+</section>
 
 <section id="recall">
   <h2>recall</h2>
@@ -1629,8 +1944,6 @@ PAGE = """<!doctype html>
 
 <section id="alarms">
   <h2>status band</h2>
-  <div id="tripwire"></div>
-  <div id="watch"></div>
   <div id="band"></div>
 </section>
 <section id="firedrill" hidden>
@@ -1729,25 +2042,131 @@ function chainRow(chain) {
   return row;
 }
 
-function render(report) {
-  const summary = document.getElementById("summary");
+// The verdict strip: one condition, stated huge, ordered by the tier
+// language — "not the recorded history" and a mid-session silence read
+// red; damage and tripwire events read amber; everything else is the
+// designed quiet state (the elephant's one appearance).
+function renderStrip(report) {
+  const strip = document.getElementById("strip");
+  const state = document.getElementById("stateline");
+  const why = document.getElementById("statewhy");
   const chains = report.repos.flatMap(r =>
     r.sessions.flatMap(s => s.chains));
-  const quietEvidence = chains.filter(c => c.superseded).length;
+  const live = report.completeness.sessions.filter(s =>
+    ["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state));
+  const regenerated = chains.filter(c => !c.superseded && c.exit === 3);
+  const broken = chains.filter(c => !c.superseded &&
+                                    c.verdict === "BROKEN");
   const changes = report.baseline.events.length;
-  if (report.exit === 0) {
-    summary.className = "quiet";
-    summary.textContent = "all quiet — " + chains.length + " chain(s) " +
-      "under " + report.root +
-      (quietEvidence ? " (" + quietEvidence + " superseded tear(s) kept " +
-                       "as evidence)" : "");
+  const quietEvidence = chains.filter(c => c.superseded).length;
+  let colour;
+  if (regenerated.length) {
+    colour = "red";
+    state.textContent = "NOT THE RECORDED HISTORY";
+    why.textContent = regenerated.length + " chain(s) contradict an " +
+      "anchor or head record — the gravest claim this page can carry";
+  } else if (live.length) {
+    colour = "red";
+    state.textContent = "RECEIPTS STOPPED ARRIVING";
+    why.textContent = live.length + " session(s) visibly active while " +
+      "the chain goes quiet — investigate while it is live";
+  } else if (broken.length || changes || report.exit !== 0) {
+    colour = "amber";
+    state.textContent = broken.length ? "HISTORY WAS ALTERED"
+                                      : "CHANGED SINCE LAST LOOK";
+    why.textContent = (broken.length
+      ? broken.length + " chain(s) fail verification — "
+      : "") + (changes
+      ? changes + " change(s) the baseline cannot explain as appends"
+      : "details in the band below") +
+      " (scan exit " + report.exit + ")";
   } else {
-    summary.className = "shouting";
-    summary.textContent = "attention — something under " + report.root +
-      " demands it" +
-      (changes ? " — " + changes + " change(s) since the last look" : "") +
-      " (scan exit: " + report.exit + ")";
+    colour = "green";
+    state.textContent = "all quiet";
+    why.textContent = chains.length + " chain(s), every receipt " +
+      "accounted for" +
+      (quietEvidence ? " — " + quietEvidence + " superseded tear(s) " +
+                       "kept as quiet evidence" : "");
   }
+  strip.className = colour;
+  document.getElementById("elephant").hidden = colour !== "green";
+  const freshness = document.getElementById("freshness");
+  freshness.textContent = "last scan " +
+    (report.scanned ? since(report.scanned) + " ago" : "just now") +
+    " · this page refreshes every 30s";
+}
+
+// The drawers: one tile per project, built from the scan (verdicts,
+// anchors) and the timeline (spans, session counts) together.
+let lastStatus = null;
+let lastRecall = null;
+
+function worstTier(chains) {
+  const ladder = ["regenerated", "broken", "refused", "valid",
+                  "anchored", "superseded"];
+  const rungs = chains.map(tier);
+  for (const rung of ladder) {
+    if (rungs.includes(rung)) return rung;
+  }
+  return "valid";
+}
+
+function openDrawer(repo) {
+  document.getElementById("ask-repo").value = repo;
+  loadRecall();
+  document.getElementById("recall")
+    .scrollIntoView({behavior: "smooth"});
+}
+
+function renderTiles() {
+  if (!lastStatus) return;
+  const tiles = document.getElementById("tiles");
+  tiles.replaceChildren();
+  const spans = {};
+  for (const story of (lastRecall ? lastRecall.sessions : [])) {
+    const span = spans[story.repo] = spans[story.repo] ||
+      {sessions: 0, ended: null};
+    span.sessions += 1;
+    if (story.ended && (!span.ended || story.ended > span.ended)) {
+      span.ended = story.ended;
+    }
+  }
+  for (const repo of lastStatus.repos) {
+    const chains = repo.sessions.flatMap(s => s.chains);
+    const rung = worstTier(chains);
+    const tile = el("button", "tile tier-" + rung);
+    tile.type = "button";
+    tile.appendChild(el("span", "name", repo.repo));
+    const row = el("span", "row");
+    const face = chains.find(c => tier(c) === rung) || {};
+    row.appendChild(el("span", "chip", CHIP[rung](face)));
+    if (chains.some(c => c.anchored)) {
+      row.appendChild(el("span", "badge", "anchored"));
+    } else if (chains.some(c =>
+        (c.anchors && c.anchors.pending || []).length)) {
+      row.appendChild(el("span", "badge", "anchor pending"));
+    }
+    tile.appendChild(row);
+    const span = spans[repo.repo];
+    tile.appendChild(el("span", "meta",
+      (span ? span.sessions : repo.sessions.length) + " session(s) · " +
+      chains.length + " chain(s)" +
+      (span && span.ended ? " · last activity " + since(span.ended) +
+                            " ago" : "")));
+    tile.addEventListener("click", () => openDrawer(repo.repo));
+    tiles.appendChild(tile);
+  }
+  if (!lastStatus.repos.length) {
+    tiles.appendChild(el("p", "",
+      "no drawers yet — wire recording with loxodonta install-hook " +
+      "and receipts will appear here."));
+  }
+}
+
+function render(report) {
+  lastStatus = report;
+  renderStrip(report);
+  renderTiles();
 
   const tripwire = document.getElementById("tripwire");
   tripwire.replaceChildren();
@@ -1772,15 +2191,30 @@ function render(report) {
   const LIVE = ["ALARM-SILENT", "ALARM-DEFICIT"];
   const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "SURPLUS", "LAGGING",
                                   "IDLE-DEFICIT"]);
-  for (const s of report.completeness.sessions) {
-    if (!NOTEWORTHY.includes(s.state)) continue;
+  const watchRow = s => {
     const live = LIVE.includes(s.state);
     const row = el("div", "watch-row " + (live ? "live" : "quiet"));
     row.appendChild(el("span", "chip", s.state));
     row.appendChild(el("span", "file", s.repo + " · " + s.session +
       " · witnessed " + s.tools + ", received " + s.receipts));
     if (s.words) row.appendChild(el("p", "claim", s.words));
-    watch.appendChild(row);
+    return row;
+  };
+  // Live alarms are the signal; ended deficits are evidence, and a
+  // machine's worth of history must never bury the one live row —
+  // the quiet ones fold away, present but not shouting.
+  const noteworthy = report.completeness.sessions.filter(
+    s => NOTEWORTHY.includes(s.state));
+  for (const s of noteworthy.filter(s => LIVE.includes(s.state))) {
+    watch.appendChild(watchRow(s));
+  }
+  const quiet = noteworthy.filter(s => !LIVE.includes(s.state));
+  if (quiet.length) {
+    const fold = el("details");
+    fold.appendChild(el("summary", "", quiet.length +
+      " quieter finding(s) — deficits ended and flags, kept as evidence"));
+    for (const s of quiet) fold.appendChild(watchRow(s));
+    watch.appendChild(fold);
   }
   if (report.completeness.note) {
     watch.appendChild(el("p", "claim", report.completeness.note));
@@ -2046,6 +2480,16 @@ function storyRow(story) {
     row.appendChild(el("p", "sibling", story.chains.length +
       " chains — recording continued in a sibling"));
   }
+  // The last rung of the ladder: a story opens its own entries in the
+  // walker, hashes rechecked in the reader's browser.
+  for (const path of story.paths || []) {
+    const walk = el("button", "walk",
+      story.paths.length > 1 ? "walk " + path.split("/").pop()
+                             : "walk this session");
+    walk.type = "button";
+    walk.addEventListener("click", () => openWalker(path));
+    row.appendChild(walk);
+  }
   return row;
 }
 
@@ -2075,7 +2519,12 @@ function asked() {
 async function loadRecall() {
   try {
     const response = await fetch("/api/recall" + asked());
-    renderRecall(await response.json());
+    const report = await response.json();
+    // The tiles want the unfiltered picture; only a filter-free answer
+    // updates their memory of it.
+    if (!asked()) lastRecall = report;
+    renderRecall(report);
+    renderTiles();
   } catch (error) {
     document.getElementById("timeline").textContent =
       "recall did not answer: " + error;
@@ -2146,9 +2595,12 @@ async function loadStatus() {
     const response = await fetch("/api/status");
     render(await response.json());
   } catch (error) {
-    const summary = document.getElementById("summary");
-    summary.className = "shouting";
-    summary.textContent = "the scan did not answer: " + error;
+    const strip = document.getElementById("strip");
+    strip.className = "red";
+    document.getElementById("stateline").textContent =
+      "the scan did not answer";
+    document.getElementById("statewhy").textContent = String(error);
+    document.getElementById("elephant").hidden = true;
   }
 }
 
@@ -2176,8 +2628,6 @@ def main(argv):
                                      description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     watching = argparse.ArgumentParser(add_help=False)
-    watching.add_argument("--root", required=True,
-                          help="the folder your repos live in")
     watching.add_argument("--witness", default=str(WITNESS_ROOT),
                           help="the harness transcript layout (the "
                                "liveness witness for completeness)")
@@ -2193,16 +2643,33 @@ def main(argv):
     scan = sub.add_parser(
         "scan", parents=[watching],
         help="one tick: census + verdicts, JSON out, exit code")
+    scan.add_argument("--root", default=None,
+                      help="legacy/explicit mode: scan this folder of "
+                           "repos instead of the store (default: the "
+                           "store, ADR-0011)")
     scan.add_argument("--json", action="store_true",
                       help="compact machine output (default pretty-prints)")
     scan.set_defaults(func=cmd_scan)
     serve = sub.add_parser(
         "serve", parents=[watching],
         help="the face: status band on a localhost-only server")
+    serve.add_argument("--root", default=None,
+                       help="legacy/explicit mode: serve this folder of "
+                            "repos instead of the store (default: the "
+                            "store, ADR-0011)")
     serve.add_argument("--port", type=int, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
     serve.set_defaults(func=cmd_serve)
+    adopt = sub.add_parser(
+        "adopt", help="one-time move of legacy chains into the store "
+                      "(ADR-0011): sidecars and .unlisted travel, "
+                      "nothing is ever overwritten")
+    adopt.add_argument("--root", required=True,
+                       help="the legacy folder of repos to adopt from")
+    adopt.add_argument("--dry-run", action="store_true",
+                       help="print the plan, move nothing")
+    adopt.set_defaults(func=cmd_adopt)
     drill = sub.add_parser(
         "drill", help="rehearse detection: four-way tamper battery on a "
                       "sandbox copy — real chains untouched")

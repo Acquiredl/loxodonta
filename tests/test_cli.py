@@ -1,6 +1,6 @@
 """Behavioral tests for the receipts CLI.
 
-Every test drives the public CLI surface (subprocess on receipts.py) and
+Every test drives the public CLI surface (subprocess on loxodonta.py) and
 asserts on stdout, exit codes, and file state — never internals. See
 docs/SPEC.md; entries, genesis, canonical form, and verdicts are defined
 there.
@@ -16,12 +16,12 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RECEIPTS = REPO_ROOT / "receipts.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
 def spec_hash(entry_without_hash):
     """Independent SPEC §4 canonicalization — deliberately reimplemented here,
-    never imported from receipts.py, so tests prove the tool matches the spec
+    never imported from loxodonta.py, so tests prove the tool matches the spec
     rather than matching itself."""
     canonical = json.dumps(
         entry_without_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -35,7 +35,7 @@ def run_receipts(*args, cwd):
     parent). `text=True` alone decodes with the locale codec — cp1252 on
     Windows — which crashes on the UTF-8 the golden fixture emits."""
     return subprocess.run(
-        [sys.executable, str(RECEIPTS), *args],
+        [sys.executable, str(LOXODONTA), *args],
         cwd=cwd,
         capture_output=True,
         encoding="utf-8",
@@ -433,6 +433,60 @@ class FileReferenceTest(ReceiptsCliTest):
 
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("CURRENT: report.md", result.stdout)
+
+
+class ProjectRecordFilesTest(ReceiptsCliTest):
+    """SPEC §3 as amended v0.1.1 (ADR-0012): a chain that lives beside a
+    project record resolves file references against the recorded
+    project, not against its own directory — the rule that lets a store
+    chain fingerprint the files its project actually holds."""
+
+    def drawer_log(self):
+        project = self.workdir / "theproject"
+        project.mkdir(exist_ok=True)
+        drawer = self.workdir / "drawer"
+        drawer.mkdir(exist_ok=True)
+        (drawer / "project.json").write_text(
+            json.dumps({"path": str(project).replace("\\", "/")}),
+            encoding="utf-8")
+        return project, drawer / "receipts-sess-rec.jsonl"
+
+    def test_log_and_verify_files_resolve_through_the_record(self):
+        project, log = self.drawer_log()
+        (project / "report.md").write_text("original\n", encoding="utf-8")
+        run_receipts("init", "--log", str(log), cwd=self.workdir)
+        result = run_receipts(
+            "log", "--log", str(log), "--actor", "agent",
+            "--action", "wrote report", "--file", "report.md",
+            cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        (project / "report.md").write_text("changed after\n",
+                                           encoding="utf-8")
+        verify = run_receipts("verify", "--log", str(log), "--files",
+                              cwd=self.workdir)
+        self.assertEqual(verify.returncode, 2, verify.stdout + verify.stderr)
+        self.assertIn("MODIFIED-SINCE-LOGGED", verify.stdout)
+
+    def test_dangling_record_reports_unresolved_not_diverged(self):
+        project, log = self.drawer_log()
+        (project / "report.md").write_text("original\n", encoding="utf-8")
+        run_receipts("init", "--log", str(log), cwd=self.workdir)
+        run_receipts("log", "--log", str(log), "--actor", "agent",
+                     "--action", "wrote report", "--file", "report.md",
+                     cwd=self.workdir)
+        # The project moves away; the record dangles. That is honest
+        # unresolvability, a different sentence from "file diverged".
+        (project / "report.md").unlink()
+        project.rmdir()
+
+        verify = run_receipts("verify", "--log", str(log), "--files",
+                              cwd=self.workdir)
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertIn("FILES-UNRESOLVED", verify.stdout)
+        self.assertNotIn("MODIFIED-SINCE-LOGGED", verify.stdout)
+        self.assertNotIn("FILES-DIVERGED", verify.stdout)
+        self.assertIn("VALID", verify.stdout)
 
 
 class HeadTest(ReceiptsCliTest):
@@ -978,7 +1032,7 @@ class BrokenPipeTest(ReceiptsCliTest):
         )
 
         process = subprocess.Popen(
-            [sys.executable, str(RECEIPTS), "report"],
+            [sys.executable, str(LOXODONTA), "report"],
             cwd=self.workdir,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

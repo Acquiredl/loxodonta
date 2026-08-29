@@ -4,39 +4,40 @@
 
 > **Status: work in progress.** I chose to publish this early rather than polish it privately. The code is real and the test suite holds every claim below, but this README has not had its final editing pass — some sections will still be rewritten. Read it as an honest draft.
 
-**receipts** is a flight recorder for AI agents. I run agents on my machine all day, and at some point the obvious question hit me: if anyone ever asks "what exactly did the agent do", all I have is a plain log file. And a plain log proves nothing. Anyone can edit it after the fact, delete the embarrassing line, backdate an entry. Including the agent itself, which has filesystem access and every reason to look good.
+**loxodonta** is a flight recorder for AI agents. I run agents on my machine all day, and at some point the obvious question hit me: if anyone ever asks "what exactly did the agent do", all I have is a plain log file. And a plain log proves nothing. Anyone can edit it after the fact, delete the embarrassing line, backdate an entry. Including the agent itself, which has filesystem access and every reason to look good.
 
 So this tool makes every action an agent takes leave a receipt, and every receipt contains the SHA256 hash of the one before it. That single change turns a log into a hash chain: edit, delete, or reorder any line and every later hash stops matching. One command tells you whether history was touched. Not prevented, detected. That distinction matters and the docs never blur it: this is tamper-evident, not immutable.
+
+In practice that means you can review what your agents ran while you were away — every tool call joins the chain, and later you can see where, why order matters, and how a session actually spent its time. And because the hook fires outside the agent's control, the record survives the case that worried me into building this: a prompt-injected session. Unless an attack specifically disables the recorder, it keeps logging — and the action that disables it is itself a tool call, so the last receipt before the silence is the kill command. The watching layer below alarms on the silence that follows.
 
 It's one Python file, no dependencies, six core commands, and you can read the whole thing top to bottom in a sitting. That's a design constraint, not an accident: a tool whose job is auditing agents should itself be auditable in an afternoon.
 
 ## what a recorded task actually looks like
 
-Here's a real slice from one of my own sessions building this repo. A Claude Code hook writes a receipt for every tool call, so the chain ends up being a timeline of how the task evolved, without the agent getting a vote:
+A Claude Code hook writes a receipt for every tool call, so a chain ends up being a timeline of how a task evolved, without the agent getting a vote. Here's a short real excerpt from a session building this repo — tests written first, code edited until they pass, then the merge:
 
 ```
 160  17:53:23Z  claude-code: Bash: cat >> tests/test_supervisor.py << 'EOF' class WalkFindingsTest...
 161  17:53:31Z  claude-code: Edit: supervisor.py
-164  17:53:43Z  claude-code: Edit: supervisor.py
-165  17:53:53Z  claude-code: Bash: python -m unittest tests.test_supervisor.WalkFindingsTest
-171  17:54:51Z  claude-code: Edit: supervisor.py
-174  17:55:09Z  claude-code: Bash: python -m unittest tests.test_serve.ScanBatchingTest ...
 176  17:55:21Z  claude-code: Bash: python -m unittest discover -s tests -q
 179  17:58:31Z  claude-code: Bash: git checkout -b claude/supervisor-walk-fixes && git commit ...
 181  18:17:16Z  claude-code: Bash: gh pr merge 37 --merge
 ```
 
-You can read the whole story in there: failing tests written first, the code edited until they pass, the full suite run, then the branch, the commit, the merge. Months later I can answer "how did that fix actually happen" from the chain instead of from memory. And because it's chained, I can also prove nobody rewrote that story afterward.
+*(A fuller worked example from a small demo project is pending — this repo recording its own construction is honest but dense.)*
 
-That second part is the point. The timeline is useful every day, and honestly it's the reason I keep the thing running. But the integrity claim is what makes it worth publishing: git only remembers what got committed, and a summary written by the agent is the agent grading its own homework. The chain records everything, gets written outside the agent's control, and breaks visibly if anyone edits it after the fact.
+Months later I can answer "how did that fix actually happen" from the chain instead of from memory. And because it's chained, I can also prove nobody rewrote that story afterward. That second part is the point: git only remembers what got committed, and a summary written by the agent is the agent grading its own homework. The chain records everything, gets written outside the agent's control, and breaks visibly if anyone edits it after the fact.
 
 ## agents reading their own history
 
-The chain isn't only for humans checking up on agents. It feeds the agents themselves. A fresh session's first problem is figuring out what happened before it arrived: git only shows what got committed, and the raw transcripts are megabytes. The chain sits in the middle, a few KB per session, every action and every file touched, across every repo on the machine.
+The chain isn't only for humans checking up on agents. It feeds the agents themselves — a second memory layer for your agent work. A fresh session's first problem is figuring out what happened before it arrived: git only shows what got committed, and the raw transcripts are megabytes. The chain sits in the middle, a few KB per session, every action and every file touched, across every repo on the machine, and an agent can walk it to see exactly what changed and when.
 
-I tested this instead of assuming it. Fresh agents had to orient in a repo from either the chain, the git log, or both, and the chain was the only source that caught the work happening off main: a local branch that was never pushed, operations that produce no commit at all, the exact action that was in flight when the last session ended. Git log held its own on committed work, so the honest summary is that the chain doesn't replace git or reading the code. It answers "what was going on here recently, which files were hot, and what was left mid-flight" before any code gets read, and it's the only record that survives when a session crashes or the work never got committed.
+Here are the test results, rather than the assumption. Fresh agents were quizzed on this repo's real history — six questions, ground truth derived from the chains beforehand, scored blind ([docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) has the full protocol and caveats):
 
-That reading now ships as a surface of its own. A `SessionStart` hook injects a **digest** at the top of every session: the repo's recent receipts as one-line rows, each session's final entry tagged as the last recorded action, capped at a fixed row budget so a long history can't flood the context. Every row carries an **entry address** — a short prefix of the entry's own hash — and three commands climb from there:
+- **With the chain: 12/12 and 12/12.** Both agents answered everything, down to the exact final action of a session that ended mid-edit, and named work that exists in *no* commit on *any* branch — a throwaway prototype the receipts alone remember.
+- **Git-only: 10/10 on what git can see, and an honest "cannot determine" on the rest.** Both dropped exactly the two chain-only questions. Git log holds its own on committed work — the chain doesn't replace it. It answers what git structurally can't: what was going on here recently, which files were hot, what was left mid-flight, and what never became a commit at all.
+
+That reading ships as a surface of its own. A `SessionStart` hook injects a **digest** at the top of every session: the repo's recent receipts as one-line rows, each session's final entry tagged as the last recorded action, capped at a fixed row budget so a long history can't flood the context. Every row carries an **entry address** — a short prefix of the entry's own hash — and three commands climb from there:
 
 ```
 python supervisor.py digest                   # what the hook injects, by hand
@@ -50,51 +51,74 @@ Because the address is a hash prefix, `show` re-hashes what it fetched and confi
 
 ## quickstart
 
-One file, stdlib only, Python 3.9+ (`alias receipts='python3 /path/to/receipts.py'`):
+Three motions. One file, stdlib only, Python 3.9+, nothing to install.
+
+**1. Grab it.** Download `loxodonta.py` anywhere (for the watching layer later, put `supervisor.py` beside it). Give it a short name if you like:
 
 ```
-receipts init                                                   # start a chain (writes the genesis entry)
-receipts log --actor agent --action "wrote draft" --file report.md
-receipts run --actor agent --file report.md -- python make_draft.py
-                                 # run a command; it cannot skip its own receipt
-receipts verify                  # walk the chain; exit 1 on any break
-receipts head                    # print the chain head — record it out of the agent's reach
-receipts verify --expect-head <hex>   # catch a wholesale rewrite, against your recorded head
-receipts report                  # the timeline you saw above
+alias loxodonta='python3 /path/to/loxodonta.py'            # bash/zsh
+function loxodonta { python C:\path\to\loxodonta.py @args } # PowerShell
 ```
 
-Then the outer layers:
+**2. Record something and try to catch yourself.**
 
 ```
-receipts anchor                  # commit the head to Bitcoin via OpenTimestamps (free, no wallet)
-receipts anchor --upgrade        # complete the proof once Bitcoin has it (a few hours later)
-receipts verify --anchors        # judge anchor proofs, offline
-receipts explain                 # LLM narration of the log (testimony, not a verdict)
+loxodonta init                                        # start a chain (writes the genesis entry)
+loxodonta run --actor agent --file report.md -- python make_draft.py
+                                                      # run a command; it cannot skip its own receipt
+loxodonta report                                      # the timeline
+loxodonta verify                                      # walk the chain; exit 1 on any break
 ```
+
+Now open `receipts.jsonl`, change one word in a past entry, and run `verify` again — that's the whole idea, demonstrated in under a minute. (`loxodonta log` appends an entry by hand; `loxodonta head` prints the chain head, which you record somewhere the agent can't reach and later check with `verify --expect-head <hex>`.)
+
+**3. Wire it into your agent.** For Claude Code, one command sets up the whole machine — every session then leaves a chain in the store (`~/.loxodonta/receipts/`, one drawer per project, so history survives even when a repo gets deleted) and starts with a recall digest:
+
+```
+python loxodonta.py install-hook
+```
+
+(Manual wiring and the details live in [docs/HOOK.md](docs/HOOK.md) — or hand your agent this file and say "wire loxodonta into this project"; the hook is a receipt-per-tool-call, so it can wire the thing that will be auditing it.)
+
+Then the outer layers, when you want them:
+
+```
+loxodonta anchor                  # commit the head to Bitcoin via OpenTimestamps (free, no wallet)
+loxodonta anchor --upgrade        # complete the proof once Bitcoin has it (a few hours later)
+loxodonta verify --anchors        # judge anchor proofs, offline
+loxodonta explain                 # LLM narration of the log (testimony, not a verdict)
+```
+
+One honest note on timing: an anchor hardens history **up to the anchored head** — entries written since your last anchor are protected by detection only until the next one. So anchor at meaningful moments (end of a session, end of a pipeline run), and copy the sidecar proof file somewhere the agent can't reach; a proof in your hands is evidence no rewrite on the machine can touch.
+
+**Exit codes**, since scripts and cron will read them: `0` valid · `1` chain broken · `2` a logged file changed since its receipt (`verify --files`) · `3` this is not the recorded history (head or anchor mismatch — the gravest tier). Argparse usage errors also exit `2`, so scripts should trust the stdout verdict line, never the exit code alone.
 
 ## hooking it into an agent
 
-For Claude Code, a `PostToolUse` hook turns every tool call into a receipt automatically, which is how the timeline above got written. Wiring in [docs/HOOK.md](docs/HOOK.md).
+For Claude Code, a `PostToolUse` hook turns every tool call into a receipt automatically, which is how the timeline above got written — `install-hook` wires it, [docs/HOOK.md](docs/HOOK.md) explains it.
 
-The recorder itself doesn't care who writes to it. Anything that can run a command can leave a receipt, so `receipts run` and `receipts log` work with any framework today, and wiring another stack in automatically means writing one small adapter against its tool-call events. Claude Code is the only shipped adapter right now because it's what I use daily. Adapters for other frameworks are on the planned list below.
+The recorder itself doesn't care who writes to it. Anything that can run a command can leave a receipt, so `loxodonta run` and `loxodonta log` work with any framework today, and wiring another stack in automatically means writing one small adapter against its tool-call events. Claude Code is the only shipped adapter right now because it's what I use daily. Adapters for other frameworks are on the planned list below.
 
 ## the supervisor
 
-Tampering only gets caught if something actually looks at the chains, and nobody reads logs every day. So `supervisor.py` does the looking. Same rules as the recorder: one file, stdlib only, readable in a sitting. It drives receipts through the public CLI and decides nothing itself:
+Tampering only gets caught if something actually looks at the chains, and nobody reads logs every day. So `supervisor.py` does the looking. Same rules as the recorder: one file, stdlib only, readable in a sitting. It drives the recorder through the public CLI and decides nothing itself:
 
 ```
-python supervisor.py scan      # one tick: every chain on the machine, verdicts, exit code for cron
-python supervisor.py serve     # localhost-only page: the recall timeline with search, plus the alarm band
-python supervisor.py drill     # rehearse detection on a sandbox copy, real chains untouched
+python supervisor.py scan                     # one tick: every chain in the store, verdicts, exit code for cron
+python supervisor.py serve                    # localhost-only dashboard: verdict strip, drawers, memory navigation
+python supervisor.py drill --root ~/repos --log <chain>   # rehearse detection on a sandbox copy, real chains untouched
+python supervisor.py adopt --root ~/repos     # one-time move of pre-store chains into the store (--dry-run to preview)
 ```
 
-Between looks it remembers every chain's last position, and it shouts when the difference can't be explained by normal appends: a chain that shrank, a head that vanished from its own history, a session that's visibly active while no receipts arrive (the failure nothing else watches for). It also keeps anchor proofs fresh, and the page re-verifies every chain in your browser via WebCrypto, so the verdicts you see don't depend on trusting the server that drew them.
+`scan` needs no arguments: the store is its universe. `--root <folder>` scans a legacy folder-of-repos layout instead (every `<repo>/receipts/` under it, plus chains stranded in old worktrees) — the mode `adopt` migrates you out of. Scan adds two exit codes of its own: `5`, the baseline tripwire (a chain changed in a way appends can't explain since the last look) and `6`, the completeness alarm (a session is visibly active while receipts stop arriving — the failure nothing else watches for).
+
+Between looks it remembers every chain's last position, and it shouts when the difference can't be explained by normal appends: a chain that shrank, a head that vanished from its own history, a silently dead hook. It also keeps anchor proofs fresh, and the page re-verifies every chain in your browser via WebCrypto, so the verdicts you see don't depend on trusting the server that drew them.
 
 One honesty rule holds all of it together: everything the supervisor stores lives on the same machine as the agent, so the agent could edit that too, and the supervisor trusts none of it. Its memory is only a reason to shout, never proof. The one thing the agent can never touch is the anchor, because that lives in a Bitcoin block. Once a chain head is anchored, no rewrite on this machine can fake that record or its timestamp. That's the hard boundary: every other layer detects fast, the anchor is the one piece of evidence a rewrite can't forge.
 
 ## why no keys
 
-Signing every entry with a private key sounds like the obvious upgrade, and it's the first thing most people suggest. receipts doesn't do it, on purpose: on a single machine, whoever holds the signing key is the same party who could rewrite the log, so a key adds ceremony without adding proof, and now you're managing keys on top. The chain proves internal consistency, and anchoring binds history to something nobody holds: the head gets committed to Bitcoin via OpenTimestamps, so entries provably existed before the block that anchors them. No wallet, no tokens, no service to run. The reasoning lives in [adrs/](adrs/), starting with the threat model: the writer of the log, in practice an AI agent, is the adversary.
+Signing every entry with a private key sounds like the obvious upgrade, and it's the first thing most people suggest. loxodonta doesn't do it, on purpose: on a single machine, whoever holds the signing key is the same party who could rewrite the log, so a key adds ceremony without adding proof, and now you're managing keys on top. The chain proves internal consistency, and anchoring binds history to something nobody holds: the head gets committed to Bitcoin via OpenTimestamps, so entries provably existed before the block that anchors them. No wallet, no tokens, no service to run. The threat model this falls out of: the writer of the log, in practice an AI agent, is the adversary.
 
 ## where it actually helps
 
@@ -122,7 +146,7 @@ A few places this has already earned its keep for me, beyond the daily timeline:
 
 ## planned
 
-Adapters for other agent frameworks, so recording isn't tied to my stack. A richer query surface if shelling out ever proves insufficient — filters and aggregation are deliberately not built until the plain commands above fall short. Navigation for the recall page in `supervisor serve`, so browsing memory doesn't require the CLI. New work happens on the `dev` branch; `main` stays stable and everything on it holds the claims above.
+A better viewer for reviewing the logs — most likely growing the localhost page in `supervisor serve` into full memory navigation, so browsing history doesn't require the CLI (still open to change). Adapters for other agent frameworks, so recording isn't tied to my stack. A richer query surface if shelling out ever proves insufficient — filters and aggregation are deliberately not built until the plain commands above fall short. New work happens on the `dev` branch; `main` stays stable and everything on it holds the claims above.
 
 ## license
 

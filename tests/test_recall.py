@@ -21,8 +21,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
-RECEIPTS = REPO_ROOT / "receipts.py"
-DOGFOOD = REPO_ROOT / "dogfood.py"
+LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
 def run_py(script, *args, env_extra=None, cwd=None):
@@ -171,11 +170,143 @@ class DigestTest(RecallBase):
                                    "cdcd8888-8888-8888-8888-888888888888"
                                    ".jsonl")
         log.parent.mkdir(parents=True)
-        run_py(RECEIPTS, "init", "--log", str(log))
-        run_py(RECEIPTS, "log", "--log", str(log), "--actor", "tester",
+        run_py(LOXODONTA, "init", "--log", str(log))
+        run_py(LOXODONTA, "log", "--log", str(log), "--actor", "tester",
                "--action", "cli-built entry")
         out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
         self.assertIn("cli-built entry", out)
+
+
+class StoreRecallTest(RecallBase):
+    """Recall over the central store (ADR-0011): the reader resolves a
+    project to the same drawer the hook writes — proven behaviorally,
+    hook in, digest out, so the slug math can never drift between the
+    two files. Legacy repo layouts stay readable as the fallback."""
+
+    def store_env(self, project):
+        return {"CLAUDE_PROJECT_DIR": str(project),
+                "LOXODONTA_HOME": str(self.root / "storehome")}
+
+    def hook(self, project, session, command):
+        payload = json.dumps({
+            "session_id": session, "hook_event_name": "PostToolUse",
+            "tool_name": "Bash", "tool_input": {"command": command},
+            "tool_response": {}})
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook"],
+            input=payload.encode("utf-8"), capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                 **self.store_env(project)})
+
+    def test_digest_reads_the_drawer_the_hook_wrote(self):
+        project = self.repo("alpha")
+        result = self.hook(project, "aaaa1111-1111-1111-1111-111111111111",
+                           "pytest -q")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = run_py(SUPERVISOR, "digest", "--repo", str(project),
+                     env_extra=self.store_env(project))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("pytest -q", out.stdout)
+
+    def test_show_and_search_reach_store_chains(self):
+        project = self.repo("alpha")
+        self.hook(project, "bbbb2222-2222-2222-2222-222222222222",
+                  "make the needle")
+        env = self.store_env(project)
+        search = run_py(SUPERVISOR, "search", "needle", "--repo",
+                        str(project), env_extra=env)
+        self.assertIn("make the needle", search.stdout)
+        address = next(line.split()[0]
+                       for line in search.stdout.splitlines()
+                       if "make the needle" in line)
+        show = run_py(SUPERVISOR, "show", address, "--repo", str(project),
+                      env_extra=env)
+        self.assertEqual(show.returncode, 0, show.stderr)
+        self.assertIn("self-verified", show.stdout)
+
+    def test_legacy_repo_layout_is_the_fallback(self):
+        # A repo with no drawer yet (pre-adopt) still renders its local
+        # receipts/ — the transition never blanks anyone's memory.
+        repo = self.repo("legacy")
+        _, hashes = forge_chain(repo, "cccc3333-3333-3333-3333-333333333333",
+                                [("2026-08-25T10:00:00Z", "old-style work")])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo),
+                     env_extra={"LOXODONTA_HOME":
+                                str(self.root / "storehome")})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(hashes[1][:8], out.stdout)
+
+    def test_drawer_outranks_legacy_when_both_exist(self):
+        # After adoption a stale legacy folder must not shadow the store.
+        project = self.repo("alpha")
+        forge_chain(project, "dddd4444-4444-4444-4444-444444444444",
+                    [("2026-08-20T10:00:00Z", "stale legacy line")])
+        self.hook(project, "eeee5555-5555-5555-5555-555555555555",
+                  "fresh store line")
+        out = run_py(SUPERVISOR, "digest", "--repo", str(project),
+                     env_extra=self.store_env(project))
+        self.assertIn("fresh store line", out.stdout)
+        self.assertNotIn("stale legacy line", out.stdout)
+
+
+class WorktreeRecallTest(RecallBase):
+    """A session in a git worktree logs to the main repository
+    (receipts hook, main_repo_root); recall invoked from that worktree
+    must read from the same place, or the digest a worktree session
+    injects at start is empty."""
+
+    def worktree_of(self, main_repo, name="wt"):
+        # The exact layout git writes: the worktree's .git is a file
+        # pointing at <main>/.git/worktrees/<name>, which holds a
+        # commondir pointing back at <main>/.git.
+        gitdir = main_repo / ".git" / "worktrees" / name
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        wt = main_repo / ".claude" / "worktrees" / name
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        return wt
+
+    def test_digest_from_worktree_reads_main_repo_chains(self):
+        repo = self.repo("alpha")
+        wt = self.worktree_of(repo)
+        _, hashes = forge_chain(repo, "9f9f0000-0000-0000-0000-000000000000",
+                                [("2026-08-25T10:00:00Z", "main-repo work")])
+        result = run_py(SUPERVISOR, "digest", "--repo", str(wt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(hashes[1][:8], result.stdout)
+        self.assertIn("main-repo work", result.stdout)
+
+    def test_digest_from_worktree_via_project_dir_env(self):
+        # The SessionStart hook's exact invocation: no --repo, only
+        # CLAUDE_PROJECT_DIR, which points at the worktree.
+        repo = self.repo("alpha")
+        wt = self.worktree_of(repo)
+        forge_chain(repo, "8e8e1111-1111-1111-1111-111111111111",
+                    [("2026-08-25T10:00:00Z", "hook-visible work")])
+        result = run_py(SUPERVISOR, "digest",
+                        env_extra={"CLAUDE_PROJECT_DIR": str(wt)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("hook-visible work", result.stdout)
+
+    def test_search_from_worktree_reads_main_repo_chains(self):
+        repo = self.repo("alpha")
+        wt = self.worktree_of(repo)
+        forge_chain(repo, "7d7d2222-2222-2222-2222-222222222222",
+                    [("2026-08-25T10:00:00Z", "needle in main")])
+        result = run_py(SUPERVISOR, "search", "needle", "--repo", str(wt))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("needle in main", result.stdout)
+
+    def test_malformed_worktree_link_falls_back_silently(self):
+        # A .git file that leads nowhere: recall treats the directory as
+        # itself (chainless -> silent digest), never an error.
+        stray = self.repo("stray")
+        (stray / ".git").write_text("gitdir: does/not/exist\n",
+                                    encoding="utf-8")
+        result = run_py(SUPERVISOR, "digest", "--repo", str(stray))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
 
 
 class ShowTest(RecallBase):
@@ -235,7 +366,7 @@ class ShowTest(RecallBase):
         self.assertNotEqual(result.returncode, 0)
         out = result.stdout + result.stderr
         self.assertIn("does not verify", out)
-        self.assertIn("receipts verify", out)
+        self.assertIn("loxodonta verify", out)
 
 
 class SearchTest(RecallBase):
@@ -325,10 +456,10 @@ class ScanSummaryTest(RecallBase):
 
 
 class InstallerTest(RecallBase):
-    def run_dogfood(self, *args):
+    def run_installer(self, *args):
         home = self.root / "home"
         home.mkdir(exist_ok=True)
-        return run_py(DOGFOOD, *args, env_extra={
+        return run_py(LOXODONTA, *args, env_extra={
             "HOME": str(home), "USERPROFILE": str(home)}), home
 
     def settings(self, home):
@@ -336,38 +467,84 @@ class InstallerTest(RecallBase):
             encoding="utf-8"))
 
     def test_install_wires_recording_and_digest_hooks(self):
-        result, home = self.run_dogfood("install-global")
+        result, home = self.run_installer("install-hook")
         self.assertEqual(result.returncode, 0, result.stderr)
         settings = self.settings(home)
         post = json.dumps(settings["hooks"]["PostToolUse"])
         start = json.dumps(settings["hooks"]["SessionStart"])
-        self.assertIn("receipts.py", post)
+        self.assertIn("loxodonta.py", post)
+        # Every shell the harness offers is matched — omitting one
+        # (PowerShell, on Windows desktop) silently loses sessions.
+        self.assertIn("PowerShell", post)
         self.assertIn("supervisor.py", start)
         self.assertIn("digest", start)
         self.assertIn("startup|clear|compact",
                       json.dumps(settings["hooks"]["SessionStart"]))
 
     def test_install_is_idempotent(self):
-        _, home = self.run_dogfood("install-global")
-        again, _ = self.run_dogfood("install-global")
+        _, home = self.run_installer("install-hook")
+        again, _ = self.run_installer("install-hook")
         self.assertEqual(again.returncode, 0)
         settings = self.settings(home)
         self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
         self.assertEqual(len(settings["hooks"]["SessionStart"]), 1)
 
+    def test_install_honors_a_live_pre_rename_recorder_hook(self):
+        # An install from the receipts.py era whose script still exists
+        # is recognised and left alone (ADR-0010): never doubled.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        legacy = self.root / "elsewhere" / "receipts.py"
+        legacy.parent.mkdir()
+        legacy.write_text(LOXODONTA.read_text(encoding="utf-8"),
+                          encoding="utf-8")
+        settings = self.settings(home)
+        for block in settings["hooks"]["PostToolUse"]:
+            for hook in block["hooks"]:
+                hook["command"] = (f'"{Path(sys.executable).as_posix()}" '
+                                   f'"{legacy.as_posix()}" hook')
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        again, _ = self.run_installer("install-hook")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        settings = self.settings(home)
+        self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
+        self.assertIn("receipts.py",
+                      json.dumps(settings["hooks"]["PostToolUse"]))
+
+    def test_install_heals_a_recorder_hook_whose_script_is_gone(self):
+        # The rename's migration path: settings still point at a
+        # receipts.py that no longer exists. "Already installed" would
+        # mean recording is silently dead; install-hook replaces the
+        # dangling command with the living one instead.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        for block in settings["hooks"]["PostToolUse"]:
+            for hook in block["hooks"]:
+                hook["command"] = hook["command"].replace(
+                    "loxodonta.py", "receipts.py")
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        again, _ = self.run_installer("install-hook")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        settings = self.settings(home)
+        post = json.dumps(settings["hooks"]["PostToolUse"])
+        self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
+        self.assertIn("loxodonta.py", post)
+        self.assertNotIn("receipts.py", post)
+
     def test_uninstall_removes_both_and_leaves_others(self):
-        _, home = self.run_dogfood("install-global")
+        _, home = self.run_installer("install-hook")
         path = home / ".claude" / "settings.json"
         settings = self.settings(home)
         settings["hooks"]["PostToolUse"].append(
             {"matcher": "*", "hooks": [{"type": "command",
                                         "command": "somebody-else"}]})
         path.write_text(json.dumps(settings), encoding="utf-8")
-        result, _ = self.run_dogfood("uninstall-global")
+        result, _ = self.run_installer("uninstall-hook")
         self.assertEqual(result.returncode, 0, result.stderr)
         settings = self.settings(home)
         text = json.dumps(settings)
-        self.assertNotIn("receipts.py", text)
+        self.assertNotIn("loxodonta.py", text)
         self.assertNotIn("supervisor.py", text)
         self.assertIn("somebody-else", text)
 
