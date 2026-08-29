@@ -325,7 +325,13 @@ def cmd_install_global(args):
     if not any("receipts.py" in h.get("command", "")
                for b in post for h in b.get("hooks", [])):
         post.append({
-            "matcher": "Edit|Write|NotebookEdit|Bash",
+            # State-changing tools only — and every shell the harness
+            # offers: the desktop app on Windows runs most commands
+            # through a PowerShell tool, and a matcher without it
+            # sleeps through exactly the sessions it should record
+            # (found in the field: this repo's own launch left almost
+            # no receipts).
+            "matcher": "Edit|Write|NotebookEdit|Bash|PowerShell",
             "hooks": [{"type": "command", "command": record}],
         })
         installed.append(f"PostToolUse: {record}")
