@@ -268,6 +268,56 @@ class HookTest(unittest.TestCase):
         self.assertEqual(chains, ["receipts-sess-aaaa.jsonl",
                                   "receipts-sess-bbbb.jsonl"])
 
+    def test_store_receipt_fingerprints_files_relative_to_the_project(self):
+        # ADR-0012: the reference base is the project root, so a chain
+        # far away in the store still fingerprints the files the agent
+        # touched — the claim the old log-relative rule silently broke.
+        project = self.workdir / "someproject"
+        target = project / "src" / "main.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("print('hi')\n", encoding="utf-8")
+        store = self.workdir / "storehome"
+
+        result = run_hook(
+            payload(tool="Write", tool_input={"file_path": str(target)}),
+            self.workdir,
+            extra_env={"CLAUDE_PROJECT_DIR": str(project),
+                       "LOXODONTA_HOME": str(store)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        drawer = drawer_of(store, "someproject")
+        entries = [json.loads(line) for line in
+                   (drawer / "receipts-sess-1234abcd.jsonl").read_text(
+                       encoding="utf-8").splitlines()]
+        (ref,) = entries[1]["files"]
+        self.assertEqual(ref["path"], "src/main.py")
+        self.assertEqual(len(ref["sha256"]), 64)
+
+    def test_store_receipt_skips_files_outside_the_project(self):
+        # The boundary moved from the log's folder to the project, not
+        # to the machine (ADR-0012): an edit to something like the
+        # harness settings is recorded as an action, never fingerprinted.
+        project = self.workdir / "someproject"
+        project.mkdir()
+        outside = self.workdir / "elsewhere.txt"
+        outside.write_text("out\n", encoding="utf-8")
+        store = self.workdir / "storehome"
+
+        run_hook(
+            payload(tool="Write", tool_input={"file_path": str(outside)}),
+            self.workdir,
+            extra_env={"CLAUDE_PROJECT_DIR": str(project),
+                       "LOXODONTA_HOME": str(store)},
+        )
+
+        drawer = drawer_of(store, "someproject")
+        entries = [json.loads(line) for line in
+                   (drawer / "receipts-sess-1234abcd.jsonl").read_text(
+                       encoding="utf-8").splitlines()]
+        self.assertEqual(entries[1]["files"], [])
+        self.assertIn("elsewhere.txt", entries[1]["action"])
+
     def test_two_projects_with_the_same_name_get_distinct_drawers(self):
         # The slug carries a hash of the full path: two folders both named
         # "app" can never interleave chains in one drawer (ADR-0011).

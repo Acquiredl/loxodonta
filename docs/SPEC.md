@@ -1,7 +1,7 @@
 # receipts format specification
 
-**Version:** 0.1
-**Status:** accepted 2026-08-10 (ADR-0001, ADR-0002 both `accepted`) — v0.1 is **frozen**; any format change requires a new version and a new chain (§2.1).
+**Version:** 0.1.1
+**Status:** accepted 2026-08-10 (ADR-0001, ADR-0002 both `accepted`) — v0.1 is **frozen**; any format change requires a new version and a new chain (§2.1). Amendment 0.1.1 (2026-08-29, ADR-0012) changes only what a file-reference path resolves *against* (§3) — no byte of any entry, canonical form, or hash moves, so chains keep `v: "0.1"` and verify identically.
 
 This document defines the receipt log format precisely enough that an independent implementation, in any language, produces byte-identical hashes. That reproducibility is the whole game: a hash chain is only as trustworthy as the serialization rules underneath it.
 
@@ -48,14 +48,14 @@ A file reference snapshots one file at log time:
 {"path": "report.md", "sha256": "8019e97e17..."}
 ```
 
-- `path` is relative to the receipt log's directory, forward slashes, no `..` segments.
+- `path` is relative to the **reference base**, forward slashes, no `..` segments. *(Amended v0.1.1, ADR-0012.)* The reference base is the **project root** the chain records: for a chain beside a project record (`project.json` — a store chain, ADR-0011), the recorded project path; for any other chain, the log's own directory, which for a log kept at the project root is the same base the original rule named — the two rules agree byte-for-byte there. A verifier that finds a project record it cannot follow reports the references as unresolvable, a different sentence from "file diverged".
 - `sha256` is the lowercase-hex SHA256 of the file's bytes at the moment of logging.
 - Within one entry, `files` is sorted by `path` (byte order) — part of canonicalization, not decoration.
 
 **Path identity rules:**
 
 - Writers normalize separators **on intake**: backslashes become forward slashes before the entry is built. The hashed bytes are always the forward-slash spelling — Windows and Unix writers produce identical hashes for the same relative path.
-- Absolute paths and paths containing `..` are **rejected with an error**, never silently rewritten. A file outside the log's directory usually means the log is in the wrong place; the operator should feel that friction. (Absolute paths would also leak machine-specific directory layout into a log that may be shown to others.)
+- Absolute paths and paths containing `..` are **rejected with an error**, never silently rewritten. A file outside the project usually means the log is recording the wrong place; the operator should feel that friction. (Absolute paths would also leak machine-specific directory layout into a log that may be shown to others.)
 - Path identity is **byte-exact — no case folding**. Case-insensitivity is a property of some filesystems, not of the format; a verifier on another OS cannot know what the writer's filesystem considered equal. Instead, `log`/`run` SHOULD warn at write time when a new reference differs from an existing one only by case — the mistake is caught on the machine that knows, and the format stays dumb.
 
 ## 4. Canonical form and `entry_hash`

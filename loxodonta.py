@@ -215,9 +215,32 @@ def sha256_file(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def file_reference(log_dir, raw_path):
-    """Build a {path, sha256} reference per SPEC §3. Paths are stored and
-    hashed relative to the log's directory."""
+def files_base(log):
+    """The directory file references resolve against (SPEC §3 as
+    amended v0.1.1, ADR-0012): the project named by a project record
+    beside the log (a store chain), else the log's own directory (a
+    local log at the project root — the two rules agree there).
+    Returns (base, problem): problem is the honest sentence when a
+    record exists but cannot lead anywhere."""
+    log_dir = os.path.dirname(os.path.abspath(log))
+    record = os.path.join(log_dir, "project.json")
+    if not os.path.exists(record):
+        return log_dir, None
+    try:
+        with open(record, encoding="utf-8") as f:
+            path = json.load(f).get("path")
+    except (OSError, ValueError):
+        return None, f"project record unreadable: {record}"
+    if isinstance(path, str) and os.path.isdir(path):
+        return path, None
+    return None, (f"project record points at a missing project ({path}) — "
+                  "references cannot be resolved")
+
+
+def file_reference(base, raw_path):
+    """Build a {path, sha256} reference per SPEC §3 (v0.1.1): paths are
+    stored and hashed relative to the reference base — the project
+    root, which for a local log is the log's own directory."""
     path = raw_path.replace("\\", "/")
     # SPEC §3: absolute and `..` paths are rejected, never silently rewritten —
     # a file outside the log's directory usually means the log is misplaced.
@@ -226,7 +249,7 @@ def file_reference(log_dir, raw_path):
     if ".." in path.split("/"):
         raise ValueError(f"path may not contain '..': {raw_path}")
     try:
-        sha256 = sha256_file(os.path.join(log_dir, path))
+        sha256 = sha256_file(os.path.join(base, path))
     except FileNotFoundError:
         raise ValueError(f"file not found: {raw_path}")
     return {"path": path, "sha256": sha256}
@@ -235,9 +258,12 @@ def file_reference(log_dir, raw_path):
 def append_entry(log, actor, action, file_paths):
     """Append one chained entry. Shared by `log` and `run` — run introduces
     no new schema fields (SPEC §7)."""
-    log_dir = os.path.dirname(os.path.abspath(log))
+    base, problem = files_base(log)
+    if problem and file_paths:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
     try:
-        files = [file_reference(log_dir, p) for p in file_paths]
+        files = [file_reference(base, p) for p in file_paths]
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -834,10 +860,16 @@ def cmd_verify(args):
         for entry in entries:
             for ref in entry["files"]:
                 latest[ref["path"]] = ref["sha256"]
-        log_dir = os.path.dirname(os.path.abspath(args.log))
+        base, problem = files_base(args.log)
+        if problem:
+            # Honest unresolvability, a different sentence from "file
+            # diverged" (ADR-0012): the check could not run, and
+            # nothing is claimed about the files either way.
+            print(f"FILES-UNRESOLVED: {problem} — file checks skipped")
+            latest = {}
         for path in sorted(latest):
             try:
-                on_disk = sha256_file(os.path.join(log_dir, path))
+                on_disk = sha256_file(os.path.join(base, path))
             except FileNotFoundError:
                 print(f"MISSING (not on disk): {path}")
                 continue
@@ -1219,18 +1251,22 @@ def cmd_hook(args):
             action = f"{tool}: {one_line(value)}"
             break
 
-    # Fingerprint files the tool touched — when they sit under the log's
-    # directory and still exist. Anything else is skipped, never fatal:
-    # a hook that fails the session over path layout would teach the
-    # operator to turn the hook off.
-    log_dir_abs = os.path.dirname(os.path.abspath(log))
+    # Fingerprint files the tool touched — when they sit under the
+    # project (SPEC §3 as amended v0.1.1, ADR-0012) and still exist.
+    # The boundary is the project, not the machine: an edit outside it
+    # (harness settings, another repo) is recorded as an action, never
+    # fingerprinted. Anything else is skipped, never fatal: a hook that
+    # fails the session over path layout would teach the operator to
+    # turn the hook off.
+    base = (os.path.abspath(project) if project is not None
+            else os.path.dirname(os.path.abspath(log)))
     file_paths = []
     for key in ("file_path", "notebook_path"):
         raw = tool_input.get(key)
         if not isinstance(raw, str) or not raw:
             continue
         resolved = os.path.abspath(raw)
-        relative = os.path.relpath(resolved, log_dir_abs)
+        relative = os.path.relpath(resolved, base)
         if relative.split(os.sep)[0] == ".." or not os.path.isfile(resolved):
             continue
         file_paths.append(relative.replace(os.sep, "/"))
