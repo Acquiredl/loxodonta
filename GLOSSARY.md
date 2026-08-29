@@ -31,7 +31,7 @@ An operator-held copy of the chain head, stored **outside the writer's reach** �
 
 ### Supervisor
 
-An operator-side reader process that continuously verifies receipt logs against its [baseline](#baseline) and shouts on change — **a tripwire with a memory**. Its claim is detection latency only: it shortens the window between tampering and discovery and raises the cost of tampering; it is never a wall. Everything it stores is writer-reachable, so nothing it holds is a [head record](#head-record); anchors remain the only hard boundary (ADR-0002 stands unamended). It may drive anchoring — keeping heads anchored and proofs upgraded — and that is how the head-record ritual is honestly automated: the out-of-reach property comes from the anchor, never from the supervisor. The tripwire watches the *log*, not the machine: this is a flight-recorder accessory, not an intrusion-detection system (`docs/PRIOR-ART.md` governs the public claim).
+An operator-side reader process that continuously verifies receipt logs against its [baseline](#baseline) and shouts on change — **a tripwire with a memory**. Its claim is detection latency only: it shortens the window between tampering and discovery and raises the cost of tampering; it is never a wall. Everything it stores is writer-reachable, so nothing it holds is a [head record](#head-record); anchors remain the only hard boundary (ADR-0002 stands unamended). It may drive anchoring — keeping heads anchored and proofs upgraded — and that is how the head-record ritual is honestly automated: the out-of-reach property comes from the anchor, never from the supervisor. The tripwire watches the *log*, not the machine: this is a flight-recorder accessory, not an intrusion-detection system. The supervisor is the repo's *reader* tool, serving two mornings from one file: suspicion (`scan`, the alarm band) and memory ([recall](#recall) — the front page, and the agent-facing digest/search/show surface of ADR-0009).
 
 ### Baseline
 
@@ -117,6 +117,18 @@ The *who*-[seal](#seal): a detached signature over the [manifest](#manifest)'s e
 
 The everyday reading of chains as *memory* rather than *evidence*: answering "what happened, when, in which repo" from what the chains already hold — session spans, files touched, action lines. Recall is testimony at machine scale: it renders writer-supplied lines and must say so, exactly as `report` does — the [verify](#verify) walk owns verdicts, recall owns none. The two readings share one log and serve different mornings: suspicion reads for broken seals; recall reads because the operator forgot. ADR-0002 called this operator forensics and predicted it "falls out for free"; the dogfood found it is the daily value that keeps the log watched.
 
+### Digest
+
+The budget-capped rendering of the current repo's recent entries, injected at session start by the SessionStart hook (Stage E, ADR-0009). Count-limited (default ~30 rows), grouped by session, each recent session's final entry tagged `last recorded action` — a fact, never an inference about how the session ended. The digest is [recall](#recall), so it carries recall's honesty labels: it cites the supervisor's last scan as testimony and owns no verdicts. Its rows are pointers, not content — each carries an [entry address](#entry-address) for pulling the full entry on demand. Local by design: other repos' memory is reached through search, never injected ("all memory" means all *reachable*, not all *injected* — a flat machine-wide injection would poison the context and evict the local signal).
+
+### Entry address
+
+The short prefix of an entry's [entry hash](#entry-hash) (displayed at 8 hex chars) used to name that entry everywhere in the recall surface — digest rows, search results, `show`, `timeline`. Globally unique across all chains on the machine by construction, with git's prefix rules: any unambiguous prefix is accepted; an ambiguous one errors listing the candidates. The address is the fingerprint: `show` recomputes the fetched entry's canonical hash and confirms it matches, so recall's pointers are self-verifying. Chosen over positional `chain:n` (two-part, session-UUID noise) and over timestamps (writer-supplied [testimony](#testimony) — an identifier must be a mechanical fact).
+
+### Unlisted
+
+A repo-level visibility declaration for cross-repo [recall](#recall): a marker file beside the chains (`receipts/.unlisted`) meaning *this repo's entries never appear in recall rendered outside this repo*. Inside its own repo, recall works normally; the marker only governs `--all` surfaces (search, timeline). The default is listed — memory exists to be found, and the operator opts specific repos out. The [digest](#digest) needs no such control: it is local-only by construction, so injection cannot leak across repos. Note the honesty scope: unlisted is an output-rendering courtesy for the operator's own hygiene (e.g. keeping a private repo's name out of transcripts that feed public work), not a security boundary — the chains remain plain files any local process can read.
+
 ### Tamper-evident
 
 The precise security claim of this tool: modifications to history are *always detectable*, never *prevented*. Deliberately weaker than "immutable" — see Anti-terms. Scope in v0.1: *surgical* tampering (edit / delete / reorder / file swap) is detectable unconditionally; *whole-chain regeneration* is detectable only against a head record (`--expect-head`) or, in Stage B, an anchor.
@@ -168,9 +180,9 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`
 - Related out-of-scope decisions: none yet.
 
 ---
 
-*Last updated: 2026-08-25*
+*Last updated: 2026-08-26*

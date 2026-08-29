@@ -3,7 +3,7 @@
 
 Stdlib only, runs anywhere Python does (Windows PowerShell included).
 The experiment itself — the bet, the decision date, the journal — is
-DOGFOOD.md.
+DOGFOOD.md (a local, operator-side journal; gitignored).
 
   python dogfood.py                 status: verdict for every session chain
                                     found across every repo (see below)
@@ -11,10 +11,12 @@ DOGFOOD.md.
   python dogfood.py anchor          anchor every chain head to Bitcoin
   python dogfood.py upgrade         complete pending anchor proofs
   python dogfood.py drill           tamper fire drill on a scratch chain
-  python dogfood.py note "..."      append a line to the DOGFOOD.md journal
-  python dogfood.py install-global  wire the hook into ~/.claude/settings.json
-                                    so every Claude Code session on this
-                                    machine logs to <project>/receipts/
+  python dogfood.py note "..."      append a line to the local DOGFOOD.md journal
+  python dogfood.py install-global  wire the hooks into ~/.claude/settings.json:
+                                    every Claude Code session on this machine
+                                    logs to <project>/receipts/ and starts
+                                    with a recall digest of that repo
+  python dogfood.py uninstall-global  remove exactly those hooks again
 
 Chains are searched for under the directory holding this repo — the folder
 your repos live in. Point the search somewhere else with the environment
@@ -278,50 +280,121 @@ def cmd_note(args):
     return 0
 
 
+def load_settings(path):
+    """The user-level settings, or None with the complaint printed —
+    shared by install and uninstall so both refuse broken JSON the
+    same way instead of clobbering it."""
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        print(f"refusing to touch {path}: it is not valid JSON ({e}) — "
+              "fix it by hand first", file=sys.stderr)
+        return None
+
+
 def cmd_install_global(args):
-    """Merge the hook into the user-level Claude Code settings, idempotently
-    and without clobbering anything already there. The command carries no
-    shell expansion — receipts.py reads CLAUDE_PROJECT_DIR itself — so the
-    same line works whatever shell the harness runs hooks with. Restart open
-    sessions afterward: hooks load at session start."""
+    """Merge both hooks into the user-level Claude Code settings,
+    idempotently and without clobbering anything already there: the
+    PostToolUse recorder (every tool call leaves a receipt) and the
+    SessionStart digest (Stage E, ADR-0009 — the session starts
+    oriented). Each is checked separately, so an install that predates
+    the digest gains it on re-run. The commands carry no shell
+    expansion — both tools read CLAUDE_PROJECT_DIR themselves — and the
+    digest is fail-open: a short timeout, and a chainless repo renders
+    nothing. Restart open sessions afterward: hooks load at start."""
     python = Path(sys.executable).as_posix()
-    command = f'"{python}" "{RECEIPTS.as_posix()}" hook'
+    supervisor = HERE / "supervisor.py"
+    record = f'"{python}" "{RECEIPTS.as_posix()}" hook'
+    digest = f'"{python}" "{supervisor.as_posix()}" digest'
     path = Path.home() / ".claude" / "settings.json"
 
-    settings = {}
+    settings = load_settings(path)
+    if settings is None:
+        return 1
     if path.exists():
-        try:
-            settings = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            print(f"refusing to touch {path}: it is not valid JSON ({e}) — "
-                  "fix it by hand first", file=sys.stderr)
-            return 1
         shutil.copy2(path, str(path) + ".bak")
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    blocks = settings.setdefault("hooks", {}).setdefault("PostToolUse", [])
-    already = [h.get("command", "") for b in blocks for h in b.get("hooks", [])
-               if "receipts.py" in h.get("command", "")]
-    if already:
-        print(f"already installed in {path}:")
-        for c in already:
-            print(f"  {c}")
+    hooks = settings.setdefault("hooks", {})
+    installed = []
+
+    post = hooks.setdefault("PostToolUse", [])
+    if not any("receipts.py" in h.get("command", "")
+               for b in post for h in b.get("hooks", [])):
+        post.append({
+            "matcher": "Edit|Write|NotebookEdit|Bash",
+            "hooks": [{"type": "command", "command": record}],
+        })
+        installed.append(f"PostToolUse: {record}")
+
+    start = hooks.setdefault("SessionStart", [])
+    if not any("supervisor.py" in h.get("command", "")
+               for b in start for h in b.get("hooks", [])):
+        start.append({
+            "matcher": "startup|clear|compact",
+            "hooks": [{"type": "command", "command": digest,
+                       "timeout": 5}],
+        })
+        installed.append(f"SessionStart: {digest}")
+
+    if not installed:
+        print(f"already installed in {path} (recorder and digest both)")
         return 0
 
-    blocks.append({
-        "matcher": "Edit|Write|NotebookEdit|Bash",
-        "hooks": [{"type": "command", "command": command}],
-    })
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-
     print(f"installed in {path}"
           + (" (previous version saved as settings.json.bak)"
              if Path(str(path) + ".bak").exists() else ""))
-    print(f"  hook: {command}")
+    for line in installed:
+        print(f"  {line}")
     print("every NEW Claude Code session on this machine now leaves a chain")
-    print("in <project>/receipts/ — the hook creates the directory and a")
-    print("protective .gitignore on first use. Restart open sessions.")
+    print("in <project>/receipts/ and starts with a recall digest of that")
+    print("repo's recent history. Restart open sessions.")
+    return 0
+
+
+def cmd_uninstall_global(args):
+    """Remove exactly our hooks — recorder and digest — from the
+    user-level settings, leaving everything else untouched. The
+    symmetric half of install-global."""
+    path = Path.home() / ".claude" / "settings.json"
+    settings = load_settings(path)
+    if settings is None:
+        return 1
+    if not settings:
+        print("nothing installed: no user-level settings file")
+        return 0
+
+    ours = ("receipts.py", "supervisor.py")
+    removed = []
+    hooks = settings.get("hooks", {})
+    for event in ("PostToolUse", "SessionStart"):
+        kept_blocks = []
+        for block in hooks.get(event, []):
+            entries = [h for h in block.get("hooks", [])
+                       if not any(marker in h.get("command", "")
+                                  for marker in ours)]
+            if len(entries) != len(block.get("hooks", [])):
+                removed.append(event)
+            if entries or "hooks" not in block:
+                block["hooks"] = entries
+                kept_blocks.append(block)
+        if kept_blocks:
+            hooks[event] = kept_blocks
+        elif event in hooks:
+            del hooks[event]
+
+    if not removed:
+        print(f"nothing of ours found in {path}")
+        return 0
+
+    shutil.copy2(path, str(path) + ".bak")
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    print(f"removed from {path}: {', '.join(sorted(set(removed)))}"
+          " (previous version saved as settings.json.bak)")
     return 0
 
 
@@ -333,6 +406,7 @@ COMMANDS = {
     "drill": cmd_drill,
     "note": cmd_note,
     "install-global": cmd_install_global,
+    "uninstall-global": cmd_uninstall_global,
 }
 
 

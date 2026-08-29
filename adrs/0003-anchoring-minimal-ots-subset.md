@@ -38,5 +38,5 @@ The open question was **how the OTS client gets into this repo.** CLAUDE.md perm
 
 - Related ADRs: `0001-hash-chain-not-signatures.md` (anchoring is that ADR's promised closure), `0002-writer-as-adversary.md` (the adversary anchoring finally beats).
 - Format details and CLI: `docs/ANCHORING.md`.
-- Prior-art landscape: `docs/PRIOR-ART.md` — rsyslog+KSI as the mechanistic analog (chain + commercial anchor); OpenTimestamps chosen precisely because its anchor is nobody's product.
+- Prior-art landscape: the 2026-08-09 operator-side survey — rsyslog+KSI as the mechanistic analog (chain + commercial anchor); OpenTimestamps chosen precisely because its anchor is nobody's product.
 - Glossary terms **added or sharpened**: *Anchor*, *Anchor proof*, *Calendar*.
