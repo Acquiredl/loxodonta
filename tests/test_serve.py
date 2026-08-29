@@ -195,6 +195,71 @@ class StoreServeTest(ServerFixture):
         self.assertEqual(walked["lines"][0]["entry"]["action"], "genesis")
 
 
+class DashboardTest(ServerFixture):
+    """The alarm-first front page (ADR-0013): the verdict strip leads,
+    drawers follow, events sit above the browsing surfaces, and the
+    terminal identity never carries information."""
+
+    def page(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        _, _, page = self.get("/")
+        return page
+
+    def test_the_verdict_strip_leads_the_page(self):
+        page = self.page()
+        self.assertIn('id="strip"', page)
+        self.assertIn('id="stateline"', page)
+        self.assertLess(page.index('id="strip"'), page.index('id="tiles"'))
+        self.assertLess(page.index('id="tiles"'),
+                        page.index('id="tripwire"'))
+        # The three states the JS can pick, by the ratified tier order.
+        self.assertIn("NOT THE RECORDED HISTORY", page)
+        self.assertIn("RECEIPTS STOPPED ARRIVING", page)
+        self.assertIn("all quiet", page)
+
+    def test_freshness_is_displayed_never_hidden(self):
+        page = self.page()
+        self.assertIn('id="freshness"', page)
+        self.assertIn("last scan", page)
+        self.assertIn("30000", page, "the 30s poll is the freshness deal")
+
+    def test_identity_is_decoration_never_information(self):
+        page = self.page()
+        self.assertIn('class="wordmark" aria-hidden="true"', page)
+        self.assertIn('id="elephant" aria-hidden="true" hidden', page)
+        self.assertIn("data:image/svg+xml", page)
+        # No art in agent-facing surfaces: the JSON endpoints stay lean.
+        _, _, status = self.get("/api/status")
+        self.assertNotIn("Y88888P", status)
+
+    def test_drawer_tiles_open_the_project_timeline(self):
+        page = self.page()
+        self.assertIn('id="tiles"', page)
+        self.assertIn("openDrawer", page)
+        self.assertIn("ask-repo", page,
+                      "a tile drives the timeline's repo filter")
+
+    def test_timeline_stories_carry_walkable_paths(self):
+        # Tile -> timeline -> entries: a story names its chains by path
+        # so the walker can open them (the last rung of the ladder).
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        story = self.recall()["sessions"][0]
+        self.assertEqual(story["paths"],
+                         ["alpha/receipts/receipts-sess-aaaa.jsonl"])
+        _, _, page = self.get("/")
+        self.assertIn("walk this session", page)
+
+    def test_scan_report_carries_its_own_timestamp(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        _, _, body = self.get("/api/status")
+        report = json.loads(body)
+        self.assertRegex(report["scanned"],
+                         r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
 class ServeTest(ServerFixture):
     def test_serve_binds_localhost_only(self):
         # The announcement is the bind: an ephemeral port on 127.0.0.1,
@@ -231,7 +296,11 @@ class ServeTest(ServerFixture):
              str(self.root), "--json"],
             capture_output=True, encoding="utf-8",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-        self.assertEqual(json.loads(body), json.loads(cli.stdout))
+        served, printed = json.loads(body), json.loads(cli.stdout)
+        # Two ticks, two clocks: the freshness stamp is the one field
+        # allowed to differ between them.
+        served.pop("scanned"), printed.pop("scanned")
+        self.assertEqual(served, printed)
 
     def test_front_page_is_inline_html_with_no_outside_dependencies(self):
         self.serve()
@@ -242,7 +311,13 @@ class ServeTest(ServerFixture):
         self.assertIn("text/html", ctype)
         self.assertIn("/api/status", page, "the band renders the scan")
         self.assertNotIn("<script src", page, "no framework, no CDN")
-        self.assertNotIn("<link", page, "nothing fetched from off-machine")
+        # A <link> is allowed only when it fetches nothing: the favicon
+        # rides inline as a data URI (ADR-0013's identity, zero assets).
+        for tag in re.findall(r"<link[^>]*>", page):
+            self.assertIn('href="data:', tag,
+                          "nothing fetched from off-machine")
+        self.assertNotIn("http://", page.split("<script>")[0].replace(
+            "http://www.w3.org/2000/svg", ""), "no external references")
 
     def test_front_page_renders_tiers_as_distinct_claims(self):
         # The strings the band is built from: VALID and ANCHORED are
