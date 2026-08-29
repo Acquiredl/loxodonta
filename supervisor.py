@@ -735,6 +735,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     return {
         **({"note": report_note} if report_note else {}),
         "root": root.as_posix(),
+        "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "exit": worst,
         "baseline": baseline,
         "completeness": completeness,
@@ -847,21 +848,34 @@ def mentions(entries, needle):
     return False
 
 
-def recall_root(root, repo=None, since=None, until=None, path=None):
+def universe(root, store):
+    """(repo, session, seq, log) for every chain in the serving
+    universe: the store's drawers, or a legacy folder of repos under an
+    explicit --root (ADR-0011/0013)."""
+    if store:
+        found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
+                        if not p.name.endswith(".anchors.jsonl"))
+                 if root.is_dir() else [])
+        return [(*store_identity(log), log) for log in found]
+    return [(*chain_identity(root, log), log) for log in find_chains(root)]
+
+
+def recall_root(root, repo=None, since=None, until=None, path=None,
+                store=False):
     """The timeline: one story per session, sibling chains folded in
     (ADR-0004 — one session, one story), newest first. Dates compare as
     ISO prefixes; a session is in range when its span overlaps."""
     stories = {}
-    for log in find_chains(root):
-        repo_name, session, _ = chain_identity(root, log)
+    for repo_name, session, _, log in universe(root, store):
         if repo and repo_name != repo:
             continue
         entries = read_entries(log)
         story = stories.setdefault((repo_name, session), {
             "repo": repo_name, "session": session, "chains": [],
-            "entries": 0, "started": None, "ended": None,
+            "paths": [], "entries": 0, "started": None, "ended": None,
             "worktree": False, "_touched": False})
         story["chains"].append(log.name)
+        story["paths"].append(log.relative_to(root).as_posix())
         story["entries"] += len(entries)
         story["worktree"] = (story["worktree"]
                              or ".claude" in log.relative_to(root).parts)
@@ -941,7 +955,7 @@ def walk_chain(root, asked):
 SEARCH_CAP = 500  # hits returned; `matched` still counts every one
 
 
-def search_root(root, query):
+def search_root(root, query, store=False):
     """Free-text search over action lines, machine-wide. Finds what was
     *written* — the writer's word, testimony like all of recall — and
     hands back the context the timeline links on. Newest first; an empty
@@ -949,8 +963,7 @@ def search_root(root, query):
     needle = (query or "").lower()
     hits = []
     if needle:
-        for log in find_chains(root):
-            repo_name, session, _ = chain_identity(root, log)
+        for repo_name, session, _, log in universe(root, store):
             for entry in read_entries(log):
                 action = str(entry.get("action", ""))
                 if needle in action.lower():
@@ -1553,7 +1566,8 @@ class Watchtower(ThreadingHTTPServer):
                     or time.monotonic() - self.scan_at >= SCAN_TTL_SECONDS):
                 report = scan_root(self.root, witness=self.witness,
                                    anchor_every=self.anchor_every,
-                                   calendars=self.calendars)
+                                   calendars=self.calendars,
+                                   store=self.store)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
             return self.scan_body
@@ -1574,7 +1588,8 @@ class Face(BaseHTTPRequestHandler):
                                  repo=asked.get("repo") or None,
                                  since=asked.get("from") or None,
                                  until=asked.get("to") or None,
-                                 path=asked.get("path") or None)
+                                 path=asked.get("path") or None,
+                                 store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/api/chain":
@@ -1589,7 +1604,8 @@ class Face(BaseHTTPRequestHandler):
         elif url.path == "/api/search":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
-            report = search_root(self.server.root, asked.get("q"))
+            report = search_root(self.server.root, asked.get("q"),
+                                 store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/checklist":
@@ -1625,11 +1641,13 @@ class Face(BaseHTTPRequestHandler):
 
 
 def cmd_serve(args):
-    root = Path(args.root).resolve()
+    store = args.root is None
+    root = store_receipts() if store else Path(args.root).resolve()
     # 127.0.0.1 is the whole posture: nothing about this machine's
     # activity is ever offered to another one.
     server = Watchtower(("127.0.0.1", args.port), Face)
     server.root = root
+    server.store = store
     server.witness = Path(args.witness)
     server.anchor_every = args.anchor_every
     server.calendars = args.calendar or ()
@@ -1660,7 +1678,8 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>supervisor — recall</title>
+<title>loxodonta — supervisor</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐘</text></svg>">
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, sans-serif; max-width: 64rem;
@@ -1668,10 +1687,48 @@ PAGE = """<!doctype html>
   header h1 { margin-bottom: 0.2rem; }
   header .stance { color: color-mix(in srgb, currentColor 60%, transparent);
                    margin-top: 0; }
-  #summary { padding: 0.6rem 1rem; border-radius: 0.5rem; margin: 1rem 0;
-             font-weight: 600; border: 1px solid transparent; }
-  #summary.quiet { background: #1d7a3e22; border-color: #1d7a3e; }
-  #summary.shouting { background: #b3261e22; border-color: #b3261e; }
+  /* The wordmark and the elephant are decoration, never information:
+     aria-hidden in the markup, and every state must read without them. */
+  .wordmark { font-family: ui-monospace, Consolas, monospace;
+              font-size: clamp(5px, 1.1vw, 9px); line-height: 1.15;
+              margin: 0 0 0.3rem; opacity: 0.8; overflow-x: auto;
+              user-select: none; }
+
+  /* The verdict strip: one condition, huge. Red is "not the recorded
+     history" or receipts stopping mid-session; amber is damage or a
+     tripwire event; green is the state the operator sees most mornings
+     — designed, not empty. */
+  #strip { padding: 1rem 1.2rem; border-radius: 0.6rem; margin: 1rem 0;
+           border: 2px solid color-mix(in srgb, currentColor 25%, transparent); }
+  #strip .state { font-size: 1.45rem; font-weight: 800; margin: 0;
+                  letter-spacing: 0.01em; }
+  #strip .why { margin: 0.25rem 0 0; opacity: 0.85; }
+  #strip.green { background: #1d7a3e1f; border-color: #1d7a3e; }
+  #strip.amber { background: #b453091f; border-color: #b45309; }
+  #strip.red { background: #b3261e22; border-color: #b3261e; }
+  #freshness { display: block; margin-top: 0.35rem; font-size: 0.8rem;
+               opacity: 0.7; font-variant-numeric: tabular-nums; }
+  #elephant { font-family: ui-monospace, Consolas, monospace;
+              font-size: 0.85rem; line-height: 1.1; margin: 0.5rem 0 0;
+              opacity: 0.75; user-select: none; }
+
+  /* The drawers: one tile per project, worst claim first, click for
+     that project's timeline. */
+  #tiles { display: grid; gap: 0.7rem; margin: 0.8rem 0;
+           grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); }
+  .tile { text-align: left; font: inherit; color: inherit; cursor: pointer;
+          display: flex; flex-direction: column; gap: 0.35rem;
+          padding: 0.7rem 0.9rem; border-radius: 0.6rem;
+          border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+          background: color-mix(in srgb, currentColor 5%, transparent); }
+  .tile:hover, .tile:focus-visible {
+          border-color: color-mix(in srgb, currentColor 60%, transparent); }
+  .tile .name { font-weight: 700; font-size: 1.05rem;
+                overflow-wrap: anywhere; }
+  .tile .meta { font-size: 0.82rem; opacity: 0.8;
+                font-variant-numeric: tabular-nums; }
+  .tile .row { display: flex; flex-wrap: wrap; gap: 0.5rem;
+               align-items: baseline; }
   h2 { border-bottom: 1px solid color-mix(in srgb, currentColor 25%, transparent);
        padding-bottom: 0.2rem; margin-top: 2rem; }
   .testimony { font-style: italic; margin-top: -0.4rem;
@@ -1817,11 +1874,46 @@ PAGE = """<!doctype html>
 </head>
 <body>
 <header>
+  <pre class="wordmark" aria-hidden="true">
+db       .d88b.  db    db  .d88b.  d8888b.  .d88b.  d8b   db d888888b  .d8b.
+88      .8P  Y8. `8b  d8' .8P  Y8. 88  `8D .8P  Y8. 888o  88 `~~88~~' d8' `8b
+88      88    88  `8bd8'  88    88 88   88 88    88 88V8o 88    88    88ooo88
+88      88    88  .dPYb.  88    88 88   88 88    88 88 V8o88    88    88~~~88
+88booo. `8b  d8' .8P  Y8. `8b  d8' 88  .8D `8b  d8' 88  V888    88    88   88
+Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</pre>
   <h1>supervisor</h1>
   <p class="stance">a tripwire with a memory — verdicts come from
   <code>receipts verify</code>; this page draws them and decides nothing</p>
 </header>
-<div id="summary">reading the scan…</div>
+<div id="strip">
+  <p class="state" id="stateline">reading the scan…</p>
+  <p class="why" id="statewhy"></p>
+  <span id="freshness"></span>
+  <pre id="elephant" aria-hidden="true" hidden>
+       __ ___
+   .--'  `   `''--..   ,-.
+  /   ()            `-'  /
+ |      ___.....____,--'`
+  \\    /       |    |
+  |    |       |    |
+  J    L       J    L
+ (__,__)      (__,__)</pre>
+</div>
+
+<section id="drawers">
+  <h2>drawers</h2>
+  <p class="testimony">one per project — the worst claim leads; click a
+  drawer for that project's timeline</p>
+  <div id="tiles">remembering…</div>
+</section>
+
+<section id="events">
+  <h2>events</h2>
+  <p class="testimony">what changed since the last look, and which
+  sessions are behind their witness — reasons to look, never verdicts</p>
+  <div id="tripwire"></div>
+  <div id="watch"></div>
+</section>
 
 <section id="recall">
   <h2>recall</h2>
@@ -1852,8 +1944,6 @@ PAGE = """<!doctype html>
 
 <section id="alarms">
   <h2>status band</h2>
-  <div id="tripwire"></div>
-  <div id="watch"></div>
   <div id="band"></div>
 </section>
 <section id="firedrill" hidden>
@@ -1952,25 +2042,131 @@ function chainRow(chain) {
   return row;
 }
 
-function render(report) {
-  const summary = document.getElementById("summary");
+// The verdict strip: one condition, stated huge, ordered by the tier
+// language — "not the recorded history" and a mid-session silence read
+// red; damage and tripwire events read amber; everything else is the
+// designed quiet state (the elephant's one appearance).
+function renderStrip(report) {
+  const strip = document.getElementById("strip");
+  const state = document.getElementById("stateline");
+  const why = document.getElementById("statewhy");
   const chains = report.repos.flatMap(r =>
     r.sessions.flatMap(s => s.chains));
-  const quietEvidence = chains.filter(c => c.superseded).length;
+  const live = report.completeness.sessions.filter(s =>
+    ["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state));
+  const regenerated = chains.filter(c => !c.superseded && c.exit === 3);
+  const broken = chains.filter(c => !c.superseded &&
+                                    c.verdict === "BROKEN");
   const changes = report.baseline.events.length;
-  if (report.exit === 0) {
-    summary.className = "quiet";
-    summary.textContent = "all quiet — " + chains.length + " chain(s) " +
-      "under " + report.root +
-      (quietEvidence ? " (" + quietEvidence + " superseded tear(s) kept " +
-                       "as evidence)" : "");
+  const quietEvidence = chains.filter(c => c.superseded).length;
+  let colour;
+  if (regenerated.length) {
+    colour = "red";
+    state.textContent = "NOT THE RECORDED HISTORY";
+    why.textContent = regenerated.length + " chain(s) contradict an " +
+      "anchor or head record — the gravest claim this page can carry";
+  } else if (live.length) {
+    colour = "red";
+    state.textContent = "RECEIPTS STOPPED ARRIVING";
+    why.textContent = live.length + " session(s) visibly active while " +
+      "the chain goes quiet — investigate while it is live";
+  } else if (broken.length || changes || report.exit !== 0) {
+    colour = "amber";
+    state.textContent = broken.length ? "HISTORY WAS ALTERED"
+                                      : "CHANGED SINCE LAST LOOK";
+    why.textContent = (broken.length
+      ? broken.length + " chain(s) fail verification — "
+      : "") + (changes
+      ? changes + " change(s) the baseline cannot explain as appends"
+      : "details in the band below") +
+      " (scan exit " + report.exit + ")";
   } else {
-    summary.className = "shouting";
-    summary.textContent = "attention — something under " + report.root +
-      " demands it" +
-      (changes ? " — " + changes + " change(s) since the last look" : "") +
-      " (scan exit: " + report.exit + ")";
+    colour = "green";
+    state.textContent = "all quiet";
+    why.textContent = chains.length + " chain(s), every receipt " +
+      "accounted for" +
+      (quietEvidence ? " — " + quietEvidence + " superseded tear(s) " +
+                       "kept as quiet evidence" : "");
   }
+  strip.className = colour;
+  document.getElementById("elephant").hidden = colour !== "green";
+  const freshness = document.getElementById("freshness");
+  freshness.textContent = "last scan " +
+    (report.scanned ? since(report.scanned) + " ago" : "just now") +
+    " · this page refreshes every 30s";
+}
+
+// The drawers: one tile per project, built from the scan (verdicts,
+// anchors) and the timeline (spans, session counts) together.
+let lastStatus = null;
+let lastRecall = null;
+
+function worstTier(chains) {
+  const ladder = ["regenerated", "broken", "refused", "valid",
+                  "anchored", "superseded"];
+  const rungs = chains.map(tier);
+  for (const rung of ladder) {
+    if (rungs.includes(rung)) return rung;
+  }
+  return "valid";
+}
+
+function openDrawer(repo) {
+  document.getElementById("ask-repo").value = repo;
+  loadRecall();
+  document.getElementById("recall")
+    .scrollIntoView({behavior: "smooth"});
+}
+
+function renderTiles() {
+  if (!lastStatus) return;
+  const tiles = document.getElementById("tiles");
+  tiles.replaceChildren();
+  const spans = {};
+  for (const story of (lastRecall ? lastRecall.sessions : [])) {
+    const span = spans[story.repo] = spans[story.repo] ||
+      {sessions: 0, ended: null};
+    span.sessions += 1;
+    if (story.ended && (!span.ended || story.ended > span.ended)) {
+      span.ended = story.ended;
+    }
+  }
+  for (const repo of lastStatus.repos) {
+    const chains = repo.sessions.flatMap(s => s.chains);
+    const rung = worstTier(chains);
+    const tile = el("button", "tile tier-" + rung);
+    tile.type = "button";
+    tile.appendChild(el("span", "name", repo.repo));
+    const row = el("span", "row");
+    const face = chains.find(c => tier(c) === rung) || {};
+    row.appendChild(el("span", "chip", CHIP[rung](face)));
+    if (chains.some(c => c.anchored)) {
+      row.appendChild(el("span", "badge", "anchored"));
+    } else if (chains.some(c =>
+        (c.anchors && c.anchors.pending || []).length)) {
+      row.appendChild(el("span", "badge", "anchor pending"));
+    }
+    tile.appendChild(row);
+    const span = spans[repo.repo];
+    tile.appendChild(el("span", "meta",
+      (span ? span.sessions : repo.sessions.length) + " session(s) · " +
+      chains.length + " chain(s)" +
+      (span && span.ended ? " · last activity " + since(span.ended) +
+                            " ago" : "")));
+    tile.addEventListener("click", () => openDrawer(repo.repo));
+    tiles.appendChild(tile);
+  }
+  if (!lastStatus.repos.length) {
+    tiles.appendChild(el("p", "",
+      "no drawers yet — wire recording with loxodonta install-hook " +
+      "and receipts will appear here."));
+  }
+}
+
+function render(report) {
+  lastStatus = report;
+  renderStrip(report);
+  renderTiles();
 
   const tripwire = document.getElementById("tripwire");
   tripwire.replaceChildren();
@@ -1995,15 +2191,30 @@ function render(report) {
   const LIVE = ["ALARM-SILENT", "ALARM-DEFICIT"];
   const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "SURPLUS", "LAGGING",
                                   "IDLE-DEFICIT"]);
-  for (const s of report.completeness.sessions) {
-    if (!NOTEWORTHY.includes(s.state)) continue;
+  const watchRow = s => {
     const live = LIVE.includes(s.state);
     const row = el("div", "watch-row " + (live ? "live" : "quiet"));
     row.appendChild(el("span", "chip", s.state));
     row.appendChild(el("span", "file", s.repo + " · " + s.session +
       " · witnessed " + s.tools + ", received " + s.receipts));
     if (s.words) row.appendChild(el("p", "claim", s.words));
-    watch.appendChild(row);
+    return row;
+  };
+  // Live alarms are the signal; ended deficits are evidence, and a
+  // machine's worth of history must never bury the one live row —
+  // the quiet ones fold away, present but not shouting.
+  const noteworthy = report.completeness.sessions.filter(
+    s => NOTEWORTHY.includes(s.state));
+  for (const s of noteworthy.filter(s => LIVE.includes(s.state))) {
+    watch.appendChild(watchRow(s));
+  }
+  const quiet = noteworthy.filter(s => !LIVE.includes(s.state));
+  if (quiet.length) {
+    const fold = el("details");
+    fold.appendChild(el("summary", "", quiet.length +
+      " quieter finding(s) — deficits ended and flags, kept as evidence"));
+    for (const s of quiet) fold.appendChild(watchRow(s));
+    watch.appendChild(fold);
   }
   if (report.completeness.note) {
     watch.appendChild(el("p", "claim", report.completeness.note));
@@ -2269,6 +2480,16 @@ function storyRow(story) {
     row.appendChild(el("p", "sibling", story.chains.length +
       " chains — recording continued in a sibling"));
   }
+  // The last rung of the ladder: a story opens its own entries in the
+  // walker, hashes rechecked in the reader's browser.
+  for (const path of story.paths || []) {
+    const walk = el("button", "walk",
+      story.paths.length > 1 ? "walk " + path.split("/").pop()
+                             : "walk this session");
+    walk.type = "button";
+    walk.addEventListener("click", () => openWalker(path));
+    row.appendChild(walk);
+  }
   return row;
 }
 
@@ -2298,7 +2519,12 @@ function asked() {
 async function loadRecall() {
   try {
     const response = await fetch("/api/recall" + asked());
-    renderRecall(await response.json());
+    const report = await response.json();
+    // The tiles want the unfiltered picture; only a filter-free answer
+    // updates their memory of it.
+    if (!asked()) lastRecall = report;
+    renderRecall(report);
+    renderTiles();
   } catch (error) {
     document.getElementById("timeline").textContent =
       "recall did not answer: " + error;
@@ -2369,9 +2595,12 @@ async function loadStatus() {
     const response = await fetch("/api/status");
     render(await response.json());
   } catch (error) {
-    const summary = document.getElementById("summary");
-    summary.className = "shouting";
-    summary.textContent = "the scan did not answer: " + error;
+    const strip = document.getElementById("strip");
+    strip.className = "red";
+    document.getElementById("stateline").textContent =
+      "the scan did not answer";
+    document.getElementById("statewhy").textContent = String(error);
+    document.getElementById("elephant").hidden = true;
   }
 }
 
@@ -2424,10 +2653,10 @@ def main(argv):
     serve = sub.add_parser(
         "serve", parents=[watching],
         help="the face: status band on a localhost-only server")
-    serve.add_argument("--root", required=True,
-                       help="the folder your repos live in (store-wide "
-                            "serving arrives with the dashboard arc, "
-                            "issue #48)")
+    serve.add_argument("--root", default=None,
+                       help="legacy/explicit mode: serve this folder of "
+                            "repos instead of the store (default: the "
+                            "store, ADR-0011)")
     serve.add_argument("--port", type=int, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
