@@ -1070,6 +1070,45 @@ def main_repo_root(project):
         return project
 
 
+def store_home():
+    """The machine-wide home of hook-written chains (ADR-0011):
+    ~/.loxodonta, or wherever LOXODONTA_HOME points."""
+    return (os.environ.get("LOXODONTA_HOME")
+            or os.path.join(os.path.expanduser("~"), ".loxodonta"))
+
+
+def project_slug(project):
+    """The store drawer name for a project: its basename plus 8 hex of
+    the normalized full path's SHA256 — readable at a glance, and two
+    same-named projects can never share a drawer (ADR-0011). The math
+    must match supervisor.py's copy exactly; the recall tests hold the
+    two together behaviorally (hook in, digest out)."""
+    p = os.path.abspath(str(project))
+    key = os.path.normcase(p).replace(os.sep, "/")
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    base = os.path.basename(p.rstrip("/\\")) or "root"
+    safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in base)
+    return f"{safe}-{digest}"
+
+
+def record_project(log_dir, project):
+    """The drawer's project record (GLOSSARY): project.json, written on
+    the first receipt and never rewritten, holding the real path a
+    file reference resolves against (ADR-0012). Testimony like
+    everything else writer-reachable. Failure to write it must never
+    fail the session (SPEC §8)."""
+    record = os.path.join(log_dir, "project.json")
+    if os.path.exists(record):
+        return
+    try:
+        with open(record, "x", encoding="utf-8", newline="\n") as f:
+            json.dump({"path": os.path.abspath(project).replace(os.sep, "/")},
+                      f)
+            f.write("\n")
+    except OSError:
+        pass
+
+
 def chain_is_damaged(log):
     """True when the log exists but cannot be extended — a torn tail."""
     try:
@@ -1129,16 +1168,23 @@ def cmd_hook(args):
         return 1
 
     # Where chains live, most specific wins: an explicit --log-dir; else
-    # <project>/receipts via the CLAUDE_PROJECT_DIR variable the harness
-    # sets for hooks (read here in Python — no shell expansion, so one
-    # settings command works on every platform); else the working directory.
-    # When the project is a git worktree, the chain goes to the repository
-    # it belongs to rather than the disposable copy (see main_repo_root).
+    # the store's drawer for the project named by CLAUDE_PROJECT_DIR
+    # (ADR-0011 — read here in Python, no shell expansion, so one
+    # settings command works on every platform); else the working
+    # directory. When the project is a git worktree, the drawer belongs
+    # to the repository the worktree serves (see main_repo_root), so a
+    # project's history collects in one place however many worktrees it
+    # runs.
     log_dir = args.log_dir
+    project = None
     if log_dir is None:
-        project = os.environ.get("CLAUDE_PROJECT_DIR")
-        log_dir = (os.path.join(main_repo_root(project), "receipts")
-                   if project else ".")
+        env_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        if env_project:
+            project = main_repo_root(env_project)
+            log_dir = os.path.join(store_home(), "receipts",
+                                   project_slug(project))
+        else:
+            log_dir = "."
 
     # Session id becomes part of a filename: keep only safe characters.
     safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(session))
@@ -1153,6 +1199,8 @@ def cmd_hook(args):
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
+    if project is not None:
+        record_project(log_dir, project)
     # A damaged chain is not extended and not repaired — recording moves to
     # a sibling so the session keeps leaving receipts (ADR-0004).
     log = writable_chain(log_dir, safe)

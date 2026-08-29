@@ -110,6 +110,88 @@ def chains_by_session(report):
             for repo in report["repos"] for sess in repo["sessions"]}
 
 
+def run_store_scan(store_home, witness, *extra, env=None):
+    """`scan` with no --root: the store is the default universe
+    (ADR-0011), reached through LOXODONTA_HOME. The witness is always
+    pinned — store mode watches every transcript on the machine, so an
+    unpinned test would read the developer's real sessions."""
+    return subprocess.run(
+        [sys.executable, str(SUPERVISOR), "scan", "--json",
+         "--witness", str(witness), *extra],
+        capture_output=True, encoding="utf-8",
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8",
+             "LOXODONTA_HOME": str(store_home)})
+
+
+class StoreScanTest(unittest.TestCase):
+    """The census over the central store. Drawers are laid out by hand —
+    the scan never recomputes slugs, it reads what the store holds, so
+    these tests own the layout the same way the writer does."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / "storehome"
+        self.witness = Path(self._tmp.name) / "no-witness"
+        self.witness.mkdir()
+
+    def drawer(self, slug, project_path):
+        d = self.home / "receipts" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "project.json").write_text(
+            json.dumps({"path": str(project_path)}), encoding="utf-8")
+        return d
+
+    def test_scan_with_no_root_sweeps_the_store(self):
+        alpha = self.drawer("alpha-11111111", r"C:\work\alpha")
+        beta = self.drawer("beta-22222222", r"C:\work\beta")
+        make_chain(alpha, "sess-aaaa", entries=3)
+        make_chain(beta, "sess-bbbb")
+
+        result = run_store_scan(self.home, self.witness)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        sessions = chains_by_session(report)
+        self.assertIn(("alpha", "sess-aaaa"), sessions)
+        self.assertIn(("beta", "sess-bbbb"), sessions)
+        (chain,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "VALID")
+        self.assertEqual(chain["entries"], 4)
+
+    def test_store_scan_keeps_its_baseline_beside_the_store(self):
+        drawer = self.drawer("alpha-11111111", r"C:\work\alpha")
+        make_chain(drawer, "sess-aaaa")
+
+        run_store_scan(self.home, self.witness)
+
+        self.assertTrue((self.home / "baseline.json").exists(),
+                        "one baseline per machine, beside the store — "
+                        "not inside it (ADR-0011)")
+
+    def test_empty_store_scan_is_a_note_not_an_error(self):
+        result = run_store_scan(self.home, self.witness)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["repos"], [])
+        self.assertIn("install-hook", json.dumps(report),
+                      "an empty store tells the newcomer what wires it")
+
+    def test_drawer_without_record_still_scans_under_its_slug(self):
+        # A hand-made or damaged drawer (no project.json) is still
+        # someone's history: censused under the drawer's own name.
+        drawer = self.home / "receipts" / "mystery-33333333"
+        drawer.mkdir(parents=True)
+        make_chain(drawer, "sess-cccc")
+
+        result = run_store_scan(self.home, self.witness)
+
+        sessions = chains_by_session(json.loads(result.stdout))
+        self.assertIn(("mystery-33333333", "sess-cccc"), sessions)
+
+
 class ScanCensusTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

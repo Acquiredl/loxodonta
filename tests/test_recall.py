@@ -177,6 +177,78 @@ class DigestTest(RecallBase):
         self.assertIn("cli-built entry", out)
 
 
+class StoreRecallTest(RecallBase):
+    """Recall over the central store (ADR-0011): the reader resolves a
+    project to the same drawer the hook writes — proven behaviorally,
+    hook in, digest out, so the slug math can never drift between the
+    two files. Legacy repo layouts stay readable as the fallback."""
+
+    def store_env(self, project):
+        return {"CLAUDE_PROJECT_DIR": str(project),
+                "LOXODONTA_HOME": str(self.root / "storehome")}
+
+    def hook(self, project, session, command):
+        payload = json.dumps({
+            "session_id": session, "hook_event_name": "PostToolUse",
+            "tool_name": "Bash", "tool_input": {"command": command},
+            "tool_response": {}})
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook"],
+            input=payload.encode("utf-8"), capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                 **self.store_env(project)})
+
+    def test_digest_reads_the_drawer_the_hook_wrote(self):
+        project = self.repo("alpha")
+        result = self.hook(project, "aaaa1111-1111-1111-1111-111111111111",
+                           "pytest -q")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = run_py(SUPERVISOR, "digest", "--repo", str(project),
+                     env_extra=self.store_env(project))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("pytest -q", out.stdout)
+
+    def test_show_and_search_reach_store_chains(self):
+        project = self.repo("alpha")
+        self.hook(project, "bbbb2222-2222-2222-2222-222222222222",
+                  "make the needle")
+        env = self.store_env(project)
+        search = run_py(SUPERVISOR, "search", "needle", "--repo",
+                        str(project), env_extra=env)
+        self.assertIn("make the needle", search.stdout)
+        address = next(line.split()[0]
+                       for line in search.stdout.splitlines()
+                       if "make the needle" in line)
+        show = run_py(SUPERVISOR, "show", address, "--repo", str(project),
+                      env_extra=env)
+        self.assertEqual(show.returncode, 0, show.stderr)
+        self.assertIn("self-verified", show.stdout)
+
+    def test_legacy_repo_layout_is_the_fallback(self):
+        # A repo with no drawer yet (pre-adopt) still renders its local
+        # receipts/ — the transition never blanks anyone's memory.
+        repo = self.repo("legacy")
+        _, hashes = forge_chain(repo, "cccc3333-3333-3333-3333-333333333333",
+                                [("2026-08-25T10:00:00Z", "old-style work")])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo),
+                     env_extra={"LOXODONTA_HOME":
+                                str(self.root / "storehome")})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(hashes[1][:8], out.stdout)
+
+    def test_drawer_outranks_legacy_when_both_exist(self):
+        # After adoption a stale legacy folder must not shadow the store.
+        project = self.repo("alpha")
+        forge_chain(project, "dddd4444-4444-4444-4444-444444444444",
+                    [("2026-08-20T10:00:00Z", "stale legacy line")])
+        self.hook(project, "eeee5555-5555-5555-5555-555555555555",
+                  "fresh store line")
+        out = run_py(SUPERVISOR, "digest", "--repo", str(project),
+                     env_extra=self.store_env(project))
+        self.assertIn("fresh store line", out.stdout)
+        self.assertNotIn("stale legacy line", out.stdout)
+
+
 class WorktreeRecallTest(RecallBase):
     """A session in a git worktree logs to the main repository
     (receipts hook, main_repo_root); recall invoked from that worktree
