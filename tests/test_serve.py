@@ -260,6 +260,70 @@ class DashboardTest(ServerFixture):
                          r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
+class FortnightTest(ServerFixture):
+    """The third question a monitoring surface owes its operator: is
+    this a trend or a one-off? Fourteen days sit under the strip, one
+    cell per day, and a day nobody watched reads as a gap in the
+    memory — never as a quiet day."""
+
+    def test_the_fortnight_sits_under_the_strip_above_recall(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn('id="fortnight"', page)
+        self.assertLess(page.index('id="strip"'), page.index('id="fortnight"'),
+                        "the alarm still leads; the trend explains it")
+        self.assertLess(page.index('id="fortnight"'), page.index('id="recall"'),
+                        "context for the alarm precedes the memory view")
+        self.assertIn("trend or a one-off", page,
+                      "the band says which question it answers")
+
+    def test_the_status_endpoint_carries_the_fourteen_days(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        _, _, body = self.get("/api/status")
+
+        history = json.loads(body)["history"]
+        self.assertEqual(len(history), 14)
+        self.assertTrue(history[-1]["watched"], "today is being watched")
+        self.assertEqual(history[-1]["worst"], 0)
+
+    def test_the_page_remembers_that_it_was_opened(self):
+        # Detection latency is a function of how often the operator
+        # looks, so the surface counts its own looks: a run of unwatched
+        # days is the one failure the chain cannot report.
+        self.serve()
+        self.get("/")
+        self.get("/")
+
+        _, _, body = self.get("/api/status")
+
+        today = json.loads(body)["history"][-1]
+        self.assertGreaterEqual(today["looks"], 2,
+                                "each opening of the page is a look")
+
+    def test_the_verdict_palette_survives_colour_vision_deficiency(self):
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        # Roughly 8% of men cannot separate red from green: the three
+        # states must part by more than hue.
+        self.assertIn("--quiet:", page)
+        self.assertIn("--damage:", page)
+        self.assertIn("--grave:", page)
+        self.assertNotIn("#1d7a3e", page,
+                         "the stoplight green is gone from the surface")
+        # Colour is never the only encoding — every state is named in
+        # text and marked with a shape.
+        for shape in ("●", "▲", "✕"):
+            self.assertIn(shape, page)
+        self.assertIn('id="statemark"', page)
+
+
 class ServeTest(ServerFixture):
     def test_serve_binds_localhost_only(self):
         # The announcement is the bind: an ephemeral port on 127.0.0.1,

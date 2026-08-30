@@ -105,12 +105,14 @@ Tampering only gets caught if something actually looks at the chains, and nobody
 
 ```
 python supervisor.py scan                     # one tick: every chain in the store, verdicts, exit code for cron
-python supervisor.py serve                    # localhost-only dashboard: verdict strip, drawers, memory navigation
+python supervisor.py serve                    # localhost-only dashboard: verdict strip, fourteen-day band, memory navigation
 python supervisor.py drill --root ~/repos --log <chain>   # rehearse detection on a sandbox copy, real chains untouched
 python supervisor.py adopt --root ~/repos     # one-time move of pre-store chains into the store (--dry-run to preview)
 ```
 
 `scan` needs no arguments: the store is its universe. `--root <folder>` scans a legacy folder-of-repos layout instead (every `<repo>/receipts/` under it, plus chains stranded in old worktrees) — the mode `adopt` migrates you out of. Scan adds two exit codes of its own: `5`, the baseline tripwire (a chain changed in a way appends can't explain since the last look) and `6`, the completeness alarm (a session is visibly active while receipts stop arriving — the failure nothing else watches for).
+
+Under the verdict strip sits a fourteen-day band, one cell per day, carrying that day's worst claim. The strip says what is true now; the band says whether now is unusual. A day nobody looked at is drawn as a gap rather than a quiet day, and that is deliberate: detection latency is a function of how often you actually look, so a run of unread days is the one failure the chains cannot report about themselves.
 
 Between looks it remembers every chain's last position, and it shouts when the difference can't be explained by normal appends: a chain that shrank, a head that vanished from its own history, a silently dead hook. It also keeps anchor proofs fresh, and the page re-verifies every chain in your browser via WebCrypto, so the verdicts you see don't depend on trusting the server that drew them.
 
