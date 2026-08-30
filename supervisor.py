@@ -246,7 +246,7 @@ def diff_baseline(remembered, relpath, entries):
 # failure has, so the surface keeps it where the alarm lives.
 #
 # Testimony like everything else here: writer-reachable, trusted for
-# nothing, and it decides no verdicts.
+# nothing, and it decides no verdicts (ADR-0014).
 
 DAYBOOK_NAME = ".supervisor-daybook.json"
 DAYBOOK_SEASON = 90  # how many days the book keeps
