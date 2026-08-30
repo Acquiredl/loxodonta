@@ -173,6 +173,34 @@ class HookTest(unittest.TestCase):
         self.assertEqual(entry["files"], [])
         self.assertIn("/etc/hostname", entry["action"])
 
+    @unittest.skipUnless(os.name == "nt",
+                         "only Windows has drive letters to cross")
+    def test_file_on_another_drive_is_logged_without_fingerprint(self):
+        # The same rule as the test above, on the one path shape that
+        # reaches it differently: os.path.relpath RAISES across drives
+        # on Windows instead of returning a '..' path, so the "outside
+        # the project" branch was never reached and the hook died
+        # before writing anything. A scratchpad on C: and a repo on S:
+        # is an ordinary layout, and every receipt for it went missing.
+        here = str(self.workdir)[:1].upper()
+        other = next((d for d in "CDEFGHIJKLMNOPQRSTUVWXYZ"
+                      if d != here and os.path.isdir(d + ":\\")), None)
+        if other is None:
+            self.skipTest("this machine has only one drive")
+        away = other + ":\\loxodonta-probe\\notes.md"
+
+        result = run_hook(
+            payload(tool="Write", tool_input={"file_path": away}),
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = self.entries()[1]
+        self.assertEqual(entry["files"], [],
+                         "a file off the project is never fingerprinted")
+        self.assertIn("notes.md", entry["action"],
+                      "but the action is still recorded")
+
     def test_missing_or_vanished_file_is_logged_without_fingerprint(self):
         result = run_hook(
             payload(tool="Write", tool_input={"file_path": "never-written.md"}),
