@@ -1266,7 +1266,17 @@ def cmd_hook(args):
         if not isinstance(raw, str) or not raw:
             continue
         resolved = os.path.abspath(raw)
-        relative = os.path.relpath(resolved, base)
+        try:
+            relative = os.path.relpath(resolved, base)
+        except ValueError:
+            # Windows raises here rather than returning a `..` path when
+            # the two sit on different drives. That means exactly what
+            # `..` means — the file is outside the project — but as an
+            # exception it escaped the loop and killed the hook, so a
+            # repo on one drive and a scratchpad on another lost every
+            # receipt for the writes between them. The rule above is the
+            # rule: skipped, never fatal.
+            continue
         if relative.split(os.sep)[0] == ".." or not os.path.isfile(resolved):
             continue
         file_paths.append(relative.replace(os.sep, "/"))
