@@ -37,6 +37,10 @@ An operator-side reader process that continuously verifies receipt logs against 
 
 The supervisor's remembered copy of chain heads, used to detect change between looks. Writer-reachable by definition, therefore trusted for nothing: a baseline that disagrees with the log is a reason to shout, never a verdict about which side is true — verdicts still come only from `verify` and its inputs. Named after the Tripwire/AIDE convention, where the same weakness (an adversary who can reach the baseline) has the same documented answer: the trustworthy copy lives out of reach (here, the anchor).
 
+### Day book
+
+The supervisor's remembered copy of its own days: one row per UTC day holding that day's worst claim, its counts, and how often the page was opened. Sits beside the [baseline](#baseline) and shares its posture exactly — writer-reachable, trusted for nothing, owning no verdicts. Where the baseline answers "did anything change since the last look?", the day book answers "is this a trend or a one-off?", and a day nobody watched is recorded as a gap rather than a quiet day. That distinction is the point: detection latency is a function of how often the operator looks, so a run of unread days is the one failure mode the chains themselves can never report.
+
 ### Issuer
 
 The party who seals a [package](#package) and ships it across a trust boundary under its own name — the one taking responsibility for the deliverable. The issuer holds the signing key **out of the writer's reach** (the head-record property, applied to a second object) and applies the [issuer signature](#issuer-signature) at package close, after the manifest is written. In a solo deployment the operator and issuer are the same person wearing two hats; the roles diverge the moment issuing becomes a service, exactly as writer and operator diverged to found this project (ADR-0008).

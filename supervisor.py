@@ -44,7 +44,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -229,6 +229,118 @@ def diff_baseline(remembered, relpath, entries):
     if not entries:
         return "regressed"
     return "rewritten"
+
+
+# --- The day book -------------------------------------------------------------
+# The baseline above remembers heads; this remembers days. One row per
+# UTC day, so the page can answer the third question a monitoring
+# surface owes its operator — "is this a trend or a one-off?" — before
+# anyone drills into anything.
+#
+# It also counts its own looks, and that is the point. Our claim is
+# detection latency, and detection latency is a function of how often
+# the operator actually looks. A front page designed to read quiet every
+# morning teaches the operator its answer and then goes unread; the
+# chain stays silent about that, because the thing that stopped working
+# is the reading of it. A run of unwatched days is the only shape that
+# failure has, so the surface keeps it where the alarm lives.
+#
+# Testimony like everything else here: writer-reachable, trusted for
+# nothing, and it decides no verdicts.
+
+DAYBOOK_NAME = ".supervisor-daybook.json"
+DAYBOOK_SEASON = 90  # how many days the book keeps
+FORTNIGHT = 14  # how many the band shows
+
+DAYBOOK_PURPOSE = ("the supervisor's day-by-day memory of its own looks — "
+                   "writer-reachable, trusted for nothing")
+
+
+def read_daybook(path):
+    """The remembered days. An unreadable book is replaced, never
+    repaired — the same posture the baseline takes."""
+    try:
+        days = json.loads(path.read_text(encoding="utf-8"))["days"]
+        return days if isinstance(days, dict) else {}
+    except (OSError, ValueError, KeyError, TypeError,
+            json.JSONDecodeError):
+        return {}
+
+
+def write_daybook(path, days, now):
+    """Keep a season, forget the rest, and never let a write failure
+    take the tick down with it — the book is a convenience, and the
+    verdicts do not live here.
+
+    Pruned by date, not by row count: a book that went unwritten for a
+    year should forget that year, not keep it because it is short."""
+    oldest = (now - timedelta(days=DAYBOOK_SEASON)).strftime("%Y-%m-%d")
+    kept = {day: row for day, row in sorted(days.items()) if day >= oldest}
+    try:
+        path.write_text(
+            json.dumps({"purpose": DAYBOOK_PURPOSE, "days": kept},
+                       indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return kept
+
+
+def remember_day(path, now, tally):
+    """Fold one tick into today's row.
+
+    The day's worst is sticky: a tripwire that fired at 09:00 still
+    colours the day at 17:00, because "was today clean?" is a different
+    question from "is it clean right now?" — and the strip above
+    already answers the second one."""
+    days = read_daybook(path)
+    today = now.strftime("%Y-%m-%d")
+    row = dict(days.get(today) or {})
+    for claim, seen in tally.items():
+        row[claim] = max(row.get(claim, 0), seen)
+    row["chains"] = tally["chains"]  # a count of now, not a high-water mark
+    row["scans"] = row.get("scans", 0) + 1
+    row["looks"] = row.get("looks", 0)
+    row["last"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    days[today] = row
+    return write_daybook(path, days, now)
+
+
+def remember_look(path, now):
+    """Someone opened the front page. Counted separately from scans,
+    which the poll drives on its own."""
+    days = read_daybook(path)
+    today = now.strftime("%Y-%m-%d")
+    row = dict(days.get(today) or {})
+    row["looks"] = row.get("looks", 0) + 1
+    days[today] = row
+    write_daybook(path, days, now)
+
+
+# What a day contributes to the band, as against what the book keeps
+# for itself. The scan tally and the last-scan stamp stay on disk: they
+# move on every tick, and a report that changes when nothing changed
+# would break the one invariant worth having here — two looks at an
+# unchanged store say the same thing, whether printed or served.
+PAINTED = ("worst", "chains", "broken", "events", "alarms")
+
+
+def fortnight(days, now):
+    """The last FORTNIGHT days, oldest first, gaps included.
+
+    A day nobody watched carries no claim at all — no worst, no counts.
+    It must never paint like a quiet day, because it isn't one: it is a
+    day this machine's history went unread."""
+    band = []
+    for back in range(FORTNIGHT - 1, -1, -1):
+        day = (now - timedelta(days=back)).strftime("%Y-%m-%d")
+        row = days.get(day) if isinstance(days.get(day), dict) else None
+        seen = {"day": day, "looks": (row or {}).get("looks", 0)}
+        if row is not None and "worst" in row:
+            band.append({**seen, "watched": True,
+                         **{claim: row.get(claim, 0) for claim in PAINTED}})
+        else:
+            band.append({**seen, "watched": False})
+    return band
 
 
 # --- Anchor keeper ------------------------------------------------------------
@@ -621,8 +733,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if store:
         os.makedirs(root.parent, exist_ok=True)
         baseline_path = root.parent / "baseline.json"
+        daybook = root.parent / "daybook.json"
     else:
         baseline_path = root / BASELINE_NAME
+        daybook = root / DAYBOOK_NAME
     remembered, keeper, note = read_baseline(baseline_path)
     events = []
     heads = {}
@@ -639,6 +753,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                         for log in find_chains(root))
     repos = {}
     worst = 0
+    damaged = 0
     for (repo, session, _), log in census:
         relpath = log.relative_to(root).as_posix()
         entries = read_entries(log)
@@ -673,6 +788,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         repos.setdefault(repo, {}).setdefault(session, []).append(chain)
         if not stood_down:
             worst = max(worst, exit_code)
+            if verdict == "BROKEN":
+                damaged += 1
 
         change = diff_baseline(remembered, relpath, entries)
         if change:
@@ -724,6 +841,15 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
            for s in completeness["sessions"]):
         worst = max(worst, 6)
 
+    # The day book last, so the row this tick writes is the finished one
+    # — worst already raised by the tripwire and the completeness watch.
+    alarms = len([s for s in completeness["sessions"]
+                  if s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")])
+    days = remember_day(daybook, now, {
+        "worst": worst, "chains": len(census), "broken": damaged,
+        "events": len(events), "alarms": alarms,
+    })
+
     baseline = {"file": baseline_path.as_posix(), "events": events}
     if note:
         baseline["note"] = note
@@ -737,6 +863,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "root": root.as_posix(),
         "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "exit": worst,
+        "history": fortnight(days, now),
         "baseline": baseline,
         "completeness": completeness,
         "repos": [
@@ -1560,6 +1687,14 @@ class Watchtower(ThreadingHTTPServer):
     share the current tick's report instead of each spawning their own
     census of verify subprocesses."""
 
+    def remember_look(self):
+        """One opening of the front page, under the scan lock — the day
+        book is one file and the tick rewrites it wholesale."""
+        book = (self.root.parent / "daybook.json" if self.store
+                else self.root / DAYBOOK_NAME)
+        with self.scan_lock:
+            remember_look(book, datetime.now(timezone.utc))
+
     def fresh_status(self):
         with self.scan_lock:
             if (self.scan_body is None
@@ -1615,6 +1750,7 @@ class Face(BaseHTTPRequestHandler):
                 return
             self.reply(doc.read_bytes(), "text/plain; charset=utf-8")
         elif url.path == "/":
+            self.server.remember_look()
             self.reply(PAGE.encode("utf-8"), "text/html; charset=utf-8")
         else:
             self.send_error(404)
@@ -1681,7 +1817,26 @@ PAGE = """<!doctype html>
 <title>loxodonta — supervisor</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐘</text></svg>">
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    /* The verdict palette. Roughly 8% of men cannot separate red from
+       green, and the stoplight triple is the worst case of it: strong
+       colour vision deficiency renders both as brown. So the quiet
+       state carries blue (teal survives the collapse), and the three
+       states part by lightness as well as hue. Colour is never the
+       only encoding here — every state is also named in words and
+       marked with a shape, which is what makes the hue safe to keep. */
+    --quiet: #0f766e;
+    --damage: #b45309;
+    --grave: #b3261e;
+    --quiet-wash: color-mix(in srgb, var(--quiet) 13%, transparent);
+    --damage-wash: color-mix(in srgb, var(--damage) 13%, transparent);
+    /* Deliberately much heavier than the other two. Amber and red are
+       adjacent hues and collapse onto the same olive under deuteranopia,
+       so the gravest state is separated by weight as well — which is
+       what it should look like anyway. */
+    --grave-wash: color-mix(in srgb, var(--grave) 32%, transparent);
+  }
   body { font-family: system-ui, sans-serif; max-width: 64rem;
          margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
   header h1 { margin-bottom: 0.2rem; }
@@ -1694,18 +1849,63 @@ PAGE = """<!doctype html>
               margin: 0 0 0.3rem; opacity: 0.8; overflow-x: auto;
               user-select: none; }
 
-  /* The verdict strip: one condition, huge. Red is "not the recorded
-     history" or receipts stopping mid-session; amber is damage or a
-     tripwire event; green is the state the operator sees most mornings
-     — designed, not empty. */
+  /* The verdict strip: one condition, huge. Grave is "not the recorded
+     history" or receipts stopping mid-session; damage is a broken chain
+     or a tripwire event; quiet is the state the operator sees most
+     mornings — designed, not empty.
+
+     Three encodings carry the same one condition: the shape, the words,
+     and the colour. Drop any one of them and the strip still reads. */
   #strip { padding: 1rem 1.2rem; border-radius: 0.6rem; margin: 1rem 0;
+           display: grid; grid-template-columns: auto 1fr;
+           gap: 0 0.9rem; align-items: start;
            border: 2px solid color-mix(in srgb, currentColor 25%, transparent); }
   #strip .state { font-size: 1.45rem; font-weight: 800; margin: 0;
                   letter-spacing: 0.01em; }
   #strip .why { margin: 0.25rem 0 0; opacity: 0.85; }
-  #strip.green { background: #1d7a3e1f; border-color: #1d7a3e; }
-  #strip.amber { background: #b453091f; border-color: #b45309; }
-  #strip.red { background: #b3261e22; border-color: #b3261e; }
+  #statemark { font-size: 1.6rem; line-height: 1.2; grid-row: 1 / span 3; }
+  #strip > :not(#statemark) { grid-column: 2; }
+  #strip.quiet { background: var(--quiet-wash); border-color: var(--quiet); }
+  #strip.quiet #statemark { color: var(--quiet); }
+  #strip.damage { background: var(--damage-wash);
+                  border-color: var(--damage); }
+  #strip.damage #statemark { color: var(--damage); }
+  #strip.grave { background: var(--grave-wash); border-color: var(--grave);
+                 border-width: 3px; }
+  #strip.grave #statemark { color: var(--grave); }
+
+  /* Fourteen days, one cell each: the question the strip cannot answer
+     on its own is whether today is a trend or a one-off. A day nobody
+     watched is drawn as absence — hatched, not coloured — because an
+     unread day is not a quiet one. */
+  #fortnight { display: grid; grid-template-columns: repeat(14, 1fr);
+               gap: 0.25rem; margin: 0.6rem 0 0.3rem; }
+  .day { border-radius: 0.25rem; padding: 0.15rem 0; min-height: 2.6rem;
+         display: flex; flex-direction: column; justify-content: flex-end;
+         align-items: center; gap: 0.15rem; font-size: 0.65rem;
+         border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+         font-variant-numeric: tabular-nums; }
+  .day .mark { font-size: 0.8rem; line-height: 1; }
+  .day .num { opacity: 0.6; }
+  .day.quiet { background: var(--quiet-wash); border-color: var(--quiet); }
+  .day.quiet .mark { color: var(--quiet); }
+  .day.damage { background: var(--damage-wash);
+                border-color: var(--damage); }
+  .day.damage .mark { color: var(--damage); }
+  .day.grave { background: var(--grave-wash); border-color: var(--grave); }
+  .day.grave .mark { color: var(--grave); }
+  .day.unwatched {
+    background: repeating-linear-gradient(45deg,
+      transparent, transparent 3px,
+      color-mix(in srgb, currentColor 14%, transparent) 3px,
+      color-mix(in srgb, currentColor 14%, transparent) 6px);
+    border-style: dashed; }
+  .day.unwatched .mark { opacity: 0.45; }
+  /* Ch. 9's move: mark where "now" is, so the eye lands on today
+     rather than on the worst day in the window. */
+  .day.today { outline: 2px solid currentColor; outline-offset: 1px; }
+  #lapse { margin: 0.2rem 0 0; font-size: 0.85rem; }
+  #lapse.warn { color: var(--damage); font-weight: 700; }
   #freshness { display: block; margin-top: 0.35rem; font-size: 0.8rem;
                opacity: 0.7; font-variant-numeric: tabular-nums; }
   #elephant { font-family: ui-monospace, Consolas, monospace;
@@ -1752,8 +1952,8 @@ PAGE = """<!doctype html>
   .story .count { opacity: 0.85; }
   .story .sibling { flex-basis: 100%; margin: 0; font-size: 0.85rem;
                     opacity: 0.7; }
-  .story.found-you { border-left-color: #1d7a3e;
-                     background: #1d7a3e1f; }
+  .story.found-you { border-left-color: var(--quiet);
+                     background: var(--quiet-wash); }
   #ask-search { width: 100%; box-sizing: border-box; font: inherit;
                 padding: 0.45rem 0.7rem; border-radius: 0.5rem;
                 border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
@@ -1790,11 +1990,11 @@ PAGE = """<!doctype html>
   .tier-regenerated { border: 3px solid #7a0c0c;
                       background: #7a0c0c1a; }
   .tier-regenerated .chip { background: #7a0c0c; color: #fff; }
-  .tier-broken { border-color: #b3261e; background: #b3261e14; }
-  .tier-broken .chip { color: #b3261e; border-color: #b3261e; }
+  .tier-broken { border-color: var(--grave); background: var(--grave-wash); }
+  .tier-broken .chip { color: var(--grave); border-color: var(--grave); }
   .tier-refused .chip { color: #8a6d00; border-color: #8a6d00; }
-  .tier-anchored .chip { background: #1d7a3e; color: #fff; }
-  .tier-valid .chip { color: #1d7a3e; border-color: #1d7a3e; }
+  .tier-anchored .chip { background: var(--quiet); color: #fff; }
+  .tier-valid .chip { color: var(--quiet); border-color: var(--quiet); }
   .tier-superseded { opacity: 0.55; }
   .tier-superseded .chip { color: inherit;
                            border-color: color-mix(in srgb, currentColor 40%, transparent); }
@@ -1814,8 +2014,8 @@ PAGE = """<!doctype html>
                align-items: baseline; padding: 0.5rem 0.8rem;
                margin: 0.4rem 0; border-radius: 0.5rem;
                border: 1px solid color-mix(in srgb, currentColor 25%, transparent); }
-  .watch-row.live { border: 3px solid #b45309; background: #b453091a; }
-  .watch-row.live .chip { background: #b45309; color: #fff; }
+  .watch-row.live { border: 3px solid var(--damage); background: var(--damage-wash); }
+  .watch-row.live .chip { background: var(--damage); color: #fff; }
   .watch-row.quiet { opacity: 0.6; }
   .watch-row.quiet .chip { color: inherit;
                            border-color: color-mix(in srgb, currentColor 40%, transparent); }
@@ -1827,11 +2027,11 @@ PAGE = """<!doctype html>
            border-left: 3px solid color-mix(in srgb, currentColor 30%, transparent);
            background: color-mix(in srgb, currentColor 5%, transparent);
            border-radius: 0 0.5rem 0.5rem 0; }
-  .berth .height { font-size: 1.35rem; font-weight: 800; color: #1d7a3e; }
+  .berth .height { font-size: 1.35rem; font-weight: 800; color: var(--quiet); }
   .berth .pending-proof { color: #8a6d00; }
   .berth .bare { opacity: 0.75; }
-  .berth .stale { color: #b45309; font-weight: 700; }
-  .berth .shout { color: #b3261e; font-weight: 700; }
+  .berth .stale { color: var(--damage); font-weight: 700; }
+  .berth .shout { color: var(--grave); font-weight: 700; }
 
   /* The walker: entry by entry, with the browser's own recomputation
      beside each hash — a second check in the reader's hands. */
@@ -1843,14 +2043,14 @@ PAGE = """<!doctype html>
   .walk-entry .said { font-family: monospace; overflow-wrap: anywhere; }
   .walk-entry .who { opacity: 0.75; font-size: 0.85rem; }
   .walk-damage { padding: 0.5rem 0.8rem; margin: 0.4rem 0;
-                 border: 3px solid #b3261e; background: #b3261e14;
+                 border: 3px solid var(--grave); background: var(--grave-wash);
                  border-radius: 0.5rem; font-family: monospace;
                  overflow-wrap: anywhere; }
   .recheck { font-size: 0.8rem; padding: 0.1rem 0.5rem;
              border-radius: 0.4rem; }
-  .recheck.match { color: #1d7a3e; border: 1px solid #1d7a3e; }
-  .recheck.mismatch { background: #b3261e; color: #fff; font-weight: 700; }
-  .broken-link { color: #b3261e; font-weight: 700; font-size: 0.85rem; }
+  .recheck.match { color: var(--quiet); border: 1px solid var(--quiet); }
+  .recheck.mismatch { background: var(--grave); color: #fff; font-weight: 700; }
+  .broken-link { color: var(--grave); font-weight: 700; font-size: 0.85rem; }
   button.walk { font: inherit; font-size: 0.8rem; cursor: pointer;
                 border-radius: 0.4rem; padding: 0.1rem 0.6rem;
                 border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
@@ -1861,15 +2061,15 @@ PAGE = """<!doctype html>
                align-items: baseline; padding: 0.4rem 0.8rem;
                margin: 0.3rem 0; border-radius: 0.5rem;
                border: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
-  .drill-row .fired { color: #1d7a3e; font-weight: 700; }
-  .drill-row .misfired { background: #b3261e; color: #fff;
+  .drill-row .fired { color: var(--quiet); font-weight: 700; }
+  .drill-row .misfired { background: var(--grave); color: #fff;
                          font-weight: 700; padding: 0.1rem 0.5rem;
                          border-radius: 0.4rem; }
   #drill-banner.quiet, #drill-banner.shouting { padding: 0.5rem 1rem;
                border-radius: 0.5rem; font-weight: 600; margin: 0.5rem 0; }
-  #drill-banner.quiet { background: #1d7a3e22; border: 1px solid #1d7a3e; }
-  #drill-banner.shouting { background: #b3261e22;
-                           border: 1px solid #b3261e; }
+  #drill-banner.quiet { background: var(--quiet)22; border: 1px solid var(--quiet); }
+  #drill-banner.shouting { background: var(--grave-wash);
+                           border: 1px solid var(--grave); }
 </style>
 </head>
 <body>
@@ -1886,6 +2086,7 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   <code>receipts verify</code>; this page draws them and decides nothing</p>
 </header>
 <div id="strip">
+  <span id="statemark" aria-hidden="true"></span>
   <p class="state" id="stateline">reading the scan…</p>
   <p class="why" id="statewhy"></p>
   <span id="freshness"></span>
@@ -1900,19 +2101,13 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
  (__,__)      (__,__)</pre>
 </div>
 
-<section id="drawers">
-  <h2>drawers</h2>
-  <p class="testimony">one per project — the worst claim leads; click a
-  drawer for that project's timeline</p>
-  <div id="tiles">remembering…</div>
-</section>
-
-<section id="events">
-  <h2>events</h2>
-  <p class="testimony">what changed since the last look, and which
-  sessions are behind their witness — reasons to look, never verdicts</p>
-  <div id="tripwire"></div>
-  <div id="watch"></div>
+<section id="trend">
+  <h2>fourteen days</h2>
+  <p class="testimony">one cell per day, worst claim of that day — is
+  this a trend or a one-off? A day nobody watched is drawn as a gap,
+  because an unread day is not a quiet one</p>
+  <div id="fortnight"></div>
+  <p id="lapse"></p>
 </section>
 
 <section id="recall">
@@ -1933,6 +2128,21 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
     </label>
   </div>
   <div id="timeline">remembering…</div>
+</section>
+
+<section id="drawers">
+  <h2>drawers</h2>
+  <p class="testimony">one per project — the worst claim leads; click a
+  drawer for that project's timeline</p>
+  <div id="tiles">remembering…</div>
+</section>
+
+<section id="events">
+  <h2>events</h2>
+  <p class="testimony">what changed since the last look, and which
+  sessions are behind their witness — reasons to look, never verdicts</p>
+  <div id="tripwire"></div>
+  <div id="watch"></div>
 </section>
 
 <section id="anchors">
@@ -1996,6 +2206,13 @@ const CLAIM = {
   superseded: "torn tail, already handled — recording continued in a " +
               "sibling chain; kept as quiet evidence",
 };
+
+// The shape half of the strip's redundant encoding. Colour, words and
+// shape all carry the same one condition, so the state still reads for
+// someone who cannot separate the hues — and still reads in a
+// screenshot printed in black and white.
+const MARK = { quiet: "●", damage: "▲", grave: "✕",
+               unwatched: "·" };
 
 const CHIP = {
   regenerated: c => c.verdict, broken: () => "BROKEN",
@@ -2061,17 +2278,17 @@ function renderStrip(report) {
   const quietEvidence = chains.filter(c => c.superseded).length;
   let colour;
   if (regenerated.length) {
-    colour = "red";
+    colour = "grave";
     state.textContent = "NOT THE RECORDED HISTORY";
     why.textContent = regenerated.length + " chain(s) contradict an " +
       "anchor or head record — the gravest claim this page can carry";
   } else if (live.length) {
-    colour = "red";
+    colour = "grave";
     state.textContent = "RECEIPTS STOPPED ARRIVING";
     why.textContent = live.length + " session(s) visibly active while " +
       "the chain goes quiet — investigate while it is live";
   } else if (broken.length || changes || report.exit !== 0) {
-    colour = "amber";
+    colour = "damage";
     state.textContent = broken.length ? "HISTORY WAS ALTERED"
                                       : "CHANGED SINCE LAST LOOK";
     why.textContent = (broken.length
@@ -2081,7 +2298,7 @@ function renderStrip(report) {
       : "details in the band below") +
       " (scan exit " + report.exit + ")";
   } else {
-    colour = "green";
+    colour = "quiet";
     state.textContent = "all quiet";
     why.textContent = chains.length + " chain(s), every receipt " +
       "accounted for" +
@@ -2089,11 +2306,70 @@ function renderStrip(report) {
                        "kept as quiet evidence" : "");
   }
   strip.className = colour;
-  document.getElementById("elephant").hidden = colour !== "green";
+  document.getElementById("statemark").textContent = MARK[colour];
+  document.getElementById("elephant").hidden = colour !== "quiet";
   const freshness = document.getElementById("freshness");
   freshness.textContent = "last scan " +
     (report.scanned ? since(report.scanned) + " ago" : "just now") +
     " · this page refreshes every 30s";
+}
+
+// Fourteen days under the strip. The strip says what is true now; the
+// band says whether now is unusual — "is this a trend or a one-off?",
+// the third question a monitoring surface owes its operator, answered
+// before anyone drills into anything.
+//
+// The gaps matter more than the colours. Our claim is detection
+// latency, and latency is a function of how often the operator looks;
+// a stretch of unread days is the one failure mode the chain itself
+// can never report, so it is drawn here, next to the alarm.
+function dayTier(row) {
+  if (!row.watched) return "unwatched";
+  if (row.worst === 3 || row.worst === 6) return "grave";
+  if (row.worst !== 0) return "damage";
+  return "quiet";
+}
+
+const DAY_WORDS = {
+  quiet: "all quiet", damage: "damage or a tripwire event",
+  grave: "the gravest claim this page can carry",
+  unwatched: "nobody looked",
+};
+
+function renderFortnight(report) {
+  const band = document.getElementById("fortnight");
+  const history = report.history || [];
+  band.replaceChildren();
+  history.forEach((row, i) => {
+    const rung = dayTier(row);
+    const cell = el("div", "day " + rung +
+                    (i === history.length - 1 ? " today" : ""));
+    cell.appendChild(el("span", "mark", MARK[rung]));
+    cell.appendChild(el("span", "num", row.day.slice(8)));
+    cell.title = row.day + " — " + DAY_WORDS[rung] +
+      (row.looks ? " · opened " + row.looks + " time(s)" : "");
+    band.appendChild(cell);
+  });
+
+  // Only count gaps after the first day this machine was ever watched:
+  // days before the recorder existed are not days anyone missed.
+  const began = history.findIndex(row => row.watched);
+  const missed = began < 0 ? []
+    : history.slice(began, -1).filter(row => !row.watched);
+  const lapse = document.getElementById("lapse");
+  if (missed.length >= 3) {
+    lapse.className = "warn";
+    lapse.textContent = MARK.damage + " " + missed.length +
+      " of the last " + (history.length - 1 - began) +
+      " days went unread — detection latency is a function of how " +
+      "often you look, and a run of unread days is the one failure " +
+      "this page cannot alarm on";
+  } else {
+    lapse.className = "";
+    lapse.textContent = history.filter(row => row.watched).length +
+      " of the last " + history.length + " days watched" +
+      (began < 0 ? " — the day book starts with this look" : "");
+  }
 }
 
 // The drawers: one tile per project, built from the scan (verdicts,
@@ -2166,6 +2442,7 @@ function renderTiles() {
 function render(report) {
   lastStatus = report;
   renderStrip(report);
+  renderFortnight(report);
   renderTiles();
 
   const tripwire = document.getElementById("tripwire");

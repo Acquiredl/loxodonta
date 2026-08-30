@@ -413,8 +413,16 @@ class ScanCensusTest(unittest.TestCase):
             capture_output=True, encoding="utf-8",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
+        def shape(text):
+            # Two runs are two moments, and the scan stamps itself: the
+            # claim under test is that the dressing changes and nothing
+            # else does.
+            report = json.loads(text)
+            report.pop("scanned")
+            return report
+
         self.assertEqual(human.returncode, 0, human.stderr)
-        self.assertEqual(json.loads(human.stdout), json.loads(machine.stdout))
+        self.assertEqual(shape(human.stdout), shape(machine.stdout))
 
 
 class ScanVerdictTest(unittest.TestCase):
@@ -776,6 +784,112 @@ def write_transcript(witness, project, session, event_times=(),
         quiet_since = time.time() - idle
         os.utime(transcript, (quiet_since, quiet_since))
     return transcript
+
+
+class DaybookTest(unittest.TestCase):
+    """The day book (GLOSSARY: Day book): one row per UTC day, so the
+    page can answer the third question a monitoring surface owes its
+    operator — is this a trend or a one-off? Testimony like the
+    baseline beside it: writer-reachable, trusted for nothing."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.daybook = self.root / ".supervisor-daybook.json"
+
+    def rows(self, result):
+        return json.loads(result.stdout)["history"]
+
+    def today(self):
+        return datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%d")
+
+    def test_a_scan_writes_the_day_it_looked(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        self.assertTrue(self.daybook.is_file(), "the day book is written")
+        book = json.loads(self.daybook.read_text(encoding="utf-8"))
+        self.assertIn("trusted for nothing", book["purpose"],
+                      "the day book claims no more than the baseline does")
+        row = book["days"][self.today()]
+        self.assertEqual(row["worst"], 0)
+        self.assertEqual(row["chains"], 1)
+        self.assertEqual(row["scans"], 1)
+
+    def test_the_window_is_fourteen_days_oldest_first(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        rows = self.rows(run_scan(self.root))
+
+        self.assertEqual(len(rows), 14)
+        self.assertEqual([r["day"] for r in rows],
+                         sorted(r["day"] for r in rows),
+                         "the band reads left to right, oldest first")
+        self.assertEqual(rows[-1]["day"], self.today(), "today lands last")
+        self.assertTrue(rows[-1]["watched"])
+
+    def test_a_day_nobody_watched_is_a_gap_not_a_quiet_day(self):
+        # The dead-end failure mode: detection latency is a function of
+        # how often the operator looks, so an unwatched day must never
+        # paint like a clean one.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+
+        rows = self.rows(run_scan(self.root))
+
+        unwatched = [r for r in rows[:-1] if not r["watched"]]
+        self.assertEqual(len(unwatched), 13,
+                         "every day before today went unwatched")
+        for row in unwatched:
+            self.assertNotIn("worst", row,
+                             "an unwatched day carries no claim at all")
+
+    def test_a_days_worst_outlives_a_later_clean_scan(self):
+        # "Was today clean?" is not "is it clean right now" — a tripwire
+        # that fired this morning still colours the day this evening.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_scan(self.root)
+        log.unlink()
+        subprocess.run([sys.executable, str(LOXODONTA), "init",
+                        "--log", str(log)], capture_output=True, check=True)
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "step 0"],
+            capture_output=True, check=True)
+        tripped = run_scan(self.root)
+
+        settled = run_scan(self.root)
+
+        self.assertEqual(tripped.returncode, 5, tripped.stdout)
+        self.assertEqual(settled.returncode, 0,
+                         "the wire is quiet again on the next look")
+        self.assertEqual(self.rows(settled)[-1]["worst"], 5,
+                         "the day still remembers what fired in it")
+        self.assertEqual(self.rows(settled)[-1]["events"], 1)
+
+    def test_the_book_keeps_a_season_not_forever(self):
+        stale = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(days=200)).strftime("%Y-%m-%d")
+        recent = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(days=3)).strftime("%Y-%m-%d")
+        self.daybook.write_text(json.dumps({
+            "purpose": "seeded", "days": {
+                stale: {"worst": 3, "scans": 1},
+                recent: {"worst": 0, "scans": 1}}}), encoding="utf-8")
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        rows = self.rows(run_scan(self.root))
+
+        kept = json.loads(self.daybook.read_text(encoding="utf-8"))["days"]
+        self.assertNotIn(stale, kept, "the book forgets past its season")
+        self.assertIn(recent, kept)
+        watched = [r["day"] for r in rows if r["watched"]]
+        self.assertIn(recent, watched, "a remembered day still paints")
 
 
 class CompletenessTest(unittest.TestCase):
