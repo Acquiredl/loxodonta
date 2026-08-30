@@ -670,33 +670,61 @@ def watch_completeness(root, witness, families, everywhere=False):
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
 
-    def add(repo, session, state, tools, receipts):
+    def add(repo, session, state, tools, receipts, drawers=()):
         entry = {"repo": repo, "session": session, "state": state,
                  "tools": tools, "receipts": receipts,
                  "deficit": max(0, tools - receipts)}
+        if len(drawers) > 1:
+            entry["drawers"] = list(drawers)
         if state in WATCH_WORDS:
             entry["words"] = WATCH_WORDS[state]
         watch["sessions"].append(entry)
 
+    # One session, one watch. A single session's receipts can span
+    # drawers: a worktree session logs to the main repo's drawer
+    # (ADR-0011, because worktrees get pruned) while the harness still
+    # names the transcript after the worktree it ran in. Pairing each
+    # (repo, session) family with the transcript separately charged the
+    # whole witness count to whichever drawer sorted first and left the
+    # rest UNWITNESSED, manufacturing a deficit nobody owed. The witness
+    # counts sessions, not drawers — so sum the family across drawers
+    # and judge the session once.
+    sessions = {}
     for (repo, session), family in sorted(families.items()):
+        group = sessions.setdefault(session, {"drawers": [], "last": None})
+        group["drawers"].append((family["receipts"], repo))
+        if family["last"]:
+            group["last"] = max(group["last"] or "", family["last"])
+    for group in sessions.values():
+        group["receipts"] = sum(n for n, _ in group["drawers"])
+        # The session's home is the drawer holding most of it: the
+        # worktree is pruned, the repo's drawer is what survives. Ties
+        # go to the first name, so the label never wobbles between looks.
+        group["repo"] = min(group["drawers"], key=lambda d: (-d[0], d[1]))[1]
+        group["spans"] = sorted(name for _, name in group["drawers"])
+
+    for session, group in sorted(sessions.items(),
+                                 key=lambda kv: (kv[1]["repo"], kv[0])):
+        repo, receipts = group["repo"], group["receipts"]
+        spans = group["spans"]
         transcript = transcripts.pop(session, None)
         if transcript is None:
-            add(repo, session, "UNWITNESSED", 0, family["receipts"])
+            add(repo, session, "UNWITNESSED", 0, receipts, spans)
             continue
         if not matchers:
-            add(repo, session, "UNWATCHED", 0, family["receipts"])
+            add(repo, session, "UNWATCHED", 0, receipts, spans)
             continue
         try:
-            state, tools = watch_session(transcript, family["receipts"],
-                                         family["last"], now, matchers)
+            state, tools = watch_session(transcript, receipts,
+                                         group["last"], now, matchers)
         except OSError:
             # A transcript that cannot be read (vanished mid-scan, or a
             # path that is not a readable file) costs this one session
             # its watch, never the whole scan. UNWITNESSED says it
             # honestly: completeness cannot be watched, nothing assumed.
-            add(repo, session, "UNWITNESSED", 0, family["receipts"])
+            add(repo, session, "UNWITNESSED", 0, receipts, spans)
             continue
-        add(repo, session, state, tools, family["receipts"])
+        add(repo, session, state, tools, receipts, spans)
 
     # Chainless sessions: only transcript folders under this root are
     # this scan's business; a folder's name past the root prefix is the
@@ -2749,6 +2777,12 @@ function render(report) {
     row.appendChild(el("span", "file", s.repo + " · " + s.session +
       " · witnessed " + s.tools + ", received " + s.receipts));
     if (s.words) row.appendChild(el("p", "claim", s.words));
+    // A session whose receipts landed in more than one drawer is
+    // counted once, against the whole family — say so, so the tally
+    // never looks larger than the drawer it is filed under.
+    if (s.drawers) row.appendChild(el("p", "claim",
+      "receipts span " + s.drawers.length + " drawers (" +
+      s.drawers.join(", ") + "), counted together as one session"));
     return row;
   };
   // Live alarms are the signal; ended deficits are evidence, and a
