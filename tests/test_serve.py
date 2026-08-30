@@ -13,6 +13,7 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -667,6 +668,124 @@ class RecallTest(ServerFixture):
         self.assertEqual(story["entries"], 3, "the readable receipts remain")
         for verdict_word in ("VALID", "BROKEN", "ANCHORED"):
             self.assertNotIn(verdict_word, body)
+
+
+class ActivityTest(ServerFixture):
+    """The shape behind the working-hours heat map and the per-drawer
+    sparklines: receipts counted into UTC hour buckets, per repo.
+
+    Buckets stay in UTC and stay hourly because the question the heat
+    map answers ("when do I actually work?") is a local-time question,
+    and only the browser knows the operator's zone. Aggregating to days
+    here would bake a UTC midnight into an answer about their evenings.
+    """
+
+    def test_activity_counts_receipts_into_utc_hour_buckets(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        self.serve()
+
+        _, _, body = self.get("/api/activity")
+
+        report = json.loads(body)
+        self.assertIn("alpha", report["activity"])
+        buckets = report["activity"]["alpha"]
+        self.assertEqual(sum(buckets.values()), 3,
+                         "the genesis is administrative, never activity")
+        for key in buckets:
+            self.assertRegex(key, r"^\d{4}-\d{2}-\d{2}T\d{2}$")
+
+    def test_activity_separates_the_drawers(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=2)
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb", entries=5)
+        self.serve()
+
+        report = json.loads(self.get("/api/activity")[2])
+
+        self.assertEqual(sum(report["activity"]["alpha"].values()), 2)
+        self.assertEqual(sum(report["activity"]["beta"].values()), 5)
+
+    def test_activity_owns_no_verdicts(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        report = json.loads(self.get("/api/activity")[2])
+
+        self.assertIn("testimony", report)
+        blob = json.dumps(report)
+        for verdict in ("VALID", "BROKEN", "ANCHORED"):
+            self.assertNotIn(verdict, blob,
+                             "activity counts what was attempted, "
+                             "never what verify decided")
+
+
+class PageScriptTest(ServerFixture):
+    """The page's script has to parse, and nothing else here proves it.
+
+    Every string assertion in this file passed while the whole script
+    was a syntax error and the page rendered "remembering…" forever —
+    the payload is inline in a non-raw Python string, so one unescaped
+    backslash silently becomes a real newline inside a JS literal. This
+    catches that class of fault. Opportunistic: node is not a
+    dependency of this repo and the test skips where it is absent."""
+
+    def test_the_inline_script_parses(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("no node on this machine to parse-check with")
+        self.serve()
+        page = self.get("/")[2]
+
+        script = page.split("<script>")[1].split("</script>")[0]
+        probe = Path(self._tmp.name) / "page.js"
+        probe.write_text(script, encoding="utf-8")
+        result = subprocess.run([node, "--check", str(probe)],
+                                capture_output=True, encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0,
+                         "the inline script does not parse:\n"
+                         + result.stderr)
+
+
+class ChartTest(ServerFixture):
+    """The chart vocabulary borrowed from the scenarios: a session Gantt
+    on a shared time axis, a working-hours heat map, and a sparkline in
+    each drawer tile."""
+
+    def page(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        return self.get("/")[2]
+
+    def test_the_gantt_gives_each_session_a_bar_on_a_shared_axis(self):
+        page = self.page()
+
+        self.assertIn('id="gantt"', page)
+        self.assertIn("renderGantt", page)
+        # Ch. 18's move: the label rides the bar, so a session's name is
+        # already where the eye lands.
+        self.assertIn("bar-label", page)
+
+    def test_the_heat_map_reads_in_the_operators_own_timezone(self):
+        page = self.page()
+
+        self.assertIn('id="clock"', page)
+        self.assertIn("getDay", page)
+        self.assertIn("getHours", page,
+                      "local hours, not UTC — the question is about "
+                      "the operator's evenings")
+
+    def test_the_heat_map_never_borrows_the_alarm_palette(self):
+        page = self.page()
+
+        self.assertIn("--busy:", page,
+                      "a sequential ramp of its own; counting receipts "
+                      "is not alerting about them")
+
+    def test_drawer_tiles_carry_a_sparkline(self):
+        page = self.page()
+
+        self.assertIn("renderSpark", page)
+        self.assertIn("spark", page)
 
 
 class SearchTest(ServerFixture):
