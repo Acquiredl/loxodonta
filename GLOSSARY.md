@@ -39,7 +39,7 @@ The supervisor's remembered copy of chain heads, used to detect change between l
 
 ### Day book
 
-The supervisor's remembered copy of its own days: one row per UTC day holding that day's worst claim, its counts, and how often the page was opened. Sits beside the [baseline](#baseline) and shares its posture exactly — writer-reachable, trusted for nothing, owning no verdicts. Where the baseline answers "did anything change since the last look?", the day book answers "is this a trend or a one-off?", and a day nobody watched is recorded as a gap rather than a quiet day. That distinction is the point: detection latency is a function of how often the operator looks, so a run of unread days is the one failure mode the chains themselves can never report.
+The supervisor's remembered copy of its own days: one row per UTC day holding that day's worst claim, its counts, and how often the page was opened. Sits beside the [baseline](#baseline) and shares its posture exactly — writer-reachable, trusted for nothing, owning no verdicts. Where the baseline answers "did anything change since the last look?", the day book answers "is this a trend or a one-off?", and a day nobody watched is recorded as a gap rather than a quiet day. That distinction is the point: detection latency is a function of how often the operator looks, so a run of unread days is the one failure mode the chains themselves can never report (ADR-0014).
 
 ### Issuer
 
