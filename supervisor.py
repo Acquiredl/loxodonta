@@ -1034,6 +1034,45 @@ def recall_root(root, repo=None, since=None, until=None, path=None,
             "sessions": sessions}
 
 
+# How far back the activity walk reads. Matches the day book's season:
+# the heat map wants more than a fortnight to have a shape, and neither
+# wants to grow without bound.
+ACTIVITY_DAYS = 90
+
+
+def activity_root(root, store=False, days=ACTIVITY_DAYS):
+    """Receipts counted into UTC hour buckets, per repo.
+
+    Two surfaces read this: the working-hours heat map and the
+    per-drawer sparklines. Both are questions about the operator's
+    local calendar, and only the browser knows their zone — so the
+    buckets stay hourly and stay UTC, and the client folds them into
+    local days and weekdays. Aggregating to days here would bake a UTC
+    midnight into an answer about somebody's evenings.
+
+    Testimony like the rest of recall: this counts what the writer said
+    it attempted, and owns no verdicts."""
+    floor = (datetime.now(timezone.utc)
+             - timedelta(days=days)).strftime("%Y-%m-%dT%H")
+    counts = {}
+    for repo_name, _, _, log in universe(root, store):
+        drawer = counts.setdefault(repo_name, {})
+        for entry in read_entries(log):
+            # The genesis is administrative — it records that a chain
+            # was opened, not that any work happened.
+            if entry.get("n") == 0:
+                continue
+            stamp = entry.get("ts")
+            if not isinstance(stamp, str) or len(stamp) < 13:
+                continue
+            hour = stamp[:13]
+            if hour < floor:
+                continue
+            drawer[hour] = drawer.get(hour, 0) + 1
+    return {"root": root.as_posix(), "testimony": TESTIMONY,
+            "since": floor, "activity": counts}
+
+
 def resolve_chain(root, asked):
     """A chain path under the root, or None — the shared gate for the
     walker and the drill. Sidecars and anything that escapes the root
@@ -1727,6 +1766,11 @@ class Face(BaseHTTPRequestHandler):
                                  store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
+        elif url.path == "/api/activity":
+            report = activity_root(self.server.root,
+                                   store=self.server.store)
+            self.reply(json.dumps(report).encode("utf-8"),
+                       "application/json")
         elif url.path == "/api/chain":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
@@ -1904,6 +1948,77 @@ PAGE = """<!doctype html>
   /* Ch. 9's move: mark where "now" is, so the eye lands on today
      rather than on the worst day in the window. */
   .day.today { outline: 2px solid currentColor; outline-offset: 1px; }
+  /* The chart vocabulary borrowed from the scenarios (Ch. 18, 9, 31).
+     No SVG and no library: bars are positioned divs, so the whole page
+     stays readable top to bottom by someone who does not write CSS for
+     a living. */
+
+  /* Sequential ramps are a different job from alerting ramps, and must
+     never be confused with one: counting receipts is not a claim that
+     anything is wrong. Its own hue, deliberately outside the verdict
+     palette. */
+  :root { --busy: #4f6bed; }
+
+  /* The session Gantt: one row per session on a shared fourteen-day
+     axis. Ch. 18's move is the label riding the bar — when a row wants
+     attention its name is already where the eye lands. */
+  #gantt { margin: 0.6rem 0; }
+  .lane { position: relative; height: 1.55rem; margin: 0.2rem 0;
+          border-radius: 0.3rem;
+          background: color-mix(in srgb, currentColor 5%, transparent); }
+  .bar { position: absolute; top: 0; bottom: 0; min-width: 3px;
+         border-radius: 0.3rem; cursor: pointer; overflow: hidden;
+         border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+         background: color-mix(in srgb, currentColor 14%, transparent);
+         display: flex; align-items: center; }
+  .bar:hover, .bar:focus-visible {
+         border-color: color-mix(in srgb, currentColor 75%, transparent); }
+  /* Ch. 18 puts the label on the mark so a row's name is already where
+     the eye lands. Its bars span one day and have room for text; ours
+     span a fortnight, so a fifteen-minute session is a sliver and an
+     inside label clips to "loxo". Same intent, adjusted: the label sits
+     immediately beside its bar, and flips to the other side near the
+     right edge so it never runs off. */
+  .bar-label { position: absolute; top: 0; bottom: 0; font-size: 0.72rem;
+               white-space: nowrap; padding: 0 0.35rem; opacity: 0.85;
+               display: flex; align-items: center; pointer-events: none; }
+  .bar-label.before { transform: translateX(-100%); }
+  .bar.damage { background: var(--damage-wash); border-color: var(--damage); }
+  .bar.grave { background: var(--grave-wash); border-color: var(--grave); }
+  /* The deficit, drawn as absence: the tail a session owed and never
+     wrote. Hatched, like an unwatched day, because it is the same
+     kind of hole. */
+  .owed { position: absolute; top: 0; bottom: 0; border-radius: 0.3rem;
+          border: 1px dashed var(--damage);
+          background: repeating-linear-gradient(45deg,
+            transparent, transparent 3px,
+            color-mix(in srgb, var(--damage) 45%, transparent) 3px,
+            color-mix(in srgb, var(--damage) 45%, transparent) 6px); }
+  #axis { display: flex; justify-content: space-between; font-size: 0.7rem;
+          opacity: 0.6; font-variant-numeric: tabular-nums;
+          margin-top: 0.15rem; }
+
+  /* The working-hours heat map: local weekday against local hour. */
+  #clock { display: grid; grid-template-columns: auto repeat(24, 1fr);
+           gap: 1px; margin: 0.6rem 0; font-size: 0.62rem; }
+  .cell { aspect-ratio: 1; border-radius: 0.15rem;
+          background: color-mix(in srgb, currentColor 6%, transparent); }
+  .cell.on { background: color-mix(in srgb, var(--busy)
+             calc(var(--heat) * 1%), transparent); }
+  .clock-head, .clock-day { opacity: 0.6; display: flex;
+          align-items: center; justify-content: center;
+          font-variant-numeric: tabular-nums; }
+  .clock-day { justify-content: flex-end; padding-right: 0.3rem; }
+
+  /* The sparkline: fourteen days of one drawer, inside its own tile. */
+  .spark { display: flex; align-items: flex-end; gap: 1px; height: 1.6rem;
+           margin-top: 0.15rem; }
+  .spark i { flex: 1; min-height: 1px; border-radius: 1px;
+             background: color-mix(in srgb, var(--busy) 55%, transparent); }
+  /* Ch. 9: mark where now is, so the eye lands on today rather than on
+     the tallest bar in the window. */
+  .spark i.now { background: var(--busy); }
+
   #lapse { margin: 0.2rem 0 0; font-size: 0.85rem; }
   #lapse.warn { color: var(--damage); font-weight: 700; }
   #freshness { display: block; margin-top: 0.35rem; font-size: 0.8rem;
@@ -2130,6 +2245,13 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   <div id="timeline">remembering…</div>
 </section>
 
+<section id="hours">
+  <h2>working hours</h2>
+  <p class="testimony">when receipts actually arrive, in your own
+  timezone — the selfish view: what your weeks really look like</p>
+  <div id="clock">remembering…</div>
+</section>
+
 <section id="drawers">
   <h2>drawers</h2>
   <p class="testimony">one per project — the worst claim leads; click a
@@ -2143,6 +2265,15 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   sessions are behind their witness — reasons to look, never verdicts</p>
   <div id="tripwire"></div>
   <div id="watch"></div>
+</section>
+
+<section id="sessions">
+  <h2>sessions</h2>
+  <p class="testimony">every session of the last fourteen days on one
+  axis, drawn from the completeness watch — a hatched tail is receipts
+  the session owed and never wrote. Reasons to look, never verdicts</p>
+  <div id="gantt">remembering…</div>
+  <div id="axis"></div>
 </section>
 
 <section id="anchors">
@@ -2429,6 +2560,7 @@ function renderTiles() {
       chains.length + " chain(s)" +
       (span && span.ended ? " · last activity " + since(span.ended) +
                             " ago" : "")));
+    tile.appendChild(renderSpark(repo.repo));
     tile.addEventListener("click", () => openDrawer(repo.repo));
     tiles.appendChild(tile);
   }
@@ -2439,11 +2571,153 @@ function renderTiles() {
   }
 }
 
+// --- the chart vocabulary (Ch. 18, 9, 31) ---------------------------
+
+let lastActivity = null;
+
+function startOfDay(when) {
+  return new Date(when.getFullYear(), when.getMonth(), when.getDate())
+    .getTime();
+}
+
+// Fourteen days of one drawer, inside its own tile (Ch. 9). The last
+// bar is marked because "now" is what the eye should land on, not the
+// tallest bar in the window.
+function renderSpark(repo) {
+  const drawer = (lastActivity && lastActivity.activity[repo]) || {};
+  const days = new Array(14).fill(0);
+  const today = startOfDay(new Date());
+  for (const [hour, n] of Object.entries(drawer)) {
+    // The bucket key is UTC; the Date turns it into the reader's own
+    // day, which is the only day they think in.
+    const back = Math.round(
+      (today - startOfDay(new Date(hour + ":00:00Z"))) / 86400000);
+    if (back >= 0 && back < 14) days[13 - back] += n;
+  }
+  const peak = Math.max(1, ...days);
+  const spark = el("div", "spark");
+  days.forEach((n, i) => {
+    const bar = el("i", i === 13 ? "now" : "");
+    bar.style.height = Math.max(2, Math.round(100 * n / peak)) + "%";
+    bar.title = n + " receipt(s)";
+    spark.appendChild(bar);
+  });
+  spark.title = "fourteen days of receipts in this drawer";
+  return spark;
+}
+
+// When receipts actually arrive, local weekday against local hour
+// (Ch. 31's seasonality table). A sequential ramp in its own hue:
+// counting receipts is not alerting about them.
+const WEEK = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function renderClock() {
+  const grid = document.getElementById("clock");
+  if (!lastActivity) return;
+  const counts = Array.from({length: 7}, () => new Array(24).fill(0));
+  for (const drawer of Object.values(lastActivity.activity || {})) {
+    for (const [hour, n] of Object.entries(drawer)) {
+      const when = new Date(hour + ":00:00Z");
+      counts[when.getDay()][when.getHours()] += n;
+    }
+  }
+  const peak = Math.max(1, ...counts.flat());
+  grid.replaceChildren();
+  grid.appendChild(el("span", "clock-head", ""));
+  for (let h = 0; h < 24; h++) {
+    grid.appendChild(el("span", "clock-head", h % 3 === 0 ? String(h) : ""));
+  }
+  for (let d = 0; d < 7; d++) {
+    grid.appendChild(el("span", "clock-day", WEEK[d]));
+    for (let h = 0; h < 24; h++) {
+      const n = counts[d][h];
+      const cell = el("div", "cell" + (n ? " on" : ""));
+      cell.style.setProperty("--heat", Math.round(14 + 86 * n / peak));
+      cell.title = WEEK[d] + " " + h + ":00 - " + n + " receipt(s)";
+      grid.appendChild(cell);
+    }
+  }
+}
+
+// The session Gantt (Ch. 18): every session of the fortnight on one
+// shared axis. Spans come from recall, states from the completeness
+// watch - the watch's own language, never verify's verdicts, because
+// this is a reason to look and not a claim about a chain.
+//
+// A bar covers the session's real span. The hatched tail inside it is
+// the share of that session's tool calls that never left a receipt,
+// split by count and not by time, because a missing receipt has no
+// duration. The label says the number out loud.
+function renderGantt() {
+  const host = document.getElementById("gantt");
+  const axis = document.getElementById("axis");
+  if (!lastStatus || !lastRecall) return;
+  const watch = new Map(lastStatus.completeness.sessions.map(
+    seen => [seen.repo + "/" + seen.session, seen]));
+  const now = Date.now();
+  const start = startOfDay(new Date(now - 13 * 86400000));
+  const width = now - start;
+  const lanes = lastRecall.sessions
+    .filter(story => story.started && story.ended)
+    .map(story => ({story, from: Date.parse(story.started),
+                    to: Date.parse(story.ended)}))
+    .filter(row => row.to >= start)
+    .sort((a, b) => b.to - a.to);
+
+  host.replaceChildren();
+  if (!lanes.length) {
+    host.appendChild(el("p", "testimony",
+      "no sessions in the last fourteen days"));
+  }
+  for (const lane of lanes) {
+    const story = lane.story;
+    const row = el("div", "lane");
+    const seen = watch.get(story.repo + "/" + story.session);
+    const state = seen ? seen.state : "";
+    const rung = state.startsWith("ALARM") ? " grave"
+      : state.endsWith("DEFICIT") ? " damage" : "";
+    const left = Math.max(0, (lane.from - start) / width) * 100;
+    const right = Math.min(1, (lane.to - start) / width) * 100;
+    const bar = el("button", "bar" + rung);
+    bar.type = "button";
+    bar.style.left = left + "%";
+    bar.style.width = Math.max(right - left, 0.4) + "%";
+    const owed = seen && seen.deficit > 0 ? seen.deficit : 0;
+    const near = left + Math.max(right - left, 0.4) > 62;
+    const label = el("span", "bar-label" + (near ? " before" : ""),
+      story.repo + " \u00b7 " + story.entries + " receipt(s)" +
+      (owed ? " \u00b7 " + owed + " owed" : ""));
+    label.style.left = (near ? left : Math.min(right, 100)) + "%";
+    if (owed && seen.tools) {
+      const tail = el("div", "owed");
+      tail.style.right = "0";
+      tail.style.width =
+        Math.min(100, Math.max(12, 100 * owed / seen.tools)) + "%";
+      bar.appendChild(tail);
+    }
+    bar.title = story.repo + " " + story.session
+      + "\\n" + story.started + " to " + story.ended
+      + "\\n" + story.entries + " receipt(s)"
+      + (state ? " - watch says " + state : "");
+    bar.addEventListener("click", () => openWalker(story.paths[0]));
+    row.appendChild(bar);
+    row.appendChild(label);
+    host.appendChild(row);
+  }
+
+  axis.replaceChildren();
+  for (let back = 13; back >= 0; back -= 2) {
+    const day = new Date(start + (13 - back) * 86400000);
+    axis.appendChild(el("span", "", String(day.getDate())));
+  }
+}
+
 function render(report) {
   lastStatus = report;
   renderStrip(report);
   renderFortnight(report);
   renderTiles();
+  renderGantt();
 
   const tripwire = document.getElementById("tripwire");
   tripwire.replaceChildren();
@@ -2802,6 +3076,7 @@ async function loadRecall() {
     if (!asked()) lastRecall = report;
     renderRecall(report);
     renderTiles();
+    renderGantt();
   } catch (error) {
     document.getElementById("timeline").textContent =
       "recall did not answer: " + error;
@@ -2867,13 +3142,26 @@ document.getElementById("ask-search").addEventListener("input", () => {
   searchPause = setTimeout(runSearch, 300);
 });
 
+async function loadActivity() {
+  try {
+    const response = await fetch("/api/activity");
+    lastActivity = await response.json();
+    renderClock();
+    renderTiles();
+  } catch (error) {
+    document.getElementById("clock").textContent =
+      "activity did not answer: " + error;
+  }
+}
+
 async function loadStatus() {
   try {
     const response = await fetch("/api/status");
     render(await response.json());
   } catch (error) {
     const strip = document.getElementById("strip");
-    strip.className = "red";
+    strip.className = "grave";
+    document.getElementById("statemark").textContent = MARK.grave;
     document.getElementById("stateline").textContent =
       "the scan did not answer";
     document.getElementById("statewhy").textContent = String(error);
@@ -2892,8 +3180,10 @@ document.getElementById("ask-path").addEventListener("input", () => {
 
 loadRecall();
 loadStatus();
+loadActivity();
 setInterval(loadRecall, 30000);
 setInterval(loadStatus, 30000);
+setInterval(loadActivity, 30000);
 </script>
 </body>
 </html>
