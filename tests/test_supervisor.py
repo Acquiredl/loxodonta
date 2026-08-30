@@ -982,6 +982,38 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(story["receipts"], 3,
                          "family counted, administrative geneses not")
 
+    def test_a_session_split_across_drawers_is_watched_once(self):
+        # From the field (2026-08-30): a worktree session logs to the
+        # main repo's drawer (ADR-0011) while the harness still names
+        # the transcript after the worktree. Pairing each drawer with
+        # the transcript separately charged the whole witness count to
+        # one drawer and left the other UNWITNESSED — a 6-receipt hole
+        # the operator never owed. The witness counts sessions, not
+        # drawers.
+        make_chain(self.root / "alpha" / "receipts", "sess-split",
+                   entries=6)
+        make_chain(self.root / "alpha-wt" / "receipts", "sess-split",
+                   entries=2)
+        write_transcript(self.witness, self.root / "alpha-wt", "sess-split",
+                         event_times=[ago(300 - 10 * i) for i in range(8)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = [s for s in json.loads(result.stdout)["completeness"]["sessions"]
+                if s["session"] == "sess-split"]
+        self.assertEqual(len(rows), 1, "one session, one watch")
+        (split,) = rows
+        self.assertEqual(split["receipts"], 8, "both drawers counted")
+        self.assertEqual(split["tools"], 8)
+        self.assertEqual(split["deficit"], 0)
+        self.assertEqual(split["state"], "OK")
+        self.assertEqual(split["repo"], "alpha",
+                         "home is the drawer holding most of it — the "
+                         "worktree gets pruned, the repo's drawer stays")
+        self.assertEqual(split["drawers"], ["alpha", "alpha-wt"],
+                         "the span stays visible, never silently merged")
+
     def test_chat_only_and_failed_tools_never_alarm(self):
         # A chat-only session expects nothing; a failed tool call fires
         # no hook (the field's suppression finding), so it is owed no
