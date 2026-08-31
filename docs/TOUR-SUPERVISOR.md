@@ -207,3 +207,47 @@ memory (`--all`: the whole store), counts every match, and caps only
 what it shows — no silent caps. `timeline` renders the rows around one
 address: how the moment unfolded.
 
+## 5. The face and the drill — `serve`, the walker, the battery
+
+**The fire drill** is the tamper playground grown into its honest job:
+copy one chain into a sandbox, run the four-way battery (edit, delete,
+reorder, regenerate — the last judged against `--expect-head`), and
+show every expected alarm firing. Real chains are never touched, and
+the sandbox is invisible to *both* censuses by construction: its
+copies are not named `receipts-*` (the store's glob) and do not live
+in a `receipts/` folder (the legacy globs) — broken-on-purpose copies
+must never alarm. Exit 0 only when every alarm fired; an alarm that
+does not fire is the loudest thing the drill can say.
+
+**`serve`** is serialization only, zero decisions (ADR-0005). One scan
+per tick under a lock — never one per request, because a scan diffs
+the baseline and then rewrites it, and two racing scans could swallow
+a tripwire event between them. The bind is 127.0.0.1 and the posture
+is *nothing is ever offered off-machine* — which includes off-machine
+by trickery: a Host header that is not localhost is refused (DNS
+rebinding makes a stranger's page read as same-origin, and CORS never
+enters it), and a POST carrying a foreign Origin is refused (no
+stranger's page pokes the drill). `/api/chain` and `/api/drill` only
+resolve chains under the root; sidecars and path escapes get 404.
+
+**The page** is one inline HTML file, no framework, no build step,
+nothing fetched from anywhere but this machine. Writer-supplied text
+— action lines, session names, verify's own words — reaches the DOM
+through `textContent` only, because a receipt is adversary input and
+must never become markup in the operator's browser. The verdict strip
+is redundantly encoded (colour, words, and a shape mark), chosen for
+strong colour-vision deficiency: the quiet state is blue, and the
+states part by lightness as well as hue. Tier language is the point:
+"NOT THE RECORDED HISTORY" (an anchor or head record contradicted) is
+never outranked; superseded tears read as quiet evidence while new
+damage shouts.
+
+**The walker** is the independent check: SPEC §4 rebuilt in
+JavaScript — keys sorted at every depth, compact separators,
+`entry_hash` stripped, UTF-8 — and every entry re-hashed with
+WebCrypto in the operator's own browser. The chain-link check resets
+its expectation after a damaged line, so the next entry visibly fails
+to connect. This is the one check the suite cannot automate end-to-end
+(a browser must run it), which is why the fire-drill checklist ends
+with it.
+

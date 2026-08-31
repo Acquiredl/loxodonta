@@ -1941,7 +1941,29 @@ class Face(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # the scan is the story; per-request chatter is noise
 
+    def refused_off_machine(self):
+        """The 127.0.0.1 bind keeps other machines out, but not a
+        browser lied to by DNS: a page at attacker.example whose name
+        rebinds to 127.0.0.1 reads as same-origin to the browser, and
+        CORS never enters it — the Host header is the only witness
+        left. A foreign Origin on a POST is the same stranger poking
+        the drill from a page this server never wrote. Both get 403:
+        nothing about this machine's activity is ever offered
+        off-machine, and that includes off-machine by trickery."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
+        stranger = host not in ("127.0.0.1", "localhost")
+        if not stranger and self.command == "POST":
+            origin = self.headers.get("Origin")
+            if origin:
+                spoke = (urlparse(origin).hostname or "").lower()
+                stranger = spoke not in ("127.0.0.1", "localhost")
+        if stranger:
+            self.send_error(403)
+        return stranger
+
     def do_GET(self):
+        if self.refused_off_machine():
+            return
         url = urlparse(self.path)
         if url.path == "/api/status":
             self.reply(self.server.fresh_status(), "application/json")
@@ -1990,6 +2012,8 @@ class Face(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if self.refused_off_machine():
+            return
         url = urlparse(self.path)
         if url.path != "/api/drill":
             self.send_error(404)
