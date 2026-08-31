@@ -118,6 +118,7 @@ lock wait must never alarm) / ALARM-SILENT (recording stopped) /
 ALARM-DEFICIT (the fork-shaped hole: receipts arrive, fewer than owed)
 / SURPLUS (an investigate flag, never a verdict) / ENDED-CLEAN /
 ENDED-DEFICIT (missing forever; kept as evidence, not a siren) /
+ENDED-SURPLUS (a surplus does not become clean by the session ending) /
 UNWITNESSED / UNWATCHED. Deficit is sticky — lost receipts never
 arrive later. One session is judged *once* even when its receipts span
 drawers (a worktree session logs to the main repo's drawer, ADR-0011,

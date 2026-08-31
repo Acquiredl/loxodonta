@@ -505,6 +505,10 @@ WATCH_WORDS = {
     "ENDED-DEFICIT": "the session ended short of the witness's count — "
                      "those receipts are missing forever; kept as "
                      "evidence, not as a siren.",
+    "ENDED-SURPLUS": "the session ended with more receipts than witnessed "
+                     "tools — witness lag frozen at end, or receipts that "
+                     "arrived unwitnessed; kept as evidence, not as a "
+                     "siren.",
     "SURPLUS": "more receipts than witnessed tools — witness lag, or "
                "receipts arriving unwitnessed; investigate. A flag, "
                "never a verdict.",
@@ -744,6 +748,8 @@ def classify(tools, receipts, ended, idle, deficit_age, silent):
     end-of-session reconciliation reports it as evidence."""
     deficit = max(0, tools - receipts)
     if ended:
+        if receipts > tools:
+            return "ENDED-SURPLUS"
         return "ENDED-CLEAN" if deficit == 0 else "ENDED-DEFICIT"
     if idle:
         return "IDLE-CLEAN" if deficit == 0 else "IDLE-DEFICIT"
@@ -2926,8 +2932,8 @@ function render(report) {
   const watch = document.getElementById("watch");
   watch.replaceChildren();
   const LIVE = ["ALARM-SILENT", "ALARM-DEFICIT"];
-  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "SURPLUS", "LAGGING",
-                                  "IDLE-DEFICIT"]);
+  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "ENDED-SURPLUS",
+                                  "SURPLUS", "LAGGING", "IDLE-DEFICIT"]);
   const watchRow = s => {
     const live = LIVE.includes(s.state);
     const row = el("div", "watch-row " + (live ? "live" : "quiet"));

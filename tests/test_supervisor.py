@@ -1098,6 +1098,22 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(plus["state"], "SURPLUS")
         self.assertIn("investigate", plus["words"])
 
+    def test_a_surplus_at_session_end_is_remembered_not_forgiven(self):
+        # Live, a surplus is an investigate flag; ending the session must
+        # not quietly turn it into ENDED-CLEAN. Receipts nobody witnessed
+        # are evidence too (walk finding, 2026-08-31).
+        make_chain(self.root / "alpha" / "receipts", "sess-eplus",
+                   entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-eplus",
+                         event_times=[ago(7200)], idle=7000)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plus = self.states(result)["sess-eplus"]
+        self.assertEqual(plus["state"], "ENDED-SURPLUS")
+        self.assertIn("evidence", plus["words"])
+
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         nowhere = Path(self._tmp.name) / "no-such-layout" / "projects"
