@@ -5,6 +5,8 @@ first reader meets it. It grew out of the 2026-08-21 readability walk
 (issue #10) and is kept as reference documentation: each section explains
 what the code does, what controls what, and — most importantly — *why it
 was built that way*, with pointers to the ADRs that hold the decisions.
+The sibling file, [TOUR-SUPERVISOR.md](TOUR-SUPERVISOR.md), walks
+`supervisor.py` the same way.
 
 It leans on one extended analogy, because it works. **The restaurant:**
 an AI agent is a line cook working the kitchen overnight, unsupervised.

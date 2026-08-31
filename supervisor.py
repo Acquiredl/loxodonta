@@ -8,15 +8,17 @@ CLI and judges nothing itself: verdicts come from `loxodonta verify`,
 and everything the supervisor holds is writer-reachable, so nothing
 here is a head record (GLOSSARY: Supervisor, Baseline).
 
-  python supervisor.py scan --root DIR --json
-  python supervisor.py serve --root DIR
+  python supervisor.py scan --json              # one tick over the store
+  python supervisor.py serve                    # the face
   python supervisor.py digest [--repo DIR]      # the session-start injection
   python supervisor.py show ADDRESS             # one entry, self-verifying
   python supervisor.py search TEXT [--all]      # the ladder past the digest
   python supervisor.py timeline ADDRESS         # context around one entry
+  python supervisor.py scan --root DIR --json   # legacy: a folder of repos
 
-`scan` is one tick without timers: a census of every chain under the
-root, a verdict for each, a baseline diff against the last look,
+`scan` is one tick without timers: a census of every chain in the
+store (ADR-0011; --root walks a legacy folder of repos instead), a
+verdict for each, a baseline diff against the last look,
 machine-readable JSON on stdout, and an exit code cron can shout about —
 0 when nothing demands attention, 1–4 for the worst verify exit found,
 5 when the baseline saw a change appends cannot explain (a reason to
@@ -56,11 +58,13 @@ LOXODONTA = HERE / "loxodonta.py"
 # --- Census -------------------------------------------------------------------
 
 def find_chains(root):
-    """Every receipt log under the root. Three shapes, because history has
-    three shapes: the root itself being a repo, each sibling repo's
-    receipts/, and chains stranded in worktrees by sessions that ran
-    before the hook learned to log to the main repo. Anchor sidecars are
-    proofs about a chain, not chains."""
+    """Every receipt log under a legacy --root. Three shapes, because
+    pre-store history has three shapes: the root itself being a repo,
+    each sibling repo's receipts/, and chains stranded in worktrees by
+    sessions that ran before the hook learned to log to the main repo.
+    The default census is not this one: it is a single glob over the
+    store's drawers, inline in scan_root (ADR-0011). Anchor sidecars
+    are proofs about a chain, not chains."""
     patterns = ("receipts/*.jsonl",
                 "*/receipts/*.jsonl",
                 "*/.claude/worktrees/*/receipts/*.jsonl")
@@ -173,7 +177,8 @@ def superseded(log, detail):
 
 # --- Baseline -----------------------------------------------------------------
 # The tripwire's memory (GLOSSARY: Baseline): every chain's last-seen
-# head, kept in a file beside the repos. Writer-reachable by definition,
+# head, kept beside what it watches — the store's home in store mode
+# (ADR-0011), the legacy root folder otherwise. Writer-reachable by definition,
 # therefore trusted for nothing — a disagreement is a reason to
 # investigate, never a verdict about which side is true. Verdicts come
 # from verify; the out-of-reach copy, if you keep one, is the anchor.
@@ -296,7 +301,8 @@ def remember_day(path, now, tally):
     today = now.strftime("%Y-%m-%d")
     row = dict(days.get(today) or {})
     for claim, seen in tally.items():
-        row[claim] = max(row.get(claim, 0), seen)
+        if claim != "chains":
+            row[claim] = max(row.get(claim, 0), seen)
     row["chains"] = tally["chains"]  # a count of now, not a high-water mark
     row["scans"] = row.get("scans", 0) + 1
     row["looks"] = row.get("looks", 0)
@@ -413,7 +419,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
-    note = None
+    notes = []  # one turn can fail twice; every failure stays said
     failed = False
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     if sidecar.exists():
@@ -423,8 +429,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
             capture_output=True, encoding="utf-8", env=env)
         attempted = True
         if finished.returncode != 0:
-            note = ("upgrade attempted; a calendar did not answer — "
-                    "proofs stay pending and the keeper will try again")
+            notes.append("upgrade attempted; a calendar did not answer — "
+                         "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
         head = entries[-1].get("entry_hash")
         born = parse_when(entries[-1].get("ts"))
@@ -439,10 +445,10 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
             attempted = True
             if finished.returncode != 0:
                 failed = True
-                note = ("anchoring failed — no calendar accepted this "
-                        "head; it stays unanchored and the keeper will "
-                        "try again")
-    return attempted, note, failed
+                notes.append("anchoring failed — no calendar accepted "
+                             "this head; it stays unanchored and the "
+                             "keeper will try again")
+    return attempted, "; ".join(notes) or None, failed
 
 
 def assess_anchors(detail, entries):
@@ -499,6 +505,10 @@ WATCH_WORDS = {
     "ENDED-DEFICIT": "the session ended short of the witness's count — "
                      "those receipts are missing forever; kept as "
                      "evidence, not as a siren.",
+    "ENDED-SURPLUS": "the session ended with more receipts than witnessed "
+                     "tools — witness lag frozen at end, or receipts that "
+                     "arrived unwitnessed; kept as evidence, not as a "
+                     "siren.",
     "SURPLUS": "more receipts than witnessed tools — witness lag, or "
                "receipts arriving unwitnessed; investigate. A flag, "
                "never a verdict.",
@@ -738,6 +748,8 @@ def classify(tools, receipts, ended, idle, deficit_age, silent):
     end-of-session reconciliation reports it as evidence."""
     deficit = max(0, tools - receipts)
     if ended:
+        if receipts > tools:
+            return "ENDED-SURPLUS"
         return "ENDED-CLEAN" if deficit == 0 else "ENDED-DEFICIT"
     if idle:
         return "IDLE-CLEAN" if deficit == 0 else "IDLE-DEFICIT"
@@ -1079,8 +1091,17 @@ def cmd_adopt(args):
         sidecar = log.parent / (log.name + ".anchors.jsonl")
         marker = log.parent / UNLISTED_NAME
         shutil.move(str(log), str(drawer / log.name))
-        if sidecar.exists() and not (drawer / sidecar.name).exists():
-            shutil.move(str(sidecar), str(drawer / sidecar.name))
+        if sidecar.exists():
+            if (drawer / sidecar.name).exists():
+                # Proofs left behind are still proofs; say so — silence
+                # here would read as "everything travelled".
+                print(f"left sidecar "
+                      f"{sidecar.relative_to(root).as_posix()}: "
+                      f"{drawer.name}/{sidecar.name} already exists in "
+                      "the store — evidence is never overwritten; "
+                      "reconcile by hand")
+            else:
+                shutil.move(str(sidecar), str(drawer / sidecar.name))
         if marker.exists() and not (drawer / UNLISTED_NAME).exists():
             shutil.copy2(str(marker), str(drawer / UNLISTED_NAME))
         print(f"adopted {line}")
@@ -1538,28 +1559,39 @@ def gather(logs):
 
 def scan_testimony(repo):
     """The last scan's verdicts for this repo's chains, read from
-    whichever baseline covers it (the repo itself, or the folder of
-    repos above it). The baseline is trusted for nothing — which is
-    exactly why recall may cite it: testimony citing testimony."""
-    for base_dir in (repo, repo.parent):
+    whichever baseline covers it: the store's, where the default scan
+    remembers (ADR-0011), else the legacy spots (the repo itself, or
+    the folder of repos above it). The baseline is trusted for nothing
+    — which is exactly why recall may cite it: testimony citing
+    testimony."""
+    slug = project_slug(repo) + "/"
+
+    def in_drawer(relpath, base_dir):
+        # Store baseline rows are keyed <drawer-slug>/<chain>.
+        return relpath.startswith(slug)
+
+    def under_repo(relpath, base_dir):
         try:
-            data = json.loads((base_dir / BASELINE_NAME).read_text(
-                encoding="utf-8"))
+            (base_dir / relpath).resolve().relative_to(repo)
+            return True
+        except (ValueError, OSError):
+            return False
+
+    sources = [(Path(store_home()) / "baseline.json", in_drawer),
+               (repo / BASELINE_NAME, under_repo),
+               (repo.parent / BASELINE_NAME, under_repo)]
+    for path, covers in sources:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         scanned = data.get("scanned")
         chains = data.get("chains")
         if not isinstance(scanned, str) or not isinstance(chains, dict):
             continue
-        verdicts = []
-        for relpath, row in chains.items():
-            if not isinstance(row, dict) or "verdict" not in row:
-                continue
-            try:
-                (base_dir / relpath).resolve().relative_to(repo)
-            except (ValueError, OSError):
-                continue
-            verdicts.append(str(row["verdict"]))
+        verdicts = [str(row["verdict"]) for relpath, row in chains.items()
+                    if isinstance(row, dict) and "verdict" in row
+                    and covers(relpath, path.parent)]
         if verdicts:
             return scanned, verdicts
     return None, []
@@ -1909,7 +1941,29 @@ class Face(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # the scan is the story; per-request chatter is noise
 
+    def refused_off_machine(self):
+        """The 127.0.0.1 bind keeps other machines out, but not a
+        browser lied to by DNS: a page at attacker.example whose name
+        rebinds to 127.0.0.1 reads as same-origin to the browser, and
+        CORS never enters it — the Host header is the only witness
+        left. A foreign Origin on a POST is the same stranger poking
+        the drill from a page this server never wrote. Both get 403:
+        nothing about this machine's activity is ever offered
+        off-machine, and that includes off-machine by trickery."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
+        stranger = host not in ("127.0.0.1", "localhost")
+        if not stranger and self.command == "POST":
+            origin = self.headers.get("Origin")
+            if origin:
+                spoke = (urlparse(origin).hostname or "").lower()
+                stranger = spoke not in ("127.0.0.1", "localhost")
+        if stranger:
+            self.send_error(403)
+        return stranger
+
     def do_GET(self):
+        if self.refused_off_machine():
+            return
         url = urlparse(self.path)
         if url.path == "/api/status":
             self.reply(self.server.fresh_status(), "application/json")
@@ -1958,6 +2012,8 @@ class Face(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if self.refused_off_machine():
+            return
         url = urlparse(self.path)
         if url.path != "/api/drill":
             self.send_error(404)
@@ -2920,8 +2976,8 @@ function render(report) {
   const watch = document.getElementById("watch");
   watch.replaceChildren();
   const LIVE = ["ALARM-SILENT", "ALARM-DEFICIT"];
-  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "SURPLUS", "LAGGING",
-                                  "IDLE-DEFICIT"]);
+  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "ENDED-SURPLUS",
+                                  "SURPLUS", "LAGGING", "IDLE-DEFICIT"]);
   const watchRow = s => {
     const live = LIVE.includes(s.state);
     const row = el("div", "watch-row " + (live ? "live" : "quiet"));

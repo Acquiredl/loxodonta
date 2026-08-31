@@ -554,6 +554,55 @@ class DrillSurfaceTest(ServerFixture):
         self.assertIn("/checklist", page)
 
 
+class OffMachineTest(ServerFixture):
+    """Nothing is ever offered off-machine — including to a browser
+    that was lied to by DNS. A page at attacker.example whose name
+    rebinds to 127.0.0.1 reads as same-origin to the browser, so CORS
+    never protects; the Host header is the only witness left (walk
+    finding, 2026-08-31). And no cross-origin page may poke the drill."""
+
+    def test_a_rebound_host_header_is_refused(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        request = urllib.request.Request(
+            self.url + "/api/status",
+            headers={"Host": "attacker.example"})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            OPENER.open(request, timeout=30)
+
+        self.assertEqual(caught.exception.code, 403)
+
+    def test_a_foreign_origin_post_is_refused(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=3)
+        self.serve()
+
+        request = urllib.request.Request(
+            self.url + "/api/drill?log="
+            + urllib.parse.quote("alpha/receipts/receipts-sess-aaaa.jsonl"),
+            method="POST", headers={"Origin": "https://attacker.example"})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            OPENER.open(request, timeout=60)
+
+        self.assertEqual(caught.exception.code, 403)
+
+    def test_the_machine_itself_is_still_answered(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=3)
+        self.serve()
+
+        status, _, _ = self.get("/api/status")
+        self.assertEqual(status, 200)
+        # The page's own drill POST carries a localhost Origin.
+        request = urllib.request.Request(
+            self.url + "/api/drill?log="
+            + urllib.parse.quote("alpha/receipts/receipts-sess-aaaa.jsonl"),
+            method="POST", headers={"Origin": self.url})
+        with OPENER.open(request, timeout=60) as response:
+            self.assertEqual(response.status, 200)
+
+
 class RecallTest(ServerFixture):
     """The memory surface (GLOSSARY: Recall): the timeline endpoint reads
     chains as testimony — what was attempted, when, in which repo — and

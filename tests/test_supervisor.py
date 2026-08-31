@@ -278,6 +278,32 @@ class AdoptTest(unittest.TestCase):
         self.assertEqual(adopted.read_bytes(), before,
                          "the adopted copy is untouched by the clash")
 
+    def test_adopt_reports_a_sidecar_it_must_leave_behind(self):
+        # A sidecar whose name is already taken in the drawer cannot
+        # travel. Leaving proofs behind must be said, not silent —
+        # everything else adopt refuses gets a printed word.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_adopt(self.home, self.root)
+        (name,) = self.drawers()
+        stranded = make_chain(self.root / "alpha" / "receipts",
+                              "sess-cccc")
+        write_completed_anchor(stranded, chain_head(stranded))
+        squatter = (self.home / "receipts" / name
+                    / "receipts-sess-cccc.jsonl.anchors.jsonl")
+        squatter.write_text("{}\n", encoding="utf-8")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        legacy_sidecar = (self.root / "alpha" / "receipts"
+                         / "receipts-sess-cccc.jsonl.anchors.jsonl")
+        self.assertTrue(legacy_sidecar.exists(),
+                        "the refused sidecar stays put")
+        self.assertIn("sidecar", result.stdout.lower())
+        self.assertEqual(squatter.read_text(encoding="utf-8"), "{}\n",
+                         "the store copy is untouched")
+
     def test_adopt_twice_is_a_quiet_no_op(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_adopt(self.home, self.root)
@@ -1098,6 +1124,22 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(plus["state"], "SURPLUS")
         self.assertIn("investigate", plus["words"])
 
+    def test_a_surplus_at_session_end_is_remembered_not_forgiven(self):
+        # Live, a surplus is an investigate flag; ending the session must
+        # not quietly turn it into ENDED-CLEAN. Receipts nobody witnessed
+        # are evidence too (walk finding, 2026-08-31).
+        make_chain(self.root / "alpha" / "receipts", "sess-eplus",
+                   entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-eplus",
+                         event_times=[ago(7200)], idle=7000)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plus = self.states(result)["sess-eplus"]
+        self.assertEqual(plus["state"], "ENDED-SURPLUS")
+        self.assertIn("evidence", plus["words"])
+
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         nowhere = Path(self._tmp.name) / "no-such-layout" / "projects"
@@ -1382,6 +1424,24 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertTrue(chain["anchors"]["failed"])
         self.assertIn("anchoring failed", chain["anchors"]["note"])
         self.assertFalse(chain["anchors"]["head"]["anchored"])
+
+    def test_one_turn_failing_twice_keeps_both_notes(self):
+        # A single turn can fail twice — a refused upgrade AND a refused
+        # fresh-head anchor. Both failures belong in the note: evidence
+        # is not a scratchpad where the last writer wins.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-2xfl")
+        first = json.loads(
+            log.read_text(encoding="utf-8").splitlines()[0])["entry_hash"]
+        write_pending_anchor(log, first, "2026-08-22T09:00:00Z")
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", "http://127.0.0.1:1",
+                          env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-2xfl")
+        self.assertIn("did not answer", chain["anchors"]["note"])
+        self.assertIn("anchoring failed", chain["anchors"]["note"])
 
     def test_an_already_anchored_head_is_left_alone(self):
         calendar = self.start_calendar()
