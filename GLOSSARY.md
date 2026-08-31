@@ -149,9 +149,13 @@ The small `project.json` written into a [store](#store) subfolder on first recei
 
 The precise security claim of this tool: modifications to history are *always detectable*, never *prevented*. Deliberately weaker than "immutable" — see Anti-terms. Scope in v0.1: *surgical* tampering (edit / delete / reorder / file swap) is detectable unconditionally; *whole-chain regeneration* is detectable only against a head record (`--expect-head`) or, in Stage B, an anchor.
 
+### Coverage
+
+The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers wired into the harness settings, *as of a moment in time* (ADR-0016 widened the shipped default to `*` — every completed tool call). Coverage is not [completeness](#completeness): coverage says which calls *owe*; the witness judges whether the owed receipts *arrived* — and it judges each session by the coverage in force at that session's time, never by today's rules. A failed or denied tool call sits outside coverage by harness design: no hook fires, so no receipt is owed.
+
 ### Completeness
 
-The property receipts deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`receipts run`, pipeline gate scripts, the Stage C harness hook). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
+The property receipts deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`receipts run`, pipeline gate scripts, the Stage C harness hook) — and is judged against [coverage](#coverage). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
 
 ### Anchor *(Stage B)*
 
@@ -196,7 +200,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`
 - Related out-of-scope decisions: none yet.
 
 ---
