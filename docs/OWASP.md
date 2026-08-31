@@ -1,8 +1,8 @@
 # loxodonta and the OWASP Top 10 for LLM Applications (2026)
 
-This document maps loxodonta's surfaces to the [OWASP Top 10 for LLM Applications 2026](https://genai.owasp.org/resource/owasp-genai-llm-top-10-2026/). It exists to answer one question precisely: for each OWASP entry, is loxodonta a layer, and if so, which kind?
+The [OWASP Top 10 for LLM Applications 2026](https://genai.owasp.org/resource/owasp-genai-llm-top-10-2026/) is the closest thing agent security has to a shared checklist. This doc walks it entry by entry and answers one question each time: is loxodonta a layer here, and if so, which kind?
 
-The honesty frame comes first, because every claim below sits inside it. loxodonta is a tamper-evident receipt log with a watching layer: a tripwire with a memory. Its security claim is detection latency, never prevention. Nothing here is a security boundary. The one hard boundary in the whole design is the anchor, because that lives in a Bitcoin block no rewrite on the machine can reach. Everything else detects fast and says so.
+The honesty frame comes first, because every claim below sits inside it. loxodonta is a tamper-evident receipt log with a watching layer: a tripwire with a memory. Its claim is detection latency, never prevention. Nothing here is a security boundary. The one hard boundary in the whole design is the anchor, because that lives in a Bitcoin block no rewrite on the machine can reach. Everything else detects fast and says so.
 
 ## Summary
 
@@ -27,7 +27,7 @@ OWASP's mitigation #8 for Excessive Agency, "Monitor tool use", prescribes this 
 
 OWASP files that mitigation under the controls that "will not prevent Excessive Agency but can limit the level of damage caused". That is exactly the claim loxodonta makes about itself: detection, never a wall.
 
-loxodonta is that control with one addition OWASP's line does not ask for: tamper evidence on the log itself. The threat model (ADR-0002) is that the writer of the log is the adversary. An agent capable of undesirable actions is capable of editing the record of them afterward, and a plain log file gives an operator no way to notice. Every receipt hashes the one before it, so edit, delete, reorder, or splice is a visible chain break. The record of tool activity is precisely the artifact a compromised agent most wants to clean up; here, cleanup is detectable.
+loxodonta is that control, plus one thing OWASP's line does not ask for: tamper evidence on the log itself. The threat model (ADR-0002) is that the writer of the log is the adversary. An agent that can take undesirable actions can also edit the record of them afterward, and a plain log gives you no way to notice. Every receipt hashes the one before it, so an edit, a deletion, or a reorder is a visible chain break. The record of tool activity is the first thing a compromised agent wants to clean up. Here, cleanup shows.
 
 The pieces that make up the control:
 
@@ -37,7 +37,7 @@ The pieces that make up the control:
 
 ## LLM01 Prompt Injection: the record that survives the incident
 
-OWASP's 2026 entry states the ground truth plainly: "no reliable prevention mechanism exists today", and defense is architectural. When prevention is off the table, the after-the-incident questions become load-bearing: what did the compromised session actually do, in what order, and can anyone trust that record? loxodonta is built for those questions.
+OWASP's 2026 entry states the ground truth plainly: "no reliable prevention mechanism exists today", and defense is architectural. Once prevention is off the table, the after-the-incident questions carry the weight: what did the compromised session actually do, in what order, and can anyone trust that record? loxodonta is built for exactly those questions.
 
 **All three trifecta legs are recorded.** OWASP's mitigation preamble cites Simon Willison's lethal trifecta, and mitigation #8 budgets agent capability along the same three legs: access to private data, exposure to untrusted content, and external communication. A recorder that only logs state changes sees one leg. Wide coverage (ADR-0016) exists because the missing tools were exactly the ones the trifecta names: the ingest leg (`Read`, `WebFetch`: where injection enters) and the communication leg (network and MCP tools: where exfiltration leaves). A forensic record that misses two of the three legs cannot reconstruct the attacks that matter.
 
@@ -45,7 +45,7 @@ OWASP's 2026 entry states the ground truth plainly: "no reliable prevention mech
 
 **The kill command is the last receipt.** The hook fires outside the agent's volition, so an injected session keeps leaving receipts unless the attack specifically disables the recorder. That disabling action is itself a tool call, so the last receipt before the silence is the kill command, and the supervisor's completeness alarm fires on the silence that follows. An attacker can stop the recording; an attacker cannot make the stopping quiet.
 
-**Memory writes are logged out of the box.** OWASP's mitigation #9 says to treat agent memory writes as privileged operations and log them. On this stack, memory writes are file writes through tools, so each one already leaves a receipt with a fingerprint of the file written. The boundary, stated honestly: the receipt records the write, not the causing prompt. The prompt lives in the harness transcript, which the chain does not currently seal (extending tamper evidence to the transcript by reference is named future work, issue #69).
+**Memory writes are logged out of the box.** OWASP's mitigation #9 says to treat agent memory writes as privileged operations and log them. On this stack, memory writes are file writes through tools, so each one already leaves a receipt with a fingerprint of the file written. One boundary, stated honestly: the receipt records the write, not the prompt that caused it. The prompt lives in the harness transcript, which the chain does not currently seal (sealing the transcript by reference is named future work, issue #69).
 
 ## LLM05 Data and Model Poisoning: the what-changed-when substrate
 
@@ -59,15 +59,15 @@ The boundary: loxodonta is not a version control system. It stores fingerprints,
 
 OWASP's mitigation #8 says to monitor agent-tool interactions and "establish baselines of normal tool behavior" to catch resource-intensive deviations.
 
-Wide coverage makes the receipt chains exactly the dataset such baselines need: every completed tool call, timestamped, per session, per repo, machine-wide. Entries per session per hour is a consumption signal that already exists in the store today.
+Wide coverage makes the receipt chains exactly the dataset such baselines need: every completed tool call, timestamped, per session, per repo, machine-wide. Entries per session per hour is a consumption signal that already sits in the store today.
 
-Stated plainly: the baseline *surface* is planned, not built (issue #67 tracks it as a supervisor surface). And the outcome-blind rule holds here too: loxodonta would evidence a circuit breaker's decision, never trip one.
+The honest label: the baseline *surface* is planned, not built (issue #67 tracks it as a supervisor surface). And the outcome-blind rule holds here too: loxodonta would evidence a circuit breaker's decision, never trip one.
 
 ## LLM02 Sensitive Information Disclosure: an honest boundary
 
 OWASP's entry names logs and telemetry as disclosure surfaces in their own right, and its foundational mitigations include restricting and scrubbing logs. loxodonta is itself a log store and says so. Its posture:
 
-- **Receipts are summaries, never transcripts.** An action line is one line, truncated to 160 characters by the hook (SPEC §2). Tool outputs, file contents, and conversation content never enter the chain.
+- **Receipts are summaries, never transcripts.** An action line is one line by spec (§2), and the hook truncates it to 160 characters. Tool outputs, file contents, and conversation content never enter the chain.
 - **No secrets in receipts.** SPEC §8: action and path values are plaintext forever, and the logger must not put credentials or sensitive content in them. Wide coverage sharpens the rule rather than relaxing it: because the recall digest is injected into sessions, everything in a chain must survive being read by the next attacker.
 - **The store is local.** Chains live in `~/.loxodonta/receipts/` under a protective `.gitignore`; nothing ships anywhere. `serve` binds localhost only.
 - **Custody, not amnesia, is the control.** The recorder never redacts (ADR-0016), because in the forensic use case the sensitive-looking artifact is often the evidence. The operator therefore treats the drawer with log-store handling: it is part of the machine's sensitive surface, and pretending otherwise would be the overclaim.
@@ -86,12 +86,12 @@ One deliberate disclosure remains, and it is documented rather than hidden: a di
 
 ## What loxodonta is not
 
-Stated once, without hedging, because the survey discipline for this repo is to show claims and never overclaim:
+Stated once, without hedging. Overclaiming is the one failure mode a document like this cannot afford:
 
 - **Not a security boundary.** Nothing is prevented. A compromised agent can still act; loxodonta shortens the time until someone knows.
 - **Not prevention of prompt injection or excessive agency.** It is the damage-limitation and forensic layer OWASP files under exactly that heading.
 - **Not authenticated provenance.** There are no keys (ADR-0001). Writer-supplied fields are testimony, trusted for nothing; verdicts come only from what the verifier recomputes, and they name mechanisms, never conclusions.
-- **Not completeness by itself.** The chain proves integrity of what was logged; a call that never fired the hook leaves no break. Completeness comes from the integration (the hook, `run`) and is judged by the witness against the coverage in force at the time.
+- **Not completeness by itself.** The chain proves integrity of what was logged; a call that never fired the hook leaves no break. Completeness comes from the integration (the hook, `run`) and is judged by the supervisor's witness against the coverage in force at the time.
 - **Detection latency only; the anchor is the only hard boundary.** Every layer on the machine is writer-reachable and says so. Once a head is anchored, no rewrite on the machine can fake that record or its timestamp. That is the one claim that survives an arbitrarily capable local adversary, and it is the only one.
 
 ## Sources
