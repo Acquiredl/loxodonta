@@ -1286,7 +1286,7 @@ def cmd_hook(args):
 
 # --- Hook installer -----------------------------------------------------------
 # `loxodonta install-hook` wires this machine's Claude Code into the
-# recorder: a PostToolUse hook so every tool call leaves a receipt, and —
+# recorder: a PostToolUse hook so every completed tool call leaves a receipt, and —
 # when supervisor.py sits beside this file — a SessionStart hook so every
 # session starts with a recall digest of its repo's recent history.
 
@@ -1318,6 +1318,10 @@ def backup_settings(path):
 # (ADR-0010): an install from either era is recognised, never doubled.
 RECORDER_MARKERS = ("loxodonta.py", "receipts.py")
 DIGEST_MARKER = "supervisor.py"
+# The shipped default before ADR-0016 widened coverage. A wired block
+# still wearing this exact string is provably an unmodified install —
+# the fingerprint the widening below keys on.
+PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 
 
 def cmd_install_hook(args):
@@ -1368,20 +1372,41 @@ def cmd_install_hook(args):
 
     post = hooks.setdefault("PostToolUse", [])
     healed = heal(post, RECORDER_MARKERS, record)
-    if not any(marker in h.get("command", "")
-               for b in post for h in b.get("hooks", [])
-               for marker in RECORDER_MARKERS):
+
+    def ours(block):
+        return any(marker in h.get("command", "")
+                   for h in block.get("hooks", [])
+                   for marker in RECORDER_MARKERS)
+
+    # Coverage goes wide (ADR-0016): a recorder block still wearing the
+    # old shipped default is provably ours and provably stale — widened
+    # in place, the heal() philosophy applied to matchers. Any other
+    # matcher is somebody's deliberate coverage choice: left alone,
+    # named in a notice below.
+    for block in post:
+        if ours(block) and block.get("matcher") == PRE_0016_MATCHER:
+            block["matcher"] = "*"
+            healed += 1
+            installed.append('PostToolUse: matcher widened to "*" '
+                             "(ADR-0016)")
+    if not any(ours(b) for b in post):
         post.append({
-            # State-changing tools only — and every shell the harness
-            # offers: the desktop app on Windows runs most commands
-            # through a PowerShell tool, and a matcher without it
-            # sleeps through exactly the sessions it should record
-            # (found in the field: this repo's own launch left almost
-            # no receipts).
-            "matcher": "Edit|Write|NotebookEdit|Bash|PowerShell",
+            # Every completed tool call, no allowlist (ADR-0016): the
+            # forensic record must include the reads and fetches where
+            # an attack enters and leaves, and MCP tool names can never
+            # be enumerated in advance. (The old curated default slept
+            # through this repo's own launch when the desktop app's
+            # PowerShell tool wasn't matched — allowlists rot.)
+            "matcher": "*",
             "hooks": [{"type": "command", "command": record}],
         })
         installed.append(f"PostToolUse: {record}")
+    for block in post:
+        matcher = block.get("matcher", "*")
+        if ours(block) and matcher != "*":
+            print(f'note: your recorder matcher "{matcher}" is narrower '
+                  'than the current default "*" — uncovered tool calls '
+                  "leave no receipts (see docs/HOOK.md)")
 
     if os.path.isfile(supervisor):
         start = hooks.setdefault("SessionStart", [])

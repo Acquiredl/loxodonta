@@ -493,9 +493,12 @@ class InstallerTest(RecallBase):
         post = json.dumps(settings["hooks"]["PostToolUse"])
         start = json.dumps(settings["hooks"]["SessionStart"])
         self.assertIn("loxodonta.py", post)
-        # Every shell the harness offers is matched — omitting one
-        # (PowerShell, on Windows desktop) silently loses sessions.
-        self.assertIn("PowerShell", post)
+        # Coverage goes wide (ADR-0016): every completed tool call owes
+        # a receipt — the sensor has no allowlist. (The old curated
+        # default slept through this repo's own launch when the desktop
+        # app's PowerShell tool wasn't matched.)
+        self.assertEqual(
+            settings["hooks"]["PostToolUse"][0]["matcher"], "*")
         self.assertIn("supervisor.py", start)
         self.assertIn("digest", start)
         self.assertIn("startup|clear|compact",
@@ -508,6 +511,38 @@ class InstallerTest(RecallBase):
         settings = self.settings(home)
         self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
         self.assertEqual(len(settings["hooks"]["SessionStart"]), 1)
+
+    def test_install_widens_the_old_default_matcher(self):
+        # The pre-ADR-0016 shipped default is provably ours and provably
+        # stale — byte-for-byte match, widened in place: the heal()
+        # philosophy applied to matchers.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        settings["hooks"]["PostToolUse"][0]["matcher"] = (
+            "Edit|Write|NotebookEdit|Bash|PowerShell")
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        again, _ = self.run_installer("install-hook")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        settings = self.settings(home)
+        self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
+        self.assertEqual(
+            settings["hooks"]["PostToolUse"][0]["matcher"], "*")
+
+    def test_install_leaves_a_customized_matcher_alone(self):
+        # Any other matcher string is somebody's deliberate coverage
+        # choice: left alone, named in a printed notice.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        settings["hooks"]["PostToolUse"][0]["matcher"] = "Edit|Write"
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        again, _ = self.run_installer("install-hook")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        settings = self.settings(home)
+        self.assertEqual(settings["hooks"]["PostToolUse"][0]["matcher"],
+                         "Edit|Write")
+        self.assertIn("narrower", again.stdout.lower())
 
     def test_install_honors_a_live_pre_rename_recorder_hook(self):
         # An install from the receipts.py era whose script still exists
