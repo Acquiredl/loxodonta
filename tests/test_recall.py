@@ -224,6 +224,26 @@ class StoreRecallTest(RecallBase):
         self.assertEqual(show.returncode, 0, show.stderr)
         self.assertIn("self-verified", show.stdout)
 
+    def test_digest_cites_the_store_scan_as_testimony(self):
+        # The default scan writes its baseline beside the store
+        # (ADR-0011); the digest's last-scan line must read it from
+        # there — a store operator saw "none recorded" while the scan
+        # ran green all day (walk finding, 2026-08-31).
+        project = self.repo("alpha")
+        self.hook(project, "f0f0aaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                  "store work")
+        env = self.store_env(project)
+        witness = self.root / "no-witness"
+        witness.mkdir(exist_ok=True)
+        scan = run_py(SUPERVISOR, "scan", "--witness", str(witness),
+                      "--json", env_extra=env)
+        self.assertEqual(scan.returncode, 0, scan.stdout + scan.stderr)
+        out = run_py(SUPERVISOR, "digest", "--repo", str(project),
+                     env_extra=env).stdout
+        self.assertIn("last scan:", out)
+        self.assertIn("VALID", out)
+        self.assertNotIn("none recorded", out)
+
     def test_legacy_repo_layout_is_the_fallback(self):
         # A repo with no drawer yet (pre-adopt) still renders its local
         # receipts/ — the transition never blanks anyone's memory.

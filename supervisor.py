@@ -1559,28 +1559,39 @@ def gather(logs):
 
 def scan_testimony(repo):
     """The last scan's verdicts for this repo's chains, read from
-    whichever baseline covers it (the repo itself, or the folder of
-    repos above it). The baseline is trusted for nothing — which is
-    exactly why recall may cite it: testimony citing testimony."""
-    for base_dir in (repo, repo.parent):
+    whichever baseline covers it: the store's, where the default scan
+    remembers (ADR-0011), else the legacy spots (the repo itself, or
+    the folder of repos above it). The baseline is trusted for nothing
+    — which is exactly why recall may cite it: testimony citing
+    testimony."""
+    slug = project_slug(repo) + "/"
+
+    def in_drawer(relpath, base_dir):
+        # Store baseline rows are keyed <drawer-slug>/<chain>.
+        return relpath.startswith(slug)
+
+    def under_repo(relpath, base_dir):
         try:
-            data = json.loads((base_dir / BASELINE_NAME).read_text(
-                encoding="utf-8"))
+            (base_dir / relpath).resolve().relative_to(repo)
+            return True
+        except (ValueError, OSError):
+            return False
+
+    sources = [(Path(store_home()) / "baseline.json", in_drawer),
+               (repo / BASELINE_NAME, under_repo),
+               (repo.parent / BASELINE_NAME, under_repo)]
+    for path, covers in sources:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         scanned = data.get("scanned")
         chains = data.get("chains")
         if not isinstance(scanned, str) or not isinstance(chains, dict):
             continue
-        verdicts = []
-        for relpath, row in chains.items():
-            if not isinstance(row, dict) or "verdict" not in row:
-                continue
-            try:
-                (base_dir / relpath).resolve().relative_to(repo)
-            except (ValueError, OSError):
-                continue
-            verdicts.append(str(row["verdict"]))
+        verdicts = [str(row["verdict"]) for relpath, row in chains.items()
+                    if isinstance(row, dict) and "verdict" in row
+                    and covers(relpath, path.parent)]
         if verdicts:
             return scanned, verdicts
     return None, []

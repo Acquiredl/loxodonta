@@ -169,3 +169,41 @@ quiet no-op. A worktree chain adopts into the repo the worktree
 served, because worktrees get pruned and evidence should not die with
 its folder.
 
+## 4. Memory — recall and the Stage E CLI
+
+Recall reads the same chains as *what happened*, not as evidence. The
+discipline is one sentence, repeated on every surface: **testimony,
+not a verdict** — recall renders what the writer said it attempted and
+spawns nothing; the digest runs zero subprocesses, because a
+session-start hook that ran verify would put a model-adjacent surface
+in the verdict path (ADR-0009).
+
+**Scope.** A recall command resolves the invoking project to the same
+store drawer the hook writes — `project_slug` is the reader-side twin
+of the recorder's, and the recall tests hold the two copies together
+behaviorally (hook in, digest out). A drawer that holds nothing yet
+falls back to the legacy repo layout, so the transition never blanks
+anyone's memory; a drawer that holds anything outranks a stale legacy
+folder. `--all` widens to every drawer, honoring `.unlisted` — an
+output courtesy, never a security boundary: the chains stay plain
+files.
+
+**The digest** is the injection: sibling chains folded per session
+(one session, one story), genesis excluded, budget-capped in *rows*
+with the cap said out loud ("showing last 30 — search reaches the
+rest"), each session's final entry tagged as the last recorded action.
+The header cites the last scan's verdicts from whichever baseline
+covers the repo — the store's first (ADR-0011), then the legacy spots
+— labeled testimony citing testimony. A chainless repo gets silence
+and exit 0: the hook must stay quiet, not nag.
+
+**Entry addresses** follow git's rules: 4–64 lowercase hex, any
+unambiguous prefix resolves, an ambiguous one is refused with
+candidates named. `show` re-hashes the fetched entry against its
+address — recall's pointers are self-verifying, and the one hash
+recall ever computes is still not a verdict: a mismatch prints a
+warning that names the real judge. `search` reaches the whole repo's
+memory (`--all`: the whole store), counts every match, and caps only
+what it shows — no silent caps. `timeline` renders the rows around one
+address: how the moment unfolded.
+
