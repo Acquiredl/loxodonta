@@ -1091,8 +1091,17 @@ def cmd_adopt(args):
         sidecar = log.parent / (log.name + ".anchors.jsonl")
         marker = log.parent / UNLISTED_NAME
         shutil.move(str(log), str(drawer / log.name))
-        if sidecar.exists() and not (drawer / sidecar.name).exists():
-            shutil.move(str(sidecar), str(drawer / sidecar.name))
+        if sidecar.exists():
+            if (drawer / sidecar.name).exists():
+                # Proofs left behind are still proofs; say so — silence
+                # here would read as "everything travelled".
+                print(f"left sidecar "
+                      f"{sidecar.relative_to(root).as_posix()}: "
+                      f"{drawer.name}/{sidecar.name} already exists in "
+                      "the store — evidence is never overwritten; "
+                      "reconcile by hand")
+            else:
+                shutil.move(str(sidecar), str(drawer / sidecar.name))
         if marker.exists() and not (drawer / UNLISTED_NAME).exists():
             shutil.copy2(str(marker), str(drawer / UNLISTED_NAME))
         print(f"adopted {line}")

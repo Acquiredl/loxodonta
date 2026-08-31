@@ -133,3 +133,39 @@ local git only: a recorder that updated itself from a remote would hand
 the writer a second road to the one file that has to stay honest
 (ADR-0002). Behind-counts name their fetch date, because a stale count
 that reads as reassurance is worse than no count.
+
+## 3. The tick — `scan_root`, `adopt`, the exit ladder
+
+`scan_root` is where the patrol and the specialists assemble into one
+look. Per chain: keeper's turn, verify's verdict, the stand-down check,
+the baseline diff, and the head remembered for next look (with its
+verdict — testimony for the digest's last-scan line, never the verdict
+itself). Per session: the receipt tally for the completeness watch,
+genesis entries excluded — each genesis is administrative, so witnessed
+count equals receipts owed.
+
+The exit ladder is a `max()`, worst wins: 1–4 the gravest verify exit
+(a stood-down tear contributes nothing — ADR-0004 already handled it),
+5 a baseline event appends cannot explain, 6 a *live* completeness
+alarm. Only live alarms raise the exit: an ended deficit is evidence,
+and a siren that never stops sounding trains the operator to ignore
+the band (the dogfood's lesson). The recorder notice never raises it —
+drift is the operator's to resolve, deliberately.
+
+Two subtleties. Baseline events are **one-shot**: the baseline is
+remembered anew after diffing, so an alarm belongs to the tick that
+caught it, and the next tick reads quiet — the day book's sticky
+`worst` is what keeps the day honest. And the day book's `broken`
+counts only damage that *demands attention* (stood-down tears are
+excluded), while the chain list and the digest's testimony line count
+every BROKEN verdict — same word, two claims: "what needs you" versus
+"what is".
+
+`adopt` is the one-time door into the store (ADR-0011): move, not copy
+— two copies of evidence is worse than one. Chain, anchor sidecars,
+and the folder's `.unlisted` marker travel together; every collision
+is refused and reported, never overwritten, and running it twice is a
+quiet no-op. A worktree chain adopts into the repo the worktree
+served, because worktrees get pruned and evidence should not die with
+its folder.
+

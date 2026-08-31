@@ -278,6 +278,32 @@ class AdoptTest(unittest.TestCase):
         self.assertEqual(adopted.read_bytes(), before,
                          "the adopted copy is untouched by the clash")
 
+    def test_adopt_reports_a_sidecar_it_must_leave_behind(self):
+        # A sidecar whose name is already taken in the drawer cannot
+        # travel. Leaving proofs behind must be said, not silent —
+        # everything else adopt refuses gets a printed word.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_adopt(self.home, self.root)
+        (name,) = self.drawers()
+        stranded = make_chain(self.root / "alpha" / "receipts",
+                              "sess-cccc")
+        write_completed_anchor(stranded, chain_head(stranded))
+        squatter = (self.home / "receipts" / name
+                    / "receipts-sess-cccc.jsonl.anchors.jsonl")
+        squatter.write_text("{}\n", encoding="utf-8")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        legacy_sidecar = (self.root / "alpha" / "receipts"
+                         / "receipts-sess-cccc.jsonl.anchors.jsonl")
+        self.assertTrue(legacy_sidecar.exists(),
+                        "the refused sidecar stays put")
+        self.assertIn("sidecar", result.stdout.lower())
+        self.assertEqual(squatter.read_text(encoding="utf-8"), "{}\n",
+                         "the store copy is untouched")
+
     def test_adopt_twice_is_a_quiet_no_op(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_adopt(self.home, self.root)
