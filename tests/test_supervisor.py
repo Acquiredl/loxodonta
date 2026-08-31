@@ -729,14 +729,16 @@ def ago(seconds):
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash"):
+def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash",
+                         command="python loxodonta.py hook"):
     """The harness settings beside the witness layout, wiring a receipts
     PostToolUse hook for the given tools — what tells the watch which
-    tool events owe a receipt."""
+    tool events owe a receipt. `command` is the wired command line, the
+    seam the recorder-drift notice reads to find the executed file."""
     witness.mkdir(parents=True, exist_ok=True)
     (witness.parent / "settings.json").write_text(json.dumps({
         "hooks": {"PostToolUse": [{"matcher": matcher, "hooks": [
-            {"type": "command", "command": "python loxodonta.py hook"},
+            {"type": "command", "command": command},
         ]}]},
     }), encoding="utf-8")
 
@@ -1550,3 +1552,89 @@ class WalkFindingsTest(unittest.TestCase):
         baseline = json.loads(
             (self.root / ".supervisor-baseline.json").read_text("utf-8"))
         self.assertLess(baseline["keeper"][relpath], "2099")
+
+
+class RecorderDriftTest(unittest.TestCase):
+    """The harness executes the recorder from a working tree, so the
+    code that records you is whatever is checked out at that path right
+    now — no pin, no copy. The scan says which, and never fetches: a
+    recorder that reaches the network to update itself would hand the
+    writer a second road to the one file that must stay trustworthy
+    (ADR-0002). Reporting drift is the honest half of that trade."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name) / "witness"
+
+    def git(self, *args, cwd):
+        return subprocess.run(["git", *args], cwd=str(cwd),
+                              capture_output=True, encoding="utf-8")
+
+    def make_checkout(self, branch="main"):
+        """A git checkout holding a stand-in recorder, wired as the hook."""
+        home = Path(self._tmp.name) / "recorder"
+        home.mkdir()
+        script = home / "loxodonta.py"
+        script.write_text("# stand-in recorder\n", encoding="utf-8")
+        self.git("init", "-b", branch, cwd=home)
+        self.git("config", "user.email", "t@example.com", cwd=home)
+        self.git("config", "user.name", "test", cwd=home)
+        self.git("add", "-A", cwd=home)
+        self.git("commit", "-m", "recorder", cwd=home)
+        install_witness_hook(
+            self.witness,
+            command=f'python "{script.as_posix()}" hook')
+        return home, script
+
+    def notice(self):
+        result = run_scan(self.root, "--witness", str(self.witness), "--json")
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        return json.loads(result.stdout)["recorder"]
+
+    def test_it_names_the_branch_the_recorder_is_executed_from(self):
+        self.make_checkout(branch="dev")
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["branch"], "dev")
+        self.assertFalse(recorder["dirty"])
+        self.assertTrue(recorder["path"].endswith("loxodonta.py"))
+
+    def test_an_uncommitted_edit_to_the_recorder_is_drift(self):
+        # The sharpest case: the file that runs is not the file that was
+        # reviewed, and nothing else on the machine would say so.
+        _, script = self.make_checkout()
+        script.write_text("# edited, uncommitted\n", encoding="utf-8")
+
+        recorder = self.notice()
+
+        self.assertTrue(recorder["dirty"])
+        self.assertIn("uncommitted", recorder["note"].lower())
+
+    def test_a_recorder_outside_git_is_unknown_never_an_error(self):
+        # No repo, no git, no upstream: say so plainly rather than
+        # guessing or failing the scan over it.
+        home = Path(self._tmp.name) / "loose"
+        home.mkdir()
+        script = home / "loxodonta.py"
+        script.write_text("# loose recorder\n", encoding="utf-8")
+        install_witness_hook(self.witness,
+                             command=f'python "{script.as_posix()}" hook')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "unknown")
+        self.assertIsNone(recorder["branch"])
+
+    def test_no_wired_hook_means_no_recorder_to_report_on(self):
+        self.witness.mkdir(parents=True, exist_ok=True)
+        (self.witness.parent / "settings.json").write_text(
+            json.dumps({"hooks": {}}), encoding="utf-8")
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "unwired")
