@@ -8,15 +8,17 @@ CLI and judges nothing itself: verdicts come from `loxodonta verify`,
 and everything the supervisor holds is writer-reachable, so nothing
 here is a head record (GLOSSARY: Supervisor, Baseline).
 
-  python supervisor.py scan --root DIR --json
-  python supervisor.py serve --root DIR
+  python supervisor.py scan --json              # one tick over the store
+  python supervisor.py serve                    # the face
   python supervisor.py digest [--repo DIR]      # the session-start injection
   python supervisor.py show ADDRESS             # one entry, self-verifying
   python supervisor.py search TEXT [--all]      # the ladder past the digest
   python supervisor.py timeline ADDRESS         # context around one entry
+  python supervisor.py scan --root DIR --json   # legacy: a folder of repos
 
-`scan` is one tick without timers: a census of every chain under the
-root, a verdict for each, a baseline diff against the last look,
+`scan` is one tick without timers: a census of every chain in the
+store (ADR-0011; --root walks a legacy folder of repos instead), a
+verdict for each, a baseline diff against the last look,
 machine-readable JSON on stdout, and an exit code cron can shout about —
 0 when nothing demands attention, 1–4 for the worst verify exit found,
 5 when the baseline saw a change appends cannot explain (a reason to
@@ -56,11 +58,13 @@ LOXODONTA = HERE / "loxodonta.py"
 # --- Census -------------------------------------------------------------------
 
 def find_chains(root):
-    """Every receipt log under the root. Three shapes, because history has
-    three shapes: the root itself being a repo, each sibling repo's
-    receipts/, and chains stranded in worktrees by sessions that ran
-    before the hook learned to log to the main repo. Anchor sidecars are
-    proofs about a chain, not chains."""
+    """Every receipt log under a legacy --root. Three shapes, because
+    pre-store history has three shapes: the root itself being a repo,
+    each sibling repo's receipts/, and chains stranded in worktrees by
+    sessions that ran before the hook learned to log to the main repo.
+    The default census is not this one: it is a single glob over the
+    store's drawers, inline in scan_root (ADR-0011). Anchor sidecars
+    are proofs about a chain, not chains."""
     patterns = ("receipts/*.jsonl",
                 "*/receipts/*.jsonl",
                 "*/.claude/worktrees/*/receipts/*.jsonl")
@@ -173,7 +177,8 @@ def superseded(log, detail):
 
 # --- Baseline -----------------------------------------------------------------
 # The tripwire's memory (GLOSSARY: Baseline): every chain's last-seen
-# head, kept in a file beside the repos. Writer-reachable by definition,
+# head, kept beside what it watches — the store's home in store mode
+# (ADR-0011), the legacy root folder otherwise. Writer-reachable by definition,
 # therefore trusted for nothing — a disagreement is a reason to
 # investigate, never a verdict about which side is true. Verdicts come
 # from verify; the out-of-reach copy, if you keep one, is the anchor.
@@ -296,7 +301,8 @@ def remember_day(path, now, tally):
     today = now.strftime("%Y-%m-%d")
     row = dict(days.get(today) or {})
     for claim, seen in tally.items():
-        row[claim] = max(row.get(claim, 0), seen)
+        if claim != "chains":
+            row[claim] = max(row.get(claim, 0), seen)
     row["chains"] = tally["chains"]  # a count of now, not a high-water mark
     row["scans"] = row.get("scans", 0) + 1
     row["looks"] = row.get("looks", 0)
@@ -413,7 +419,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
-    note = None
+    notes = []  # one turn can fail twice; every failure stays said
     failed = False
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     if sidecar.exists():
@@ -423,8 +429,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
             capture_output=True, encoding="utf-8", env=env)
         attempted = True
         if finished.returncode != 0:
-            note = ("upgrade attempted; a calendar did not answer — "
-                    "proofs stay pending and the keeper will try again")
+            notes.append("upgrade attempted; a calendar did not answer — "
+                         "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
         head = entries[-1].get("entry_hash")
         born = parse_when(entries[-1].get("ts"))
@@ -439,10 +445,10 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
             attempted = True
             if finished.returncode != 0:
                 failed = True
-                note = ("anchoring failed — no calendar accepted this "
-                        "head; it stays unanchored and the keeper will "
-                        "try again")
-    return attempted, note, failed
+                notes.append("anchoring failed — no calendar accepted "
+                             "this head; it stays unanchored and the "
+                             "keeper will try again")
+    return attempted, "; ".join(notes) or None, failed
 
 
 def assess_anchors(detail, entries):

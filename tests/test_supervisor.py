@@ -1383,6 +1383,24 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertIn("anchoring failed", chain["anchors"]["note"])
         self.assertFalse(chain["anchors"]["head"]["anchored"])
 
+    def test_one_turn_failing_twice_keeps_both_notes(self):
+        # A single turn can fail twice — a refused upgrade AND a refused
+        # fresh-head anchor. Both failures belong in the note: evidence
+        # is not a scratchpad where the last writer wins.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-2xfl")
+        first = json.loads(
+            log.read_text(encoding="utf-8").splitlines()[0])["entry_hash"]
+        write_pending_anchor(log, first, "2026-08-22T09:00:00Z")
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", "http://127.0.0.1:1",
+                          env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-2xfl")
+        self.assertIn("did not answer", chain["anchors"]["note"])
+        self.assertIn("anchoring failed", chain["anchors"]["note"])
+
     def test_an_already_anchored_head_is_left_alone(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
