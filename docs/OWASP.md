@@ -1,5 +1,7 @@
 # loxodonta and the OWASP Top 10 for LLM Applications (2026)
 
+> **Status: first draft, pending review.** This mapping has not had its final read-through yet. Every claim is pinned to a quoted OWASP mitigation and a repo source, but wording and framing may still change.
+
 The [OWASP Top 10 for LLM Applications 2026](https://genai.owasp.org/resource/owasp-genai-llm-top-10-2026/) is the closest thing agent security has to a shared checklist. This doc walks it entry by entry and answers one question each time: is loxodonta a layer here, and if so, which kind?
 
 The honesty frame comes first, because every claim below sits inside it. loxodonta is a tamper-evident receipt log with a watching layer: a tripwire with a memory. Its claim is detection latency, never prevention. Nothing here is a security boundary. The one hard boundary in the whole design is the anchor, because that lives in a Bitcoin block no rewrite on the machine can reach. Everything else detects fast and says so.
