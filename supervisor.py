@@ -547,6 +547,133 @@ def hook_matchers(witness):
     return matchers
 
 
+# --- The recorder notice ------------------------------------------------------
+# The harness executes a *path*, not a version, so the recorder running
+# on this machine is whatever is checked out there at the moment a tool
+# fires. Nothing pins it and nothing copies it. This reports that state
+# and corrects none of it: reading local git only, never the network,
+# because a recorder that updated itself from a remote would hand the
+# writer a second road to the one file that has to stay honest
+# (ADR-0002). Drift is the operator's to resolve, deliberately.
+
+RECORDER_NAMES = ("loxodonta.py", "receipts.py")
+
+
+def recorder_path(witness):
+    """The file the harness actually runs for PostToolUse, read out of
+    the wired command line — the only place that truth lives. Either
+    era's name (ADR-0010)."""
+    try:
+        settings = json.loads((witness.parent / "settings.json")
+                              .read_text(encoding="utf-8"))
+        rules = settings["hooks"]["PostToolUse"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    for rule in rules if isinstance(rules, list) else []:
+        if not isinstance(rule, dict):
+            continue
+        for hook in rule.get("hooks") or []:
+            if not isinstance(hook, dict):
+                continue
+            # Quoted first: a path with spaces is one token, not several.
+            for quoted, bare in re.findall(r'"([^"]+?\.py)"|(\S+\.py)',
+                                           str(hook.get("command", ""))):
+                candidate = Path(quoted or bare)
+                if candidate.name in RECORDER_NAMES:
+                    return candidate
+    return None
+
+
+def git_say(home, *question):
+    """One read-only git question, or None when git cannot answer —
+    absent, or the path is not a checkout. Never fetches, never writes."""
+    try:
+        answered = subprocess.run(["git", "-C", str(home), *question],
+                                  capture_output=True, encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    return answered.stdout.strip() if answered.returncode == 0 else None
+
+
+def recorder_drift(witness):
+    """Which recorder is running, and whether it is the one the operator
+    thinks. Testimony like everything else local: it says what the
+    checkout looks like, never that the code is trustworthy."""
+    script = recorder_path(witness)
+    if script is None:
+        return {"state": "unwired", "path": None, "branch": None,
+                "note": "no recorder hook is wired into the harness "
+                        "settings — nothing is recording, so there is no "
+                        "recorder to drift"}
+    notice = {"state": "unknown", "path": script.as_posix(), "branch": None,
+              "head": None, "dirty": False, "upstream": None,
+              "ahead": None, "behind": None, "fetched": None, "note": None}
+    if not script.exists():
+        notice["note"] = ("the wired recorder is not on disk — the hook "
+                          "runs nothing, and a session that records "
+                          "nothing looks exactly like a quiet one")
+        return notice
+    home = script.parent
+    branch = git_say(home, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch is None:
+        notice["note"] = ("the recorder is not in a git checkout, or git "
+                          "is unavailable — only its path can be read "
+                          "from here, not its version")
+        return notice
+    notice.update({
+        "state": "tracked",
+        "branch": branch,
+        "head": git_say(home, "rev-parse", "--short", "HEAD"),
+        # Only the executed file matters: an unrelated dirty file in the
+        # same checkout is not drift in the recorder.
+        "dirty": bool(git_say(home, "status", "--porcelain", "--",
+                              script.name)),
+        "upstream": git_say(home, "rev-parse", "--abbrev-ref",
+                            "--symbolic-full-name", "@{u}"),
+    })
+    if notice["upstream"]:
+        counts = git_say(home, "rev-list", "--left-right", "--count",
+                         "@{u}...HEAD")
+        if counts and len(counts.split()) == 2:
+            behind, ahead = counts.split()
+            notice["behind"], notice["ahead"] = int(behind), int(ahead)
+        git_dir = git_say(home, "rev-parse", "--git-dir")
+        if git_dir:
+            stamp = (home / git_dir) / "FETCH_HEAD"
+            try:
+                notice["fetched"] = datetime.fromtimestamp(
+                    stamp.stat().st_mtime, timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except OSError:
+                pass  # never fetched here; the counts say so themselves
+    notice["note"] = recorder_words(notice)
+    return notice
+
+
+def recorder_words(notice):
+    """The notice in one sentence, worst thing first. Behind-counts are
+    only as fresh as the last fetch and say so, because a stale count
+    that reads as reassurance is worse than no count."""
+    said = []
+    if notice["dirty"]:
+        said.append("the recorder has uncommitted changes — the file "
+                    "being executed is not the file that was reviewed")
+    if notice["behind"]:
+        said.append(f"the checkout is {notice['behind']} commit(s) behind "
+                    f"{notice['upstream']} as of the last fetch"
+                    + (f" ({notice['fetched']})" if notice["fetched"]
+                       else ", which has never run here")
+                    + " — pull deliberately; nothing updates it for you")
+    if notice["ahead"]:
+        said.append(f"the checkout is {notice['ahead']} commit(s) ahead of "
+                    f"{notice['upstream']} — you are recording with code "
+                    "that has not been pushed")
+    if not said:
+        said.append(f"recording from {notice['branch']} at "
+                    f"{notice['head']}, clean")
+    return "; ".join(said)
+
+
 def owes_receipt(name, matchers):
     for matcher in matchers:
         if matcher in ("", "*"):
@@ -894,6 +1021,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "history": fortnight(days, now),
         "baseline": baseline,
         "completeness": completeness,
+        # Which recorder is actually running. Never raises the exit:
+        # drift is a reason to look, and the operator's to resolve.
+        "recorder": recorder_drift(witness),
         "repos": [
             {"repo": repo,
              "sessions": [{"session": session, "chains": chains}
@@ -1935,7 +2065,16 @@ PAGE = """<!doctype html>
   #strip .state { font-size: 1.45rem; font-weight: 800; margin: 0;
                   letter-spacing: 0.01em; }
   #strip .why { margin: 0.25rem 0 0; opacity: 0.85; }
-  #statemark { font-size: 1.6rem; line-height: 1.2; grid-row: 1 / span 3; }
+  /* The recorder line sits under the verdict as context, quieter than
+     it: smaller, dimmer, monospaced for the path. Drift underlines
+     rather than recolours — it is a reason to look, never a verdict,
+     and must not read as a fourth alarm state. */
+  #recorder { font-size: 0.85rem; opacity: 0.7;
+              font-family: ui-monospace, monospace; }
+  #recorder.drifted { opacity: 1;
+                      text-decoration: underline dotted var(--damage);
+                      text-underline-offset: 0.25rem; }
+  #statemark { font-size: 1.6rem; line-height: 1.2; grid-row: 1 / span 4; }
   #strip > :not(#statemark) { grid-column: 2; }
   #strip.quiet { background: var(--quiet-wash); border-color: var(--quiet); }
   #strip.quiet #statemark { color: var(--quiet); }
@@ -2232,6 +2371,7 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   <span id="statemark" aria-hidden="true"></span>
   <p class="state" id="stateline">reading the scan…</p>
   <p class="why" id="statewhy"></p>
+  <p class="why" id="recorder"></p>
   <span id="freshness"></span>
   <pre id="elephant" aria-hidden="true" hidden>
        __ ___
@@ -2426,6 +2566,18 @@ function renderStrip(report) {
   const strip = document.getElementById("strip");
   const state = document.getElementById("stateline");
   const why = document.getElementById("statewhy");
+  // Which recorder is running. Quiet by design — it is context for
+  // every verdict above it, not a verdict of its own, and it never
+  // colours the strip.
+  const rec = report.recorder;
+  const recLine = document.getElementById("recorder");
+  if (rec && recLine) {
+    recLine.textContent = "recorder: " + rec.note +
+      (rec.path ? " · " + rec.path : "");
+    recLine.classList.toggle("drifted",
+      !!(rec.dirty || rec.behind || rec.state === "unwired" ||
+         rec.state === "unknown"));
+  }
   const chains = report.repos.flatMap(r =>
     r.sessions.flatMap(s => s.chains));
   const live = report.completeness.sessions.filter(s =>
