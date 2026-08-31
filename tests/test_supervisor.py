@@ -1202,6 +1202,109 @@ class CompletenessTest(unittest.TestCase):
             self.assertNotIn(overclaim, words)
 
 
+class CalibrationTest(unittest.TestCase):
+    """Effective-dated coverage (ADR-0016): each session is judged by
+    the matchers in force at its time, so a matcher change never
+    manufactures deficits over history the old rules recorded
+    honestly — and never excuses silence after the change."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name) / "witness"
+        self.baseline = self.root / ".supervisor-baseline.json"
+
+    def scan(self, *extra, env=None):
+        return run_scan(self.root, "--witness", str(self.witness),
+                        *extra, env=env)
+
+    def states(self, result):
+        report = json.loads(result.stdout)
+        return {s["session"]: s
+                for s in report["completeness"]["sessions"]}
+
+    def rewire(self, matcher, age):
+        """(Re)wire the harness settings and pin their mtime `age`
+        seconds into the past — the effective date the calibration
+        reads for a changed matcher."""
+        install_witness_hook(self.witness, matcher=matcher)
+        stamp = time.time() - age
+        os.utime(self.witness.parent / "settings.json", (stamp, stamp))
+
+    def test_widening_does_not_rejudge_ended_sessions(self):
+        # A session recorded honestly under the narrow matcher: three
+        # Bash events with three receipts, five Reads nothing owed.
+        # Widening to * afterwards must not turn those Reads into a
+        # five-receipt scar (the wave ADR-0016 exists to prevent).
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=600)
+        first = self.scan()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        make_chain(self.root / "alpha" / "receipts", "sess-old", entries=3)
+        write_transcript(
+            self.witness, self.root / "alpha", "sess-old",
+            event_times=[ago(500), ago(490), ago(480), ago(470),
+                         ago(460), ago(450), ago(440), ago(430)],
+            tool=["Bash", "Read", "Bash", "Read", "Read", "Bash",
+                  "Read", "Read"],
+            idle=3600)
+        self.rewire("*", age=100)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        judged = self.states(result)["sess-old"]
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+        self.assertEqual(judged["tools"], 3,
+                         "Reads before the widening owe nothing")
+
+    def test_events_after_widening_owe_receipts(self):
+        # The flip side: once * is in force, a Read owes a receipt,
+        # and a session of unreceipted Reads after the change alarms.
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=600)
+        self.scan()
+        self.rewire("*", age=300)
+        write_transcript(self.witness, self.root / "alpha", "sess-new",
+                         event_times=[ago(120), ago(110), ago(100)],
+                         tool="Read")
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6,
+                         result.stdout + result.stderr)
+        judged = self.states(result)["sess-new"]
+        self.assertEqual(judged["state"], "ALARM-SILENT")
+        self.assertEqual(judged["tools"], 3)
+
+    def test_calibration_is_remembered_and_spoken(self):
+        # The observations live in the baseline (writer-reachable,
+        # trusted for nothing beyond calibration), the change is named
+        # in words on the watch, and an unchanged matcher adds nothing.
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=600)
+        self.scan()
+        self.rewire("*", age=100)
+
+        result = self.scan()
+        again = self.scan()
+
+        baseline = json.loads(self.baseline.read_text(encoding="utf-8"))
+        epochs = baseline["calibration"]
+        self.assertEqual(len(epochs), 2)
+        self.assertIsNone(epochs[0]["since"],
+                          "the first observation covers all history")
+        self.assertEqual(epochs[1]["matchers"], ["*"])
+        report = json.loads(result.stdout)
+        words = report["completeness"]["calibration"]["words"]
+        self.assertIn("in force at its time", words)
+        rewritten = json.loads(self.baseline.read_text(encoding="utf-8"))
+        self.assertEqual(len(rewritten["calibration"]), 2,
+                         "an unchanged matcher records no new epoch")
+        self.assertEqual(again.returncode, 0,
+                         again.stdout + again.stderr)
+
+
 class FakeCalendarHandler(BaseHTTPRequestHandler):
     """The minimal calendar from the anchor suite: submits get a pending
     proof; polls get 404 while "pending", a Bitcoin continuation once

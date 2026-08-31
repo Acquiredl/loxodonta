@@ -209,14 +209,18 @@ def read_baseline(path):
                    and "n" in known for known in chains.values()):
             raise ValueError("baseline rows must remember a head and an n")
         keeper = data.get("keeper")
-        return chains, keeper if isinstance(keeper, dict) else {}, None
+        calibration = [epoch for epoch in data.get("calibration", [])
+                       if isinstance(epoch, dict)
+                       and isinstance(epoch.get("matchers"), list)]
+        return (chains, keeper if isinstance(keeper, dict) else {},
+                calibration, None)
     except FileNotFoundError:
-        return {}, {}, None  # cold start: seed silently
+        return {}, {}, [], None  # cold start: seed silently
     except (ValueError, KeyError, TypeError, AttributeError,
             json.JSONDecodeError, OSError):
-        return {}, {}, ("the baseline could not be read — remembering "
-                        "afresh from this look; it was trusted for "
-                        "nothing either way")
+        return {}, {}, [], ("the baseline could not be read — remembering "
+                            "afresh from this look; it was trusted for "
+                            "nothing either way")
 
 
 def diff_baseline(remembered, relpath, entries):
@@ -557,6 +561,49 @@ def hook_matchers(witness):
     return matchers
 
 
+def calibrate(remembered, witness, now):
+    """Effective-dated coverage (ADR-0016): the supervisor's memory of
+    which matchers were wired when, so a matcher change never re-judges
+    history the old rules recorded honestly. The first observation
+    covers all time before it; a change is dated by the settings file's
+    mtime, clamped between the last observation and now — the best
+    estimate available, since the harness does not log its own config
+    changes. Lives in the baseline: writer-reachable, trusted for
+    nothing beyond calibration."""
+    current = hook_matchers(witness)
+    if remembered and remembered[-1]["matchers"] == current:
+        return remembered
+    if not remembered:
+        return [{"since": None, "matchers": current}]
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        changed = datetime.fromtimestamp(
+            (witness.parent / "settings.json").stat().st_mtime,
+            timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except OSError:
+        changed = stamp
+    floor = remembered[-1]["since"] or ""
+    return remembered + [{"since": min(max(changed, floor), stamp),
+                          "matchers": current}]
+
+
+def matchers_at(calibration, ts):
+    """The matchers in force at one moment: the newest observation not
+    after `ts` (ISO timestamps compare as strings). A time before the
+    first observation gets the first — the supervisor claims no
+    knowledge older than its own memory — and a missing timestamp gets
+    the present."""
+    if not calibration:
+        return []
+    if not isinstance(ts, str):
+        return calibration[-1]["matchers"]
+    chosen = calibration[0]["matchers"]
+    for epoch in calibration[1:]:
+        if epoch["since"] <= ts:
+            chosen = epoch["matchers"]
+    return chosen
+
+
 # --- The recorder notice ------------------------------------------------------
 # The harness executes a *path*, not a version, so the recorder running
 # on this machine is whatever is checked out there at the moment a tool
@@ -696,14 +743,16 @@ def owes_receipt(name, matchers):
     return False
 
 
-def read_witness(transcript, matchers):
+def read_witness(transcript, calibration):
     """The witness signal: timestamps of tool events that owe a receipt.
     A tool event is a tool_use block paired by id with its result line;
     only completed results count (failed calls fire no hook — the
-    field's suppression finding) and only tools the wired matchers
-    cover (the calibration finding: an all-tools witness over an
-    Edit|Write|Bash hook manufactures deficits). Chatter is never
-    counted: a chat-only session can never alarm."""
+    field's suppression finding) and only tools covered at the event's
+    own time (the calibration finding, effective-dated by ADR-0016: an
+    all-tools witness over an Edit|Write|Bash hook manufactures
+    deficits, and so does today's wide matcher over yesterday's narrow
+    sessions). Chatter is never counted: a chat-only session can never
+    alarm."""
     names = {}
     events = []
     with open(transcript, encoding="utf-8", errors="replace") as lines:
@@ -736,8 +785,9 @@ def read_witness(transcript, matchers):
                 # on the tool_result block (field capture, 2026-08-29).
                 continue
             name = names.get(found.get("tool_use_id")) if found else None
-            if owes_receipt(name, matchers):
-                events.append(record.get("timestamp"))
+            when = record.get("timestamp")
+            if owes_receipt(name, matchers_at(calibration, when)):
+                events.append(when)
     return events
 
 
@@ -764,11 +814,11 @@ def classify(tools, receipts, ended, idle, deficit_age, silent):
     return "ALARM-SILENT" if silent else "ALARM-DEFICIT"
 
 
-def watch_session(transcript, receipts, last_receipt, now, matchers):
+def watch_session(transcript, receipts, last_receipt, now, calibration):
     """One session against its witness. deficit_since needs no stored
     state: receipts pair with tool events in order, so the first
     unpaired event's timestamp is when the deficit began."""
-    events = read_witness(transcript, matchers)
+    events = read_witness(transcript, calibration)
     tools = len(events)
     quiet_for = now.timestamp() - transcript.stat().st_mtime
     # Today both flags read from the idle window ("witness quiet this
@@ -786,17 +836,30 @@ def watch_session(transcript, receipts, last_receipt, now, matchers):
     return state, tools
 
 
-def watch_completeness(root, witness, families, everywhere=False):
+def watch_completeness(root, witness, families, everywhere=False,
+                       calibration=None):
     """The completeness half of a tick: every census session paired with
     its transcript, plus witnessed sessions that never grew a chain at
     all — the disabled-hook case the census alone can never see.
     `everywhere` is store mode (ADR-0011): the store covers the whole
     machine, so every witnessed project is this scan's business, not
-    just folders under one root."""
+    just folders under one root. `calibration` is the effective-dated
+    coverage memory (ADR-0016); without one, this look's wired matchers
+    are taken to have always been in force."""
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
     ours = munge(root)
-    matchers = hook_matchers(witness)
+    if calibration is None:
+        calibration = [{"since": None, "matchers": hook_matchers(witness)}]
+    matchers = calibration[-1]["matchers"]
+    if len(calibration) > 1:
+        watch["calibration"] = {
+            "epochs": calibration,
+            "words": ("the wired matchers changed on "
+                      f"{calibration[-1]['since']} — each session is "
+                      "judged by the coverage in force at its time "
+                      "(ADR-0016)"),
+        }
     transcripts = {}
     if witness.is_dir():
         transcripts = {t.stem: t for t in sorted(witness.glob("*/*.jsonl"))}
@@ -855,7 +918,7 @@ def watch_completeness(root, witness, families, everywhere=False):
             continue
         try:
             state, tools = watch_session(transcript, receipts,
-                                         group["last"], now, matchers)
+                                         group["last"], now, calibration)
         except OSError:
             # A transcript that cannot be read (vanished mid-scan, or a
             # path that is not a readable file) costs this one session
@@ -873,7 +936,8 @@ def watch_completeness(root, witness, families, everywhere=False):
         if not matchers or (not everywhere and not folder.startswith(ours)):
             continue
         try:
-            state, tools = watch_session(transcript, 0, None, now, matchers)
+            state, tools = watch_session(transcript, 0, None, now,
+                                         calibration)
         except OSError:
             continue  # unreadable and chainless: nothing to say about it
         name = (folder if everywhere
@@ -904,7 +968,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     else:
         baseline_path = root / BASELINE_NAME
         daybook = root / DAYBOOK_NAME
-    remembered, keeper, note = read_baseline(baseline_path)
+    remembered, keeper, calibration, note = read_baseline(baseline_path)
+    # Observe the wired matchers before anything is judged, so this
+    # tick's own judgments use a memory that includes this tick's look.
+    calibration = calibrate(calibration, witness, now)
     events = []
     heads = {}
     families = {}
@@ -995,12 +1062,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "chains": heads,
         "keeper": keeper,
+        "calibration": calibration,
     }, indent=2) + "\n", encoding="utf-8")
     if events:
         worst = max(worst, 5)
 
     completeness = watch_completeness(root, witness, families,
-                                      everywhere=store)
+                                      everywhere=store,
+                                      calibration=calibration)
     # Only a live alarm raises the exit: an ended deficit is evidence,
     # and a siren that never stops sounding trains the operator to
     # ignore the band (the dogfood's lesson).
@@ -3011,6 +3080,12 @@ function render(report) {
   }
   if (report.completeness.note) {
     watch.appendChild(el("p", "claim", report.completeness.note));
+  }
+  // A matcher change is context the deficits above need: sessions are
+  // judged by the coverage in force at their time (ADR-0016).
+  if (report.completeness.calibration) {
+    watch.appendChild(el("p", "claim",
+      report.completeness.calibration.words));
   }
 
   renderAnchors(report);
