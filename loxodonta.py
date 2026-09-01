@@ -1194,30 +1194,37 @@ HOOK_SUMMARY_KEYS = ("file_path", "notebook_path", "command", "path",
 COMMITMENT_CADENCE = 25
 
 
+def transcript_commitment_action(transcript_path):
+    """The pinned SPEC §2.2 action line for the transcript's current
+    bytes — committed from byte zero every time, so each commitment
+    re-covers everything before it — or None when the transcript
+    cannot be read: skipped, never fatal, everywhere it is used."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    try:
+        with open(transcript_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    return (f"transcript-commitment: bytes={len(data)} "
+            f"sha256={hashlib.sha256(data).hexdigest()}")
+
+
 def commit_transcript_due(log, transcript_path):
     """Append a transcript commitment when the tail lands on a cadence
     boundary. Called with the chain lock held, right after a hook
     receipt. Every failure path is a silent skip, never fatal: a hook
     that failed the session over the transcript would teach the
     operator to turn the hook off."""
-    if not isinstance(transcript_path, str) or not transcript_path:
-        return
     try:
         last = tail_entry(read_log(log))
     except FileNotFoundError:
         return
     if last is None or last["n"] == 0 or last["n"] % COMMITMENT_CADENCE:
         return
-    try:
-        with open(transcript_path, "rb") as f:
-            data = f.read()
-    except OSError:
-        return
-    # The pinned grammar (SPEC §2.2): the prefix is committed from byte
-    # zero every time, so each commitment re-covers everything before it.
-    action = (f"transcript-commitment: bytes={len(data)} "
-              f"sha256={hashlib.sha256(data).hexdigest()}")
-    append_locked(log, "receipts", action, [])
+    action = transcript_commitment_action(transcript_path)
+    if action is not None:
+        append_locked(log, "receipts", action, [])
 
 
 def one_line(text, limit=160):
@@ -1360,7 +1367,8 @@ def cmd_hook(args):
         return 1
     session = payload.get("session_id")
     tool = payload.get("tool_name")
-    if not session or not tool:
+    ending = payload.get("hook_event_name") == "SessionEnd"
+    if not session or not (tool or ending):
         print("error: hook payload has no session_id or tool_name",
               file=sys.stderr)
         return 1
@@ -1386,6 +1394,40 @@ def cmd_hook(args):
 
     # Session id becomes part of a filename: keep only safe characters.
     safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(session))
+
+    if ending:
+        # The tail commitment (ADR-0017's named deferral, issue #79): a
+        # clean exit seals the transcript's final bytes, closing the
+        # window the every-25 cadence leaves open. Only a session that
+        # already left receipts owes one — SessionEnd must never
+        # manufacture a chain for a chat-only session — and every
+        # failure path is a silent skip: an exit hook that complains is
+        # noise nobody can act on, and the harness's SessionEnd budget
+        # is short by design.
+        if not os.path.isdir(log_dir):
+            return 0
+        log = writable_chain(log_dir, safe)
+        if not os.path.exists(log):
+            return 0
+        action = transcript_commitment_action(
+            payload.get("transcript_path"))
+        if action is None:
+            return 0
+        try:
+            with ChainLock(log):
+                try:
+                    last = tail_entry(read_log(log))
+                except FileNotFoundError:
+                    return 0
+                if last is None or last.get("action") == action:
+                    # A damaged tail cannot anchor a seal, and a session
+                    # that ended exactly on a cadence boundary with an
+                    # unchanged transcript is already committed.
+                    return 0
+                return append_locked(log, "receipts", action, [])
+        except LockTimeout:
+            return locked_out(log)
+
     if not os.path.isdir(log_dir):
         os.makedirs(log_dir, exist_ok=True)
         # A freshly created log dir gets a protective .gitignore: action
@@ -1466,9 +1508,11 @@ def cmd_hook(args):
 
 # --- Hook installer -----------------------------------------------------------
 # `loxodonta install-hook` wires this machine's Claude Code into the
-# recorder: a PostToolUse hook so every completed tool call leaves a receipt, and —
-# when supervisor.py sits beside this file — a SessionStart hook so every
-# session starts with a recall digest of its repo's recent history.
+# recorder: a PostToolUse hook so every completed tool call leaves a
+# receipt, a SessionEnd hook so a clean exit seals the transcript's
+# tail (issue #79), and — when supervisor.py sits beside this file — a
+# SessionStart hook so every session starts with a recall digest of
+# its repo's recent history.
 
 def load_settings(path):
     """The user-level settings, or None with the complaint printed —
@@ -1588,6 +1632,20 @@ def cmd_install_hook(args):
                   'than the current default "*" — uncovered tool calls '
                   "leave no receipts (see docs/HOOK.md)")
 
+    # The tail commitment (ADR-0017, issue #79): SessionEnd runs the
+    # same recorder command — the payload's hook_event_name is the
+    # branch. The explicit timeout matters: the harness gives SessionEnd
+    # hooks a short shared budget by default, and a large transcript
+    # deserves the read.
+    end = hooks.setdefault("SessionEnd", [])
+    healed += heal(end, RECORDER_MARKERS, record)
+    if not any(ours(b) for b in end):
+        end.append({
+            "hooks": [{"type": "command", "command": record,
+                       "timeout": 20}],
+        })
+        installed.append(f"SessionEnd: {record}")
+
     if os.path.isfile(supervisor):
         start = hooks.setdefault("SessionStart", [])
         healed += heal(start, (DIGEST_MARKER,), digest)
@@ -1639,7 +1697,7 @@ def cmd_uninstall_hook(args):
     ours = RECORDER_MARKERS + (DIGEST_MARKER,)
     removed = []
     hooks = settings.get("hooks", {})
-    for event in ("PostToolUse", "SessionStart"):
+    for event in ("PostToolUse", "SessionStart", "SessionEnd"):
         kept_blocks = []
         for block in hooks.get(event, []):
             entries = [h for h in block.get("hooks", [])
