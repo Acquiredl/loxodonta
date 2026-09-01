@@ -164,6 +164,71 @@ class DigestTest(RecallBase):
         self.assertIn("VALID", out)
         self.assertIn("testimony", out.split("last scan:")[1].splitlines()[0])
 
+    def test_consecutive_same_tool_entries_collapse(self):
+        # Issue #66: the recorder never filters, readers collapse. A run
+        # of same-tool rows renders as one line standing on the run's
+        # last entry; the neighbours keep their own lines.
+        repo = self.repo("alpha")
+        _, h = forge_chain(repo, "1a1a1111-1111-1111-1111-111111111111", [
+            ("2026-08-30T10:00:00Z", "Edit: one.py"),
+            ("2026-08-30T10:01:00Z", "Read: a.py"),
+            ("2026-08-30T10:02:00Z", "Read: b.py"),
+            ("2026-08-30T10:03:00Z", "Read: c.py"),
+            ("2026-08-30T10:04:00Z", "Grep: needle"),
+            ("2026-08-30T10:05:00Z", "Grep: pin"),
+            ("2026-08-30T10:06:00Z", "Bash: pytest -q"),
+        ])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        # The run is one line: count, tool, the newest detail, the
+        # newest entry's address and time. Pairs collapse too.
+        self.assertIn("3x Read, last: c.py", out)
+        self.assertIn("2x Grep, last: pin", out)
+        run_line = next(line for line in out.splitlines()
+                        if "3x Read" in line)
+        self.assertIn(h[4][:8], run_line)   # last Read's address
+        self.assertIn("10:03Z", run_line)   # last Read's time
+        # Earlier run members surrender their rows, not their record.
+        self.assertNotIn(h[2][:8], out)
+        self.assertNotIn(h[3][:8], out)
+        self.assertNotIn("a.py", out)
+        # Different-tool neighbours keep their own uncollapsed lines.
+        self.assertIn("Edit: one.py", out)
+        self.assertIn("Bash: pytest -q", out)
+        self.assertNotIn("1x", out)
+
+    def test_budget_counts_rendered_rows_not_entries(self):
+        # The fix the issue asks for: a Read flood must not scroll the
+        # story out of the window. Collapse happens before the cap, so
+        # --limit 3 still reaches the Edit twelve entries back.
+        repo = self.repo("alpha")
+        steps = [("2026-08-30T10:00:00Z", "Edit: start.py")]
+        steps += [(f"2026-08-30T10:{m:02d}:00Z", f"Read: f{m}.py")
+                  for m in range(1, 11)]
+        steps += [("2026-08-30T10:11:00Z", "Bash: done")]
+        _, h = forge_chain(repo, "2b2b2222-2222-2222-2222-222222222222",
+                           steps)
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo),
+                     "--limit", "3").stdout
+        self.assertIn(h[1][:8], out)        # the Edit survived the flood
+        self.assertIn("10x Read, last: f10.py", out)
+        self.assertIn("Bash: done", out)
+        self.assertIn("12 entries", out)
+        # All twelve entries fit in three rows: nothing was left behind,
+        # so the truncation notice must not appear.
+        self.assertNotIn("showing last", out)
+
+    def test_last_action_tag_lands_on_collapsed_run(self):
+        repo = self.repo("alpha")
+        _, h = forge_chain(repo, "3c3c3333-3333-3333-3333-333333333333", [
+            ("2026-08-30T10:00:00Z", "Edit: one.py"),
+            ("2026-08-30T10:01:00Z", "Read: a.py"),
+            ("2026-08-30T10:02:00Z", "Read: b.py"),
+        ])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        run_line = next(line for line in out.splitlines()
+                        if "2x Read" in line)
+        self.assertIn("last recorded action", run_line)
+
     def test_parity_with_cli_built_chain(self):
         repo = self.repo("alpha")
         log = repo / "receipts" / ("receipts-"

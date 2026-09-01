@@ -192,6 +192,12 @@ files.
 (one session, one story), genesis excluded, budget-capped in *rows*
 with the cap said out loud ("showing last 30 — search reaches the
 rest"), each session's final entry tagged as the last recorded action.
+Consecutive same-tool entries collapse into one row (`14x Read,
+last: supervisor.py`) standing on the run's newest entry — collapse
+happens before the cap, so a wide-coverage exploration flood spends
+one row instead of scrolling the story out of the window (#66; the
+recorder never filters, readers do — ADR-0016). `timeline` around
+the shown address unrolls a run.
 The header cites the last scan's verdicts from whichever baseline
 covers the repo — the store's first (ADR-0011), then the legacy spots
 — labeled testimony citing testimony. A chainless repo gets silence
