@@ -88,7 +88,7 @@ def run_scan(root, *extra, env=None):
              "PYTHONIOENCODING": "utf-8"})
 
 
-def make_chain(log_dir, session, entries=2):
+def make_chain(log_dir, session, entries=2, action="step {i}"):
     """A real chain, built through the public CLI — not a hand-forged
     fixture — so the supervisor is tested against what the tool writes."""
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -98,7 +98,7 @@ def make_chain(log_dir, session, entries=2):
     for i in range(entries):
         subprocess.run(
             [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", f"step {i}"],
+             "--actor", "claude-code", "--action", action.format(i=i)],
             capture_output=True, check=True)
     return log
 
@@ -1801,3 +1801,107 @@ class RecorderDriftTest(unittest.TestCase):
         recorder = self.notice()
 
         self.assertEqual(recorder["state"], "unwired")
+
+class ConsumptionTest(unittest.TestCase):
+    """The consumption watch (issue #67; OWASP GenAI LLM06 mitigation
+    #8): tool tempo per session against the store's own norm, read
+    entirely from what the chains already hold. Evidence for someone
+    else's circuit breaker — it never raises the exit and never is
+    one."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+        # Pinned to an empty layout: consumption reads only chains, and
+        # the completeness watch must not read the developer's machine.
+        self.witness = Path(self._tmp.name) / "witness" / "projects"
+
+    def scan(self, env=None):
+        return run_scan(self.root, "--witness", str(self.witness), env=env)
+
+    def hot_env(self, **extra):
+        """The suite's threshold handle: hot means a busiest hour of at
+        least max(10, 3 x the store's median active hour)."""
+        return {**os.environ, "SUPERVISOR_HOT_TIMES": "3",
+                "SUPERVISOR_HOT_FLOOR": "10", **extra}
+
+    def watched(self, result):
+        report = json.loads(result.stdout)
+        return report, {s["session"]: s
+                       for s in report["consumption"]["sessions"]}
+
+    def test_a_session_burning_above_the_store_norm_runs_hot(self):
+        # Three ordinary sessions set the norm; one burns well past it,
+        # driven by a single tool — the runaway-loop shape.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb", entries=3)
+        make_chain(self.root / "gamma" / "receipts", "sess-cccc", entries=3)
+        make_chain(self.root / "delta" / "receipts", "sess-hot",
+                   entries=12, action="Bash: loop {i}")
+
+        result = self.scan(env=self.hot_env())
+
+        report, hot = self.watched(result)
+        self.assertIn("sess-hot", hot)
+        burning = hot["sess-hot"]
+        self.assertEqual(burning["state"], "RUNNING-HOT")
+        self.assertEqual(burning["repo"], "delta")
+        self.assertEqual(burning["busiest_hour"], 12)
+        self.assertEqual(burning["top_tool"], "Bash")
+        self.assertEqual(burning["top_tool_count"], 12)
+        self.assertNotIn("sess-aaaa", hot,
+                         "an ordinary session is never surfaced")
+
+    def test_the_watch_is_evidence_and_never_raises_the_exit(self):
+        # The boundary of issue #67, held: this tool evidences someone
+        # else's circuit breaker; it never is one. A hot session leaves
+        # the scan exit exactly where the verdicts put it.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        make_chain(self.root / "delta" / "receipts", "sess-hot",
+                   entries=12, action="Bash: loop {i}")
+
+        result = self.scan(env=self.hot_env())
+
+        report, hot = self.watched(result)
+        self.assertIn("sess-hot", hot)
+        self.assertEqual(result.returncode, 0,
+                         "a hot session is a reason to look, never an alarm "
+                         "exit")
+        self.assertEqual(report["exit"], 0)
+        words = hot["sess-hot"]["words"]
+        self.assertIn("never a brake", words)
+
+    def test_a_quiet_store_flags_nothing_but_still_states_its_norm(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb", entries=2)
+
+        result = self.scan()
+
+        report, hot = self.watched(result)
+        self.assertEqual(hot, {})
+        norm = report["consumption"]["norm"]
+        self.assertGreater(norm["sessions_counted"], 0)
+        self.assertIn("never a verdict", norm["words"])
+
+    def test_a_hot_session_gone_quiet_is_evidence_not_a_siren(self):
+        # Idle window pinned to zero: the burn is over, so it reads as
+        # kept evidence, exactly like an ended deficit.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        make_chain(self.root / "delta" / "receipts", "sess-hot",
+                   entries=12, action="Bash: loop {i}")
+
+        result = self.scan(env=self.hot_env(
+            SUPERVISOR_IDLE_END_SECONDS="0"))
+
+        _, hot = self.watched(result)
+        self.assertEqual(hot["sess-hot"]["state"], "ENDED-HOT")
+        self.assertIn("evidence", hot["sess-hot"]["words"])
+
+    def test_an_empty_store_has_no_norm_to_deviate_from(self):
+        result = self.scan()
+
+        report = json.loads(result.stdout)
+        self.assertEqual(report["consumption"]["sessions"], [])
+        self.assertEqual(report["consumption"]["norm"]["sessions_counted"], 0)

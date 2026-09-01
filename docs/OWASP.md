@@ -15,7 +15,7 @@ The honesty frame comes first, because every claim below sits inside it. loxodon
 | LLM03 Excessive Agency | Implements prescribed mitigation #8 (Monitor tool use), plus tamper evidence on the log itself |
 | LLM04 Supply Chain | No claim |
 | LLM05 Data and Model Poisoning | Substrate for mitigation #8: fingerprints and chains answer what-changed-when |
-| LLM06 Unbounded Consumption | Substrate for mitigation #8: the chains can carry tool-use baselines (surface planned, not built) |
+| LLM06 Unbounded Consumption | Implements mitigation #8: the consumption watch reads tool tempo from the chains and surfaces sessions running far above the store's norm |
 | LLM07 Misinformation | No claim |
 | LLM08 Hidden Context Exposure | Honest boundary: the recall digest is discoverable hidden context by design, kept at the informational tier |
 | LLM09 Vector and Embedding Weaknesses | No claim |
@@ -57,13 +57,13 @@ loxodonta supplies the forensic half of that sentence. Every receipt fingerprint
 
 The boundary: loxodonta is not a version control system. It stores fingerprints, never contents, so restoring a prior state needs the artifacts from somewhere else (git, backups, the dataset store). The chain tells you what to restore and proves nobody rewrote that answer; it does not hold the bytes.
 
-## LLM06 Unbounded Consumption: baselines become possible
+## LLM06 Unbounded Consumption: the norm and the sessions that leave it
 
 OWASP's mitigation #8 says to monitor agent-tool interactions and "establish baselines of normal tool behavior" to catch resource-intensive deviations.
 
-Wide coverage makes the receipt chains exactly the dataset such baselines need: every completed tool call, timestamped, per session, per repo, machine-wide. Entries per session per hour is a consumption signal that already sits in the store today.
+Wide coverage makes the receipt chains exactly the dataset such baselines need: every completed tool call, timestamped, per session, per repo, machine-wide. The supervisor's consumption watch (issue #67) reads that dataset on every scan: it takes the store's own norm (the median of every session's busiest hour) and surfaces any session whose peak burns far past it, naming the tool that drove the burn. A runaway loop or recursion without a clear end state is precisely the shape this catches. The norm is self-calibrating, and a session never sets its own: each one is judged against every other session's peak.
 
-The honest label: the baseline *surface* is planned, not built (issue #67 tracks it as a supervisor surface). And the outcome-blind rule holds here too: loxodonta would evidence a circuit breaker's decision, never trip one.
+Two honesty labels. Everything the watch reads is testimony (writer-stamped timestamps and action lines), so a hot flag is a reason to look, never a verdict, and it never raises the scan exit. And the outcome-blind rule holds here too: loxodonta evidences a circuit breaker's decision, it never trips one ([.out-of-scope/001](../.out-of-scope/001-outcome-capture-in-hook.md)).
 
 ## LLM02 Sensitive Information Disclosure: an honest boundary
 

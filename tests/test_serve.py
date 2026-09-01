@@ -219,6 +219,18 @@ class DashboardTest(ServerFixture):
         self.assertIn("RECEIPTS STOPPED ARRIVING", page)
         self.assertIn("all quiet", page)
 
+    def test_the_page_carries_the_consumption_watch(self):
+        # Issue #67: hot sessions render in the events section, in the
+        # investigate voice — and the status endpoint carries the watch
+        # the rows are drawn from.
+        page = self.page()
+        self.assertIn('id="consumption"', page)
+        self.assertIn("RUNNING-HOT", page)
+        self.assertIn("never a breaker", page,
+                      "the circuit-breaker boundary is stated on the page")
+        _, _, status = self.get("/api/status")
+        self.assertIn("consumption", json.loads(status))
+
     def test_freshness_is_displayed_never_hidden(self):
         page = self.page()
         self.assertIn('id="freshness"', page)

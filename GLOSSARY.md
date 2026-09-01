@@ -45,6 +45,10 @@ The supervisor's remembered copy of its own days: one row per UTC day holding th
 
 The supervisor's reading of *which recorder is actually running*: the file the harness executes for `PostToolUse`, the branch and commit it sits on, whether that file has uncommitted changes, and how far its checkout is from its upstream as of the last fetch. The harness wires an absolute path, not a version, so the recorder tracks whatever is checked out there — a branch, a dirty tree, a half-finished rebase — and nothing else on the machine reports that. Read from local git only: the notice never fetches, because a recorder that updated itself from a remote would hand the [writer](#writer) a second road to the one file that has to stay honest (ADR-0015, on ADR-0002's threat model). [Testimony](#testimony) like everything else local, and never an alarm — drift is a reason to look, and the operator's to resolve.
 
+### Consumption watch
+
+The supervisor's reading of tool *tempo* against the store's own norm: entries per session per hour, computed from what the chains already hold (OWASP GenAI LLM06 mitigation #8; wide [coverage](#coverage), ADR-0016, is what makes the chains this dataset). Peak against peaks: the norm is the median of every session's own busiest hour, and a session never sets its own — each is judged against every other session's peak. A session whose busiest hour burns far past that norm surfaces as `RUNNING-HOT` while receipts still arrive and is kept as `ENDED-HOT` evidence once it goes quiet; the runaway loop and the recursion without an end state are the shapes this catches. Built entirely on [testimony](#testimony) (writer-stamped timestamps and action lines), so it never raises the scan exit and owns no verdicts — the norm is context for a flag, never a truth about the session. Boundary, in the hook's own rule (`.out-of-scope/001`): this watch evidences someone else's circuit breaker; it never is one.
+
 ### Issuer
 
 The party who seals a [package](#package) and ships it across a trust boundary under its own name — the one taking responsibility for the deliverable. The issuer holds the signing key **out of the writer's reach** (the head-record property, applied to a second object) and applies the [issuer signature](#issuer-signature) at package close, after the manifest is written. In a solo deployment the operator and issuer are the same person wearing two hats; the roles diverge the moment issuing becomes a service, exactly as writer and operator diverged to found this project (ADR-0008).
@@ -205,4 +209,4 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ---
 
-*Last updated: 2026-08-26*
+*Last updated: 2026-08-31*
