@@ -793,7 +793,8 @@ def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash",
 
 
 def write_transcript(witness, project, session, event_times=(),
-                     error_times=(), chatter=0, idle=0, tool="Bash"):
+                     error_times=(), chatter=0, idle=0, tool="Bash",
+                     metadata=0):
     """A synthetic harness transcript shaped like the real one: each
     tool event is a tool_use block (carrying the tool's name) paired by
     id with a tool-result line (the witness signal). Failed results are
@@ -827,6 +828,11 @@ def write_transcript(witness, project, session, event_times=(),
     for _ in range(chatter):
         lines.append({"type": "assistant", "timestamp": ago(10),
                       "message": "just talk"})
+    # Harness metadata records carry no timestamp (field capture,
+    # 2026-09-01: last-prompt / custom-title / bridge-session appended
+    # to ended sessions' transcripts by restart and resume).
+    for i in range(metadata):
+        lines.append({"type": "bridge-session", "note": f"meta {i}"})
     transcript = folder / f"{session}.jsonl"
     transcript.write_text(
         "".join(json.dumps(line) + "\n" for line in lines),
@@ -1163,6 +1169,26 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(plus["state"], "ENDED-SURPLUS")
         self.assertIn("evidence", plus["words"])
 
+    def test_metadata_appends_never_keep_a_dead_session_alive(self):
+        # Issue #85, found live on the dashboard: the harness appends
+        # timestamp-less metadata (bridge-session, custom-title) to an
+        # ended session's transcript on restart/resume. An mtime-based
+        # idle clock resets on every touch, so an old deficit presents
+        # as an immortal live alarm. Liveness must read the newest
+        # timestamped record instead: this session went quiet hours
+        # ago, so its deficit is kept evidence, never a live siren.
+        make_chain(self.root / "alpha" / "receipts", "sess-meta",
+                   entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-meta",
+                         event_times=[ago(7200), ago(7100)], metadata=3)
+        # No idle= here: the file was just written, so its mtime is
+        # fresh — exactly the bug's shape.
+
+        result = self.scan()
+
+        watched = self.states(result)["sess-meta"]
+        self.assertEqual(watched["state"], "ENDED-DEFICIT")
+
     def test_bookkeeping_entries_never_count_as_receipts(self):
         # ADR-0017: a transcript commitment is the recorder's own voice
         # (actor "receipts", like genesis) — an entry no tool event owes.
@@ -1316,14 +1342,16 @@ class CalibrationTest(unittest.TestCase):
         # Bash events with three receipts, five Reads nothing owed.
         # Widening to * afterwards must not turn those Reads into a
         # five-receipt scar (the wave ADR-0016 exists to prevent).
-        self.rewire("Edit|Write|NotebookEdit|Bash", age=600)
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=7000)
         first = self.scan()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         make_chain(self.root / "alpha" / "receipts", "sess-old", entries=3)
+        # Event stamps are the liveness clock (issue #85), so "ended"
+        # means genuinely old timestamps, not a back-dated mtime.
         write_transcript(
             self.witness, self.root / "alpha", "sess-old",
-            event_times=[ago(500), ago(490), ago(480), ago(470),
-                         ago(460), ago(450), ago(440), ago(430)],
+            event_times=[ago(6500), ago(6490), ago(6480), ago(6470),
+                         ago(6460), ago(6450), ago(6440), ago(6430)],
             tool=["Bash", "Read", "Bash", "Read", "Read", "Bash",
                   "Read", "Read"],
             idle=3600)
