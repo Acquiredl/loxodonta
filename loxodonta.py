@@ -828,6 +828,111 @@ def walk(lines):
     return entries, breaks, warns
 
 
+def parse_commitment(action):
+    """(bytes, sha256) when the action line speaks SPEC §2.2's pinned
+    grammar exactly; None otherwise."""
+    prefix = "transcript-commitment: bytes="
+    if not action.startswith(prefix):
+        return None
+    count, sep, digest = action[len(prefix):].partition(" sha256=")
+    if not sep or not count.isdigit() or len(digest) != 64 \
+            or any(c not in "0123456789abcdef" for c in digest):
+        return None
+    return int(count), digest
+
+
+def transcript_commitments(entries):
+    """(commitments, malformed): each commitment is (n, bytes, sha256)
+    in chain order. An entry that names the grammar but fails it is
+    malformed — entries are hash-protected, so it was *written* that
+    way, and pretending to judge it would judge nothing."""
+    marks, malformed = [], []
+    for entry in entries:
+        if entry is None or entry.get("actor") != "receipts":
+            continue
+        action = str(entry.get("action", ""))
+        if not action.startswith("transcript-commitment:"):
+            continue
+        parsed = parse_commitment(action)
+        if parsed is None:
+            malformed.append(entry["n"])
+        else:
+            marks.append((entry["n"], parsed[0], parsed[1]))
+    return marks, malformed
+
+
+def judge_prefixes(marks, transcript_path):
+    """One pass over the transcript, oldest boundary first: hash up to
+    each committed byte count and photograph the digest there
+    (hashlib.copy) — which localizes a rewrite to the span between two
+    commitments. Returns True when any commitment failed to hold."""
+    if not marks:
+        print("no transcript commitments in this chain — nothing to judge")
+        return False
+    try:
+        handle = open(transcript_path, "rb")
+    except OSError:
+        # Absence is a note, never a verdict: the harness cleans
+        # transcripts on a retention cycle (ADR-0017).
+        print(f"TRANSCRIPT-UNRESOLVED: no transcript at {transcript_path} "
+              "— commitments unjudgeable; chain verdict unaffected")
+        return False
+    diverged = False
+    with handle:
+        running = hashlib.sha256()
+        pos = 0
+        for n, count, expected in sorted(marks, key=lambda m: m[1]):
+            if count > pos:
+                chunk = handle.read(count - pos)
+                running.update(chunk)
+                pos += len(chunk)
+            if pos < count:
+                print(f"COMMITMENT DIVERGED (entry {n}): transcript holds "
+                      f"{pos} bytes, {count} committed — truncated")
+                diverged = True
+            elif running.copy().hexdigest() == expected:
+                print(f"COMMITMENT HOLDS (entry {n}: first {count} bytes)")
+            else:
+                print(f"COMMITMENT DIVERGED (entry {n}): the first "
+                      f"{count} bytes no longer match the committed hash")
+                diverged = True
+    return diverged
+
+
+def check_transcript(entries, transcript_path):
+    """The --transcript half of verify, plus the chain-only monotonicity
+    rule (SPEC §2.2/§6 as amended v0.1.2, ADR-0017). Judges every
+    commitment in one pass, oldest boundary first, photographing the
+    running hash at each committed byte count — which localizes a
+    rewrite to the span between two commitments. `transcript_path` may
+    be None: monotonicity needs no transcript. Returns True when any
+    commitment failed to hold."""
+    marks, malformed = transcript_commitments(entries)
+    for n in malformed:
+        print(f"warning: entry {n} names transcript-commitment but not "
+              "its grammar — skipped, judged as nothing", file=sys.stderr)
+    diverged = False
+
+    # A growing file never shrinks: contradicting byte counts are their
+    # own evidence, judged from the chain alone.
+    high = None
+    for n, count, _ in marks:
+        if high is not None and count < high:
+            print(f"COMMITMENT-SHRANK (entry {n}): commits {count} bytes "
+                  f"after an earlier commitment of {high} — a growing "
+                  "transcript never shrinks")
+            diverged = True
+        high = count if high is None else max(high, count)
+
+    if transcript_path is not None:
+        diverged = judge_prefixes(marks, transcript_path) or diverged
+    # The TRANSCRIPT-DIVERGED verdict line itself is printed by the
+    # caller's exit ladder, last — the supervisor reads the final line
+    # as the verdict (its own tripwire comment), so detail lines here
+    # must never dangle after the conclusion.
+    return diverged
+
+
 def cmd_verify(args):
     try:
         lines = read_log(args.log)
@@ -892,10 +997,22 @@ def cmd_verify(args):
             print(f"FILES-DIVERGED: chain intact, {diverged} file(s) "
                   "differ from their logged fingerprints")
 
+    # Transcript commitments (SPEC §2.2, ADR-0017): monotonicity is
+    # judged on every walk; the prefix hashes only under --transcript.
+    transcript_diverged = check_transcript(entries, args.transcript)
+
     # Anchor and head-record findings share the exit-3 tier: both mean
     # "this is not the recorded history", the graver verdict, never masked
     # by a files divergence (SPEC §6, docs/ANCHORING.md §3).
     anchors_bad = args.anchors and check_anchors(args.log, entries)
+
+    if transcript_diverged:
+        # Printed after the anchor chatter so that when this verdict
+        # governs, it is the last line — the supervisor reads the final
+        # line as the verdict. A graver finding below still prints
+        # later and wins the exit (all reported, gravest sets the code).
+        print("TRANSCRIPT-DIVERGED: chain intact, but a committed "
+              "transcript prefix no longer holds")
 
     chain_head = entries[-1]["entry_hash"] if entries else None
     if args.expect_head is not None and chain_head != args.expect_head:
@@ -906,6 +1023,11 @@ def cmd_verify(args):
         return 3
     if anchors_bad:
         return 3
+    if transcript_diverged:
+        # Graver than a files divergence (working-tree drift is usually
+        # innocent; a rewritten transcript never is), milder than a
+        # regenerated chain (SPEC §6 as amended v0.1.2).
+        return 5
     if diverged:
         return 2
 
@@ -1587,6 +1709,10 @@ def main(argv=None):
                                help="also compare referenced files against disk")
     verify_parser.add_argument("--expect-head", metavar="HEX", type=head_record,
                                help="operator-held head record to compare against")
+    verify_parser.add_argument("--transcript", metavar="PATH", default=None,
+                               help="judge transcript commitments against "
+                                    "this harness transcript (ADR-0017); a "
+                                    "missing file is noted, never a verdict")
     verify_parser.add_argument("--anchors", action="store_true",
                                help="also judge anchor proofs, offline")
     verify_parser.set_defaults(func=cmd_verify)
