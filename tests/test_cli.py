@@ -173,6 +173,150 @@ class LogTest(ReceiptsCliTest):
         self.assertFalse(self.log_path.exists())
 
 
+class TranscriptVerifyTest(ReceiptsCliTest):
+    """ADR-0017 / SPEC §2.2, §6 (v0.1.2): `verify --transcript` judges
+    every transcript commitment against the transcript's bytes, one
+    pass, oldest boundary first; monotonicity is judged from the chain
+    alone. TRANSCRIPT-DIVERGED is exit 5 — graver than FILES-DIVERGED,
+    milder than HEAD-MISMATCH."""
+
+    def setUp(self):
+        super().setUp()
+        self.transcript = self.workdir / "transcript.jsonl"
+
+    def commitment(self, data):
+        return (f"transcript-commitment: bytes={len(data)} "
+                f"sha256={hashlib.sha256(data).hexdigest()}")
+
+    def build(self, *actions):
+        run_receipts("init", cwd=self.workdir)
+        for action in actions:
+            actor = ("receipts"
+                     if action.startswith("transcript-commitment") else "agent")
+            result = run_receipts("log", "--actor", actor,
+                                  "--action", action, cwd=self.workdir)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def judge(self, *extra):
+        return run_receipts("verify", "--transcript", str(self.transcript),
+                            *extra, cwd=self.workdir)
+
+    def test_every_commitment_is_judged_and_holds(self):
+        page_one = b"page one\n"
+        both = b"page one\npage two\n"
+        self.transcript.write_bytes(both)
+        self.build("step 1", self.commitment(page_one),
+                   "step 2", self.commitment(both))
+
+        result = self.judge()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("COMMITMENT HOLDS (entry 2", result.stdout)
+        self.assertIn("COMMITMENT HOLDS (entry 4", result.stdout)
+        self.assertIn("VALID", result.stdout)
+
+    def test_a_rewritten_prefix_diverges_and_is_localized(self):
+        page_one = b"page one\n"
+        both = b"page one\npage two\n"
+        self.build("step 1", self.commitment(page_one),
+                   "step 2", self.commitment(both))
+        # Re-ink only the bytes after the first boundary: the first
+        # commitment must hold, the second must name the rewrite.
+        self.transcript.write_bytes(b"page one\nPAGE TWO!\n")
+
+        result = self.judge()
+
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("COMMITMENT HOLDS (entry 2", result.stdout)
+        self.assertIn("COMMITMENT DIVERGED (entry 4", result.stdout)
+        self.assertIn("TRANSCRIPT-DIVERGED", result.stdout)
+        self.assertNotIn("VALID", result.stdout)
+
+    def test_a_truncated_transcript_diverges(self):
+        both = b"page one\npage two\n"
+        self.build("step 1", self.commitment(both))
+        self.transcript.write_bytes(b"page one\n")
+
+        result = self.judge()
+
+        self.assertEqual(result.returncode, 5)
+        self.assertIn("truncated", result.stdout)
+        self.assertIn("TRANSCRIPT-DIVERGED", result.stdout)
+
+    def test_a_missing_transcript_is_a_note_never_a_verdict(self):
+        # The harness cleans transcripts on a retention cycle; absence
+        # as a verdict would scar every chain older than a month.
+        self.build("step 1", self.commitment(b"gone\n"))
+
+        result = self.judge()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("chain verdict unaffected", result.stdout)
+        self.assertIn("VALID", result.stdout)
+
+    def test_shrinking_byte_counts_diverge_without_any_transcript(self):
+        # Monotonicity is a chain-only judgment: a growing file never
+        # shrinks, so contradicting commitments are their own evidence.
+        big = b"page one\npage two\n"
+        self.build("step 1", self.commitment(big),
+                   "step 2", self.commitment(big[:9]))
+
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("COMMITMENT-SHRANK (entry 4", result.stdout)
+        self.assertIn("TRANSCRIPT-DIVERGED", result.stdout)
+
+    def test_head_mismatch_outranks_transcript_divergence(self):
+        self.build("step 1", self.commitment(b"gone\n"))
+        self.transcript.write_bytes(b"other\n")
+
+        result = self.judge("--expect-head", "f" * 64)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("TRANSCRIPT-DIVERGED", result.stdout)
+        self.assertIn("HEAD-MISMATCH", result.stdout)
+
+    def test_transcript_divergence_outranks_files_divergence(self):
+        (self.workdir / "report.md").write_text("v1\n", encoding="utf-8")
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "wrote report",
+                     "--file", "report.md", cwd=self.workdir)
+        run_receipts("log", "--actor", "receipts", "--action",
+                     self.commitment(b"gone\n"), cwd=self.workdir)
+        (self.workdir / "report.md").write_text("v2\n", encoding="utf-8")
+        self.transcript.write_bytes(b"other\n")
+
+        result = self.judge("--files")
+
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("FILES-DIVERGED", result.stdout)
+        self.assertIn("TRANSCRIPT-DIVERGED", result.stdout)
+
+    def test_a_malformed_commitment_is_warned_about_never_judged(self):
+        # Entries are hash-protected, so a malformed commitment was
+        # written that way; pretending to judge it would judge nothing.
+        self.transcript.write_bytes(b"whatever\n")
+        self.build("step 1", "transcript-commitment: bytes=oops")
+
+        result = self.judge()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("grammar", result.stderr)
+        self.assertIn("nothing to judge", result.stdout)
+        self.assertIn("VALID", result.stdout)
+
+    def test_a_chain_without_commitments_says_nothing_to_judge(self):
+        self.transcript.write_bytes(b"whatever\n")
+        self.build("step 1")
+
+        result = self.judge()
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("nothing to judge", result.stdout)
+        self.assertIn("VALID", result.stdout)
+
+
 class VerifyTest(ReceiptsCliTest):
     def test_verify_genesis_only_chain_is_valid(self):
         run_receipts("init", cwd=self.workdir)

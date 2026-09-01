@@ -483,6 +483,29 @@ class ScanVerdictTest(unittest.TestCase):
         self.assertEqual(good["verdict"], "VALID",
                          "one bad chain never blanks the scan")
 
+    def test_contradicting_commitments_raise_scan_exit_seven(self):
+        # ADR-0017: verify says TRANSCRIPT-DIVERGED with exit 5, but
+        # scan's 5 already means the baseline tripwire — the fold
+        # renames it to 7 so one number never tells two stories.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        for count in (18, 9):
+            subprocess.run(
+                [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+                 "--actor", "receipts", "--action",
+                 f"transcript-commitment: bytes={count} sha256=" + "0" * 64],
+                capture_output=True, check=True)
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 7,
+                         result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (chain,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "TRANSCRIPT-DIVERGED")
+        self.assertEqual(chain["exit"], 5,
+                         "the chain keeps verify's own exit; only the "
+                         "scan's fold renames")
+
     def test_a_superseded_torn_tail_stays_visible_but_stands_down(self):
         # ADR-0004 working as designed: the tear ended a chain, not the
         # recording. Failing the exit code forever over handled history is
@@ -1162,6 +1185,38 @@ class CompletenessTest(unittest.TestCase):
         watched = self.states(result)["sess-mark"]
         self.assertEqual(watched["state"], "OK")
         self.assertEqual(watched["receipts"], 2)
+
+    def test_a_committed_session_carries_the_judge_command(self):
+        # ADR-0017: the supervisor locates, verify judges — scan prints
+        # the exact operator command for a session whose chain holds
+        # transcript commitments and whose transcript still exists.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-judge",
+                         entries=2)
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "receipts", "--action",
+             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
+            capture_output=True, check=True)
+        transcript = write_transcript(self.witness, self.root / "alpha",
+                                      "sess-judge",
+                                      event_times=[ago(120), ago(60)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        judged = self.states(result)["sess-judge"]
+        self.assertIn("judge", judged)
+        self.assertIn("verify", judged["judge"])
+        self.assertIn("--transcript", judged["judge"])
+        self.assertIn(transcript.as_posix(), judged["judge"])
+        # An uncommitted session owes no ritual line.
+        plain = make_chain(self.root / "alpha" / "receipts", "sess-plain",
+                           entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-plain",
+                         event_times=[ago(30)])
+        rerun = self.states(self.scan())["sess-plain"]
+        self.assertNotIn("judge", rerun)
 
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")

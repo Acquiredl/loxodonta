@@ -23,7 +23,10 @@ machine-readable JSON on stdout, and an exit code cron can shout about —
 0 when nothing demands attention, 1–4 for the worst verify exit found,
 5 when the baseline saw a change appends cannot explain (a reason to
 investigate, never a verdict), 6 when a session is demonstrably active
-but its chain is behind the witness (the completeness alarm).
+but its chain is behind the witness (the completeness alarm), 7 when a
+chain's transcript commitments contradict each other (verify's exit 5,
+ADR-0017 — renumbered in this fold because scan's 5 already means the
+tripwire).
 
 `serve` is the face: a localhost-only stdlib HTTP server serving one
 inline HTML page — no framework, no build step. The page opens on
@@ -872,7 +875,7 @@ def watch_completeness(root, witness, families, everywhere=False,
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
 
-    def add(repo, session, state, tools, receipts, drawers=()):
+    def add(repo, session, state, tools, receipts, drawers=(), judge=None):
         entry = {"repo": repo, "session": session, "state": state,
                  "tools": tools, "receipts": receipts,
                  "deficit": max(0, tools - receipts)}
@@ -880,6 +883,8 @@ def watch_completeness(root, witness, families, everywhere=False,
             entry["drawers"] = list(drawers)
         if state in WATCH_WORDS:
             entry["words"] = WATCH_WORDS[state]
+        if judge:
+            entry["judge"] = judge
         watch["sessions"].append(entry)
 
     # One session, one watch. A single session's receipts can span
@@ -897,6 +902,8 @@ def watch_completeness(root, witness, families, everywhere=False,
         group["drawers"].append((family["receipts"], repo))
         if family["last"]:
             group["last"] = max(group["last"] or "", family["last"])
+        if "committed_log" in family and "judge_log" not in group:
+            group["judge_log"] = family["committed_log"]
     for group in sessions.values():
         group["receipts"] = sum(n for n, _ in group["drawers"])
         # The session's home is the drawer holding most of it: the
@@ -926,7 +933,14 @@ def watch_completeness(root, witness, families, everywhere=False,
             # honestly: completeness cannot be watched, nothing assumed.
             add(repo, session, "UNWITNESSED", 0, receipts, spans)
             continue
-        add(repo, session, state, tools, receipts, spans)
+        # The supervisor locates, verify judges (ADR-0017): a committed
+        # session with a living transcript gets the exact ritual command.
+        judge = None
+        if group.get("judge_log"):
+            judge = (f'python "{LOXODONTA.as_posix()}" verify '
+                     f'--log "{group["judge_log"]}" '
+                     f'--transcript "{transcript.as_posix()}"')
+        add(repo, session, state, tools, receipts, spans, judge=judge)
 
     # Chainless sessions: only transcript folders under this root are
     # this scan's business; a folder's name past the root prefix is the
@@ -1147,7 +1161,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             chain["anchors"]["failed"] = True
         repos.setdefault(repo, {}).setdefault(session, []).append(chain)
         if not stood_down:
-            worst = max(worst, exit_code)
+            # verify's TRANSCRIPT-DIVERGED is exit 5 in its own contract
+            # (SPEC §6 v0.1.2); scan's 5 already means the baseline
+            # tripwire, so the fold renames it rather than letting one
+            # number tell two stories.
+            worst = max(worst, 7 if exit_code == 5 else exit_code)
             if verdict == "BROKEN":
                 damaged += 1
 
@@ -1185,6 +1203,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             if when is not None and when.tzinfo is None:
                 when = when.replace(tzinfo=timezone.utc)
             family["moments"].append((when, tool_of(e.get("action"))))
+        # ADR-0017: a chain holding transcript commitments earns the
+        # operator's judge command once the watch pairs its transcript.
+        if "committed_log" not in family and any(
+                isinstance(e, dict) and e.get("actor") == "receipts"
+                and str(e.get("action", "")).startswith(
+                    "transcript-commitment:")
+                for e in entries):
+            family["committed_log"] = (root / relpath).as_posix()
 
     for relpath in remembered:
         if relpath not in heads and not (root / relpath).exists():
