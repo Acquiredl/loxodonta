@@ -244,6 +244,17 @@ class DashboardTest(ServerFixture):
                         'href="http'):
             self.assertNotIn(outside, page)
 
+    def test_the_panes_are_the_operators_to_resize(self):
+        # A fixed frame that needs scrolling teaches the operator to
+        # stop reading: the divider drags (and takes arrow keys) to
+        # trade width, and each pane body grows by its own corner —
+        # the browser's native resize, no library.
+        page = self.page()
+        self.assertIn('id="divider"', page)
+        self.assertIn('role="separator"', page)
+        self.assertIn("resize: vertical", page)
+        self.assertIn("col-resize", page)
+
     def test_the_worktable_splits_sessions_from_inspection(self):
         # Slice 2 of the #48 shape: pane one is what you are looking
         # at (the sessions table), pane two is the thing under
