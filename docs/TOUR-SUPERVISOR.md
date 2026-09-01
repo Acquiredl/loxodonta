@@ -240,10 +240,16 @@ resolve chains under the root; sidecars and path escapes get 404.
 nothing fetched from anywhere but this machine. Writer-supplied text
 — action lines, session names, verify's own words — reaches the DOM
 through `textContent` only, because a receipt is adversary input and
-must never become markup in the operator's browser. The verdict strip
-is redundantly encoded (colour, words, and a shape mark), chosen for
-strong colour-vision deficiency: the quiet state is blue, and the
-states part by lightness as well as hue. Tier language is the point:
+must never become markup in the operator's browser. The layout (issue
+#48) is a status rail beside a tabbed worktable: the rail carries the
+verdict block, the severity-sorted attention queue, and the fourteen
+days; the worktable splits what you are looking at (sessions,
+projects, search, evidence) from the thing under inspection (a
+session's chains, or the activity charts), so everything quieter than
+an alarm waits behind a tab instead of shouting from the front page.
+The verdict strip is redundantly encoded (colour, words, and a shape
+mark), chosen for strong colour-vision deficiency: the quiet state is
+blue-teal, and the states part by lightness as well as hue. Tier language is the point:
 "NOT THE RECORDED HISTORY" (an anchor or head record contradicted) is
 never outranked; superseded tears read as quiet evidence while new
 damage shouts.
