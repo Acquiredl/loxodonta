@@ -755,9 +755,16 @@ def read_witness(transcript, calibration):
     all-tools witness over an Edit|Write|Bash hook manufactures
     deficits, and so does today's wide matcher over yesterday's narrow
     sessions). Chatter is never counted: a chat-only session can never
-    alarm."""
+    alarm. Returns (events, latest): latest is the newest timestamped
+    record of any conversational kind — the session's liveness clock.
+    Chatter moves it (a chat-only session is alive); the harness's
+    timestamp-less metadata records (bridge-session, custom-title,
+    appended to ended transcripts by restart and resume) never do,
+    because an idle clock that resets on metadata re-presents an old
+    deficit as an immortal live alarm (issue #85)."""
     names = {}
     events = []
+    latest = None
     with open(transcript, encoding="utf-8", errors="replace") as lines:
         for line in lines:
             try:
@@ -766,6 +773,12 @@ def read_witness(transcript, calibration):
                 continue
             if not isinstance(record, dict):
                 continue
+            stamped = parse_when(record.get("timestamp"))
+            if stamped is not None:
+                if stamped.tzinfo is None:
+                    stamped = stamped.replace(tzinfo=timezone.utc)
+                if latest is None or stamped > latest:
+                    latest = stamped
             message = record.get("message")
             blocks = (message.get("content")
                       if isinstance(message, dict) else None)
@@ -791,7 +804,7 @@ def read_witness(transcript, calibration):
             when = record.get("timestamp")
             if owes_receipt(name, matchers_at(calibration, when)):
                 events.append(when)
-    return events
+    return events, latest
 
 
 def classify(tools, receipts, ended, idle, deficit_age, silent):
@@ -821,9 +834,17 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     """One session against its witness. deficit_since needs no stored
     state: receipts pair with tool events in order, so the first
     unpaired event's timestamp is when the deficit began."""
-    events = read_witness(transcript, calibration)
+    events, latest = read_witness(transcript, calibration)
     tools = len(events)
-    quiet_for = now.timestamp() - transcript.stat().st_mtime
+    # The idle clock reads the newest timestamped record, not file
+    # mtime: the harness touches ended transcripts with timestamp-less
+    # metadata, and an mtime clock resets on every touch (issue #85).
+    # mtime remains the fallback for a transcript holding no
+    # timestamped record at all.
+    if latest is not None:
+        quiet_for = (now - latest).total_seconds()
+    else:
+        quiet_for = now.timestamp() - transcript.stat().st_mtime
     # Today both flags read from the idle window ("witness quiet this
     # long ⇒ session treated as ended"); they separate if the harness
     # ever writes an explicit end marker.
@@ -2369,78 +2390,138 @@ PAGE = """<!doctype html>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐘</text></svg>">
 <style>
   :root {
-    color-scheme: light dark;
+    /* One committed look (issue #48, ratified 2026-09-01): the cockpit
+       is dark. OLED slate surfaces, one green accent for life signs,
+       and the verdict palette below for claims. System fonts only —
+       this page renders offline and asks nothing of any other host. */
+    color-scheme: dark;
+    --bg: #0b1120; --surface: #111a2e; --surface2: #18233b;
+    --border: #24304c; --line: #1b2740;
+    --fg: #f1f5f9; --dim: #8fa3bf; --faint: #5b6b85;
+    --accent: #22c55e;
+    --mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+    --sans: 'Inter', system-ui, sans-serif;
     /* The verdict palette. Roughly 8% of men cannot separate red from
        green, and the stoplight triple is the worst case of it: strong
        colour vision deficiency renders both as brown. So the quiet
        state carries blue (teal survives the collapse), and the three
-       states part by lightness as well as hue. Colour is never the
-       only encoding here — every state is also named in words and
-       marked with a shape, which is what makes the hue safe to keep. */
-    --quiet: #0f766e;
-    --damage: #b45309;
-    --grave: #b3261e;
+       states part by lightness as well as hue — steps re-picked for
+       the dark surface, same rule. Colour is never the only encoding
+       here — every state is also named in words and marked with a
+       shape, which is what makes the hue safe to keep. */
+    --quiet: #2dd4bf;
+    --damage: #f59e0b;
+    --grave: #f87171;
     --quiet-wash: color-mix(in srgb, var(--quiet) 13%, transparent);
     --damage-wash: color-mix(in srgb, var(--damage) 13%, transparent);
     /* Deliberately much heavier than the other two. Amber and red are
        adjacent hues and collapse onto the same olive under deuteranopia,
        so the gravest state is separated by weight as well — which is
        what it should look like anyway. */
-    --grave-wash: color-mix(in srgb, var(--grave) 32%, transparent);
+    --grave-wash: color-mix(in srgb, var(--grave) 26%, transparent);
+    /* The investigate voice (tripwire, hot sessions): deliberately
+       unlike any verdict tier. */
+    --look: #a78bfa;
   }
-  body { font-family: system-ui, sans-serif; max-width: 64rem;
-         margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
-  header h1 { margin-bottom: 0.2rem; }
-  header .stance { color: color-mix(in srgb, currentColor 60%, transparent);
-                   margin-top: 0; }
+  * { box-sizing: border-box; }
+  body { font-family: var(--sans); background: var(--bg); color: var(--fg);
+         margin: 0; line-height: 1.5; }
+  a { color: inherit; }
+  code { font-family: var(--mono); }
+  @media (prefers-reduced-motion: no-preference) {
+    button, .tile, .chain, .story, .hit { transition: border-color 0.18s
+      ease, background 0.18s ease, color 0.18s ease; }
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* The shell: a sticky rail (what wants your eyes) beside the work
+     area (what you chose to look at). Stacks on narrow viewports. */
+  #shell { display: grid; grid-template-columns: 20rem minmax(0, 1fr);
+           min-height: 100vh; }
+  #rail { border-right: 1px solid var(--border); background: var(--surface);
+          padding: 1.1rem 1rem 1rem; display: flex; flex-direction: column;
+          gap: 1.1rem; position: sticky; top: 0; max-height: 100vh;
+          overflow: auto; }
+  #work { padding: 1.4rem 1.8rem 3rem; min-width: 0; max-width: 72rem; }
+  @media (max-width: 60rem) {
+    #shell { grid-template-columns: 1fr; }
+    #rail { position: static; max-height: none;
+            border-right: 0; border-bottom: 1px solid var(--border); }
+  }
+  header h1 { margin: 0; font-size: 1.05rem; letter-spacing: 0.04em; }
+  header .stance { color: var(--dim); margin: 0.15rem 0 0;
+                   font-size: 0.8rem; }
   /* The wordmark and the elephant are decoration, never information:
      aria-hidden in the markup, and every state must read without them. */
-  .wordmark { font-family: ui-monospace, Consolas, monospace;
-              font-size: clamp(5px, 1.1vw, 9px); line-height: 1.15;
-              margin: 0 0 0.3rem; opacity: 0.8; overflow-x: auto;
-              user-select: none; }
+  .wordmark { font-family: var(--mono); font-size: 5px; line-height: 1.15;
+              margin: 0 0 0.3rem; opacity: 0.8; overflow: hidden;
+              user-select: none; color: var(--accent); }
 
-  /* The verdict strip: one condition, huge. Grave is "not the recorded
-     history" or receipts stopping mid-session; damage is a broken chain
-     or a tripwire event; quiet is the state the operator sees most
-     mornings — designed, not empty.
-
-     Three encodings carry the same one condition: the shape, the words,
-     and the colour. Drop any one of them and the strip still reads. */
-  #strip { padding: 1rem 1.2rem; border-radius: 0.6rem; margin: 1rem 0;
+  /* The status block: one condition, stated big, at the top of the
+     rail. Grave is "not the recorded history" or receipts stopping
+     mid-session; damage is a broken chain or a tripwire event; quiet
+     is the state the operator sees most mornings — designed, not
+     empty. Three encodings carry the same one condition: the shape,
+     the words, and the colour. Drop any one and it still reads. */
+  #strip { padding: 0.9rem 1rem; border-radius: 0.7rem;
            display: grid; grid-template-columns: auto 1fr;
-           gap: 0 0.9rem; align-items: start;
-           border: 2px solid color-mix(in srgb, currentColor 25%, transparent); }
-  #strip .state { font-size: 1.45rem; font-weight: 800; margin: 0;
+           gap: 0 0.7rem; align-items: start; background: var(--surface2);
+           border: 2px solid var(--border); }
+  #strip .state { font-size: 1.15rem; font-weight: 800; margin: 0;
                   letter-spacing: 0.01em; }
-  #strip .why { margin: 0.25rem 0 0; opacity: 0.85; }
+  #strip .why { margin: 0.25rem 0 0; color: var(--dim);
+                font-size: 0.85rem; }
   /* The recorder line sits under the verdict as context, quieter than
      it: smaller, dimmer, monospaced for the path. Drift underlines
      rather than recolours — it is a reason to look, never a verdict,
      and must not read as a fourth alarm state. */
-  #recorder { font-size: 0.85rem; opacity: 0.7;
-              font-family: ui-monospace, monospace; }
-  #recorder.drifted { opacity: 1;
+  #recorder { font-size: 0.72rem; color: var(--faint);
+              font-family: var(--mono); overflow-wrap: anywhere; }
+  #recorder.drifted { color: var(--dim);
                       text-decoration: underline dotted var(--damage);
                       text-underline-offset: 0.25rem; }
-  #statemark { font-size: 1.6rem; line-height: 1.2; grid-row: 1 / span 4; }
+  #statemark { font-size: 1.3rem; line-height: 1.2; grid-row: 1 / span 4; }
   #strip > :not(#statemark) { grid-column: 2; }
-  #strip.quiet { background: var(--quiet-wash); border-color: var(--quiet); }
+  #strip.quiet { background: color-mix(in srgb, var(--quiet) 9%, var(--surface));
+                 border-color: color-mix(in srgb, var(--quiet) 55%, transparent); }
   #strip.quiet #statemark { color: var(--quiet); }
-  #strip.damage { background: var(--damage-wash);
+  #strip.damage { background: color-mix(in srgb, var(--damage) 10%, var(--surface));
                   border-color: var(--damage); }
   #strip.damage #statemark { color: var(--damage); }
-  #strip.grave { background: var(--grave-wash); border-color: var(--grave);
-                 border-width: 3px; }
+  #strip.grave { background: color-mix(in srgb, var(--grave) 14%, var(--surface));
+                 border-color: var(--grave); border-width: 3px; }
   #strip.grave #statemark { color: var(--grave); }
 
-  /* Fourteen days, one cell each: the question the strip cannot answer
-     on its own is whether today is a trend or a one-off. A day nobody
-     watched is drawn as absence — hatched, not coloured — because an
-     unread day is not a quiet one. */
+  /* The attention queue: the only loud list on the page. Severity
+     sorted — live alarms, then damaged history, then reasons to look.
+     Empty is designed, not blank: the elephant's other appearance. */
+  #attention { display: flex; flex-direction: column; gap: 0.45rem; }
+  .alert { display: flex; flex-direction: column; gap: 0.2rem;
+           padding: 0.55rem 0.7rem; border-radius: 0.55rem;
+           background: var(--surface2); border: 1px solid var(--border);
+           font-size: 0.8rem; }
+  .alert .head { display: flex; gap: 0.5rem; align-items: baseline; }
+  .alert .what { color: var(--dim); overflow-wrap: anywhere; }
+  .alert.grave { border-color: var(--grave);
+                 background: color-mix(in srgb, var(--grave) 12%, var(--surface2)); }
+  .alert.damage { border-color: var(--damage);
+                  background: color-mix(in srgb, var(--damage) 9%, var(--surface2)); }
+  .alert.look { border-color: var(--look);
+                background: color-mix(in srgb, var(--look) 9%, var(--surface2)); }
+  .alert button { align-self: flex-start; }
+  #rail h2 { border: 0; margin: 0 0 0.4rem; padding: 0;
+             font-size: 0.72rem; letter-spacing: 0.1em;
+             text-transform: uppercase; color: var(--dim); }
+  #railfoot { margin-top: auto; font-family: var(--mono);
+              font-size: 0.7rem; color: var(--faint); line-height: 1.8; }
+
+  /* Fourteen days, one cell each: the question the status block cannot
+     answer on its own is whether today is a trend or a one-off. A day
+     nobody watched is drawn as absence — hatched, not coloured —
+     because an unread day is not a quiet one. */
   #fortnight { display: grid; grid-template-columns: repeat(14, 1fr);
                gap: 0.25rem; margin: 0.6rem 0 0.3rem; }
-  .day { border-radius: 0.25rem; padding: 0.15rem 0; min-height: 2.6rem;
+  .day { border-radius: 0.25rem; padding: 0.15rem 0; min-height: 2rem;
          display: flex; flex-direction: column; justify-content: flex-end;
          align-items: center; gap: 0.15rem; font-size: 0.65rem;
          border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
@@ -2542,6 +2623,86 @@ PAGE = """<!doctype html>
   #elephant { font-family: ui-monospace, Consolas, monospace;
               font-size: 0.85rem; line-height: 1.1; margin: 0.5rem 0 0;
               opacity: 0.75; user-select: none; }
+
+  /* The worktable (#48): tabs over a two-pane split. Pane one is
+     always "what am I looking at"; pane two is always "the thing under
+     inspection". Stacks on narrow viewports. */
+  #tabs { display: flex; gap: 0.2rem; border-bottom: 1px solid var(--border);
+          margin-bottom: 0; }
+  .tab { font: inherit; font-size: 0.85rem; color: var(--dim);
+         background: none; border: 0; border-bottom: 2px solid transparent;
+         padding: 0.5rem 1rem; cursor: pointer; }
+  .tab:hover { color: var(--fg); }
+  .tab.on { color: var(--fg); border-bottom-color: var(--accent); }
+  #split { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+           border: 1px solid var(--border); border-top: 0;
+           border-radius: 0 0 0.6rem 0.6rem; overflow: hidden;
+           min-height: 24rem; }
+  .pane { min-width: 0; display: flex; flex-direction: column; }
+  .pane + .pane { border-left: 1px solid var(--border); }
+  .phead { font-family: var(--mono); font-size: 0.7rem; color: var(--faint);
+           letter-spacing: 0.06em; padding: 0.45rem 0.8rem;
+           border-bottom: 1px solid var(--border); background: var(--surface);
+           display: flex; gap: 0.5rem; align-items: baseline; }
+  .phead .no { color: var(--accent); }
+  .pbody { overflow: auto; flex: 1; max-height: 34rem; }
+  @media (max-width: 72rem) {
+    #split { grid-template-columns: 1fr; }
+    .pane + .pane { border-left: 0; border-top: 1px solid var(--border); }
+  }
+  #sessions-table { width: 100%; border-collapse: collapse;
+                    font-size: 0.82rem; }
+  #sessions-table th { font-size: 0.68rem; text-transform: uppercase;
+                       letter-spacing: 0.07em; color: var(--faint);
+                       text-align: left; padding: 0.5rem 0.7rem;
+                       border-bottom: 1px solid var(--border);
+                       position: sticky; top: 0; background: var(--surface); }
+  #sessions-table td { padding: 0.5rem 0.7rem;
+                       border-bottom: 1px solid var(--line); }
+  #sessions-table tr { cursor: pointer; }
+  #sessions-table tr:hover td { background: var(--surface2); }
+  #sessions-table tr.sel td { background:
+      color-mix(in srgb, var(--accent) 8%, transparent);
+    border-left: 2px solid var(--accent); }
+  #sessions-table .addr { font-family: var(--mono); color: #7dd3fc; }
+  #sessions-table .num { font-variant-numeric: tabular-nums;
+                         color: var(--dim); }
+  #sessions-table .when { font-family: var(--mono); font-size: 0.72rem;
+                          color: var(--faint); }
+  #inspect-meta { padding: 0.7rem 0.9rem 0; color: var(--dim);
+                  font-size: 0.82rem; }
+  #inspect-chains { padding: 0.2rem 0.9rem 0.9rem; }
+  #inspect-judge { margin: 0.4rem 0.9rem; padding: 0.55rem 0.7rem;
+                   border-radius: 0.5rem; border: 1px dashed var(--border);
+                   font-family: var(--mono); font-size: 0.72rem;
+                   color: var(--dim); overflow-wrap: anywhere; }
+  #inspect-judge strong { color: var(--fg); }
+  .pane-empty { color: var(--faint); padding: 1.2rem;
+                font-size: 0.85rem; }
+  .tabpane { padding: 0; }
+  .p2tab { font: inherit; font-size: 0.7rem; font-family: var(--mono);
+           color: var(--faint); background: none; border: 0;
+           border-radius: 0.3rem; padding: 0.1rem 0.5rem;
+           cursor: pointer; }
+  .p2tab.on { color: var(--fg); background: var(--surface2); }
+  .chartbox { padding: 0.7rem 0.9rem 0.4rem; }
+  .chartbox h3 { margin: 0 0 0.3rem; font-size: 0.72rem;
+                 letter-spacing: 0.08em; text-transform: uppercase;
+                 color: var(--dim); }
+  .chartbox .testimony { font-size: 0.72rem; padding: 0; }
+  .clab { font-family: var(--mono); font-size: 10px; fill: var(--dim); }
+  .cval { font-family: var(--mono); font-size: 10px; fill: var(--fg); }
+  .cbar { fill: var(--accent); opacity: 0.85; }
+  .cbar.hot { fill: var(--grave); }
+  .cnorm { stroke: var(--dim); stroke-width: 1.5;
+           stroke-dasharray: 4 4; }
+  .tabpane > .testimony { padding: 0.6rem 0.8rem 0; margin: 0; }
+  #pane-projects #tiles { margin: 0.8rem; }
+  #pane-search #ask-search { width: calc(100% - 1.6rem);
+                             margin: 0.6rem 0.8rem; }
+  #pane-search #found { padding: 0 0.8rem 0.8rem; }
+  #pane-evidence > div { padding: 0.3rem 0.8rem; }
+  #pane-sessions #filters { margin: 0.6rem 0.8rem; }
 
   /* The drawers: one tile per project, worst claim first, click for
      that project's timeline. */
@@ -2709,6 +2870,8 @@ PAGE = """<!doctype html>
 </style>
 </head>
 <body>
+<div id="shell">
+<aside id="rail">
 <header>
   <pre class="wordmark" aria-hidden="true">
 db       .d88b.  db    db  .d88b.  d8888b.  .d88b.  d8b   db d888888b  .d8b.
@@ -2738,6 +2901,11 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
  (__,__)      (__,__)</pre>
 </div>
 
+<section id="attention-box">
+  <h2>attention</h2>
+  <div id="attention"></div>
+</section>
+
 <section id="trend">
   <h2>fourteen days</h2>
   <p class="testimony">one cell per day, worst claim of that day — is
@@ -2747,70 +2915,119 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   <p id="lapse"></p>
 </section>
 
-<section id="recall">
-  <h2>recall</h2>
-  <p class="testimony">testimony, not a verdict — what was attempted, as
-  the writer told it; run <code>receipts verify</code> for the verdict</p>
-  <input type="search" id="ask-search"
-         placeholder="search every action line on this machine">
-  <div id="found"></div>
-  <div id="filters">
-    <label>repo
-      <select id="ask-repo"><option value="">every repo</option></select>
-    </label>
-    <label>from <input type="date" id="ask-from"></label>
-    <label>to <input type="date" id="ask-to"></label>
-    <label>file path
-      <input type="text" id="ask-path" placeholder="anywhere it appears">
-    </label>
+<footer id="railfoot">verdicts come from <code>receipts verify</code> —
+this page draws them and decides nothing</footer>
+</aside>
+<main id="work">
+<section id="worktable">
+  <div id="tabs" role="tablist">
+    <button type="button" class="tab on" data-tab="sessions">sessions</button>
+    <button type="button" class="tab" data-tab="projects">projects</button>
+    <button type="button" class="tab" data-tab="search">search</button>
+    <button type="button" class="tab" data-tab="evidence">evidence</button>
   </div>
-  <div id="timeline">remembering…</div>
+  <div id="split">
+    <div class="pane">
+      <div class="phead"><span class="no">[1]</span> testimony, not a
+      verdict — what was attempted, as the writer told it;
+      click a row to inspect</div>
+      <div class="pbody" id="pane1">
+        <div class="tabpane" id="pane-sessions">
+          <div id="filters">
+            <label>repo
+              <select id="ask-repo"><option value="">every repo</option></select>
+            </label>
+            <label>from <input type="date" id="ask-from"></label>
+            <label>to <input type="date" id="ask-to"></label>
+            <label>file path
+              <input type="text" id="ask-path" placeholder="anywhere it appears">
+            </label>
+          </div>
+          <table id="sessions-table">
+            <thead><tr><th>session</th><th>repo</th><th>receipts</th>
+            <th>span</th></tr></thead>
+            <tbody id="sessions-body"></tbody>
+          </table>
+        </div>
+        <div class="tabpane" id="pane-projects" hidden>
+          <p class="testimony">one per project — the worst claim leads;
+          click a drawer to focus its sessions</p>
+          <div id="tiles">remembering…</div>
+        </div>
+        <div class="tabpane" id="pane-search" hidden>
+          <p class="testimony">the writer's word, findable — run
+          <code>receipts verify</code> for the verdict</p>
+          <input type="search" id="ask-search"
+                 placeholder="search every action line on this machine">
+          <div id="found"></div>
+        </div>
+        <div class="tabpane" id="pane-evidence" hidden>
+          <p class="testimony">what changed since the last look, which
+          sessions ended behind their witness, and which burned far
+          above the store's norm — kept as evidence; reasons to look,
+          never verdicts</p>
+          <div id="tripwire"></div>
+          <div id="watch"></div>
+          <div id="consumption"></div>
+          <div id="anchors">
+            <p class="testimony">the block height is your half of the
+            regeneration defense — confirm it against a Bitcoin block
+            source you trust</p>
+            <div id="panel"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="phead"><span class="no">[2]</span>
+        <button type="button" class="p2tab on" data-p2="inspect">inspect</button>
+        <button type="button" class="p2tab" data-p2="activity">activity</button>
+        <span>— the chain as <code>receipts verify</code> sees it,
+        or the store drawn</span></div>
+      <div class="pbody">
+        <div id="p2-inspect">
+          <div id="inspect-meta" class="pane-empty">click a session on
+          the left — its chains, claims, and actions land here</div>
+          <div id="inspect-judge" hidden></div>
+          <div id="inspect-chains"></div>
+        </div>
+        <div id="p2-activity" hidden>
+          <div class="chartbox">
+            <h3>receipts per session — last ten</h3>
+            <div id="chart-receipts"></div>
+          </div>
+          <div class="chartbox">
+            <h3>busiest hour vs the store's norm</h3>
+            <div id="chart-tempo"></div>
+          </div>
+          <div class="chartbox">
+            <h3>looks per day — fourteen days</h3>
+            <p class="testimony">red marks a day that carried an alarm;
+            an unread day is a gap, not a quiet day</p>
+            <div id="chart-looks"></div>
+          </div>
+          <div class="chartbox">
+            <h3>working hours</h3>
+            <p class="testimony">when receipts actually arrive, in your
+            own timezone — the selfish view: what your weeks really
+            look like</p>
+            <div id="clock">remembering…</div>
+          </div>
+          <div class="chartbox">
+            <h3>sessions on one axis</h3>
+            <p class="testimony">every session of the last fourteen
+            days, drawn from the completeness watch — a hatched tail is
+            receipts the session owed and never wrote. Reasons to look,
+            never verdicts</p>
+            <div id="gantt">remembering…</div>
+            <div id="axis"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </section>
 
-<section id="hours">
-  <h2>working hours</h2>
-  <p class="testimony">when receipts actually arrive, in your own
-  timezone — the selfish view: what your weeks really look like</p>
-  <div id="clock">remembering…</div>
-</section>
-
-<section id="drawers">
-  <h2>drawers</h2>
-  <p class="testimony">one per project — the worst claim leads; click a
-  drawer for that project's timeline</p>
-  <div id="tiles">remembering…</div>
-</section>
-
-<section id="events">
-  <h2>events</h2>
-  <p class="testimony">what changed since the last look, which sessions
-  are behind their witness, and which are burning far above the store's
-  norm — reasons to look, never verdicts</p>
-  <div id="tripwire"></div>
-  <div id="watch"></div>
-  <div id="consumption"></div>
-</section>
-
-<section id="sessions">
-  <h2>sessions</h2>
-  <p class="testimony">every session of the last fourteen days on one
-  axis, drawn from the completeness watch — a hatched tail is receipts
-  the session owed and never wrote. Reasons to look, never verdicts</p>
-  <div id="gantt">remembering…</div>
-  <div id="axis"></div>
-</section>
-
-<section id="anchors">
-  <h2>anchors</h2>
-  <p class="testimony">the block height is your half of the regeneration
-  defense — confirm it against a Bitcoin block source you trust</p>
-  <div id="panel"></div>
-</section>
-
-<section id="alarms">
-  <h2>status band</h2>
-  <div id="band"></div>
-</section>
 <section id="firedrill" hidden>
   <h2>fire drill</h2>
   <p class="testimony">rehearsal on sandbox copies — nothing here is a
@@ -2830,6 +3047,8 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   <div id="walking"></div>
   <div id="entries"></div>
 </section>
+</main>
+</div>
 <script>
 "use strict";
 
@@ -2981,6 +3200,103 @@ function renderStrip(report) {
     " · this page refreshes every 30s";
 }
 
+// The attention queue: everything that wants eyes, in one list,
+// severity sorted — the rail's ordering contract. Live completeness
+// alarms outrank damaged history, which outranks reasons to look
+// (tripwire events, hot sessions). Everything else on the page is
+// deliberately quiet.
+const SEVERITY = ["alarm", "regenerated", "broken", "tripwire", "hot"];
+
+function attentionItems(report) {
+  const items = [];
+  for (const s of report.completeness.sessions) {
+    if (["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state)) {
+      items.push({rank: "alarm", tone: "grave", chip: s.state,
+        text: s.repo + " · " + s.session.slice(0, 8) + " — " +
+              (s.words || "receipts behind the witness"),
+        repo: s.repo, session: s.session});
+    }
+  }
+  for (const repo of report.repos) {
+    for (const session of repo.sessions) {
+      for (const chain of session.chains) {
+        if (chain.superseded) continue;
+        if (chain.exit === 3) {
+          items.push({rank: "regenerated", tone: "grave",
+            chip: chain.verdict,
+            text: repo.repo + " · " + session.session.slice(0, 8) +
+                  " — not the recorded history",
+            repo: repo.repo, session: session.session});
+        } else if (chain.verdict === "BROKEN") {
+          items.push({rank: "broken", tone: "damage", chip: "BROKEN",
+            text: repo.repo + " · " + session.session.slice(0, 8) +
+                  " — history was altered after the fact",
+            repo: repo.repo, session: session.session});
+        }
+      }
+    }
+  }
+  for (const event of report.baseline.events) {
+    items.push({rank: "tripwire", tone: "damage",
+      chip: "CHANGED SINCE LAST LOOK",
+      text: event.repo + " · " + event.session + " — " + event.change,
+      tab: "evidence"});
+  }
+  for (const s of (report.consumption || {sessions: []}).sessions) {
+    if (s.state === "RUNNING-HOT") {
+      items.push({rank: "hot", tone: "look", chip: "RUNNING-HOT",
+        text: s.repo + " · " + s.session.slice(0, 8) +
+              " — burning far above the store's norm", tab: "evidence"});
+    }
+  }
+  items.sort((a, b) =>
+    SEVERITY.indexOf(a.rank) - SEVERITY.indexOf(b.rank));
+  return items;
+}
+
+function renderAttention(report) {
+  const box = document.getElementById("attention");
+  box.replaceChildren();
+  const items = attentionItems(report);
+  if (!items.length) {
+    const kept = report.completeness.sessions.filter(s =>
+      ["ENDED-DEFICIT", "ENDED-SURPLUS", "SURPLUS", "IDLE-DEFICIT"]
+        .includes(s.state)).length;
+    const row = el("div", "alert");
+    const head = el("div", "head");
+    head.appendChild(el("strong", "", "nothing wants your eyes"));
+    row.appendChild(head);
+    row.appendChild(el("span", "what", kept
+      ? kept + " quieter finding(s) kept as evidence, folded below"
+      : "the elephant is watching"));
+    box.appendChild(row);
+    return;
+  }
+  for (const item of items) {
+    const row = el("div", "alert " + item.tone);
+    const head = el("div", "head");
+    head.appendChild(el("strong", "", item.chip));
+    row.appendChild(head);
+    row.appendChild(el("span", "what", item.text));
+    const go = el("button", "walk", "look");
+    go.type = "button";
+    go.addEventListener("click", () => {
+      // A named session opens under inspection; anything else opens
+      // the evidence view — either way, the loud row is one click
+      // from its own detail.
+      const story = item.session && (shownRecall
+        ? shownRecall.sessions : []).find(s =>
+          s.repo === item.repo && s.session === item.session);
+      if (story) { showTab("sessions"); selectSession(story); }
+      else showTab(item.tab || "evidence");
+      document.getElementById("worktable")
+        .scrollIntoView({behavior: "smooth"});
+    });
+    row.appendChild(go);
+    box.appendChild(row);
+  }
+}
+
 // Fourteen days under the strip. The strip says what is true now; the
 // band says whether now is unusual — "is this a trend or a one-off?",
 // the third question a monitoring surface owes its operator, answered
@@ -3054,10 +3370,25 @@ function worstTier(chains) {
   return "valid";
 }
 
+// The worktable's tab row: pane one shows exactly one of the four
+// views; pane two stays the inspection surface throughout.
+function showTab(name) {
+  for (const b of document.querySelectorAll("#tabs .tab")) {
+    b.classList.toggle("on", b.dataset.tab === name);
+  }
+  for (const pane of document.querySelectorAll("#pane1 > .tabpane")) {
+    pane.hidden = pane.id !== "pane-" + name;
+  }
+}
+for (const b of document.querySelectorAll("#tabs .tab")) {
+  b.addEventListener("click", () => showTab(b.dataset.tab));
+}
+
 function openDrawer(repo) {
   document.getElementById("ask-repo").value = repo;
   loadRecall();
-  document.getElementById("recall")
+  showTab("sessions");
+  document.getElementById("worktable")
     .scrollIntoView({behavior: "smooth"});
 }
 
@@ -3251,7 +3582,9 @@ function renderGantt() {
 function render(report) {
   lastStatus = report;
   renderStrip(report);
+  renderAttention(report);
   renderFortnight(report);
+  if (!document.getElementById("p2-activity").hidden) renderCharts();
   renderTiles();
   renderGantt();
 
@@ -3354,24 +3687,6 @@ function render(report) {
   }
 
   renderAnchors(report);
-
-  const band = document.getElementById("band");
-  band.replaceChildren();
-  for (const repo of report.repos) {
-    band.appendChild(el("h2", "", repo.repo));
-    for (const session of repo.sessions) {
-      const box = el("div", "session");
-      box.appendChild(el("div", "name", "session " + session.session));
-      for (const chain of session.chains) {
-        box.appendChild(chainRow(chain));
-      }
-      band.appendChild(box);
-    }
-  }
-  if (!report.repos.length) {
-    band.appendChild(el("p", "", "no chains under this root yet — work " +
-      "a session with the hook installed and receipts will appear here."));
-  }
 
   const ask = document.getElementById("ask-repo");
   const known = new Set(Array.from(ask.options, o => o.value));
@@ -3599,43 +3914,208 @@ function spanText(story) {
   return trim(story.started) + " → " + trim(story.ended) + " UTC";
 }
 
-function storyRow(story) {
-  const row = el("div", "story");
+// --- the worktable: sessions in pane one, inspection in pane two ----
+
+let shownRecall = null;
+let selectedWhere = null;
+
+function sessionRow(story) {
+  const row = document.createElement("tr");
   row.dataset.where = story.repo + "/" + story.session;
-  row.appendChild(el("span", "repo", story.repo));
-  row.appendChild(el("span", "id", story.session));
-  row.appendChild(el("span", "span", spanText(story)));
-  row.appendChild(el("span", "count", story.entries + " receipt(s)"));
-  if (story.worktree) {
-    row.appendChild(el("span", "badge", "stranded in a worktree"));
+  if (row.dataset.where === selectedWhere) row.className = "sel";
+  const addr = el("td", "addr", story.session.slice(0, 8));
+  addr.title = story.session;
+  row.appendChild(addr);
+  row.appendChild(el("td", "", story.repo));
+  row.appendChild(el("td", "num", String(story.entries)));
+  row.appendChild(el("td", "when", spanText(story)));
+  row.addEventListener("click", () => selectSession(story));
+  return row;
+}
+
+function renderRecall(report) {
+  shownRecall = report;
+  const body = document.getElementById("sessions-body");
+  body.replaceChildren();
+  for (const story of report.sessions) {
+    body.appendChild(sessionRow(story));
   }
+  if (!report.sessions.length) {
+    const row = document.createElement("tr");
+    const cell = el("td", "pane-empty", "nothing remembered here — " +
+      "no session matches these filters.");
+    cell.colSpan = 4;
+    row.appendChild(cell);
+    body.appendChild(row);
+  }
+}
+
+// Pane two: the selected session's chains, claims, and actions — the
+// chain rows are the same tier ladder the whole page speaks, and the
+// walk buttons still open the WebCrypto walker.
+function selectSession(story) {
+  selectedWhere = story.repo + "/" + story.session;
+  for (const row of document.querySelectorAll("#sessions-body tr")) {
+    row.classList.toggle("sel", row.dataset.where === selectedWhere);
+  }
+  const meta = document.getElementById("inspect-meta");
+  meta.className = "";
+  meta.replaceChildren();
+  meta.appendChild(el("strong", "", story.repo + " · " +
+                      story.session.slice(0, 8)));
+  meta.appendChild(el("span", "", " — " + story.entries +
+    " receipt(s) · " + spanText(story) +
+    (story.worktree ? " · stranded in a worktree" : "")));
   if (story.chains.length > 1) {
-    row.appendChild(el("p", "sibling", story.chains.length +
+    meta.appendChild(el("p", "sibling", story.chains.length +
       " chains — recording continued in a sibling"));
   }
-  // The last rung of the ladder: a story opens its own entries in the
-  // walker, hashes rechecked in the reader's browser.
+  // The last rung of the ladder: the walker, hashes rechecked in the
+  // reader's own browser.
   for (const path of story.paths || []) {
     const walk = el("button", "walk",
       story.paths.length > 1 ? "walk " + path.split("/").pop()
                              : "walk this session");
     walk.type = "button";
+    walk.style.marginLeft = "0.5rem";
     walk.addEventListener("click", () => openWalker(path));
-    row.appendChild(walk);
+    meta.appendChild(walk);
   }
-  return row;
+  // The chains as verify saw them, worst first — reusing the page's
+  // one tier vocabulary.
+  const chainsBox = document.getElementById("inspect-chains");
+  chainsBox.replaceChildren();
+  const scan = findScanSession(story);
+  for (const chain of scan ? scan.chains : []) {
+    chainsBox.appendChild(chainRow(chain));
+  }
+  if (!scan) {
+    chainsBox.appendChild(el("p", "pane-empty",
+      "the scan has not judged this session yet — refresh in a tick"));
+  }
+  // The ADR-0017 judge command, where the watch paired a transcript:
+  // the supervisor locates, verify judges — copy it, run it, read the
+  // verdict in your own terminal.
+  const judgeBox = document.getElementById("inspect-judge");
+  const seen = (lastStatus ? lastStatus.completeness.sessions : [])
+    .find(s => s.repo === story.repo && s.session === story.session);
+  if (seen && seen.judge) {
+    judgeBox.hidden = false;
+    judgeBox.replaceChildren();
+    judgeBox.appendChild(el("strong", "", "judge transcript "));
+    judgeBox.appendChild(el("span", "", "— commitments re-hashed " +
+      "against the harness transcript (run it yourself): "));
+    judgeBox.appendChild(el("code", "", seen.judge));
+    const copy = el("button", "walk", "copy");
+    copy.type = "button";
+    copy.style.marginLeft = "0.5rem";
+    copy.addEventListener("click", () =>
+      navigator.clipboard.writeText(seen.judge));
+    judgeBox.appendChild(copy);
+  } else {
+    judgeBox.hidden = true;
+  }
 }
 
-function renderRecall(report) {
-  const timeline = document.getElementById("timeline");
-  timeline.replaceChildren();
-  for (const story of report.sessions) {
-    timeline.appendChild(storyRow(story));
+// Pane two's own tabs: inspection or the store drawn. The charts
+// speak the house rules — one hue per chart, values reachable as
+// text, red only for status and never alone (a HOT word rides it).
+function showPane2(name) {
+  for (const b of document.querySelectorAll(".p2tab")) {
+    b.classList.toggle("on", b.dataset.p2 === name);
   }
-  if (!report.sessions.length) {
-    timeline.appendChild(el("p", "", "nothing remembered here — " +
-      "no session matches these filters."));
+  document.getElementById("p2-inspect").hidden = name !== "inspect";
+  document.getElementById("p2-activity").hidden = name !== "activity";
+  if (name === "activity") renderCharts();
+}
+for (const b of document.querySelectorAll(".p2tab")) {
+  b.addEventListener("click", () => showPane2(b.dataset.p2));
+}
+
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs) {
+  const node = document.createElementNS(SVGNS, tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    node.setAttribute(key, value);
   }
+  return node;
+}
+
+// Thin horizontal bars, rounded data ends, direct value labels, ink
+// for text and one hue for marks; an optional dashed norm line.
+function hbars(host, items, unit, norm) {
+  host.replaceChildren();
+  if (!items.length) return;
+  const peak = Math.max(norm || 0, ...items.map(i => i.v), 1);
+  const W = 420, LEFT = 100, BARS = W - LEFT - 58, ROW = 24;
+  const svg = svgEl("svg",
+    {viewBox: "0 0 " + W + " " + (items.length * ROW + 6),
+     role: "img", style: "width:100%;height:auto"});
+  items.forEach((item, i) => {
+    const y = i * ROW;
+    const w = Math.max(3, Math.round(item.v / peak * BARS));
+    const label = svgEl("text", {x: LEFT - 8, y: y + 14,
+      "text-anchor": "end", "class": "clab"});
+    label.textContent = item.label;
+    svg.appendChild(label);
+    const bar = svgEl("rect", {x: LEFT, y: y + 4, width: w, height: 13,
+      rx: 4, "class": "cbar" + (item.hot ? " hot" : "")});
+    const tip = svgEl("title", {});
+    tip.textContent = item.label + ": " + item.v + " " + unit;
+    bar.appendChild(tip);
+    svg.appendChild(bar);
+    const value = svgEl("text", {x: LEFT + w + 7, y: y + 15,
+      "class": "cval"});
+    value.textContent = item.v + (item.hot ? " · HOT" : "");
+    svg.appendChild(value);
+  });
+  if (norm) {
+    const x = LEFT + Math.round(norm / peak * BARS);
+    svg.appendChild(svgEl("line", {x1: x, x2: x, y1: 0,
+      y2: items.length * ROW, "class": "cnorm"}));
+    const cap = svgEl("text", {x: x + 5, y: 10, "class": "clab"});
+    cap.textContent = "norm " + norm;
+    svg.appendChild(cap);
+  }
+  host.appendChild(svg);
+}
+
+function renderCharts() {
+  const recent = (shownRecall ? shownRecall.sessions : [])
+    .slice(0, 10).map(story => ({label: story.session.slice(0, 8),
+                                 v: story.entries}));
+  hbars(document.getElementById("chart-receipts"), recent, "receipts");
+
+  const tempoHost = document.getElementById("chart-tempo");
+  const consumption = (lastStatus && lastStatus.consumption) ||
+    {sessions: [], norm: null};
+  if (consumption.sessions.length) {
+    hbars(tempoHost, consumption.sessions.map(s => ({
+      label: s.session.slice(0, 8), v: s.busiest_hour, hot: true})),
+      "calls in the busiest hour",
+      consumption.norm ? consumption.norm.median_busiest_hour : 0);
+  } else {
+    tempoHost.replaceChildren();
+    tempoHost.appendChild(el("p", "testimony", consumption.norm
+      ? "no session ran hot — the norm holds at " +
+        consumption.norm.median_busiest_hour + " calls in a busiest " +
+        "hour (" + consumption.norm.sessions_counted + " sessions " +
+        "counted). Testimony, never a verdict."
+      : "no tempo to draw yet"));
+  }
+
+  const days = ((lastStatus && lastStatus.history) || []).map(row => ({
+    label: row.day.slice(5), v: row.looks || 0,
+    hot: row.watched && (row.alarms || 0) > 0}));
+  hbars(document.getElementById("chart-looks"), days, "look(s)");
+}
+
+function findScanSession(story) {
+  if (!lastStatus) return null;
+  const repo = lastStatus.repos.find(r => r.repo === story.repo);
+  return repo ? repo.sessions.find(s => s.session === story.session)
+              : null;
 }
 
 function asked() {
@@ -3660,24 +4140,25 @@ async function loadRecall() {
     renderTiles();
     renderGantt();
   } catch (error) {
-    document.getElementById("timeline").textContent =
+    document.getElementById("inspect-meta").textContent =
       "recall did not answer: " + error;
   }
 }
 
 // --- search: the writer's word, findable ----------------------------
 
-// A hit links into the timeline: focus the session's repo, then scroll
-// to its story once the timeline has re-answered.
+// A hit links into the worktable: focus the session's repo, then
+// select its row once the sessions pane has re-answered.
 async function visit(hit) {
   document.getElementById("ask-repo").value = hit.repo;
   await loadRecall();
   const where = hit.repo + "/" + hit.session;
-  for (const row of document.querySelectorAll("#timeline .story")) {
+  const story = (shownRecall ? shownRecall.sessions : [])
+    .find(s => s.repo + "/" + s.session === where);
+  if (story) { showTab("sessions"); selectSession(story); }
+  for (const row of document.querySelectorAll("#sessions-body tr")) {
     if (row.dataset.where === where) {
-      row.classList.add("found-you");
       row.scrollIntoView({behavior: "smooth", block: "center"});
-      setTimeout(() => row.classList.remove("found-you"), 2500);
     }
   }
 }
