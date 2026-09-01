@@ -260,6 +260,19 @@ class DashboardTest(ServerFixture):
         self.assertIn("judge transcript", page)
         self.assertIn("seen.judge", page)
 
+    def test_the_worktable_carries_all_four_tabs(self):
+        # Slice 3 of the #48 shape: projects, search, and evidence join
+        # sessions in pane one — the old full-width sections retire, and
+        # every id they carried keeps its name inside its tab.
+        page = self.page()
+        for tab in ("sessions", "projects", "search", "evidence"):
+            self.assertIn('data-tab="' + tab + '"', page)
+            self.assertIn('id="pane-' + tab + '"', page)
+        for kept in ('id="tiles"', 'id="ask-search"', 'id="tripwire"',
+                     'id="watch"', 'id="consumption"', 'id="anchors"',
+                     'id="filters"'):
+            self.assertIn(kept, page)
+
     def test_the_page_carries_the_consumption_watch(self):
         # Issue #67: hot sessions render in the events section, in the
         # investigate voice — and the status endpoint carries the watch
@@ -329,7 +342,8 @@ class FortnightTest(ServerFixture):
         self.assertIn('id="fortnight"', page)
         self.assertLess(page.index('id="strip"'), page.index('id="fortnight"'),
                         "the alarm still leads; the trend explains it")
-        self.assertLess(page.index('id="fortnight"'), page.index('id="recall"'),
+        self.assertLess(page.index('id="fortnight"'),
+                        page.index('id="worktable"'),
                         "context for the alarm precedes the memory view")
         self.assertIn("trend or a one-off", page,
                       "the band says which question it answers")
@@ -670,7 +684,10 @@ class RecallTest(ServerFixture):
 
         self.assertIn("what was attempted", page,
                       "the testimony label is the surface's first claim")
-        self.assertLess(page.index('id="recall"'), page.index('id="band"'),
+        # The memory view (the sessions pane) leads the worktable;
+        # evidence — tripwire, watch, anchors — sits behind its own tab.
+        self.assertLess(page.index('id="pane-sessions"'),
+                        page.index('id="pane-evidence"'),
                         "the memory view lands first; alarms sit around it")
 
     def test_timeline_lists_sessions_across_repos_newest_first(self):

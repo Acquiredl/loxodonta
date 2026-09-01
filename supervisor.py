@@ -2679,6 +2679,14 @@ PAGE = """<!doctype html>
   #inspect-judge strong { color: var(--fg); }
   .pane-empty { color: var(--faint); padding: 1.2rem;
                 font-size: 0.85rem; }
+  .tabpane { padding: 0; }
+  .tabpane > .testimony { padding: 0.6rem 0.8rem 0; margin: 0; }
+  #pane-projects #tiles { margin: 0.8rem; }
+  #pane-search #ask-search { width: calc(100% - 1.6rem);
+                             margin: 0.6rem 0.8rem; }
+  #pane-search #found { padding: 0 0.8rem 0.8rem; }
+  #pane-evidence > div { padding: 0.3rem 0.8rem; }
+  #pane-sessions #filters { margin: 0.6rem 0.8rem; }
 
   /* The drawers: one tile per project, worst claim first, click for
      that project's timeline. */
@@ -2898,17 +2906,60 @@ this page draws them and decides nothing</footer>
 <section id="worktable">
   <div id="tabs" role="tablist">
     <button type="button" class="tab on" data-tab="sessions">sessions</button>
+    <button type="button" class="tab" data-tab="projects">projects</button>
+    <button type="button" class="tab" data-tab="search">search</button>
+    <button type="button" class="tab" data-tab="evidence">evidence</button>
   </div>
   <div id="split">
     <div class="pane">
-      <div class="phead"><span class="no">[1]</span> sessions —
-      click a row to inspect · testimony, not a verdict</div>
-      <div class="pbody">
-        <table id="sessions-table">
-          <thead><tr><th>session</th><th>repo</th><th>receipts</th>
-          <th>span</th></tr></thead>
-          <tbody id="sessions-body"></tbody>
-        </table>
+      <div class="phead"><span class="no">[1]</span> testimony, not a
+      verdict — what was attempted, as the writer told it;
+      click a row to inspect</div>
+      <div class="pbody" id="pane1">
+        <div class="tabpane" id="pane-sessions">
+          <div id="filters">
+            <label>repo
+              <select id="ask-repo"><option value="">every repo</option></select>
+            </label>
+            <label>from <input type="date" id="ask-from"></label>
+            <label>to <input type="date" id="ask-to"></label>
+            <label>file path
+              <input type="text" id="ask-path" placeholder="anywhere it appears">
+            </label>
+          </div>
+          <table id="sessions-table">
+            <thead><tr><th>session</th><th>repo</th><th>receipts</th>
+            <th>span</th></tr></thead>
+            <tbody id="sessions-body"></tbody>
+          </table>
+        </div>
+        <div class="tabpane" id="pane-projects" hidden>
+          <p class="testimony">one per project — the worst claim leads;
+          click a drawer to focus its sessions</p>
+          <div id="tiles">remembering…</div>
+        </div>
+        <div class="tabpane" id="pane-search" hidden>
+          <p class="testimony">the writer's word, findable — run
+          <code>receipts verify</code> for the verdict</p>
+          <input type="search" id="ask-search"
+                 placeholder="search every action line on this machine">
+          <div id="found"></div>
+        </div>
+        <div class="tabpane" id="pane-evidence" hidden>
+          <p class="testimony">what changed since the last look, which
+          sessions ended behind their witness, and which burned far
+          above the store's norm — kept as evidence; reasons to look,
+          never verdicts</p>
+          <div id="tripwire"></div>
+          <div id="watch"></div>
+          <div id="consumption"></div>
+          <div id="anchors">
+            <p class="testimony">the block height is your half of the
+            regeneration defense — confirm it against a Bitcoin block
+            source you trust</p>
+            <div id="panel"></div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="pane">
@@ -2924,47 +2975,11 @@ this page draws them and decides nothing</footer>
   </div>
 </section>
 
-<section id="recall">
-  <h2>recall</h2>
-  <p class="testimony">testimony, not a verdict — what was attempted, as
-  the writer told it; run <code>receipts verify</code> for the verdict</p>
-  <input type="search" id="ask-search"
-         placeholder="search every action line on this machine">
-  <div id="found"></div>
-  <div id="filters">
-    <label>repo
-      <select id="ask-repo"><option value="">every repo</option></select>
-    </label>
-    <label>from <input type="date" id="ask-from"></label>
-    <label>to <input type="date" id="ask-to"></label>
-    <label>file path
-      <input type="text" id="ask-path" placeholder="anywhere it appears">
-    </label>
-  </div>
-</section>
-
 <section id="hours">
   <h2>working hours</h2>
   <p class="testimony">when receipts actually arrive, in your own
   timezone — the selfish view: what your weeks really look like</p>
   <div id="clock">remembering…</div>
-</section>
-
-<section id="drawers">
-  <h2>drawers</h2>
-  <p class="testimony">one per project — the worst claim leads; click a
-  drawer for that project's timeline</p>
-  <div id="tiles">remembering…</div>
-</section>
-
-<section id="events">
-  <h2>events</h2>
-  <p class="testimony">what changed since the last look, which sessions
-  are behind their witness, and which are burning far above the store's
-  norm — reasons to look, never verdicts</p>
-  <div id="tripwire"></div>
-  <div id="watch"></div>
-  <div id="consumption"></div>
 </section>
 
 <section id="sessions">
@@ -2976,17 +2991,6 @@ this page draws them and decides nothing</footer>
   <div id="axis"></div>
 </section>
 
-<section id="anchors">
-  <h2>anchors</h2>
-  <p class="testimony">the block height is your half of the regeneration
-  defense — confirm it against a Bitcoin block source you trust</p>
-  <div id="panel"></div>
-</section>
-
-<section id="alarms">
-  <h2>status band</h2>
-  <div id="band"></div>
-</section>
 <section id="firedrill" hidden>
   <h2>fire drill</h2>
   <p class="testimony">rehearsal on sandbox copies — nothing here is a
@@ -3173,7 +3177,7 @@ function attentionItems(report) {
       items.push({rank: "alarm", tone: "grave", chip: s.state,
         text: s.repo + " · " + s.session.slice(0, 8) + " — " +
               (s.words || "receipts behind the witness"),
-        goto: "events"});
+        repo: s.repo, session: s.session});
     }
   }
   for (const repo of report.repos) {
@@ -3184,12 +3188,13 @@ function attentionItems(report) {
           items.push({rank: "regenerated", tone: "grave",
             chip: chain.verdict,
             text: repo.repo + " · " + session.session.slice(0, 8) +
-                  " — not the recorded history", goto: "alarms"});
+                  " — not the recorded history",
+            repo: repo.repo, session: session.session});
         } else if (chain.verdict === "BROKEN") {
           items.push({rank: "broken", tone: "damage", chip: "BROKEN",
             text: repo.repo + " · " + session.session.slice(0, 8) +
                   " — history was altered after the fact",
-            goto: "alarms"});
+            repo: repo.repo, session: session.session});
         }
       }
     }
@@ -3198,13 +3203,13 @@ function attentionItems(report) {
     items.push({rank: "tripwire", tone: "damage",
       chip: "CHANGED SINCE LAST LOOK",
       text: event.repo + " · " + event.session + " — " + event.change,
-      goto: "events"});
+      tab: "evidence"});
   }
   for (const s of (report.consumption || {sessions: []}).sessions) {
     if (s.state === "RUNNING-HOT") {
       items.push({rank: "hot", tone: "look", chip: "RUNNING-HOT",
         text: s.repo + " · " + s.session.slice(0, 8) +
-              " — burning far above the store's norm", goto: "events"});
+              " — burning far above the store's norm", tab: "evidence"});
     }
   }
   items.sort((a, b) =>
@@ -3238,8 +3243,18 @@ function renderAttention(report) {
     row.appendChild(el("span", "what", item.text));
     const go = el("button", "walk", "look");
     go.type = "button";
-    go.addEventListener("click", () => document.getElementById(item.goto)
-      .scrollIntoView({behavior: "smooth"}));
+    go.addEventListener("click", () => {
+      // A named session opens under inspection; anything else opens
+      // the evidence view — either way, the loud row is one click
+      // from its own detail.
+      const story = item.session && (shownRecall
+        ? shownRecall.sessions : []).find(s =>
+          s.repo === item.repo && s.session === item.session);
+      if (story) { showTab("sessions"); selectSession(story); }
+      else showTab(item.tab || "evidence");
+      document.getElementById("worktable")
+        .scrollIntoView({behavior: "smooth"});
+    });
     row.appendChild(go);
     box.appendChild(row);
   }
@@ -3318,9 +3333,24 @@ function worstTier(chains) {
   return "valid";
 }
 
+// The worktable's tab row: pane one shows exactly one of the four
+// views; pane two stays the inspection surface throughout.
+function showTab(name) {
+  for (const b of document.querySelectorAll("#tabs .tab")) {
+    b.classList.toggle("on", b.dataset.tab === name);
+  }
+  for (const pane of document.querySelectorAll("#pane1 > .tabpane")) {
+    pane.hidden = pane.id !== "pane-" + name;
+  }
+}
+for (const b of document.querySelectorAll("#tabs .tab")) {
+  b.addEventListener("click", () => showTab(b.dataset.tab));
+}
+
 function openDrawer(repo) {
   document.getElementById("ask-repo").value = repo;
   loadRecall();
+  showTab("sessions");
   document.getElementById("worktable")
     .scrollIntoView({behavior: "smooth"});
 }
@@ -3619,24 +3649,6 @@ function render(report) {
   }
 
   renderAnchors(report);
-
-  const band = document.getElementById("band");
-  band.replaceChildren();
-  for (const repo of report.repos) {
-    band.appendChild(el("h2", "", repo.repo));
-    for (const session of repo.sessions) {
-      const box = el("div", "session");
-      box.appendChild(el("div", "name", "session " + session.session));
-      for (const chain of session.chains) {
-        box.appendChild(chainRow(chain));
-      }
-      band.appendChild(box);
-    }
-  }
-  if (!report.repos.length) {
-    band.appendChild(el("p", "", "no chains under this root yet — work " +
-      "a session with the hook installed and receipts will appear here."));
-  }
 
   const ask = document.getElementById("ask-repo");
   const known = new Set(Array.from(ask.options, o => o.value));
@@ -4011,7 +4023,7 @@ async function visit(hit) {
   const where = hit.repo + "/" + hit.session;
   const story = (shownRecall ? shownRecall.sessions : [])
     .find(s => s.repo + "/" + s.session === where);
-  if (story) selectSession(story);
+  if (story) { showTab("sessions"); selectSession(story); }
   for (const row of document.querySelectorAll("#sessions-body tr")) {
     if (row.dataset.where === where) {
       row.scrollIntoView({behavior: "smooth", block: "center"});
