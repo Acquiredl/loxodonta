@@ -10,6 +10,8 @@ So this tool makes every action an agent takes leave a receipt, and every receip
 
 In practice that means you can review what your agents ran while you were away — every completed tool call joins the chain, and later you can see where, why order matters, and how a session actually spent its time. And because the hook fires outside the agent's control, the record survives the case that worried me into building this: a prompt-injected session. Unless an attack specifically disables the recorder, it keeps logging — and the action that disables it is itself a tool call, so the last receipt before the silence is the kill command. The watching layer below alarms on the silence that follows.
 
+The chain holds one-line summaries, not the full story. The full record, complete commands and tool output, lives in the harness transcript, a plain file anyone can rewrite. So every 25 receipts the chain also commits the transcript's hash as it grows: once a stretch of transcript is committed, rewriting it is detectable forever, and `verify --transcript` says which stretch was touched. The claim is caged the same way as everything here: coverage runs forward from each commitment, the newest ~25 calls are always still open, and it is detection, not protection. Anchors remain the only hard boundary.
+
 It's one Python file, no dependencies, six core commands, and you can read the whole thing top to bottom in a sitting. That's a design constraint, not an accident: a tool whose job is auditing agents should itself be auditable in an afternoon.
 
 ## what a recorded task actually looks like

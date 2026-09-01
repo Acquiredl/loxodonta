@@ -51,10 +51,29 @@ Where the real limits sit:
 
 Failure semantics: on an unusable payload or an unappendable log the adapter prints one error line and exits 1 — visible in the harness, non-blocking for the session (the tool already ran; PostToolUse cannot roll it back, and receipts wouldn't want to).
 
+## The transcript commitment (ADR-0017)
+
+The chain is the *spine* of a forensic rebuild; the flesh — full commands, tool output, the conversation — lives in the harness transcript, a plain file the writer can reach. Every 25 entries, the hook staples the two together: it hashes the transcript **from byte zero** and appends a bookkeeping entry in the recorder's own voice —
+
+```
+{"actor": "receipts", "action": "transcript-commitment: bytes=1679210 sha256=c01237…", "files": [], …}
+```
+
+A committed prefix can never be rewritten undetected again: `verify --transcript` re-hashes each committed boundary and says which commitments hold (SPEC §2.2, §6). Because each commitment covers the whole prefix, a diverging one localizes the rewrite to the span since the previous commitment. `supervisor scan` hands each committed session its exact judge command.
+
+The honest limits, stated plainly:
+
+- **The window before the next commitment is open.** Bytes newer than the latest commitment — including the whole transcript during the first 25 calls — are rewritable until a commitment covers them, and the commitment will faithfully fingerprint whatever is there by then. At most ~25 calls of history are exposed at any moment.
+- **The tail after the last commitment is never covered** — the final <25 calls plus the session's closing bytes stay uncommitted until a SessionEnd commitment lands (tracked future work).
+- The commitment is **writer-authored**, like everything the recorder writes: it extends tamper-evidence to the transcript *by reference, forward from each commitment* — detection latency, not protection. Anchors remain the only hard boundary.
+
+Cost: a commitment is one extra append (~4% more entries) and one transcript read+hash at the boundary — measured at ~1 ms per MB, inside a ~155 ms hook call that interpreter startup dominates either way (EXPERIMENTS §4). Bookkeeping entries never count against the completeness witness and never spend digest rows.
+
 ## Verifying a session
 
 ```
 receipts verify --log receipts-<session>.jsonl            # chain integrity
+receipts verify --log ... --transcript <transcript.jsonl> # + judge transcript commitments
 receipts report --log receipts-<session>.jsonl            # human timeline
 receipts anchor --log receipts-<session>.jsonl            # pin it to Bitcoin (Stage B)
 ```
