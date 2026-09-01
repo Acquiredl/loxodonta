@@ -2634,21 +2634,31 @@ PAGE = """<!doctype html>
          padding: 0.5rem 1rem; cursor: pointer; }
   .tab:hover { color: var(--fg); }
   .tab.on { color: var(--fg); border-bottom-color: var(--accent); }
-  #split { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+  /* The split is the operator's to shape: the divider drags (or takes
+     arrow keys) to trade width between the panes, and each pane body
+     drags its own bottom-right corner to grow taller — the browser's
+     native resize, no library. */
+  #split { display: grid;
+           grid-template-columns: minmax(0, var(--p1, 1fr)) 6px
+                                  minmax(0, var(--p2, 1fr));
            border: 1px solid var(--border); border-top: 0;
            border-radius: 0 0 0.6rem 0.6rem; overflow: hidden;
            min-height: 24rem; }
   .pane { min-width: 0; display: flex; flex-direction: column; }
-  .pane + .pane { border-left: 1px solid var(--border); }
+  #divider { cursor: col-resize; background: var(--border);
+             border: 0; padding: 0; }
+  #divider:hover, #divider:focus-visible { background: var(--accent); }
   .phead { font-family: var(--mono); font-size: 0.7rem; color: var(--faint);
            letter-spacing: 0.06em; padding: 0.45rem 0.8rem;
            border-bottom: 1px solid var(--border); background: var(--surface);
            display: flex; gap: 0.5rem; align-items: baseline; }
   .phead .no { color: var(--accent); }
-  .pbody { overflow: auto; flex: 1; max-height: 34rem; }
+  .pbody { overflow: auto; flex: 1; height: 32rem;
+           resize: vertical; min-height: 10rem; }
   @media (max-width: 72rem) {
     #split { grid-template-columns: 1fr; }
-    .pane + .pane { border-left: 0; border-top: 1px solid var(--border); }
+    #divider { display: none; }
+    .pane + .pane { border-top: 1px solid var(--border); }
   }
   #sessions-table { width: 100%; border-collapse: collapse;
                     font-size: 0.82rem; }
@@ -2978,6 +2988,10 @@ this page draws them and decides nothing</footer>
         </div>
       </div>
     </div>
+    <button type="button" id="divider" role="separator"
+            aria-orientation="vertical"
+            aria-label="drag or use arrow keys to resize the panes"
+            title="drag to resize"></button>
     <div class="pane">
       <div class="phead"><span class="no">[2]</span>
         <button type="button" class="p2tab on" data-p2="inspect">inspect</button>
@@ -3383,6 +3397,35 @@ function showTab(name) {
 for (const b of document.querySelectorAll("#tabs .tab")) {
   b.addEventListener("click", () => showTab(b.dataset.tab));
 }
+
+// The divider: pointer-drag or arrow keys trade width between the
+// panes. Fractions live in CSS custom properties; nothing persists —
+// the split is a working posture, not configuration.
+const splitBox = document.getElementById("split");
+function setSplit(fraction) {
+  const share = Math.min(0.8, Math.max(0.2, fraction));
+  splitBox.style.setProperty("--p1", share + "fr");
+  splitBox.style.setProperty("--p2", (1 - share) + "fr");
+}
+const divider = document.getElementById("divider");
+divider.addEventListener("pointerdown", down => {
+  down.preventDefault();
+  divider.setPointerCapture(down.pointerId);
+  const move = drag => {
+    const box = splitBox.getBoundingClientRect();
+    setSplit((drag.clientX - box.left) / box.width);
+  };
+  divider.addEventListener("pointermove", move);
+  divider.addEventListener("pointerup", () => {
+    divider.removeEventListener("pointermove", move);
+  }, {once: true});
+});
+divider.addEventListener("keydown", key => {
+  const current = parseFloat(
+    splitBox.style.getPropertyValue("--p1")) || 0.5;
+  if (key.key === "ArrowLeft") setSplit(current - 0.05);
+  if (key.key === "ArrowRight") setSplit(current + 0.05);
+});
 
 function openDrawer(repo) {
   document.getElementById("ask-repo").value = repo;
