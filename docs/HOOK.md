@@ -64,7 +64,7 @@ A committed prefix can never be rewritten undetected again: `verify --transcript
 The honest limits, stated plainly:
 
 - **The window before the next commitment is open.** Bytes newer than the latest commitment — including the whole transcript during the first 25 calls — are rewritable until a commitment covers them, and the commitment will faithfully fingerprint whatever is there by then. At most ~25 calls of history are exposed at any moment.
-- **The tail after the last commitment is never covered** — the final <25 calls plus the session's closing bytes stay uncommitted until a SessionEnd commitment lands (tracked future work).
+- **The tail is sealed on clean exits.** A SessionEnd hook writes one final commitment over the whole transcript, whatever the cadence position (issue #79) — so the mid-session window above is the only one left on a session that ends cleanly. A hard kill can still leave the final <25 calls uncommitted: SessionEnd only fires when the harness gets to clean up, and the docs keep saying so.
 - The commitment is **writer-authored**, like everything the recorder writes: it extends tamper-evidence to the transcript *by reference, forward from each commitment* — detection latency, not protection. Anchors remain the only hard boundary.
 
 Cost: a commitment is one extra append (~4% more entries) and one transcript read+hash at the boundary — measured at ~1 ms per MB, inside a ~155 ms hook call that interpreter startup dominates either way (EXPERIMENTS §4). Bookkeeping entries never count against the completeness witness and never spend digest rows.
