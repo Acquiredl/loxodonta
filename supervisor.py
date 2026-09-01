@@ -755,9 +755,16 @@ def read_witness(transcript, calibration):
     all-tools witness over an Edit|Write|Bash hook manufactures
     deficits, and so does today's wide matcher over yesterday's narrow
     sessions). Chatter is never counted: a chat-only session can never
-    alarm."""
+    alarm. Returns (events, latest): latest is the newest timestamped
+    record of any conversational kind — the session's liveness clock.
+    Chatter moves it (a chat-only session is alive); the harness's
+    timestamp-less metadata records (bridge-session, custom-title,
+    appended to ended transcripts by restart and resume) never do,
+    because an idle clock that resets on metadata re-presents an old
+    deficit as an immortal live alarm (issue #85)."""
     names = {}
     events = []
+    latest = None
     with open(transcript, encoding="utf-8", errors="replace") as lines:
         for line in lines:
             try:
@@ -766,6 +773,12 @@ def read_witness(transcript, calibration):
                 continue
             if not isinstance(record, dict):
                 continue
+            stamped = parse_when(record.get("timestamp"))
+            if stamped is not None:
+                if stamped.tzinfo is None:
+                    stamped = stamped.replace(tzinfo=timezone.utc)
+                if latest is None or stamped > latest:
+                    latest = stamped
             message = record.get("message")
             blocks = (message.get("content")
                       if isinstance(message, dict) else None)
@@ -791,7 +804,7 @@ def read_witness(transcript, calibration):
             when = record.get("timestamp")
             if owes_receipt(name, matchers_at(calibration, when)):
                 events.append(when)
-    return events
+    return events, latest
 
 
 def classify(tools, receipts, ended, idle, deficit_age, silent):
@@ -821,9 +834,17 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     """One session against its witness. deficit_since needs no stored
     state: receipts pair with tool events in order, so the first
     unpaired event's timestamp is when the deficit began."""
-    events = read_witness(transcript, calibration)
+    events, latest = read_witness(transcript, calibration)
     tools = len(events)
-    quiet_for = now.timestamp() - transcript.stat().st_mtime
+    # The idle clock reads the newest timestamped record, not file
+    # mtime: the harness touches ended transcripts with timestamp-less
+    # metadata, and an mtime clock resets on every touch (issue #85).
+    # mtime remains the fallback for a transcript holding no
+    # timestamped record at all.
+    if latest is not None:
+        quiet_for = (now - latest).total_seconds()
+    else:
+        quiet_for = now.timestamp() - transcript.stat().st_mtime
     # Today both flags read from the idle window ("witness quiet this
     # long ⇒ session treated as ended"); they separate if the harness
     # ever writes an explicit end marker.
