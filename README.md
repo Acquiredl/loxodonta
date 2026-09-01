@@ -8,13 +8,15 @@
 
 So this tool makes every action an agent takes leave a receipt, and every receipt contains the SHA256 hash of the one before it. That single change turns a log into a hash chain: edit, delete, or reorder any line and every later hash stops matching. One command tells you whether history was touched. Not prevented, detected. That distinction matters and the docs never blur it: this is tamper-evident, not immutable.
 
-In practice that means you can review what your agents ran while you were away — every tool call joins the chain, and later you can see where, why order matters, and how a session actually spent its time. And because the hook fires outside the agent's control, the record survives the case that worried me into building this: a prompt-injected session. Unless an attack specifically disables the recorder, it keeps logging — and the action that disables it is itself a tool call, so the last receipt before the silence is the kill command. The watching layer below alarms on the silence that follows.
+In practice that means you can review what your agents ran while you were away — every completed tool call joins the chain, and later you can see where, why order matters, and how a session actually spent its time. And because the hook fires outside the agent's control, the record survives the case that worried me into building this: a prompt-injected session. Unless an attack specifically disables the recorder, it keeps logging — and the action that disables it is itself a tool call, so the last receipt before the silence is the kill command. The watching layer below alarms on the silence that follows.
+
+The chain holds one-line summaries, not the full story. The full record, complete commands and tool output, lives in the harness transcript, a plain file anyone can rewrite. So every 25 receipts the chain also commits the transcript's hash as it grows: once a stretch of transcript is committed, rewriting it is detectable forever, and `verify --transcript` says which stretch was touched. The claim is caged the same way as everything here: coverage runs forward from each commitment, the newest ~25 calls are always still open, and it is detection, not protection. Anchors remain the only hard boundary.
 
 It's one Python file, no dependencies, six core commands, and you can read the whole thing top to bottom in a sitting. That's a design constraint, not an accident: a tool whose job is auditing agents should itself be auditable in an afternoon.
 
 ## what a recorded task actually looks like
 
-A Claude Code hook writes a receipt for every tool call, so a chain ends up being a timeline of how a task evolved, without the agent getting a vote. Here's a short real excerpt from a session building this repo — tests written first, code edited until they pass, then the merge:
+A Claude Code hook writes a receipt for every completed tool call, so a chain ends up being a timeline of how a task evolved, without the agent getting a vote. Here's a short real excerpt from a session building this repo — tests written first, code edited until they pass, then the merge:
 
 ```
 160  17:53:23Z  claude-code: Bash: cat >> tests/test_supervisor.py << 'EOF' class WalkFindingsTest...
@@ -37,7 +39,7 @@ Here are the test results, rather than the assumption. Fresh agents were quizzed
 - **With the chain: 12/12 and 12/12.** Both agents answered everything, down to the exact final action of a session that ended mid-edit, and named work that exists in *no* commit on *any* branch — a throwaway prototype the receipts alone remember.
 - **Git-only: 10/10 on what git can see, and an honest "cannot determine" on the rest.** Both dropped exactly the two chain-only questions. Git log holds its own on committed work — the chain doesn't replace it. It answers what git structurally can't: what was going on here recently, which files were hot, what was left mid-flight, and what never became a commit at all.
 
-That reading ships as a surface of its own. A `SessionStart` hook injects a **digest** at the top of every session: the repo's recent receipts as one-line rows, each session's final entry tagged as the last recorded action, capped at a fixed row budget so a long history can't flood the context. Every row carries an **entry address** — a short prefix of the entry's own hash — and three commands climb from there:
+That reading ships as a surface of its own. A `SessionStart` hook injects a **digest** at the top of every session: the repo's recent receipts as one-line rows, each session's final entry tagged as the last recorded action, capped at a fixed row budget so a long history can't flood the context. Runs of same-tool receipts collapse into one row (`14x Read, last: ...`) before the cap is applied, so an exploration-heavy session spends rows on its story, not its searching. Every row carries an **entry address** — a short prefix of the entry's own hash — and three commands climb from there:
 
 ```
 python supervisor.py digest                   # what the hook injects, by hand
@@ -95,7 +97,7 @@ One honest note on timing: an anchor hardens history **up to the anchored head**
 
 ## hooking it into an agent
 
-For Claude Code, a `PostToolUse` hook turns every tool call into a receipt automatically, which is how the timeline above got written — `install-hook` wires it, [docs/HOOK.md](docs/HOOK.md) explains it.
+For Claude Code, a `PostToolUse` hook turns every completed tool call into a receipt automatically, which is how the timeline above got written — `install-hook` wires it, [docs/HOOK.md](docs/HOOK.md) explains it.
 
 The recorder itself doesn't care who writes to it. Anything that can run a command can leave a receipt, so `loxodonta run` and `loxodonta log` work with any framework today, and wiring another stack in automatically means writing one small adapter against its tool-call events. Claude Code is the only shipped adapter right now because it's what I use daily. Adapters for other frameworks are on the planned list below.
 

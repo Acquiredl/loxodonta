@@ -8,20 +8,25 @@ CLI and judges nothing itself: verdicts come from `loxodonta verify`,
 and everything the supervisor holds is writer-reachable, so nothing
 here is a head record (GLOSSARY: Supervisor, Baseline).
 
-  python supervisor.py scan --root DIR --json
-  python supervisor.py serve --root DIR
+  python supervisor.py scan --json              # one tick over the store
+  python supervisor.py serve                    # the face
   python supervisor.py digest [--repo DIR]      # the session-start injection
   python supervisor.py show ADDRESS             # one entry, self-verifying
   python supervisor.py search TEXT [--all]      # the ladder past the digest
   python supervisor.py timeline ADDRESS         # context around one entry
+  python supervisor.py scan --root DIR --json   # legacy: a folder of repos
 
-`scan` is one tick without timers: a census of every chain under the
-root, a verdict for each, a baseline diff against the last look,
+`scan` is one tick without timers: a census of every chain in the
+store (ADR-0011; --root walks a legacy folder of repos instead), a
+verdict for each, a baseline diff against the last look,
 machine-readable JSON on stdout, and an exit code cron can shout about —
 0 when nothing demands attention, 1–4 for the worst verify exit found,
 5 when the baseline saw a change appends cannot explain (a reason to
 investigate, never a verdict), 6 when a session is demonstrably active
-but its chain is behind the witness (the completeness alarm).
+but its chain is behind the witness (the completeness alarm), 7 when a
+chain's transcript commitments contradict each other (verify's exit 5,
+ADR-0017 — renumbered in this fold because scan's 5 already means the
+tripwire).
 
 `serve` is the face: a localhost-only stdlib HTTP server serving one
 inline HTML page — no framework, no build step. The page opens on
@@ -56,11 +61,13 @@ LOXODONTA = HERE / "loxodonta.py"
 # --- Census -------------------------------------------------------------------
 
 def find_chains(root):
-    """Every receipt log under the root. Three shapes, because history has
-    three shapes: the root itself being a repo, each sibling repo's
-    receipts/, and chains stranded in worktrees by sessions that ran
-    before the hook learned to log to the main repo. Anchor sidecars are
-    proofs about a chain, not chains."""
+    """Every receipt log under a legacy --root. Three shapes, because
+    pre-store history has three shapes: the root itself being a repo,
+    each sibling repo's receipts/, and chains stranded in worktrees by
+    sessions that ran before the hook learned to log to the main repo.
+    The default census is not this one: it is a single glob over the
+    store's drawers, inline in scan_root (ADR-0011). Anchor sidecars
+    are proofs about a chain, not chains."""
     patterns = ("receipts/*.jsonl",
                 "*/receipts/*.jsonl",
                 "*/.claude/worktrees/*/receipts/*.jsonl")
@@ -173,7 +180,8 @@ def superseded(log, detail):
 
 # --- Baseline -----------------------------------------------------------------
 # The tripwire's memory (GLOSSARY: Baseline): every chain's last-seen
-# head, kept in a file beside the repos. Writer-reachable by definition,
+# head, kept beside what it watches — the store's home in store mode
+# (ADR-0011), the legacy root folder otherwise. Writer-reachable by definition,
 # therefore trusted for nothing — a disagreement is a reason to
 # investigate, never a verdict about which side is true. Verdicts come
 # from verify; the out-of-reach copy, if you keep one, is the anchor.
@@ -204,14 +212,18 @@ def read_baseline(path):
                    and "n" in known for known in chains.values()):
             raise ValueError("baseline rows must remember a head and an n")
         keeper = data.get("keeper")
-        return chains, keeper if isinstance(keeper, dict) else {}, None
+        calibration = [epoch for epoch in data.get("calibration", [])
+                       if isinstance(epoch, dict)
+                       and isinstance(epoch.get("matchers"), list)]
+        return (chains, keeper if isinstance(keeper, dict) else {},
+                calibration, None)
     except FileNotFoundError:
-        return {}, {}, None  # cold start: seed silently
+        return {}, {}, [], None  # cold start: seed silently
     except (ValueError, KeyError, TypeError, AttributeError,
             json.JSONDecodeError, OSError):
-        return {}, {}, ("the baseline could not be read — remembering "
-                        "afresh from this look; it was trusted for "
-                        "nothing either way")
+        return {}, {}, [], ("the baseline could not be read — remembering "
+                            "afresh from this look; it was trusted for "
+                            "nothing either way")
 
 
 def diff_baseline(remembered, relpath, entries):
@@ -296,7 +308,8 @@ def remember_day(path, now, tally):
     today = now.strftime("%Y-%m-%d")
     row = dict(days.get(today) or {})
     for claim, seen in tally.items():
-        row[claim] = max(row.get(claim, 0), seen)
+        if claim != "chains":
+            row[claim] = max(row.get(claim, 0), seen)
     row["chains"] = tally["chains"]  # a count of now, not a high-water mark
     row["scans"] = row.get("scans", 0) + 1
     row["looks"] = row.get("looks", 0)
@@ -413,7 +426,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
-    note = None
+    notes = []  # one turn can fail twice; every failure stays said
     failed = False
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     if sidecar.exists():
@@ -423,8 +436,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
             capture_output=True, encoding="utf-8", env=env)
         attempted = True
         if finished.returncode != 0:
-            note = ("upgrade attempted; a calendar did not answer — "
-                    "proofs stay pending and the keeper will try again")
+            notes.append("upgrade attempted; a calendar did not answer — "
+                         "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
         head = entries[-1].get("entry_hash")
         born = parse_when(entries[-1].get("ts"))
@@ -439,10 +452,10 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
             attempted = True
             if finished.returncode != 0:
                 failed = True
-                note = ("anchoring failed — no calendar accepted this "
-                        "head; it stays unanchored and the keeper will "
-                        "try again")
-    return attempted, note, failed
+                notes.append("anchoring failed — no calendar accepted "
+                             "this head; it stays unanchored and the "
+                             "keeper will try again")
+    return attempted, "; ".join(notes) or None, failed
 
 
 def assess_anchors(detail, entries):
@@ -499,6 +512,10 @@ WATCH_WORDS = {
     "ENDED-DEFICIT": "the session ended short of the witness's count — "
                      "those receipts are missing forever; kept as "
                      "evidence, not as a siren.",
+    "ENDED-SURPLUS": "the session ended with more receipts than witnessed "
+                     "tools — witness lag frozen at end, or receipts that "
+                     "arrived unwitnessed; kept as evidence, not as a "
+                     "siren.",
     "SURPLUS": "more receipts than witnessed tools — witness lag, or "
                "receipts arriving unwitnessed; investigate. A flag, "
                "never a verdict.",
@@ -545,6 +562,49 @@ def hook_matchers(witness):
         if wired:
             matchers.append(str(rule.get("matcher", "*")))
     return matchers
+
+
+def calibrate(remembered, witness, now):
+    """Effective-dated coverage (ADR-0016): the supervisor's memory of
+    which matchers were wired when, so a matcher change never re-judges
+    history the old rules recorded honestly. The first observation
+    covers all time before it; a change is dated by the settings file's
+    mtime, clamped between the last observation and now — the best
+    estimate available, since the harness does not log its own config
+    changes. Lives in the baseline: writer-reachable, trusted for
+    nothing beyond calibration."""
+    current = hook_matchers(witness)
+    if remembered and remembered[-1]["matchers"] == current:
+        return remembered
+    if not remembered:
+        return [{"since": None, "matchers": current}]
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        changed = datetime.fromtimestamp(
+            (witness.parent / "settings.json").stat().st_mtime,
+            timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except OSError:
+        changed = stamp
+    floor = remembered[-1]["since"] or ""
+    return remembered + [{"since": min(max(changed, floor), stamp),
+                          "matchers": current}]
+
+
+def matchers_at(calibration, ts):
+    """The matchers in force at one moment: the newest observation not
+    after `ts` (ISO timestamps compare as strings). A time before the
+    first observation gets the first — the supervisor claims no
+    knowledge older than its own memory — and a missing timestamp gets
+    the present."""
+    if not calibration:
+        return []
+    if not isinstance(ts, str):
+        return calibration[-1]["matchers"]
+    chosen = calibration[0]["matchers"]
+    for epoch in calibration[1:]:
+        if epoch["since"] <= ts:
+            chosen = epoch["matchers"]
+    return chosen
 
 
 # --- The recorder notice ------------------------------------------------------
@@ -686,14 +746,16 @@ def owes_receipt(name, matchers):
     return False
 
 
-def read_witness(transcript, matchers):
+def read_witness(transcript, calibration):
     """The witness signal: timestamps of tool events that owe a receipt.
     A tool event is a tool_use block paired by id with its result line;
     only completed results count (failed calls fire no hook — the
-    field's suppression finding) and only tools the wired matchers
-    cover (the calibration finding: an all-tools witness over an
-    Edit|Write|Bash hook manufactures deficits). Chatter is never
-    counted: a chat-only session can never alarm."""
+    field's suppression finding) and only tools covered at the event's
+    own time (the calibration finding, effective-dated by ADR-0016: an
+    all-tools witness over an Edit|Write|Bash hook manufactures
+    deficits, and so does today's wide matcher over yesterday's narrow
+    sessions). Chatter is never counted: a chat-only session can never
+    alarm."""
     names = {}
     events = []
     with open(transcript, encoding="utf-8", errors="replace") as lines:
@@ -726,8 +788,9 @@ def read_witness(transcript, matchers):
                 # on the tool_result block (field capture, 2026-08-29).
                 continue
             name = names.get(found.get("tool_use_id")) if found else None
-            if owes_receipt(name, matchers):
-                events.append(record.get("timestamp"))
+            when = record.get("timestamp")
+            if owes_receipt(name, matchers_at(calibration, when)):
+                events.append(when)
     return events
 
 
@@ -738,6 +801,8 @@ def classify(tools, receipts, ended, idle, deficit_age, silent):
     end-of-session reconciliation reports it as evidence."""
     deficit = max(0, tools - receipts)
     if ended:
+        if receipts > tools:
+            return "ENDED-SURPLUS"
         return "ENDED-CLEAN" if deficit == 0 else "ENDED-DEFICIT"
     if idle:
         return "IDLE-CLEAN" if deficit == 0 else "IDLE-DEFICIT"
@@ -752,11 +817,11 @@ def classify(tools, receipts, ended, idle, deficit_age, silent):
     return "ALARM-SILENT" if silent else "ALARM-DEFICIT"
 
 
-def watch_session(transcript, receipts, last_receipt, now, matchers):
+def watch_session(transcript, receipts, last_receipt, now, calibration):
     """One session against its witness. deficit_since needs no stored
     state: receipts pair with tool events in order, so the first
     unpaired event's timestamp is when the deficit began."""
-    events = read_witness(transcript, matchers)
+    events = read_witness(transcript, calibration)
     tools = len(events)
     quiet_for = now.timestamp() - transcript.stat().st_mtime
     # Today both flags read from the idle window ("witness quiet this
@@ -774,17 +839,30 @@ def watch_session(transcript, receipts, last_receipt, now, matchers):
     return state, tools
 
 
-def watch_completeness(root, witness, families, everywhere=False):
+def watch_completeness(root, witness, families, everywhere=False,
+                       calibration=None):
     """The completeness half of a tick: every census session paired with
     its transcript, plus witnessed sessions that never grew a chain at
     all — the disabled-hook case the census alone can never see.
     `everywhere` is store mode (ADR-0011): the store covers the whole
     machine, so every witnessed project is this scan's business, not
-    just folders under one root."""
+    just folders under one root. `calibration` is the effective-dated
+    coverage memory (ADR-0016); without one, this look's wired matchers
+    are taken to have always been in force."""
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
     ours = munge(root)
-    matchers = hook_matchers(witness)
+    if calibration is None:
+        calibration = [{"since": None, "matchers": hook_matchers(witness)}]
+    matchers = calibration[-1]["matchers"]
+    if len(calibration) > 1:
+        watch["calibration"] = {
+            "epochs": calibration,
+            "words": ("the wired matchers changed on "
+                      f"{calibration[-1]['since']} — each session is "
+                      "judged by the coverage in force at its time "
+                      "(ADR-0016)"),
+        }
     transcripts = {}
     if witness.is_dir():
         transcripts = {t.stem: t for t in sorted(witness.glob("*/*.jsonl"))}
@@ -797,7 +875,7 @@ def watch_completeness(root, witness, families, everywhere=False):
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
 
-    def add(repo, session, state, tools, receipts, drawers=()):
+    def add(repo, session, state, tools, receipts, drawers=(), judge=None):
         entry = {"repo": repo, "session": session, "state": state,
                  "tools": tools, "receipts": receipts,
                  "deficit": max(0, tools - receipts)}
@@ -805,6 +883,8 @@ def watch_completeness(root, witness, families, everywhere=False):
             entry["drawers"] = list(drawers)
         if state in WATCH_WORDS:
             entry["words"] = WATCH_WORDS[state]
+        if judge:
+            entry["judge"] = judge
         watch["sessions"].append(entry)
 
     # One session, one watch. A single session's receipts can span
@@ -822,6 +902,8 @@ def watch_completeness(root, witness, families, everywhere=False):
         group["drawers"].append((family["receipts"], repo))
         if family["last"]:
             group["last"] = max(group["last"] or "", family["last"])
+        if "committed_log" in family and "judge_log" not in group:
+            group["judge_log"] = family["committed_log"]
     for group in sessions.values():
         group["receipts"] = sum(n for n, _ in group["drawers"])
         # The session's home is the drawer holding most of it: the
@@ -843,7 +925,7 @@ def watch_completeness(root, witness, families, everywhere=False):
             continue
         try:
             state, tools = watch_session(transcript, receipts,
-                                         group["last"], now, matchers)
+                                         group["last"], now, calibration)
         except OSError:
             # A transcript that cannot be read (vanished mid-scan, or a
             # path that is not a readable file) costs this one session
@@ -851,7 +933,14 @@ def watch_completeness(root, witness, families, everywhere=False):
             # honestly: completeness cannot be watched, nothing assumed.
             add(repo, session, "UNWITNESSED", 0, receipts, spans)
             continue
-        add(repo, session, state, tools, receipts, spans)
+        # The supervisor locates, verify judges (ADR-0017): a committed
+        # session with a living transcript gets the exact ritual command.
+        judge = None
+        if group.get("judge_log"):
+            judge = (f'python "{LOXODONTA.as_posix()}" verify '
+                     f'--log "{group["judge_log"]}" '
+                     f'--transcript "{transcript.as_posix()}"')
+        add(repo, session, state, tools, receipts, spans, judge=judge)
 
     # Chainless sessions: only transcript folders under this root are
     # this scan's business; a folder's name past the root prefix is the
@@ -861,13 +950,140 @@ def watch_completeness(root, witness, families, everywhere=False):
         if not matchers or (not everywhere and not folder.startswith(ours)):
             continue
         try:
-            state, tools = watch_session(transcript, 0, None, now, matchers)
+            state, tools = watch_session(transcript, 0, None, now,
+                                         calibration)
         except OSError:
             continue  # unreadable and chainless: nothing to say about it
         name = (folder if everywhere
                 else folder[len(ours):].strip("-") or root.name)
         add(name, stem, state, tools, 0)
 
+    return watch
+
+
+# --- Consumption --------------------------------------------------------------
+# The consumption watch (issue #67; OWASP GenAI LLM06 mitigation #8):
+# wide coverage (ADR-0016) makes the chains a record of tool tempo —
+# entries per session per hour — so a runaway loop or recursion without
+# a clear end state shows up as a session burning far above this
+# store's own norm. Everything read here is testimony (writer-stamped
+# timestamps and action lines), so the watch never raises the scan exit
+# and owns no verdicts. The boundary of the issue, held on purpose:
+# this tool evidences someone else's circuit breaker; it never is one
+# (.out-of-scope/001 — the hook stays outcome-blind).
+
+# A session runs hot when its busiest sliding hour reaches HOT_TIMES x
+# the median busiest hour of every *other* session, and at least
+# HOT_FLOOR — below one entry a minute nothing is runaway, however
+# small the norm. Peak against peaks, deliberately: an ordinary busy
+# hour towers over the median *hour* of a store full of quiet ones
+# (the first cut flagged a fifth of this machine's honest history);
+# against other sessions' peaks, that same history sat inside 3x while
+# a runaway loop still stands clear of it. The env knobs are the test
+# suite's threshold handle.
+HOT_TIMES = int(os.environ.get("SUPERVISOR_HOT_TIMES", 3))
+HOT_FLOOR = int(os.environ.get("SUPERVISOR_HOT_FLOOR", 60))
+
+CONSUMPTION_WORDS = {
+    "RUNNING-HOT": "receipts arriving far above this store's norm and "
+                   "still coming — a runaway loop or recursion without a "
+                   "clear end state looks like this. Evidence for your "
+                   "hand on the brake, never a brake itself.",
+    "ENDED-HOT": "a session that burned far above the store's norm and "
+                 "has gone quiet — kept as evidence, not a siren.",
+}
+
+
+def tool_of(action):
+    """The tool inside an action line, the way the hook writes one —
+    "Tool: summary" or a bare tool name. A line from any other writer
+    is its own label, whole: testimony rendered, never interpreted."""
+    head, sep, _ = str(action).partition(": ")
+    return head if sep else str(action)
+
+
+def busiest_hour(moments):
+    """One session's peak tempo: the sliding hour holding the most
+    entries, as (count, window start, dominant tool, its count). Two
+    pointers over the sorted timestamps; ties keep the earliest
+    window, so the figure never wobbles between looks."""
+    stamped = sorted(m for m in moments if m[0] is not None)
+    best, start = (0, None, None, 0), 0
+    for end in range(len(stamped)):
+        while (stamped[end][0] - stamped[start][0]).total_seconds() >= 3600:
+            start += 1
+        if end - start + 1 > best[0]:
+            window = [tool for _, tool in stamped[start:end + 1]]
+            top = max(set(window), key=window.count)
+            best = (len(window), stamped[start][0], top, window.count(top))
+    return best
+
+
+def median_of(counts):
+    ordered = sorted(counts)
+    mid = len(ordered) // 2
+    return (ordered[mid] if len(ordered) % 2
+            else (ordered[mid - 1] + ordered[mid]) / 2)
+
+
+def watch_consumption(families, now):
+    """The consumption half of a tick: every census session's tempo
+    against the store's norm, the hot ones surfaced. A session's
+    drawers merge exactly as the completeness watch merges them — the
+    tempo belongs to the session, not the drawer — and its home is the
+    drawer holding most of it, ties to the first name."""
+    sessions = {}
+    for (repo, session), family in sorted(families.items()):
+        group = sessions.setdefault(session, {"moments": [], "homes": []})
+        moments = family.get("moments", ())
+        group["moments"].extend(moments)
+        group["homes"].append((len(moments), repo))
+    peaks = {name: busiest_hour(group["moments"])
+             for name, group in sessions.items()}
+    # A session with no timestamped entries has no peak — it neither
+    # sets the norm nor gets judged against one.
+    samples = {name: peak[0] for name, peak in peaks.items() if peak[0]}
+    if not samples:
+        return {"norm": {"sessions_counted": 0,
+                         "words": "no timestamped entries yet — there is "
+                                  "no norm to deviate from"},
+                "sessions": []}
+    watch = {
+        "norm": {
+            "median_busiest_hour": median_of(samples.values()),
+            "sessions_counted": len(samples),
+            "words": (f"hot means a busiest hour of at least "
+                      f"max({HOT_FLOOR}, {HOT_TIMES} x the median busiest "
+                      "hour of every other session) — a session never "
+                      "sets its own norm. The norm is context for a "
+                      "flag, never a verdict; timestamps are testimony"),
+        },
+        "sessions": [],
+    }
+    for session, group in sorted(sessions.items()):
+        # Deviation needs a norm the session did not write: the other
+        # sessions' peaks. A store holding only this session has no
+        # norm to deviate from, and says nothing rather than guessing.
+        others = [peak for name, peak in samples.items() if name != session]
+        if not others:
+            continue
+        threshold = max(HOT_FLOOR, HOT_TIMES * median_of(others))
+        count, began, top, top_count = peaks[session]
+        if count < threshold:
+            continue
+        last = max((when for when, _ in group["moments"]
+                    if when is not None), default=None)
+        live = (last is not None
+                and (now - last).total_seconds() < IDLE_END_SECONDS)
+        state = "RUNNING-HOT" if live else "ENDED-HOT"
+        home = min(group["homes"], key=lambda h: (-h[0], h[1]))[1]
+        watch["sessions"].append({
+            "repo": home, "session": session, "state": state,
+            "busiest_hour": count, "threshold": threshold,
+            "window_start": began.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "top_tool": top, "top_tool_count": top_count,
+            "words": CONSUMPTION_WORDS[state],
+        })
     return watch
 
 
@@ -892,7 +1108,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     else:
         baseline_path = root / BASELINE_NAME
         daybook = root / DAYBOOK_NAME
-    remembered, keeper, note = read_baseline(baseline_path)
+    remembered, keeper, calibration, note = read_baseline(baseline_path)
+    # Observe the wired matchers before anything is judged, so this
+    # tick's own judgments use a memory that includes this tick's look.
+    calibration = calibrate(calibration, witness, now)
     events = []
     heads = {}
     families = {}
@@ -942,7 +1161,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             chain["anchors"]["failed"] = True
         repos.setdefault(repo, {}).setdefault(session, []).append(chain)
         if not stood_down:
-            worst = max(worst, exit_code)
+            # verify's TRANSCRIPT-DIVERGED is exit 5 in its own contract
+            # (SPEC §6 v0.1.2); scan's 5 already means the baseline
+            # tripwire, so the fold renames it rather than letting one
+            # number tell two stories.
+            worst = max(worst, 7 if exit_code == 5 else exit_code)
             if verdict == "BROKEN":
                 damaged += 1
 
@@ -960,14 +1183,34 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                               "verdict": verdict}
 
         # The session's receipt tally for the completeness watch: the
-        # whole sibling family counts; each genesis is administrative.
+        # whole sibling family counts, minus the recorder's own voice —
+        # genesis and transcript commitments carry actor "receipts" and
+        # are owed by no tool event, so counting them would manufacture
+        # SURPLUS on every committed session (ADR-0017).
         family = families.setdefault((repo, session),
-                                     {"receipts": 0, "last": None})
-        logged = [e for e in entries if e.get("n") != 0]
+                                     {"receipts": 0, "last": None,
+                                      "moments": []})
+        logged = [e for e in entries if e.get("actor") != "receipts"]
         family["receipts"] += len(logged)
         stamps = [e["ts"] for e in logged if isinstance(e.get("ts"), str)]
         if stamps:
             family["last"] = max(family["last"] or "", max(stamps))
+        # And the same entries as (when, tool) moments for the
+        # consumption watch — a stamp without a zone is read as UTC, so
+        # one odd writer can never make two timestamps incomparable.
+        for e in logged:
+            when = parse_when(e.get("ts"))
+            if when is not None and when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            family["moments"].append((when, tool_of(e.get("action"))))
+        # ADR-0017: a chain holding transcript commitments earns the
+        # operator's judge command once the watch pairs its transcript.
+        if "committed_log" not in family and any(
+                isinstance(e, dict) and e.get("actor") == "receipts"
+                and str(e.get("action", "")).startswith(
+                    "transcript-commitment:")
+                for e in entries):
+            family["committed_log"] = (root / relpath).as_posix()
 
     for relpath in remembered:
         if relpath not in heads and not (root / relpath).exists():
@@ -983,12 +1226,17 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "chains": heads,
         "keeper": keeper,
+        "calibration": calibration,
     }, indent=2) + "\n", encoding="utf-8")
     if events:
         worst = max(worst, 5)
 
     completeness = watch_completeness(root, witness, families,
-                                      everywhere=store)
+                                      everywhere=store,
+                                      calibration=calibration)
+    # The consumption watch never touches `worst`: a hot session is a
+    # reason to look, and the brake is the operator's (issue #67).
+    consumption = watch_consumption(families, now)
     # Only a live alarm raises the exit: an ended deficit is evidence,
     # and a siren that never stops sounding trains the operator to
     # ignore the band (the dogfood's lesson).
@@ -1021,6 +1269,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "history": fortnight(days, now),
         "baseline": baseline,
         "completeness": completeness,
+        "consumption": consumption,
         # Which recorder is actually running. Never raises the exit:
         # drift is a reason to look, and the operator's to resolve.
         "recorder": recorder_drift(witness),
@@ -1079,8 +1328,17 @@ def cmd_adopt(args):
         sidecar = log.parent / (log.name + ".anchors.jsonl")
         marker = log.parent / UNLISTED_NAME
         shutil.move(str(log), str(drawer / log.name))
-        if sidecar.exists() and not (drawer / sidecar.name).exists():
-            shutil.move(str(sidecar), str(drawer / sidecar.name))
+        if sidecar.exists():
+            if (drawer / sidecar.name).exists():
+                # Proofs left behind are still proofs; say so — silence
+                # here would read as "everything travelled".
+                print(f"left sidecar "
+                      f"{sidecar.relative_to(root).as_posix()}: "
+                      f"{drawer.name}/{sidecar.name} already exists in "
+                      "the store — evidence is never overwritten; "
+                      "reconcile by hand")
+            else:
+                shutil.move(str(sidecar), str(drawer / sidecar.name))
         if marker.exists() and not (drawer / UNLISTED_NAME).exists():
             shutil.copy2(str(marker), str(drawer / UNLISTED_NAME))
         print(f"adopted {line}")
@@ -1509,7 +1767,9 @@ def day_span(ts):
 
 def gather(logs):
     """(families, rows): sibling chains folded per session (ADR-0004),
-    genesis excluded — administrative, not memory. Rows arrive sorted
+    bookkeeping excluded — genesis and transcript commitments are the
+    chain talking about itself, not memory of the work (ADR-0017);
+    search and `show` still reach them by address. Rows arrive sorted
     oldest-first; ties break on chain name then n, deterministically."""
     families = {}
     rows = []
@@ -1519,7 +1779,7 @@ def gather(logs):
             session, {"count": 0, "first": None, "last": None,
                       "final": None})
         for entry in read_entries(log):
-            if entry.get("n") == 0:
+            if entry.get("actor") == "receipts":
                 continue
             ts = entry.get("ts") if isinstance(entry.get("ts"), str) else ""
             rows.append({"session": session, "log": log, "ts": ts,
@@ -1536,30 +1796,81 @@ def gather(logs):
     return families, rows
 
 
+def tool_of(action):
+    """The collapse key for a digest row: the tool label the hook
+    writes before the first colon (`Read: ...` -> `Read`), or the
+    whole action when there is none. A prefix rule is tool-agnostic
+    on purpose — it cannot rot the way a tool taxonomy would (#66)."""
+    return str(action).partition(":")[0].strip()
+
+
+def collapse_runs(rows):
+    """Consecutive same-actor, same-tool rows folded into rendered
+    units (#66) — the recorder never filters, readers collapse
+    (ADR-0016 ruling 3). A unit's line stands on the run's last
+    entry: its address resolves like any other, and `timeline`
+    around it unrolls the rest of the run."""
+    units = []
+    for row in rows:
+        entry = row["entry"]
+        key = (entry.get("actor"), tool_of(entry.get("action", "")))
+        if units and units[-1]["key"] == key:
+            units[-1]["rows"].append(row)
+        else:
+            units.append({"key": key, "rows": [row]})
+    return units
+
+
+def run_action(unit):
+    """The action text a unit renders: a lone row speaks for itself;
+    a run says how long it was, the shared tool, and where it ended —
+    `14x Read, last: supervisor.py`. The newest detail is shown
+    because it is what the session did most recently; the rest is one
+    `timeline` away."""
+    rows = unit["rows"]
+    action = str(rows[-1]["entry"].get("action", ""))
+    if len(rows) == 1:
+        return action
+    label, _, rest = action.partition(":")
+    prefix = f"{len(rows)}x {label.strip()}"
+    return f"{prefix}, last: {rest.strip()}" if rest.strip() else prefix
+
+
 def scan_testimony(repo):
     """The last scan's verdicts for this repo's chains, read from
-    whichever baseline covers it (the repo itself, or the folder of
-    repos above it). The baseline is trusted for nothing — which is
-    exactly why recall may cite it: testimony citing testimony."""
-    for base_dir in (repo, repo.parent):
+    whichever baseline covers it: the store's, where the default scan
+    remembers (ADR-0011), else the legacy spots (the repo itself, or
+    the folder of repos above it). The baseline is trusted for nothing
+    — which is exactly why recall may cite it: testimony citing
+    testimony."""
+    slug = project_slug(repo) + "/"
+
+    def in_drawer(relpath, base_dir):
+        # Store baseline rows are keyed <drawer-slug>/<chain>.
+        return relpath.startswith(slug)
+
+    def under_repo(relpath, base_dir):
         try:
-            data = json.loads((base_dir / BASELINE_NAME).read_text(
-                encoding="utf-8"))
+            (base_dir / relpath).resolve().relative_to(repo)
+            return True
+        except (ValueError, OSError):
+            return False
+
+    sources = [(Path(store_home()) / "baseline.json", in_drawer),
+               (repo / BASELINE_NAME, under_repo),
+               (repo.parent / BASELINE_NAME, under_repo)]
+    for path, covers in sources:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         scanned = data.get("scanned")
         chains = data.get("chains")
         if not isinstance(scanned, str) or not isinstance(chains, dict):
             continue
-        verdicts = []
-        for relpath, row in chains.items():
-            if not isinstance(row, dict) or "verdict" not in row:
-                continue
-            try:
-                (base_dir / relpath).resolve().relative_to(repo)
-            except (ValueError, OSError):
-                continue
-            verdicts.append(str(row["verdict"]))
+        verdicts = [str(row["verdict"]) for relpath, row in chains.items()
+                    if isinstance(row, dict) and "verdict" in row
+                    and covers(relpath, path.parent)]
         if verdicts:
             return scanned, verdicts
     return None, []
@@ -1576,12 +1887,24 @@ def cmd_digest(args):
     total = len(rows)
     if not total:
         return 0  # nothing to recall; the hook must stay silent, not nag
-    shown = rows[-max(args.limit, 1):]
+    # Collapse before capping (#66): the budget counts rendered rows,
+    # so a Read flood folds to one line instead of scrolling the story
+    # out of the window. Runs never cross sessions.
+    by_session = {}
+    for row in rows:
+        by_session.setdefault(row["session"], []).append(row)
+    units = [unit for session_rows in by_session.values()
+             for unit in collapse_runs(session_rows)]
+    units.sort(key=lambda u: (u["rows"][-1]["ts"],
+                              u["rows"][-1]["log"].name,
+                              u["rows"][-1]["entry"].get("n") or 0))
+    shown = units[-max(args.limit, 1):]
+    reached = sum(len(unit["rows"]) for unit in shown)
 
     lines = [f"== recall digest -- {repo.name} ({repo.as_posix()}) =="]
     memory = f"memory: {len(families)} sessions, {total} entries"
-    if len(shown) < total:
-        memory += f"; showing last {len(shown)} (search reaches the rest)"
+    if reached < total:
+        memory += f"; showing last {reached} (search reaches the rest)"
     lines.append(memory)
     scanned, verdicts = scan_testimony(repo)
     if scanned:
@@ -1600,20 +1923,22 @@ def cmd_digest(args):
                      "run loxodonta verify for a verdict")
 
     groups = {}
-    for row in shown:
-        groups.setdefault(row["session"], []).append(row)
-    for session in sorted(groups, key=lambda s: groups[s][-1]["ts"]):
+    for unit in shown:
+        groups.setdefault(unit["rows"][-1]["session"], []).append(unit)
+    for session in sorted(groups,
+                          key=lambda s: groups[s][-1]["rows"][-1]["ts"]):
         family = families[session]
         lines.append("")
         lines.append(f"-- session {session[:8]} "
                      f"({day_span(family['first'])} .. "
                      f"{day_span(family['last'])}, "
                      f"{family['count']} entries) --")
-        for row in groups[session]:
+        for unit in groups[session]:
+            row = unit["rows"][-1]
             entry = row["entry"]
             line = (f"{address_of(entry)}  {hhmm(row['ts'])}  "
                     f"{clip(entry.get('actor', '?'), 16)}  "
-                    f"{clip(entry.get('action', ''))}")
+                    f"{clip(run_action(unit))}")
             if entry.get("entry_hash") == family["final"]:
                 line += "   <- last recorded action"
             lines.append(line)
@@ -1909,7 +2234,29 @@ class Face(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # the scan is the story; per-request chatter is noise
 
+    def refused_off_machine(self):
+        """The 127.0.0.1 bind keeps other machines out, but not a
+        browser lied to by DNS: a page at attacker.example whose name
+        rebinds to 127.0.0.1 reads as same-origin to the browser, and
+        CORS never enters it — the Host header is the only witness
+        left. A foreign Origin on a POST is the same stranger poking
+        the drill from a page this server never wrote. Both get 403:
+        nothing about this machine's activity is ever offered
+        off-machine, and that includes off-machine by trickery."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
+        stranger = host not in ("127.0.0.1", "localhost")
+        if not stranger and self.command == "POST":
+            origin = self.headers.get("Origin")
+            if origin:
+                spoke = (urlparse(origin).hostname or "").lower()
+                stranger = spoke not in ("127.0.0.1", "localhost")
+        if stranger:
+            self.send_error(403)
+        return stranger
+
     def do_GET(self):
+        if self.refused_off_machine():
+            return
         url = urlparse(self.path)
         if url.path == "/api/status":
             self.reply(self.server.fresh_status(), "application/json")
@@ -1958,6 +2305,8 @@ class Face(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if self.refused_off_machine():
+            return
         url = urlparse(self.path)
         if url.path != "/api/drill":
             self.send_error(404)
@@ -2301,6 +2650,11 @@ PAGE = """<!doctype html>
   .watch-row.quiet { opacity: 0.6; }
   .watch-row.quiet .chip { color: inherit;
                            border-color: color-mix(in srgb, currentColor 40%, transparent); }
+  /* The consumption watch borrows the tripwire's investigate voice:
+     a hot session is a reason to look, deliberately unlike any
+     verdict tier and never as loud as a live completeness alarm. */
+  .watch-row.hot { border: 3px solid #6d28a8; background: #6d28a81a; }
+  .watch-row.hot .chip { background: #6d28a8; color: #fff; }
 
   /* The anchor panel: the block height is the operator's half of the
      regeneration defense, so it is the biggest thing in each row. */
@@ -2429,10 +2783,12 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
 
 <section id="events">
   <h2>events</h2>
-  <p class="testimony">what changed since the last look, and which
-  sessions are behind their witness — reasons to look, never verdicts</p>
+  <p class="testimony">what changed since the last look, which sessions
+  are behind their witness, and which are burning far above the store's
+  norm — reasons to look, never verdicts</p>
   <div id="tripwire"></div>
   <div id="watch"></div>
+  <div id="consumption"></div>
 </section>
 
 <section id="sessions">
@@ -2920,8 +3276,8 @@ function render(report) {
   const watch = document.getElementById("watch");
   watch.replaceChildren();
   const LIVE = ["ALARM-SILENT", "ALARM-DEFICIT"];
-  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "SURPLUS", "LAGGING",
-                                  "IDLE-DEFICIT"]);
+  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "ENDED-SURPLUS",
+                                  "SURPLUS", "LAGGING", "IDLE-DEFICIT"]);
   const watchRow = s => {
     const live = LIVE.includes(s.state);
     const row = el("div", "watch-row " + (live ? "live" : "quiet"));
@@ -2955,6 +3311,46 @@ function render(report) {
   }
   if (report.completeness.note) {
     watch.appendChild(el("p", "claim", report.completeness.note));
+  }
+  // A matcher change is context the deficits above need: sessions are
+  // judged by the coverage in force at their time (ADR-0016).
+  if (report.completeness.calibration) {
+    watch.appendChild(el("p", "claim",
+      report.completeness.calibration.words));
+  }
+
+  // The consumption watch (issue #67, OWASP LLM06 #8): sessions
+  // burning far above the store's own norm — evidence for the
+  // operator's circuit breaker, never a breaker. Nothing here raises
+  // the exit or colours the strip; a quiet store draws nothing.
+  const burn = document.getElementById("consumption");
+  burn.replaceChildren();
+  const consumption = report.consumption || {sessions: []};
+  const hotRow = s => {
+    const row = el("div", "watch-row " +
+                   (s.state === "RUNNING-HOT" ? "hot" : "quiet"));
+    row.appendChild(el("span", "chip", s.state));
+    row.appendChild(el("span", "file", s.repo + " · " + s.session +
+      " · busiest hour " + s.busiest_hour + " entries, " +
+      s.top_tool + " ran " + s.top_tool_count + " of them"));
+    if (s.words) row.appendChild(el("p", "claim", s.words));
+    return row;
+  };
+  for (const s of consumption.sessions.filter(
+      s => s.state === "RUNNING-HOT")) {
+    burn.appendChild(hotRow(s));
+  }
+  const cooled = consumption.sessions.filter(
+    s => s.state !== "RUNNING-HOT");
+  if (cooled.length) {
+    const fold = el("details");
+    fold.appendChild(el("summary", "", cooled.length +
+      " session(s) that ran hot and ended — kept as evidence"));
+    for (const s of cooled) fold.appendChild(hotRow(s));
+    burn.appendChild(fold);
+  }
+  if (consumption.sessions.length && consumption.norm) {
+    burn.appendChild(el("p", "claim", consumption.norm.words));
   }
 
   renderAnchors(report);

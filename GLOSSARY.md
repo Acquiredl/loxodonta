@@ -45,6 +45,10 @@ The supervisor's remembered copy of its own days: one row per UTC day holding th
 
 The supervisor's reading of *which recorder is actually running*: the file the harness executes for `PostToolUse`, the branch and commit it sits on, whether that file has uncommitted changes, and how far its checkout is from its upstream as of the last fetch. The harness wires an absolute path, not a version, so the recorder tracks whatever is checked out there — a branch, a dirty tree, a half-finished rebase — and nothing else on the machine reports that. Read from local git only: the notice never fetches, because a recorder that updated itself from a remote would hand the [writer](#writer) a second road to the one file that has to stay honest (ADR-0015, on ADR-0002's threat model). [Testimony](#testimony) like everything else local, and never an alarm — drift is a reason to look, and the operator's to resolve.
 
+### Consumption watch
+
+The supervisor's reading of tool *tempo* against the store's own norm: entries per session per hour, computed from what the chains already hold (OWASP GenAI LLM06 mitigation #8; wide [coverage](#coverage), ADR-0016, is what makes the chains this dataset). Peak against peaks: the norm is the median of every session's own busiest hour, and a session never sets its own — each is judged against every other session's peak. A session whose busiest hour burns far past that norm surfaces as `RUNNING-HOT` while receipts still arrive and is kept as `ENDED-HOT` evidence once it goes quiet; the runaway loop and the recursion without an end state are the shapes this catches. Built entirely on [testimony](#testimony) (writer-stamped timestamps and action lines), so it never raises the scan exit and owns no verdicts — the norm is context for a flag, never a truth about the session. Boundary, in the hook's own rule (`.out-of-scope/001`): this watch evidences someone else's circuit breaker; it never is one.
+
 ### Issuer
 
 The party who seals a [package](#package) and ships it across a trust boundary under its own name — the one taking responsibility for the deliverable. The issuer holds the signing key **out of the writer's reach** (the head-record property, applied to a second object) and applies the [issuer signature](#issuer-signature) at package close, after the manifest is written. In a solo deployment the operator and issuer are the same person wearing two hats; the roles diverge the moment issuing becomes a service, exactly as writer and operator diverged to found this project (ADR-0008).
@@ -115,7 +119,7 @@ The package's sidecar list: a small document, **written last**, holding the chai
 
 ### Seal
 
-An outer commitment applied to the [manifest](#manifest) hash from beyond the package. Two kinds, answering orthogonal questions: the **anchor** (ADR-0003, pointed at the manifest hash) says *when* — the only seal the issuer cannot forge later, because a signature has no clock and no one can anchor into the past; the [**issuer signature**](#issuer-signature) says *who* (ADR-0008). The manifest commits its declared seal set, so a stripped seal is `SEAL-MISSING`, never a silent downgrade. An unsealed package can verify at most `SELF-CONSISTENT` — indistinguishable from a wholesale regeneration. Package verdicts name the mechanism, never the conclusion — see Anti-terms.
+An outer commitment applied to the [manifest](#manifest) hash from beyond the package. Two kinds, answering orthogonal questions: the **anchor** (ADR-0003, pointed at the manifest hash) says *when* — the only seal the issuer cannot forge later, because a signature has no clock and no one can anchor into the past; the [**issuer signature**](#issuer-signature) says *who* (ADR-0008). The manifest commits its declared seal set, so a stripped seal is `SEAL-MISSING`, never a silent downgrade. An unsealed package can verify at most `SELF-CONSISTENT` — indistinguishable from a wholesale regeneration. Package verdicts name the mechanism, never the conclusion — see Anti-terms. Anti-use: the [transcript commitment](#transcript-commitment) is not a seal — it is writer-authored and inner, protected only by the chain; the word stays reserved for outer commitments (ADR-0017).
 
 ### Issuer signature
 
@@ -127,7 +131,7 @@ The everyday reading of chains as *memory* rather than *evidence*: answering "wh
 
 ### Digest
 
-The budget-capped rendering of the current repo's recent entries, injected at session start by the SessionStart hook (Stage E, ADR-0009). Count-limited (default ~30 rows), grouped by session, each recent session's final entry tagged `last recorded action` — a fact, never an inference about how the session ended. The digest is [recall](#recall), so it carries recall's honesty labels: it cites the supervisor's last scan as testimony and owns no verdicts. Its rows are pointers, not content — each carries an [entry address](#entry-address) for pulling the full entry on demand. Local by design: other repos' memory is reached through search, never injected ("all memory" means all *reachable*, not all *injected* — a flat machine-wide injection would poison the context and evict the local signal).
+The budget-capped rendering of the current repo's recent entries, injected at session start by the SessionStart hook (Stage E, ADR-0009). Count-limited (default ~30 rows), grouped by session, each recent session's final entry tagged `last recorded action` — a fact, never an inference about how the session ended. Consecutive same-tool entries collapse into one row (`14x Read, last: supervisor.py`) standing on the run's newest entry, and the budget counts rendered rows, so an exploration flood spends one row instead of the window (ADR-0016 ruling 3: the recorder never filters, readers do); `timeline` around the shown address unrolls a run. The digest is [recall](#recall), so it carries recall's honesty labels: it cites the supervisor's last scan as testimony and owns no verdicts. Its rows are pointers, not content — each carries an [entry address](#entry-address) for pulling the full entry on demand. Local by design: other repos' memory is reached through search, never injected ("all memory" means all *reachable*, not all *injected* — a flat machine-wide injection would poison the context and evict the local signal).
 
 ### Entry address
 
@@ -149,9 +153,21 @@ The small `project.json` written into a [store](#store) subfolder on first recei
 
 The precise security claim of this tool: modifications to history are *always detectable*, never *prevented*. Deliberately weaker than "immutable" — see Anti-terms. Scope in v0.1: *surgical* tampering (edit / delete / reorder / file swap) is detectable unconditionally; *whole-chain regeneration* is detectable only against a head record (`--expect-head`) or, in Stage B, an anchor.
 
+### Coverage
+
+The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers wired into the harness settings, *as of a moment in time* (ADR-0016 widened the shipped default to `*` — every completed tool call). Coverage is not [completeness](#completeness): coverage says which calls *owe*; the witness judges whether the owed receipts *arrived* — and it judges each session by the coverage in force at that session's time, never by today's rules. A failed or denied tool call sits outside coverage by harness design: no hook fires, so no receipt is owed.
+
 ### Completeness
 
-The property receipts deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`receipts run`, pipeline gate scripts, the Stage C harness hook). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
+The property receipts deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`receipts run`, pipeline gate scripts, the Stage C harness hook) — and is judged against [coverage](#coverage). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
+
+### Bookkeeping entry
+
+An entry the recorder writes in its own voice — `actor: "receipts"`, the same voice as [genesis](#genesis) — rather than on behalf of a tool call: today, genesis and the [transcript commitment](#transcript-commitment). The actor field is the mechanical marker every reader keys on: the witness excludes bookkeeping from the receipts count (an entry no tool event owes must not manufacture `SURPLUS`), and the [digest](#digest) skips bookkeeping rows (they are the chain talking about itself, not memory of the work). Search and `show` still reach them by [entry address](#entry-address) — unweighted, never hidden (ADR-0017).
+
+### Transcript commitment
+
+A [bookkeeping entry](#bookkeeping-entry) that fingerprints the harness transcript as it grows: `action: "transcript-commitment: bytes=N sha256=<hex>"` — the hash of the transcript's first N bytes, taken from byte zero every time, appended by the hook every 25 entries (ADR-0017). It extends tamper-evidence to the rich record *by reference, forward from each commitment*: once a region is committed, rewriting it is detectable forever (`verify --transcript`, verdict `TRANSCRIPT-DIVERGED`); before it is committed, rewriting it is free — the window is at most ~25 calls, plus the tail after the last commitment. The anti-claim, spelled out: the commitment is **writer-authored** — an adversary who rewrites the transcript before its first commitment gets the forgery faithfully committed; garbage in, faithfully committed garbage. Detection latency, not protection — the same sentence as the tripwire, one artifact over. Deliberately **not** called a seal: a [seal](#seal) is an outer commitment from beyond the package; this is inner, chain-protected bookkeeping.
 
 ### Anchor *(Stage B)*
 
@@ -170,7 +186,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## States and transitions
 
-- Verification verdict is one of: `VALID` (exit 0) | `BROKEN` (exit 1, chain integrity failed at ≥1 entries) | `FILES-DIVERGED` (exit 2, chain intact but a referenced file was modified since logging) | `HEAD-MISMATCH` (exit 3, chain internally valid but its head differs from the operator's head record — the whole-chain-regeneration case). `UNSUPPORTED-VERSION` (exit 4) is a refusal to judge, not a verdict: the log's genesis declares a format this verifier doesn't speak.
+- Verification verdict is one of: `VALID` (exit 0) | `BROKEN` (exit 1, chain integrity failed at ≥1 entries) | `FILES-DIVERGED` (exit 2, chain intact but a referenced file was modified since logging) | `HEAD-MISMATCH` (exit 3, chain internally valid but its head differs from the operator's head record — the whole-chain-regeneration case) | `TRANSCRIPT-DIVERGED` (exit 5, chain intact but the transcript no longer matches a [transcript commitment](#transcript-commitment) — a committed prefix was rewritten or truncated; ADR-0017). `UNSUPPORTED-VERSION` (exit 4) is a refusal to judge, not a verdict: the log's genesis declares a format this verifier doesn't speak. When verdicts compete, the graver sets the exit: `BROKEN` > `HEAD-MISMATCH` > `TRANSCRIPT-DIVERGED` > `FILES-DIVERGED` — transcript divergence is never innocent; working-tree drift usually is. A *missing* transcript is a note, never a verdict: the harness cleans transcripts on a retention cycle.
 - A log never transitions backward: append is the only legal write; anything else moves the verdict to `BROKEN`.
 
 ---
@@ -196,9 +212,9 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`
 - Related out-of-scope decisions: none yet.
 
 ---
 
-*Last updated: 2026-08-26*
+*Last updated: 2026-08-31*

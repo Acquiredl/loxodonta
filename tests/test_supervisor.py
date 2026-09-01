@@ -88,7 +88,7 @@ def run_scan(root, *extra, env=None):
              "PYTHONIOENCODING": "utf-8"})
 
 
-def make_chain(log_dir, session, entries=2):
+def make_chain(log_dir, session, entries=2, action="step {i}"):
     """A real chain, built through the public CLI — not a hand-forged
     fixture — so the supervisor is tested against what the tool writes."""
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -98,7 +98,7 @@ def make_chain(log_dir, session, entries=2):
     for i in range(entries):
         subprocess.run(
             [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", f"step {i}"],
+             "--actor", "claude-code", "--action", action.format(i=i)],
             capture_output=True, check=True)
     return log
 
@@ -278,6 +278,32 @@ class AdoptTest(unittest.TestCase):
         self.assertEqual(adopted.read_bytes(), before,
                          "the adopted copy is untouched by the clash")
 
+    def test_adopt_reports_a_sidecar_it_must_leave_behind(self):
+        # A sidecar whose name is already taken in the drawer cannot
+        # travel. Leaving proofs behind must be said, not silent —
+        # everything else adopt refuses gets a printed word.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_adopt(self.home, self.root)
+        (name,) = self.drawers()
+        stranded = make_chain(self.root / "alpha" / "receipts",
+                              "sess-cccc")
+        write_completed_anchor(stranded, chain_head(stranded))
+        squatter = (self.home / "receipts" / name
+                    / "receipts-sess-cccc.jsonl.anchors.jsonl")
+        squatter.write_text("{}\n", encoding="utf-8")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        legacy_sidecar = (self.root / "alpha" / "receipts"
+                         / "receipts-sess-cccc.jsonl.anchors.jsonl")
+        self.assertTrue(legacy_sidecar.exists(),
+                        "the refused sidecar stays put")
+        self.assertIn("sidecar", result.stdout.lower())
+        self.assertEqual(squatter.read_text(encoding="utf-8"), "{}\n",
+                         "the store copy is untouched")
+
     def test_adopt_twice_is_a_quiet_no_op(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_adopt(self.home, self.root)
@@ -456,6 +482,29 @@ class ScanVerdictTest(unittest.TestCase):
         (good,) = sessions[("beta", "sess-bbbb")]
         self.assertEqual(good["verdict"], "VALID",
                          "one bad chain never blanks the scan")
+
+    def test_contradicting_commitments_raise_scan_exit_seven(self):
+        # ADR-0017: verify says TRANSCRIPT-DIVERGED with exit 5, but
+        # scan's 5 already means the baseline tripwire — the fold
+        # renames it to 7 so one number never tells two stories.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        for count in (18, 9):
+            subprocess.run(
+                [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+                 "--actor", "receipts", "--action",
+                 f"transcript-commitment: bytes={count} sha256=" + "0" * 64],
+                capture_output=True, check=True)
+
+        result = run_scan(self.root)
+
+        self.assertEqual(result.returncode, 7,
+                         result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (chain,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "TRANSCRIPT-DIVERGED")
+        self.assertEqual(chain["exit"], 5,
+                         "the chain keeps verify's own exit; only the "
+                         "scan's fold renames")
 
     def test_a_superseded_torn_tail_stays_visible_but_stands_down(self):
         # ADR-0004 working as designed: the tear ended a chain, not the
@@ -1098,6 +1147,77 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(plus["state"], "SURPLUS")
         self.assertIn("investigate", plus["words"])
 
+    def test_a_surplus_at_session_end_is_remembered_not_forgiven(self):
+        # Live, a surplus is an investigate flag; ending the session must
+        # not quietly turn it into ENDED-CLEAN. Receipts nobody witnessed
+        # are evidence too (walk finding, 2026-08-31).
+        make_chain(self.root / "alpha" / "receipts", "sess-eplus",
+                   entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-eplus",
+                         event_times=[ago(7200)], idle=7000)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plus = self.states(result)["sess-eplus"]
+        self.assertEqual(plus["state"], "ENDED-SURPLUS")
+        self.assertIn("evidence", plus["words"])
+
+    def test_bookkeeping_entries_never_count_as_receipts(self):
+        # ADR-0017: a transcript commitment is the recorder's own voice
+        # (actor "receipts", like genesis) — an entry no tool event owes.
+        # Counting it would manufacture SURPLUS on every committed
+        # session: a machine-wide self-inflicted false scar.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-mark",
+                         entries=2)
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "receipts", "--action",
+             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
+            capture_output=True, check=True)
+        write_transcript(self.witness, self.root / "alpha", "sess-mark",
+                         event_times=[ago(120), ago(60)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        watched = self.states(result)["sess-mark"]
+        self.assertEqual(watched["state"], "OK")
+        self.assertEqual(watched["receipts"], 2)
+
+    def test_a_committed_session_carries_the_judge_command(self):
+        # ADR-0017: the supervisor locates, verify judges — scan prints
+        # the exact operator command for a session whose chain holds
+        # transcript commitments and whose transcript still exists.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-judge",
+                         entries=2)
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "receipts", "--action",
+             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
+            capture_output=True, check=True)
+        transcript = write_transcript(self.witness, self.root / "alpha",
+                                      "sess-judge",
+                                      event_times=[ago(120), ago(60)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        judged = self.states(result)["sess-judge"]
+        self.assertIn("judge", judged)
+        self.assertIn("verify", judged["judge"])
+        self.assertIn("--transcript", judged["judge"])
+        self.assertIn(transcript.as_posix(), judged["judge"])
+        # An uncommitted session owes no ritual line.
+        plain = make_chain(self.root / "alpha" / "receipts", "sess-plain",
+                           entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-plain",
+                         event_times=[ago(30)])
+        rerun = self.states(self.scan())["sess-plain"]
+        self.assertNotIn("judge", rerun)
+
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         nowhere = Path(self._tmp.name) / "no-such-layout" / "projects"
@@ -1158,6 +1278,109 @@ class CompletenessTest(unittest.TestCase):
         self.assertIn("accident", words)
         for overclaim in ("prevent", "guarantee", "complete record"):
             self.assertNotIn(overclaim, words)
+
+
+class CalibrationTest(unittest.TestCase):
+    """Effective-dated coverage (ADR-0016): each session is judged by
+    the matchers in force at its time, so a matcher change never
+    manufactures deficits over history the old rules recorded
+    honestly — and never excuses silence after the change."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name) / "witness"
+        self.baseline = self.root / ".supervisor-baseline.json"
+
+    def scan(self, *extra, env=None):
+        return run_scan(self.root, "--witness", str(self.witness),
+                        *extra, env=env)
+
+    def states(self, result):
+        report = json.loads(result.stdout)
+        return {s["session"]: s
+                for s in report["completeness"]["sessions"]}
+
+    def rewire(self, matcher, age):
+        """(Re)wire the harness settings and pin their mtime `age`
+        seconds into the past — the effective date the calibration
+        reads for a changed matcher."""
+        install_witness_hook(self.witness, matcher=matcher)
+        stamp = time.time() - age
+        os.utime(self.witness.parent / "settings.json", (stamp, stamp))
+
+    def test_widening_does_not_rejudge_ended_sessions(self):
+        # A session recorded honestly under the narrow matcher: three
+        # Bash events with three receipts, five Reads nothing owed.
+        # Widening to * afterwards must not turn those Reads into a
+        # five-receipt scar (the wave ADR-0016 exists to prevent).
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=600)
+        first = self.scan()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        make_chain(self.root / "alpha" / "receipts", "sess-old", entries=3)
+        write_transcript(
+            self.witness, self.root / "alpha", "sess-old",
+            event_times=[ago(500), ago(490), ago(480), ago(470),
+                         ago(460), ago(450), ago(440), ago(430)],
+            tool=["Bash", "Read", "Bash", "Read", "Read", "Bash",
+                  "Read", "Read"],
+            idle=3600)
+        self.rewire("*", age=100)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        judged = self.states(result)["sess-old"]
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+        self.assertEqual(judged["tools"], 3,
+                         "Reads before the widening owe nothing")
+
+    def test_events_after_widening_owe_receipts(self):
+        # The flip side: once * is in force, a Read owes a receipt,
+        # and a session of unreceipted Reads after the change alarms.
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=600)
+        self.scan()
+        self.rewire("*", age=300)
+        write_transcript(self.witness, self.root / "alpha", "sess-new",
+                         event_times=[ago(120), ago(110), ago(100)],
+                         tool="Read")
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6,
+                         result.stdout + result.stderr)
+        judged = self.states(result)["sess-new"]
+        self.assertEqual(judged["state"], "ALARM-SILENT")
+        self.assertEqual(judged["tools"], 3)
+
+    def test_calibration_is_remembered_and_spoken(self):
+        # The observations live in the baseline (writer-reachable,
+        # trusted for nothing beyond calibration), the change is named
+        # in words on the watch, and an unchanged matcher adds nothing.
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=600)
+        self.scan()
+        self.rewire("*", age=100)
+
+        result = self.scan()
+        again = self.scan()
+
+        baseline = json.loads(self.baseline.read_text(encoding="utf-8"))
+        epochs = baseline["calibration"]
+        self.assertEqual(len(epochs), 2)
+        self.assertIsNone(epochs[0]["since"],
+                          "the first observation covers all history")
+        self.assertEqual(epochs[1]["matchers"], ["*"])
+        report = json.loads(result.stdout)
+        words = report["completeness"]["calibration"]["words"]
+        self.assertIn("in force at its time", words)
+        rewritten = json.loads(self.baseline.read_text(encoding="utf-8"))
+        self.assertEqual(len(rewritten["calibration"]), 2,
+                         "an unchanged matcher records no new epoch")
+        self.assertEqual(again.returncode, 0,
+                         again.stdout + again.stderr)
 
 
 class FakeCalendarHandler(BaseHTTPRequestHandler):
@@ -1382,6 +1605,24 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertTrue(chain["anchors"]["failed"])
         self.assertIn("anchoring failed", chain["anchors"]["note"])
         self.assertFalse(chain["anchors"]["head"]["anchored"])
+
+    def test_one_turn_failing_twice_keeps_both_notes(self):
+        # A single turn can fail twice — a refused upgrade AND a refused
+        # fresh-head anchor. Both failures belong in the note: evidence
+        # is not a scratchpad where the last writer wins.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-2xfl")
+        first = json.loads(
+            log.read_text(encoding="utf-8").splitlines()[0])["entry_hash"]
+        write_pending_anchor(log, first, "2026-08-22T09:00:00Z")
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", "http://127.0.0.1:1",
+                          env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-2xfl")
+        self.assertIn("did not answer", chain["anchors"]["note"])
+        self.assertIn("anchoring failed", chain["anchors"]["note"])
 
     def test_an_already_anchored_head_is_left_alone(self):
         calendar = self.start_calendar()
@@ -1638,3 +1879,107 @@ class RecorderDriftTest(unittest.TestCase):
         recorder = self.notice()
 
         self.assertEqual(recorder["state"], "unwired")
+
+class ConsumptionTest(unittest.TestCase):
+    """The consumption watch (issue #67; OWASP GenAI LLM06 mitigation
+    #8): tool tempo per session against the store's own norm, read
+    entirely from what the chains already hold. Evidence for someone
+    else's circuit breaker — it never raises the exit and never is
+    one."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "repos"
+        self.root.mkdir()
+        # Pinned to an empty layout: consumption reads only chains, and
+        # the completeness watch must not read the developer's machine.
+        self.witness = Path(self._tmp.name) / "witness" / "projects"
+
+    def scan(self, env=None):
+        return run_scan(self.root, "--witness", str(self.witness), env=env)
+
+    def hot_env(self, **extra):
+        """The suite's threshold handle: hot means a busiest hour of at
+        least max(10, 3 x the store's median active hour)."""
+        return {**os.environ, "SUPERVISOR_HOT_TIMES": "3",
+                "SUPERVISOR_HOT_FLOOR": "10", **extra}
+
+    def watched(self, result):
+        report = json.loads(result.stdout)
+        return report, {s["session"]: s
+                       for s in report["consumption"]["sessions"]}
+
+    def test_a_session_burning_above_the_store_norm_runs_hot(self):
+        # Three ordinary sessions set the norm; one burns well past it,
+        # driven by a single tool — the runaway-loop shape.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb", entries=3)
+        make_chain(self.root / "gamma" / "receipts", "sess-cccc", entries=3)
+        make_chain(self.root / "delta" / "receipts", "sess-hot",
+                   entries=12, action="Bash: loop {i}")
+
+        result = self.scan(env=self.hot_env())
+
+        report, hot = self.watched(result)
+        self.assertIn("sess-hot", hot)
+        burning = hot["sess-hot"]
+        self.assertEqual(burning["state"], "RUNNING-HOT")
+        self.assertEqual(burning["repo"], "delta")
+        self.assertEqual(burning["busiest_hour"], 12)
+        self.assertEqual(burning["top_tool"], "Bash")
+        self.assertEqual(burning["top_tool_count"], 12)
+        self.assertNotIn("sess-aaaa", hot,
+                         "an ordinary session is never surfaced")
+
+    def test_the_watch_is_evidence_and_never_raises_the_exit(self):
+        # The boundary of issue #67, held: this tool evidences someone
+        # else's circuit breaker; it never is one. A hot session leaves
+        # the scan exit exactly where the verdicts put it.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        make_chain(self.root / "delta" / "receipts", "sess-hot",
+                   entries=12, action="Bash: loop {i}")
+
+        result = self.scan(env=self.hot_env())
+
+        report, hot = self.watched(result)
+        self.assertIn("sess-hot", hot)
+        self.assertEqual(result.returncode, 0,
+                         "a hot session is a reason to look, never an alarm "
+                         "exit")
+        self.assertEqual(report["exit"], 0)
+        words = hot["sess-hot"]["words"]
+        self.assertIn("never a brake", words)
+
+    def test_a_quiet_store_flags_nothing_but_still_states_its_norm(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb", entries=2)
+
+        result = self.scan()
+
+        report, hot = self.watched(result)
+        self.assertEqual(hot, {})
+        norm = report["consumption"]["norm"]
+        self.assertGreater(norm["sessions_counted"], 0)
+        self.assertIn("never a verdict", norm["words"])
+
+    def test_a_hot_session_gone_quiet_is_evidence_not_a_siren(self):
+        # Idle window pinned to zero: the burn is over, so it reads as
+        # kept evidence, exactly like an ended deficit.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        make_chain(self.root / "delta" / "receipts", "sess-hot",
+                   entries=12, action="Bash: loop {i}")
+
+        result = self.scan(env=self.hot_env(
+            SUPERVISOR_IDLE_END_SECONDS="0"))
+
+        _, hot = self.watched(result)
+        self.assertEqual(hot["sess-hot"]["state"], "ENDED-HOT")
+        self.assertIn("evidence", hot["sess-hot"]["words"])
+
+    def test_an_empty_store_has_no_norm_to_deviate_from(self):
+        result = self.scan()
+
+        report = json.loads(result.stdout)
+        self.assertEqual(report["consumption"]["sessions"], [])
+        self.assertEqual(report["consumption"]["norm"]["sessions_counted"], 0)

@@ -255,19 +255,29 @@ def file_reference(base, raw_path):
     return {"path": path, "sha256": sha256}
 
 
-def append_entry(log, actor, action, file_paths):
-    """Append one chained entry. Shared by `log` and `run` — run introduces
-    no new schema fields (SPEC §7)."""
+def build_references(log, file_paths):
+    """The sorted {path, sha256} list for an append, or (None, 1) with
+    the complaint printed — shared by `log`/`run`/`hook` so all three
+    refuse the same ways."""
     base, problem = files_base(log)
     if problem and file_paths:
         print(f"error: {problem}", file=sys.stderr)
-        return 1
+        return None, 1
     try:
         files = [file_reference(base, p) for p in file_paths]
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
-        return 1
+        return None, 1
     files.sort(key=lambda ref: ref["path"])  # by path bytes (SPEC §3)
+    return files, 0
+
+
+def append_entry(log, actor, action, file_paths):
+    """Append one chained entry. Shared by `log` and `run` — run introduces
+    no new schema fields (SPEC §7)."""
+    files, code = build_references(log, file_paths)
+    if files is None:
+        return code
     # From here the tail is read, extended, and written as one unit. A
     # racing writer that slips between the read and the write tears the
     # line or forks the chain at the same `n` (ADR-0004).
@@ -818,6 +828,111 @@ def walk(lines):
     return entries, breaks, warns
 
 
+def parse_commitment(action):
+    """(bytes, sha256) when the action line speaks SPEC §2.2's pinned
+    grammar exactly; None otherwise."""
+    prefix = "transcript-commitment: bytes="
+    if not action.startswith(prefix):
+        return None
+    count, sep, digest = action[len(prefix):].partition(" sha256=")
+    if not sep or not count.isdigit() or len(digest) != 64 \
+            or any(c not in "0123456789abcdef" for c in digest):
+        return None
+    return int(count), digest
+
+
+def transcript_commitments(entries):
+    """(commitments, malformed): each commitment is (n, bytes, sha256)
+    in chain order. An entry that names the grammar but fails it is
+    malformed — entries are hash-protected, so it was *written* that
+    way, and pretending to judge it would judge nothing."""
+    marks, malformed = [], []
+    for entry in entries:
+        if entry is None or entry.get("actor") != "receipts":
+            continue
+        action = str(entry.get("action", ""))
+        if not action.startswith("transcript-commitment:"):
+            continue
+        parsed = parse_commitment(action)
+        if parsed is None:
+            malformed.append(entry["n"])
+        else:
+            marks.append((entry["n"], parsed[0], parsed[1]))
+    return marks, malformed
+
+
+def judge_prefixes(marks, transcript_path):
+    """One pass over the transcript, oldest boundary first: hash up to
+    each committed byte count and photograph the digest there
+    (hashlib.copy) — which localizes a rewrite to the span between two
+    commitments. Returns True when any commitment failed to hold."""
+    if not marks:
+        print("no transcript commitments in this chain — nothing to judge")
+        return False
+    try:
+        handle = open(transcript_path, "rb")
+    except OSError:
+        # Absence is a note, never a verdict: the harness cleans
+        # transcripts on a retention cycle (ADR-0017).
+        print(f"TRANSCRIPT-UNRESOLVED: no transcript at {transcript_path} "
+              "— commitments unjudgeable; chain verdict unaffected")
+        return False
+    diverged = False
+    with handle:
+        running = hashlib.sha256()
+        pos = 0
+        for n, count, expected in sorted(marks, key=lambda m: m[1]):
+            if count > pos:
+                chunk = handle.read(count - pos)
+                running.update(chunk)
+                pos += len(chunk)
+            if pos < count:
+                print(f"COMMITMENT DIVERGED (entry {n}): transcript holds "
+                      f"{pos} bytes, {count} committed — truncated")
+                diverged = True
+            elif running.copy().hexdigest() == expected:
+                print(f"COMMITMENT HOLDS (entry {n}: first {count} bytes)")
+            else:
+                print(f"COMMITMENT DIVERGED (entry {n}): the first "
+                      f"{count} bytes no longer match the committed hash")
+                diverged = True
+    return diverged
+
+
+def check_transcript(entries, transcript_path):
+    """The --transcript half of verify, plus the chain-only monotonicity
+    rule (SPEC §2.2/§6 as amended v0.1.2, ADR-0017). Judges every
+    commitment in one pass, oldest boundary first, photographing the
+    running hash at each committed byte count — which localizes a
+    rewrite to the span between two commitments. `transcript_path` may
+    be None: monotonicity needs no transcript. Returns True when any
+    commitment failed to hold."""
+    marks, malformed = transcript_commitments(entries)
+    for n in malformed:
+        print(f"warning: entry {n} names transcript-commitment but not "
+              "its grammar — skipped, judged as nothing", file=sys.stderr)
+    diverged = False
+
+    # A growing file never shrinks: contradicting byte counts are their
+    # own evidence, judged from the chain alone.
+    high = None
+    for n, count, _ in marks:
+        if high is not None and count < high:
+            print(f"COMMITMENT-SHRANK (entry {n}): commits {count} bytes "
+                  f"after an earlier commitment of {high} — a growing "
+                  "transcript never shrinks")
+            diverged = True
+        high = count if high is None else max(high, count)
+
+    if transcript_path is not None:
+        diverged = judge_prefixes(marks, transcript_path) or diverged
+    # The TRANSCRIPT-DIVERGED verdict line itself is printed by the
+    # caller's exit ladder, last — the supervisor reads the final line
+    # as the verdict (its own tripwire comment), so detail lines here
+    # must never dangle after the conclusion.
+    return diverged
+
+
 def cmd_verify(args):
     try:
         lines = read_log(args.log)
@@ -882,10 +997,22 @@ def cmd_verify(args):
             print(f"FILES-DIVERGED: chain intact, {diverged} file(s) "
                   "differ from their logged fingerprints")
 
+    # Transcript commitments (SPEC §2.2, ADR-0017): monotonicity is
+    # judged on every walk; the prefix hashes only under --transcript.
+    transcript_diverged = check_transcript(entries, args.transcript)
+
     # Anchor and head-record findings share the exit-3 tier: both mean
     # "this is not the recorded history", the graver verdict, never masked
     # by a files divergence (SPEC §6, docs/ANCHORING.md §3).
     anchors_bad = args.anchors and check_anchors(args.log, entries)
+
+    if transcript_diverged:
+        # Printed after the anchor chatter so that when this verdict
+        # governs, it is the last line — the supervisor reads the final
+        # line as the verdict. A graver finding below still prints
+        # later and wins the exit (all reported, gravest sets the code).
+        print("TRANSCRIPT-DIVERGED: chain intact, but a committed "
+              "transcript prefix no longer holds")
 
     chain_head = entries[-1]["entry_hash"] if entries else None
     if args.expect_head is not None and chain_head != args.expect_head:
@@ -896,6 +1023,11 @@ def cmd_verify(args):
         return 3
     if anchors_bad:
         return 3
+    if transcript_diverged:
+        # Graver than a files divergence (working-tree drift is usually
+        # innocent; a rewritten transcript never is), milder than a
+        # regenerated chain (SPEC §6 as amended v0.1.2).
+        return 5
     if diverged:
         return 2
 
@@ -1052,6 +1184,40 @@ def cmd_explain(args):
 # The most descriptive scalar a tool call has, in preference order.
 HOOK_SUMMARY_KEYS = ("file_path", "notebook_path", "command", "path",
                      "pattern", "url", "query", "prompt")
+
+
+# ADR-0017: every COMMITMENT_CADENCE entries, the chain commits the
+# harness transcript's byte-prefix — the transcript is the writer-reachable
+# flesh of a forensic rebuild, and a committed prefix can never be
+# rewritten undetected again. The window is the honesty: bytes newer than
+# the latest commitment stay rewritable until the next one.
+COMMITMENT_CADENCE = 25
+
+
+def commit_transcript_due(log, transcript_path):
+    """Append a transcript commitment when the tail lands on a cadence
+    boundary. Called with the chain lock held, right after a hook
+    receipt. Every failure path is a silent skip, never fatal: a hook
+    that failed the session over the transcript would teach the
+    operator to turn the hook off."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return
+    try:
+        last = tail_entry(read_log(log))
+    except FileNotFoundError:
+        return
+    if last is None or last["n"] == 0 or last["n"] % COMMITMENT_CADENCE:
+        return
+    try:
+        with open(transcript_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return
+    # The pinned grammar (SPEC §2.2): the prefix is committed from byte
+    # zero every time, so each commitment re-covers everything before it.
+    action = (f"transcript-commitment: bytes={len(data)} "
+              f"sha256={hashlib.sha256(data).hexdigest()}")
+    append_locked(log, "receipts", action, [])
 
 
 def one_line(text, limit=160):
@@ -1281,12 +1447,26 @@ def cmd_hook(args):
             continue
         file_paths.append(relative.replace(os.sep, "/"))
 
-    return append_entry(log, args.actor, action, file_paths)
+    files, code = build_references(log, file_paths)
+    if files is None:
+        return code
+    # One lock for the receipt and any due transcript commitment: a
+    # racing sibling process between the two could steal the cadence
+    # boundary, and a commitment that sometimes silently misses its
+    # window is the kind of flake an operator learns to shrug at.
+    try:
+        with ChainLock(log):
+            code = append_locked(log, args.actor, action, files)
+            if code == 0:
+                commit_transcript_due(log, payload.get("transcript_path"))
+            return code
+    except LockTimeout:
+        return locked_out(log)
 
 
 # --- Hook installer -----------------------------------------------------------
 # `loxodonta install-hook` wires this machine's Claude Code into the
-# recorder: a PostToolUse hook so every tool call leaves a receipt, and —
+# recorder: a PostToolUse hook so every completed tool call leaves a receipt, and —
 # when supervisor.py sits beside this file — a SessionStart hook so every
 # session starts with a recall digest of its repo's recent history.
 
@@ -1318,6 +1498,10 @@ def backup_settings(path):
 # (ADR-0010): an install from either era is recognised, never doubled.
 RECORDER_MARKERS = ("loxodonta.py", "receipts.py")
 DIGEST_MARKER = "supervisor.py"
+# The shipped default before ADR-0016 widened coverage. A wired block
+# still wearing this exact string is provably an unmodified install —
+# the fingerprint the widening below keys on.
+PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 
 
 def cmd_install_hook(args):
@@ -1368,20 +1552,41 @@ def cmd_install_hook(args):
 
     post = hooks.setdefault("PostToolUse", [])
     healed = heal(post, RECORDER_MARKERS, record)
-    if not any(marker in h.get("command", "")
-               for b in post for h in b.get("hooks", [])
-               for marker in RECORDER_MARKERS):
+
+    def ours(block):
+        return any(marker in h.get("command", "")
+                   for h in block.get("hooks", [])
+                   for marker in RECORDER_MARKERS)
+
+    # Coverage goes wide (ADR-0016): a recorder block still wearing the
+    # old shipped default is provably ours and provably stale — widened
+    # in place, the heal() philosophy applied to matchers. Any other
+    # matcher is somebody's deliberate coverage choice: left alone,
+    # named in a notice below.
+    for block in post:
+        if ours(block) and block.get("matcher") == PRE_0016_MATCHER:
+            block["matcher"] = "*"
+            healed += 1
+            installed.append('PostToolUse: matcher widened to "*" '
+                             "(ADR-0016)")
+    if not any(ours(b) for b in post):
         post.append({
-            # State-changing tools only — and every shell the harness
-            # offers: the desktop app on Windows runs most commands
-            # through a PowerShell tool, and a matcher without it
-            # sleeps through exactly the sessions it should record
-            # (found in the field: this repo's own launch left almost
-            # no receipts).
-            "matcher": "Edit|Write|NotebookEdit|Bash|PowerShell",
+            # Every completed tool call, no allowlist (ADR-0016): the
+            # forensic record must include the reads and fetches where
+            # an attack enters and leaves, and MCP tool names can never
+            # be enumerated in advance. (The old curated default slept
+            # through this repo's own launch when the desktop app's
+            # PowerShell tool wasn't matched — allowlists rot.)
+            "matcher": "*",
             "hooks": [{"type": "command", "command": record}],
         })
         installed.append(f"PostToolUse: {record}")
+    for block in post:
+        matcher = block.get("matcher", "*")
+        if ours(block) and matcher != "*":
+            print(f'note: your recorder matcher "{matcher}" is narrower '
+                  'than the current default "*" — uncovered tool calls '
+                  "leave no receipts (see docs/HOOK.md)")
 
     if os.path.isfile(supervisor):
         start = hooks.setdefault("SessionStart", [])
@@ -1504,6 +1709,10 @@ def main(argv=None):
                                help="also compare referenced files against disk")
     verify_parser.add_argument("--expect-head", metavar="HEX", type=head_record,
                                help="operator-held head record to compare against")
+    verify_parser.add_argument("--transcript", metavar="PATH", default=None,
+                               help="judge transcript commitments against "
+                                    "this harness transcript (ADR-0017); a "
+                                    "missing file is noted, never a verdict")
     verify_parser.add_argument("--anchors", action="store_true",
                                help="also judge anchor proofs, offline")
     verify_parser.set_defaults(func=cmd_verify)

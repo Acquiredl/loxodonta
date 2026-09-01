@@ -1,7 +1,7 @@
 # receipts format specification
 
-**Version:** 0.1.1
-**Status:** accepted 2026-08-10 (ADR-0001, ADR-0002 both `accepted`) — v0.1 is **frozen**; any format change requires a new version and a new chain (§2.1). Amendment 0.1.1 (2026-08-29, ADR-0012) changes only what a file-reference path resolves *against* (§3) — no byte of any entry, canonical form, or hash moves, so chains keep `v: "0.1"` and verify identically.
+**Version:** 0.1.2
+**Status:** accepted 2026-08-10 (ADR-0001, ADR-0002 both `accepted`) — v0.1 is **frozen**; any format change requires a new version and a new chain (§2.1). Amendment 0.1.1 (2026-08-29, ADR-0012) changes only what a file-reference path resolves *against* (§3) — no byte of any entry, canonical form, or hash moves, so chains keep `v: "0.1"` and verify identically. Amendment 0.1.2 (2026-08-31, ADR-0017) names the bookkeeping-entry class and pins the transcript-commitment grammar (§2.2) — additive vocabulary over ordinary entries; again no byte moves and chains keep `v: "0.1"`.
 
 This document defines the receipt log format precisely enough that an independent implementation, in any language, produces byte-identical hashes. That reproducibility is the whole game: a hash chain is only as trustworthy as the serialization rules underneath it.
 
@@ -39,6 +39,20 @@ Genesis is fully determined except for its timestamp:
 - `v` is the **format version** — a string, present on genesis and **only** genesis. A chain is born under one version and stays there; a format upgrade means starting a new chain.
 - Because `v` sits inside the genesis entry, it is hash-committed like everything else: every later entry's chain transitively pins the version. A chain cannot be relabeled without breaking.
 - Verifiers MUST read `v` before applying any other rule. An unrecognized version stops verification immediately with `UNSUPPORTED-VERSION: log is format "X"; this verifier speaks "0.1"` (exit 4) — a clean refusal, not a tamper verdict.
+
+### 2.2 Bookkeeping entries and the transcript commitment *(amended v0.1.2, ADR-0017)*
+
+An entry whose `actor` is `"receipts"` is a **bookkeeping entry**: the recorder speaking in its own voice rather than on behalf of a tool call. Genesis is the original bookkeeping entry; the transcript commitment is the second kind. Readers that count or render *work* — the completeness witness, the recall digest — exclude bookkeeping entries; no tool event owes them.
+
+A **transcript commitment** records the hash of the harness transcript's byte-prefix at the moment of writing. Its action line is machine-parsed and its grammar is pinned, one space between fields, no trailing content:
+
+```
+transcript-commitment: bytes=<decimal byte count> sha256=<64 lowercase hex>
+```
+
+- The hash covers the transcript's **first `bytes` bytes, from byte zero**, so each commitment re-covers everything before it; across one chain the byte counts never decrease (a growing file never shrinks — a verifier may judge this from the chain alone).
+- `files` is `[]`. The commitment is an ordinary entry in every other respect: chained, hashed, no new schema fields — a v0.1 verifier that predates this amendment walks it without noticing.
+- The honest claim, stated once here: the commitment is **writer-authored**. It extends tamper-evidence to the transcript *by reference, forward from each commitment* — a prefix rewritten before it was first committed is committed as-is. Detection latency, not protection.
 
 ## 3. File references
 
@@ -104,6 +118,8 @@ The **chain head** is the `entry_hash` of the last entry. It commits to the enti
 The companion command `receipts head` prints the current chain head, so the operator can record it somewhere the writer cannot reach (another machine, a password-manager note, a message to self). The tool deliberately does **not** store heads locally on the operator's behalf: a state file the writer can also reach would be false security. The out-of-reach storage is the operator's job; the tool only makes the comparison mechanical.
 
 **Verdicts:** `VALID` (exit 0) or `BROKEN at entry N: <reason>` (exit 1, first break reported, walk continues to list all breaks). File mismatches under `--files` are reported but produce exit 2 — the chain itself is intact; the working tree diverged. A head mismatch under `--expect-head` produces `HEAD-MISMATCH` (exit 3) — the chain may be internally valid, but it is not the recorded history. When both fire in one invocation, both are reported but the head mismatch sets the exit code (3): a regenerated chain is the graver finding and must never be masked by the milder one. *(Precedence decided 2026-08-13; verifier behavior, not a format change — v0.1 hashes are unaffected.)*
+
+**Transcript commitments** *(amended v0.1.2, ADR-0017)*: every walk judges commitment monotonicity from the chain alone (§2.2 — byte counts never decrease); under `--transcript <path>`, the verifier additionally re-hashes the transcript's committed prefixes, oldest boundary first, and reports each commitment as holding or diverged — which localizes a rewrite to the span between two commitments. Any failure produces `TRANSCRIPT-DIVERGED` (exit 5): graver than `FILES-DIVERGED` (working-tree drift is usually innocent; a rewritten transcript never is), milder than `HEAD-MISMATCH` and `BROKEN` — full precedence, gravest sets the exit: 1 > 3 > 5 > 2, everything found is reported. A *missing* transcript is a note, never a verdict: the harness cleans transcripts on a retention cycle, and absence-as-failure would scar every aged chain. A commitment line that names the grammar but fails it is warned about and judged as nothing — entries are hash-protected, so it was written that way.
 
 **Torn tail:** if the **final** line of the file fails to parse as JSON, verify reports it distinctly — `BROKEN: torn tail at line N (crash-truncated append; entries 0–N-1 intact)` — still exit 1. This is the signature of an honest interrupted append, and the message says so plus what survives; the operator repairs it by removing the partial line themselves. An unparseable line anywhere **other than** the final line is ordinary `BROKEN` — there is no innocent way for garbage to appear mid-file. Verify never repairs anything, and the tool deliberately ships no repair command: a sanctioned way to trim the end of a log is exactly the capability an adversary with a cover story wants.
 

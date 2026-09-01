@@ -47,8 +47,10 @@ def forge_chain(repo_dir, session, steps, actor="forge"):
                "n": 0, "prev": None, "ts": steps[0][0], "v": "0.1"}
     genesis["entry_hash"] = spec_hash(genesis)
     entries = [genesis]
-    for i, (ts, action) in enumerate(steps, start=1):
-        entry = {"n": i, "ts": ts, "actor": actor, "action": action,
+    for i, step in enumerate(steps, start=1):
+        ts, action = step[0], step[1]
+        who = step[2] if len(step) > 2 else actor
+        entry = {"n": i, "ts": ts, "actor": who, "action": action,
                  "files": [], "prev": entries[-1]["entry_hash"]}
         entry["entry_hash"] = spec_hash(entry)
         entries.append(entry)
@@ -108,6 +110,34 @@ class DigestTest(RecallBase):
         self.assertIn("show", out)
         self.assertIn("search", out)
 
+    def test_bookkeeping_rows_are_skipped_but_stay_addressable(self):
+        # ADR-0017: the digest renders memory of the work, never the
+        # chain talking about itself — readers filter, the recorder
+        # never does. The tag falls to the last *rendered* row when a
+        # session ends on a commitment.
+        repo = self.repo("alpha")
+        mark = "transcript-commitment: bytes=9 sha256=" + "0" * 64
+        _, hashes = forge_chain(
+            repo, "eeee5555-5555-5555-5555-555555555555", [
+                ("2026-08-20T10:00:00Z", "Edit: one.py"),
+                ("2026-08-20T10:05:00Z", "Bash: pytest -q"),
+                ("2026-08-20T10:06:00Z", mark, "receipts"),
+            ])
+        result = run_py(SUPERVISOR, "digest", "--repo", str(repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertNotIn("transcript-commitment", out)
+        self.assertNotIn(hashes[3][:8], out)
+        self.assertIn(hashes[1][:8], out)
+        for line in out.splitlines():
+            if hashes[2][:8] in line:
+                self.assertIn("last recorded action", line)
+        # Unweighted, never hidden: show still fetches it by address.
+        shown = run_py(SUPERVISOR, "show", hashes[3][:8],
+                       "--repo", str(repo))
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("transcript-commitment", shown.stdout)
+
     def test_budget_cap_keeps_newest_and_says_so(self):
         repo = self.repo("alpha")
         steps = [(f"2026-08-20T10:{m:02d}:00Z", f"step {m}")
@@ -163,6 +193,71 @@ class DigestTest(RecallBase):
         self.assertIn("last scan:", out)
         self.assertIn("VALID", out)
         self.assertIn("testimony", out.split("last scan:")[1].splitlines()[0])
+
+    def test_consecutive_same_tool_entries_collapse(self):
+        # Issue #66: the recorder never filters, readers collapse. A run
+        # of same-tool rows renders as one line standing on the run's
+        # last entry; the neighbours keep their own lines.
+        repo = self.repo("alpha")
+        _, h = forge_chain(repo, "1a1a1111-1111-1111-1111-111111111111", [
+            ("2026-08-30T10:00:00Z", "Edit: one.py"),
+            ("2026-08-30T10:01:00Z", "Read: a.py"),
+            ("2026-08-30T10:02:00Z", "Read: b.py"),
+            ("2026-08-30T10:03:00Z", "Read: c.py"),
+            ("2026-08-30T10:04:00Z", "Grep: needle"),
+            ("2026-08-30T10:05:00Z", "Grep: pin"),
+            ("2026-08-30T10:06:00Z", "Bash: pytest -q"),
+        ])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        # The run is one line: count, tool, the newest detail, the
+        # newest entry's address and time. Pairs collapse too.
+        self.assertIn("3x Read, last: c.py", out)
+        self.assertIn("2x Grep, last: pin", out)
+        run_line = next(line for line in out.splitlines()
+                        if "3x Read" in line)
+        self.assertIn(h[4][:8], run_line)   # last Read's address
+        self.assertIn("10:03Z", run_line)   # last Read's time
+        # Earlier run members surrender their rows, not their record.
+        self.assertNotIn(h[2][:8], out)
+        self.assertNotIn(h[3][:8], out)
+        self.assertNotIn("a.py", out)
+        # Different-tool neighbours keep their own uncollapsed lines.
+        self.assertIn("Edit: one.py", out)
+        self.assertIn("Bash: pytest -q", out)
+        self.assertNotIn("1x", out)
+
+    def test_budget_counts_rendered_rows_not_entries(self):
+        # The fix the issue asks for: a Read flood must not scroll the
+        # story out of the window. Collapse happens before the cap, so
+        # --limit 3 still reaches the Edit twelve entries back.
+        repo = self.repo("alpha")
+        steps = [("2026-08-30T10:00:00Z", "Edit: start.py")]
+        steps += [(f"2026-08-30T10:{m:02d}:00Z", f"Read: f{m}.py")
+                  for m in range(1, 11)]
+        steps += [("2026-08-30T10:11:00Z", "Bash: done")]
+        _, h = forge_chain(repo, "2b2b2222-2222-2222-2222-222222222222",
+                           steps)
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo),
+                     "--limit", "3").stdout
+        self.assertIn(h[1][:8], out)        # the Edit survived the flood
+        self.assertIn("10x Read, last: f10.py", out)
+        self.assertIn("Bash: done", out)
+        self.assertIn("12 entries", out)
+        # All twelve entries fit in three rows: nothing was left behind,
+        # so the truncation notice must not appear.
+        self.assertNotIn("showing last", out)
+
+    def test_last_action_tag_lands_on_collapsed_run(self):
+        repo = self.repo("alpha")
+        _, h = forge_chain(repo, "3c3c3333-3333-3333-3333-333333333333", [
+            ("2026-08-30T10:00:00Z", "Edit: one.py"),
+            ("2026-08-30T10:01:00Z", "Read: a.py"),
+            ("2026-08-30T10:02:00Z", "Read: b.py"),
+        ])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        run_line = next(line for line in out.splitlines()
+                        if "2x Read" in line)
+        self.assertIn("last recorded action", run_line)
 
     def test_parity_with_cli_built_chain(self):
         repo = self.repo("alpha")
@@ -223,6 +318,26 @@ class StoreRecallTest(RecallBase):
                       env_extra=env)
         self.assertEqual(show.returncode, 0, show.stderr)
         self.assertIn("self-verified", show.stdout)
+
+    def test_digest_cites_the_store_scan_as_testimony(self):
+        # The default scan writes its baseline beside the store
+        # (ADR-0011); the digest's last-scan line must read it from
+        # there — a store operator saw "none recorded" while the scan
+        # ran green all day (walk finding, 2026-08-31).
+        project = self.repo("alpha")
+        self.hook(project, "f0f0aaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                  "store work")
+        env = self.store_env(project)
+        witness = self.root / "no-witness"
+        witness.mkdir(exist_ok=True)
+        scan = run_py(SUPERVISOR, "scan", "--witness", str(witness),
+                      "--json", env_extra=env)
+        self.assertEqual(scan.returncode, 0, scan.stdout + scan.stderr)
+        out = run_py(SUPERVISOR, "digest", "--repo", str(project),
+                     env_extra=env).stdout
+        self.assertIn("last scan:", out)
+        self.assertIn("VALID", out)
+        self.assertNotIn("none recorded", out)
 
     def test_legacy_repo_layout_is_the_fallback(self):
         # A repo with no drawer yet (pre-adopt) still renders its local
@@ -473,9 +588,12 @@ class InstallerTest(RecallBase):
         post = json.dumps(settings["hooks"]["PostToolUse"])
         start = json.dumps(settings["hooks"]["SessionStart"])
         self.assertIn("loxodonta.py", post)
-        # Every shell the harness offers is matched — omitting one
-        # (PowerShell, on Windows desktop) silently loses sessions.
-        self.assertIn("PowerShell", post)
+        # Coverage goes wide (ADR-0016): every completed tool call owes
+        # a receipt — the sensor has no allowlist. (The old curated
+        # default slept through this repo's own launch when the desktop
+        # app's PowerShell tool wasn't matched.)
+        self.assertEqual(
+            settings["hooks"]["PostToolUse"][0]["matcher"], "*")
         self.assertIn("supervisor.py", start)
         self.assertIn("digest", start)
         self.assertIn("startup|clear|compact",
@@ -488,6 +606,38 @@ class InstallerTest(RecallBase):
         settings = self.settings(home)
         self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
         self.assertEqual(len(settings["hooks"]["SessionStart"]), 1)
+
+    def test_install_widens_the_old_default_matcher(self):
+        # The pre-ADR-0016 shipped default is provably ours and provably
+        # stale — byte-for-byte match, widened in place: the heal()
+        # philosophy applied to matchers.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        settings["hooks"]["PostToolUse"][0]["matcher"] = (
+            "Edit|Write|NotebookEdit|Bash|PowerShell")
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        again, _ = self.run_installer("install-hook")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        settings = self.settings(home)
+        self.assertEqual(len(settings["hooks"]["PostToolUse"]), 1)
+        self.assertEqual(
+            settings["hooks"]["PostToolUse"][0]["matcher"], "*")
+
+    def test_install_leaves_a_customized_matcher_alone(self):
+        # Any other matcher string is somebody's deliberate coverage
+        # choice: left alone, named in a printed notice.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        settings["hooks"]["PostToolUse"][0]["matcher"] = "Edit|Write"
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        again, _ = self.run_installer("install-hook")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        settings = self.settings(home)
+        self.assertEqual(settings["hooks"]["PostToolUse"][0]["matcher"],
+                         "Edit|Write")
+        self.assertIn("narrower", again.stdout.lower())
 
     def test_install_honors_a_live_pre_rename_recorder_hook(self):
         # An install from the receipts.py era whose script still exists
