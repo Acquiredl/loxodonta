@@ -219,6 +219,31 @@ class DashboardTest(ServerFixture):
         self.assertIn("RECEIPTS STOPPED ARRIVING", page)
         self.assertIn("all quiet", page)
 
+    def test_the_rail_carries_status_and_the_attention_queue(self):
+        # The redesign's shell (#48, ratified 2026-09-01): a sticky rail
+        # holds the status block, the attention queue, and the fortnight;
+        # the work area holds everything the operator chose to look at.
+        page = self.page()
+        self.assertIn('id="rail"', page)
+        self.assertIn('id="work"', page)
+        self.assertLess(page.index('id="rail"'), page.index('id="work"'))
+        self.assertIn('id="attention"', page)
+        # The queue's ordering contract: live alarms outrank damaged
+        # history, which outranks reasons to look.
+        self.assertIn('const SEVERITY = ["alarm", "regenerated", '
+                      '"broken", "tripwire", "hot"];', page)
+        # The designed empty state — quiet is never blank.
+        self.assertIn("nothing wants your eyes", page)
+
+    def test_the_page_asks_nothing_of_any_other_host(self):
+        # The cockpit renders offline: system fonts only, no CDN, no
+        # third-party requests of any kind (#48 ruling).
+        page = self.page()
+        for outside in ("fonts.googleapis", "fonts.gstatic", "cdn.",
+                        "//unpkg", "@import", 'src="http',
+                        'href="http'):
+            self.assertNotIn(outside, page)
+
     def test_the_page_carries_the_consumption_watch(self):
         # Issue #67: hot sessions render in the events section, in the
         # investigate voice — and the status endpoint carries the watch

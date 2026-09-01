@@ -2390,78 +2390,138 @@ PAGE = """<!doctype html>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐘</text></svg>">
 <style>
   :root {
-    color-scheme: light dark;
+    /* One committed look (issue #48, ratified 2026-09-01): the cockpit
+       is dark. OLED slate surfaces, one green accent for life signs,
+       and the verdict palette below for claims. System fonts only —
+       this page renders offline and asks nothing of any other host. */
+    color-scheme: dark;
+    --bg: #0b1120; --surface: #111a2e; --surface2: #18233b;
+    --border: #24304c; --line: #1b2740;
+    --fg: #f1f5f9; --dim: #8fa3bf; --faint: #5b6b85;
+    --accent: #22c55e;
+    --mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+    --sans: 'Inter', system-ui, sans-serif;
     /* The verdict palette. Roughly 8% of men cannot separate red from
        green, and the stoplight triple is the worst case of it: strong
        colour vision deficiency renders both as brown. So the quiet
        state carries blue (teal survives the collapse), and the three
-       states part by lightness as well as hue. Colour is never the
-       only encoding here — every state is also named in words and
-       marked with a shape, which is what makes the hue safe to keep. */
-    --quiet: #0f766e;
-    --damage: #b45309;
-    --grave: #b3261e;
+       states part by lightness as well as hue — steps re-picked for
+       the dark surface, same rule. Colour is never the only encoding
+       here — every state is also named in words and marked with a
+       shape, which is what makes the hue safe to keep. */
+    --quiet: #2dd4bf;
+    --damage: #f59e0b;
+    --grave: #f87171;
     --quiet-wash: color-mix(in srgb, var(--quiet) 13%, transparent);
     --damage-wash: color-mix(in srgb, var(--damage) 13%, transparent);
     /* Deliberately much heavier than the other two. Amber and red are
        adjacent hues and collapse onto the same olive under deuteranopia,
        so the gravest state is separated by weight as well — which is
        what it should look like anyway. */
-    --grave-wash: color-mix(in srgb, var(--grave) 32%, transparent);
+    --grave-wash: color-mix(in srgb, var(--grave) 26%, transparent);
+    /* The investigate voice (tripwire, hot sessions): deliberately
+       unlike any verdict tier. */
+    --look: #a78bfa;
   }
-  body { font-family: system-ui, sans-serif; max-width: 64rem;
-         margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
-  header h1 { margin-bottom: 0.2rem; }
-  header .stance { color: color-mix(in srgb, currentColor 60%, transparent);
-                   margin-top: 0; }
+  * { box-sizing: border-box; }
+  body { font-family: var(--sans); background: var(--bg); color: var(--fg);
+         margin: 0; line-height: 1.5; }
+  a { color: inherit; }
+  code { font-family: var(--mono); }
+  @media (prefers-reduced-motion: no-preference) {
+    button, .tile, .chain, .story, .hit { transition: border-color 0.18s
+      ease, background 0.18s ease, color 0.18s ease; }
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* The shell: a sticky rail (what wants your eyes) beside the work
+     area (what you chose to look at). Stacks on narrow viewports. */
+  #shell { display: grid; grid-template-columns: 20rem minmax(0, 1fr);
+           min-height: 100vh; }
+  #rail { border-right: 1px solid var(--border); background: var(--surface);
+          padding: 1.1rem 1rem 1rem; display: flex; flex-direction: column;
+          gap: 1.1rem; position: sticky; top: 0; max-height: 100vh;
+          overflow: auto; }
+  #work { padding: 1.4rem 1.8rem 3rem; min-width: 0; max-width: 72rem; }
+  @media (max-width: 60rem) {
+    #shell { grid-template-columns: 1fr; }
+    #rail { position: static; max-height: none;
+            border-right: 0; border-bottom: 1px solid var(--border); }
+  }
+  header h1 { margin: 0; font-size: 1.05rem; letter-spacing: 0.04em; }
+  header .stance { color: var(--dim); margin: 0.15rem 0 0;
+                   font-size: 0.8rem; }
   /* The wordmark and the elephant are decoration, never information:
      aria-hidden in the markup, and every state must read without them. */
-  .wordmark { font-family: ui-monospace, Consolas, monospace;
-              font-size: clamp(5px, 1.1vw, 9px); line-height: 1.15;
-              margin: 0 0 0.3rem; opacity: 0.8; overflow-x: auto;
-              user-select: none; }
+  .wordmark { font-family: var(--mono); font-size: 5px; line-height: 1.15;
+              margin: 0 0 0.3rem; opacity: 0.8; overflow: hidden;
+              user-select: none; color: var(--accent); }
 
-  /* The verdict strip: one condition, huge. Grave is "not the recorded
-     history" or receipts stopping mid-session; damage is a broken chain
-     or a tripwire event; quiet is the state the operator sees most
-     mornings — designed, not empty.
-
-     Three encodings carry the same one condition: the shape, the words,
-     and the colour. Drop any one of them and the strip still reads. */
-  #strip { padding: 1rem 1.2rem; border-radius: 0.6rem; margin: 1rem 0;
+  /* The status block: one condition, stated big, at the top of the
+     rail. Grave is "not the recorded history" or receipts stopping
+     mid-session; damage is a broken chain or a tripwire event; quiet
+     is the state the operator sees most mornings — designed, not
+     empty. Three encodings carry the same one condition: the shape,
+     the words, and the colour. Drop any one and it still reads. */
+  #strip { padding: 0.9rem 1rem; border-radius: 0.7rem;
            display: grid; grid-template-columns: auto 1fr;
-           gap: 0 0.9rem; align-items: start;
-           border: 2px solid color-mix(in srgb, currentColor 25%, transparent); }
-  #strip .state { font-size: 1.45rem; font-weight: 800; margin: 0;
+           gap: 0 0.7rem; align-items: start; background: var(--surface2);
+           border: 2px solid var(--border); }
+  #strip .state { font-size: 1.15rem; font-weight: 800; margin: 0;
                   letter-spacing: 0.01em; }
-  #strip .why { margin: 0.25rem 0 0; opacity: 0.85; }
+  #strip .why { margin: 0.25rem 0 0; color: var(--dim);
+                font-size: 0.85rem; }
   /* The recorder line sits under the verdict as context, quieter than
      it: smaller, dimmer, monospaced for the path. Drift underlines
      rather than recolours — it is a reason to look, never a verdict,
      and must not read as a fourth alarm state. */
-  #recorder { font-size: 0.85rem; opacity: 0.7;
-              font-family: ui-monospace, monospace; }
-  #recorder.drifted { opacity: 1;
+  #recorder { font-size: 0.72rem; color: var(--faint);
+              font-family: var(--mono); overflow-wrap: anywhere; }
+  #recorder.drifted { color: var(--dim);
                       text-decoration: underline dotted var(--damage);
                       text-underline-offset: 0.25rem; }
-  #statemark { font-size: 1.6rem; line-height: 1.2; grid-row: 1 / span 4; }
+  #statemark { font-size: 1.3rem; line-height: 1.2; grid-row: 1 / span 4; }
   #strip > :not(#statemark) { grid-column: 2; }
-  #strip.quiet { background: var(--quiet-wash); border-color: var(--quiet); }
+  #strip.quiet { background: color-mix(in srgb, var(--quiet) 9%, var(--surface));
+                 border-color: color-mix(in srgb, var(--quiet) 55%, transparent); }
   #strip.quiet #statemark { color: var(--quiet); }
-  #strip.damage { background: var(--damage-wash);
+  #strip.damage { background: color-mix(in srgb, var(--damage) 10%, var(--surface));
                   border-color: var(--damage); }
   #strip.damage #statemark { color: var(--damage); }
-  #strip.grave { background: var(--grave-wash); border-color: var(--grave);
-                 border-width: 3px; }
+  #strip.grave { background: color-mix(in srgb, var(--grave) 14%, var(--surface));
+                 border-color: var(--grave); border-width: 3px; }
   #strip.grave #statemark { color: var(--grave); }
 
-  /* Fourteen days, one cell each: the question the strip cannot answer
-     on its own is whether today is a trend or a one-off. A day nobody
-     watched is drawn as absence — hatched, not coloured — because an
-     unread day is not a quiet one. */
+  /* The attention queue: the only loud list on the page. Severity
+     sorted — live alarms, then damaged history, then reasons to look.
+     Empty is designed, not blank: the elephant's other appearance. */
+  #attention { display: flex; flex-direction: column; gap: 0.45rem; }
+  .alert { display: flex; flex-direction: column; gap: 0.2rem;
+           padding: 0.55rem 0.7rem; border-radius: 0.55rem;
+           background: var(--surface2); border: 1px solid var(--border);
+           font-size: 0.8rem; }
+  .alert .head { display: flex; gap: 0.5rem; align-items: baseline; }
+  .alert .what { color: var(--dim); overflow-wrap: anywhere; }
+  .alert.grave { border-color: var(--grave);
+                 background: color-mix(in srgb, var(--grave) 12%, var(--surface2)); }
+  .alert.damage { border-color: var(--damage);
+                  background: color-mix(in srgb, var(--damage) 9%, var(--surface2)); }
+  .alert.look { border-color: var(--look);
+                background: color-mix(in srgb, var(--look) 9%, var(--surface2)); }
+  .alert button { align-self: flex-start; }
+  #rail h2 { border: 0; margin: 0 0 0.4rem; padding: 0;
+             font-size: 0.72rem; letter-spacing: 0.1em;
+             text-transform: uppercase; color: var(--dim); }
+  #railfoot { margin-top: auto; font-family: var(--mono);
+              font-size: 0.7rem; color: var(--faint); line-height: 1.8; }
+
+  /* Fourteen days, one cell each: the question the status block cannot
+     answer on its own is whether today is a trend or a one-off. A day
+     nobody watched is drawn as absence — hatched, not coloured —
+     because an unread day is not a quiet one. */
   #fortnight { display: grid; grid-template-columns: repeat(14, 1fr);
                gap: 0.25rem; margin: 0.6rem 0 0.3rem; }
-  .day { border-radius: 0.25rem; padding: 0.15rem 0; min-height: 2.6rem;
+  .day { border-radius: 0.25rem; padding: 0.15rem 0; min-height: 2rem;
          display: flex; flex-direction: column; justify-content: flex-end;
          align-items: center; gap: 0.15rem; font-size: 0.65rem;
          border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
@@ -2730,6 +2790,8 @@ PAGE = """<!doctype html>
 </style>
 </head>
 <body>
+<div id="shell">
+<aside id="rail">
 <header>
   <pre class="wordmark" aria-hidden="true">
 db       .d88b.  db    db  .d88b.  d8888b.  .d88b.  d8b   db d888888b  .d8b.
@@ -2759,6 +2821,11 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
  (__,__)      (__,__)</pre>
 </div>
 
+<section id="attention-box">
+  <h2>attention</h2>
+  <div id="attention"></div>
+</section>
+
 <section id="trend">
   <h2>fourteen days</h2>
   <p class="testimony">one cell per day, worst claim of that day — is
@@ -2768,6 +2835,10 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   <p id="lapse"></p>
 </section>
 
+<footer id="railfoot">verdicts come from <code>receipts verify</code> —
+this page draws them and decides nothing</footer>
+</aside>
+<main id="work">
 <section id="recall">
   <h2>recall</h2>
   <p class="testimony">testimony, not a verdict — what was attempted, as
@@ -2851,6 +2922,8 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   <div id="walking"></div>
   <div id="entries"></div>
 </section>
+</main>
+</div>
 <script>
 "use strict";
 
@@ -3000,6 +3073,92 @@ function renderStrip(report) {
   freshness.textContent = "last scan " +
     (report.scanned ? since(report.scanned) + " ago" : "just now") +
     " · this page refreshes every 30s";
+}
+
+// The attention queue: everything that wants eyes, in one list,
+// severity sorted — the rail's ordering contract. Live completeness
+// alarms outrank damaged history, which outranks reasons to look
+// (tripwire events, hot sessions). Everything else on the page is
+// deliberately quiet.
+const SEVERITY = ["alarm", "regenerated", "broken", "tripwire", "hot"];
+
+function attentionItems(report) {
+  const items = [];
+  for (const s of report.completeness.sessions) {
+    if (["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state)) {
+      items.push({rank: "alarm", tone: "grave", chip: s.state,
+        text: s.repo + " · " + s.session.slice(0, 8) + " — " +
+              (s.words || "receipts behind the witness"),
+        goto: "events"});
+    }
+  }
+  for (const repo of report.repos) {
+    for (const session of repo.sessions) {
+      for (const chain of session.chains) {
+        if (chain.superseded) continue;
+        if (chain.exit === 3) {
+          items.push({rank: "regenerated", tone: "grave",
+            chip: chain.verdict,
+            text: repo.repo + " · " + session.session.slice(0, 8) +
+                  " — not the recorded history", goto: "alarms"});
+        } else if (chain.verdict === "BROKEN") {
+          items.push({rank: "broken", tone: "damage", chip: "BROKEN",
+            text: repo.repo + " · " + session.session.slice(0, 8) +
+                  " — history was altered after the fact",
+            goto: "alarms"});
+        }
+      }
+    }
+  }
+  for (const event of report.baseline.events) {
+    items.push({rank: "tripwire", tone: "damage",
+      chip: "CHANGED SINCE LAST LOOK",
+      text: event.repo + " · " + event.session + " — " + event.change,
+      goto: "events"});
+  }
+  for (const s of (report.consumption || {sessions: []}).sessions) {
+    if (s.state === "RUNNING-HOT") {
+      items.push({rank: "hot", tone: "look", chip: "RUNNING-HOT",
+        text: s.repo + " · " + s.session.slice(0, 8) +
+              " — burning far above the store's norm", goto: "events"});
+    }
+  }
+  items.sort((a, b) =>
+    SEVERITY.indexOf(a.rank) - SEVERITY.indexOf(b.rank));
+  return items;
+}
+
+function renderAttention(report) {
+  const box = document.getElementById("attention");
+  box.replaceChildren();
+  const items = attentionItems(report);
+  if (!items.length) {
+    const kept = report.completeness.sessions.filter(s =>
+      ["ENDED-DEFICIT", "ENDED-SURPLUS", "SURPLUS", "IDLE-DEFICIT"]
+        .includes(s.state)).length;
+    const row = el("div", "alert");
+    const head = el("div", "head");
+    head.appendChild(el("strong", "", "nothing wants your eyes"));
+    row.appendChild(head);
+    row.appendChild(el("span", "what", kept
+      ? kept + " quieter finding(s) kept as evidence, folded below"
+      : "the elephant is watching"));
+    box.appendChild(row);
+    return;
+  }
+  for (const item of items) {
+    const row = el("div", "alert " + item.tone);
+    const head = el("div", "head");
+    head.appendChild(el("strong", "", item.chip));
+    row.appendChild(head);
+    row.appendChild(el("span", "what", item.text));
+    const go = el("button", "walk", "look");
+    go.type = "button";
+    go.addEventListener("click", () => document.getElementById(item.goto)
+      .scrollIntoView({behavior: "smooth"}));
+    row.appendChild(go);
+    box.appendChild(row);
+  }
 }
 
 // Fourteen days under the strip. The strip says what is true now; the
@@ -3272,6 +3431,7 @@ function renderGantt() {
 function render(report) {
   lastStatus = report;
   renderStrip(report);
+  renderAttention(report);
   renderFortnight(report);
   renderTiles();
   renderGantt();
