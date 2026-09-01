@@ -152,6 +152,10 @@ a flat "the transcript is tamper-evident".
 - Chain bloat ≈ 4% at N=25; the measured envelope goes in
   `docs/EXPERIMENTS.md`.
 - Deferred, tracked: the SessionEnd tail commitment (own slice); scan
-  and dashboard surfacing of commitment status (#48).
+  and dashboard surfacing of commitment status (#48). *(Addendum
+  2026-09-01: both built — the judge command surfaces on the dashboard
+  via #88, and #79 wired SessionEnd to the same recorder command,
+  sealing the tail on clean exits; the harness fires no SessionEnd on
+  a hard kill, so that residue stays, and is documented.)*
 - GLOSSARY gains **Transcript commitment** and **Bookkeeping entry**;
   the verdict ladder gains `TRANSCRIPT-DIVERGED` (exit 5).

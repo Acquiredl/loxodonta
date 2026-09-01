@@ -642,6 +642,91 @@ class TranscriptCommitmentTest(unittest.TestCase):
         self.assertEqual(len(entries), self.CADENCE + 1)
         self.assertEqual(self.commitments(), [])
 
+    def end_payload(self, session="sess-1234abcd", transcript=True,
+                    reason="prompt_input_exit"):
+        body = {"session_id": session, "hook_event_name": "SessionEnd",
+                "reason": reason}
+        if transcript:
+            body["transcript_path"] = str(self.transcript)
+        return body
+
+    def test_session_end_seals_the_tail(self):
+        # Issue #79: a clean exit closes the uncommitted-tail window —
+        # one final commitment over the whole prefix, whatever the
+        # cadence position.
+        self.transcript.write_bytes(b"page one\n")
+        self.drive(3)
+        with open(self.transcript, "ab") as f:
+            f.write(b"the tail\n")
+
+        result = run_hook(self.end_payload(), cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        marks = self.commitments()
+        self.assertEqual(len(marks), 1)
+        self.assertEqual(marks[0]["n"], 4)
+        self.assertEqual(marks[0]["actor"], "receipts")
+        self.assertIn("bytes=" + str(len(b"page one\nthe tail\n")),
+                      marks[0]["action"])
+
+    def test_session_end_never_manufactures_a_chain(self):
+        # A chat-only session owes nothing: SessionEnd on a session
+        # with no receipts must not create a chain just to seal it.
+        self.transcript.write_bytes(b"just talk\n")
+
+        result = run_hook(self.end_payload(session="sess-chatonly"),
+                          cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(
+            (self.workdir / "receipts-sess-chatonly.jsonl").exists())
+
+    def test_session_end_on_a_boundary_writes_no_duplicate(self):
+        # Ending right after a cadence commitment with unchanged bytes
+        # must not write the same commitment twice.
+        self.transcript.write_bytes(b"the diary, page one\n")
+        self.drive(self.CADENCE)
+
+        result = run_hook(self.end_payload(), cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.commitments()), 1)
+
+    def test_session_end_without_a_transcript_is_a_quiet_no_op(self):
+        self.drive(2)  # transcript_path points at a missing file
+
+        result = run_hook(self.end_payload(), cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.commitments(), [])
+
+    def test_install_hook_wires_session_end(self):
+        # The installer's third event: SessionEnd calls the same
+        # recorder command, with an explicit timeout (the harness's
+        # default SessionEnd budget is too small for a big transcript).
+        home = self.workdir / "home"
+        (home / ".claude").mkdir(parents=True)
+        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "install-hook"],
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, **env, "PYTHONIOENCODING": "utf-8"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        settings = json.loads(
+            (home / ".claude" / "settings.json").read_text(
+                encoding="utf-8"))
+        end = settings["hooks"]["SessionEnd"]
+        self.assertTrue(any("loxodonta.py" in h.get("command", "")
+                            and "hook" in h.get("command", "")
+                            for b in end for h in b.get("hooks", [])))
+        self.assertTrue(all(h.get("timeout")
+                            for b in end for h in b.get("hooks", [])))
+        again = subprocess.run(
+            [sys.executable, str(LOXODONTA), "install-hook"],
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, **env, "PYTHONIOENCODING": "utf-8"})
+        self.assertIn("already installed", again.stdout)
+
     def test_unreadable_transcript_skips_the_commitment_never_fails(self):
         # Skipped, never fatal: a hook that failed the session over the
         # transcript would teach the operator to turn the hook off.
