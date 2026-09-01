@@ -244,6 +244,22 @@ class DashboardTest(ServerFixture):
                         'href="http'):
             self.assertNotIn(outside, page)
 
+    def test_the_worktable_splits_sessions_from_inspection(self):
+        # Slice 2 of the #48 shape: pane one is what you are looking
+        # at (the sessions table), pane two is the thing under
+        # inspection (chains as verify saw them, walk/judge actions).
+        page = self.page()
+        self.assertIn('id="worktable"', page)
+        self.assertIn('id="sessions-table"', page)
+        self.assertIn('id="inspect-chains"', page)
+        self.assertIn("click a row to inspect", page)
+        self.assertIn("walk this session", page)
+        # The ADR-0017 surfacing: the judge command renders copy-ready,
+        # and only for sessions the watch paired with a transcript.
+        self.assertIn('id="inspect-judge"', page)
+        self.assertIn("judge transcript", page)
+        self.assertIn("seen.judge", page)
+
     def test_the_page_carries_the_consumption_watch(self):
         # Issue #67: hot sessions render in the events section, in the
         # investigate voice — and the status endpoint carries the watch

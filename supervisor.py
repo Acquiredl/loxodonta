@@ -2624,6 +2624,62 @@ PAGE = """<!doctype html>
               font-size: 0.85rem; line-height: 1.1; margin: 0.5rem 0 0;
               opacity: 0.75; user-select: none; }
 
+  /* The worktable (#48): tabs over a two-pane split. Pane one is
+     always "what am I looking at"; pane two is always "the thing under
+     inspection". Stacks on narrow viewports. */
+  #tabs { display: flex; gap: 0.2rem; border-bottom: 1px solid var(--border);
+          margin-bottom: 0; }
+  .tab { font: inherit; font-size: 0.85rem; color: var(--dim);
+         background: none; border: 0; border-bottom: 2px solid transparent;
+         padding: 0.5rem 1rem; cursor: pointer; }
+  .tab:hover { color: var(--fg); }
+  .tab.on { color: var(--fg); border-bottom-color: var(--accent); }
+  #split { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+           border: 1px solid var(--border); border-top: 0;
+           border-radius: 0 0 0.6rem 0.6rem; overflow: hidden;
+           min-height: 24rem; }
+  .pane { min-width: 0; display: flex; flex-direction: column; }
+  .pane + .pane { border-left: 1px solid var(--border); }
+  .phead { font-family: var(--mono); font-size: 0.7rem; color: var(--faint);
+           letter-spacing: 0.06em; padding: 0.45rem 0.8rem;
+           border-bottom: 1px solid var(--border); background: var(--surface);
+           display: flex; gap: 0.5rem; align-items: baseline; }
+  .phead .no { color: var(--accent); }
+  .pbody { overflow: auto; flex: 1; max-height: 34rem; }
+  @media (max-width: 72rem) {
+    #split { grid-template-columns: 1fr; }
+    .pane + .pane { border-left: 0; border-top: 1px solid var(--border); }
+  }
+  #sessions-table { width: 100%; border-collapse: collapse;
+                    font-size: 0.82rem; }
+  #sessions-table th { font-size: 0.68rem; text-transform: uppercase;
+                       letter-spacing: 0.07em; color: var(--faint);
+                       text-align: left; padding: 0.5rem 0.7rem;
+                       border-bottom: 1px solid var(--border);
+                       position: sticky; top: 0; background: var(--surface); }
+  #sessions-table td { padding: 0.5rem 0.7rem;
+                       border-bottom: 1px solid var(--line); }
+  #sessions-table tr { cursor: pointer; }
+  #sessions-table tr:hover td { background: var(--surface2); }
+  #sessions-table tr.sel td { background:
+      color-mix(in srgb, var(--accent) 8%, transparent);
+    border-left: 2px solid var(--accent); }
+  #sessions-table .addr { font-family: var(--mono); color: #7dd3fc; }
+  #sessions-table .num { font-variant-numeric: tabular-nums;
+                         color: var(--dim); }
+  #sessions-table .when { font-family: var(--mono); font-size: 0.72rem;
+                          color: var(--faint); }
+  #inspect-meta { padding: 0.7rem 0.9rem 0; color: var(--dim);
+                  font-size: 0.82rem; }
+  #inspect-chains { padding: 0.2rem 0.9rem 0.9rem; }
+  #inspect-judge { margin: 0.4rem 0.9rem; padding: 0.55rem 0.7rem;
+                   border-radius: 0.5rem; border: 1px dashed var(--border);
+                   font-family: var(--mono); font-size: 0.72rem;
+                   color: var(--dim); overflow-wrap: anywhere; }
+  #inspect-judge strong { color: var(--fg); }
+  .pane-empty { color: var(--faint); padding: 1.2rem;
+                font-size: 0.85rem; }
+
   /* The drawers: one tile per project, worst claim first, click for
      that project's timeline. */
   #tiles { display: grid; gap: 0.7rem; margin: 0.8rem 0;
@@ -2839,6 +2895,35 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
 this page draws them and decides nothing</footer>
 </aside>
 <main id="work">
+<section id="worktable">
+  <div id="tabs" role="tablist">
+    <button type="button" class="tab on" data-tab="sessions">sessions</button>
+  </div>
+  <div id="split">
+    <div class="pane">
+      <div class="phead"><span class="no">[1]</span> sessions —
+      click a row to inspect · testimony, not a verdict</div>
+      <div class="pbody">
+        <table id="sessions-table">
+          <thead><tr><th>session</th><th>repo</th><th>receipts</th>
+          <th>span</th></tr></thead>
+          <tbody id="sessions-body"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="phead"><span class="no">[2]</span> inspect — the
+      chain as <code>receipts verify</code> sees it</div>
+      <div class="pbody">
+        <div id="inspect-meta" class="pane-empty">click a session on
+        the left — its chains, claims, and actions land here</div>
+        <div id="inspect-judge" hidden></div>
+        <div id="inspect-chains"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section id="recall">
   <h2>recall</h2>
   <p class="testimony">testimony, not a verdict — what was attempted, as
@@ -2856,7 +2941,6 @@ this page draws them and decides nothing</footer>
       <input type="text" id="ask-path" placeholder="anywhere it appears">
     </label>
   </div>
-  <div id="timeline">remembering…</div>
 </section>
 
 <section id="hours">
@@ -3237,7 +3321,7 @@ function worstTier(chains) {
 function openDrawer(repo) {
   document.getElementById("ask-repo").value = repo;
   loadRecall();
-  document.getElementById("recall")
+  document.getElementById("worktable")
     .scrollIntoView({behavior: "smooth"});
 }
 
@@ -3780,43 +3864,114 @@ function spanText(story) {
   return trim(story.started) + " → " + trim(story.ended) + " UTC";
 }
 
-function storyRow(story) {
-  const row = el("div", "story");
+// --- the worktable: sessions in pane one, inspection in pane two ----
+
+let shownRecall = null;
+let selectedWhere = null;
+
+function sessionRow(story) {
+  const row = document.createElement("tr");
   row.dataset.where = story.repo + "/" + story.session;
-  row.appendChild(el("span", "repo", story.repo));
-  row.appendChild(el("span", "id", story.session));
-  row.appendChild(el("span", "span", spanText(story)));
-  row.appendChild(el("span", "count", story.entries + " receipt(s)"));
-  if (story.worktree) {
-    row.appendChild(el("span", "badge", "stranded in a worktree"));
+  if (row.dataset.where === selectedWhere) row.className = "sel";
+  const addr = el("td", "addr", story.session.slice(0, 8));
+  addr.title = story.session;
+  row.appendChild(addr);
+  row.appendChild(el("td", "", story.repo));
+  row.appendChild(el("td", "num", String(story.entries)));
+  row.appendChild(el("td", "when", spanText(story)));
+  row.addEventListener("click", () => selectSession(story));
+  return row;
+}
+
+function renderRecall(report) {
+  shownRecall = report;
+  const body = document.getElementById("sessions-body");
+  body.replaceChildren();
+  for (const story of report.sessions) {
+    body.appendChild(sessionRow(story));
   }
+  if (!report.sessions.length) {
+    const row = document.createElement("tr");
+    const cell = el("td", "pane-empty", "nothing remembered here — " +
+      "no session matches these filters.");
+    cell.colSpan = 4;
+    row.appendChild(cell);
+    body.appendChild(row);
+  }
+}
+
+// Pane two: the selected session's chains, claims, and actions — the
+// chain rows are the same tier ladder the whole page speaks, and the
+// walk buttons still open the WebCrypto walker.
+function selectSession(story) {
+  selectedWhere = story.repo + "/" + story.session;
+  for (const row of document.querySelectorAll("#sessions-body tr")) {
+    row.classList.toggle("sel", row.dataset.where === selectedWhere);
+  }
+  const meta = document.getElementById("inspect-meta");
+  meta.className = "";
+  meta.replaceChildren();
+  meta.appendChild(el("strong", "", story.repo + " · " +
+                      story.session.slice(0, 8)));
+  meta.appendChild(el("span", "", " — " + story.entries +
+    " receipt(s) · " + spanText(story) +
+    (story.worktree ? " · stranded in a worktree" : "")));
   if (story.chains.length > 1) {
-    row.appendChild(el("p", "sibling", story.chains.length +
+    meta.appendChild(el("p", "sibling", story.chains.length +
       " chains — recording continued in a sibling"));
   }
-  // The last rung of the ladder: a story opens its own entries in the
-  // walker, hashes rechecked in the reader's browser.
+  // The last rung of the ladder: the walker, hashes rechecked in the
+  // reader's own browser.
   for (const path of story.paths || []) {
     const walk = el("button", "walk",
       story.paths.length > 1 ? "walk " + path.split("/").pop()
                              : "walk this session");
     walk.type = "button";
+    walk.style.marginLeft = "0.5rem";
     walk.addEventListener("click", () => openWalker(path));
-    row.appendChild(walk);
+    meta.appendChild(walk);
   }
-  return row;
+  // The chains as verify saw them, worst first — reusing the page's
+  // one tier vocabulary.
+  const chainsBox = document.getElementById("inspect-chains");
+  chainsBox.replaceChildren();
+  const scan = findScanSession(story);
+  for (const chain of scan ? scan.chains : []) {
+    chainsBox.appendChild(chainRow(chain));
+  }
+  if (!scan) {
+    chainsBox.appendChild(el("p", "pane-empty",
+      "the scan has not judged this session yet — refresh in a tick"));
+  }
+  // The ADR-0017 judge command, where the watch paired a transcript:
+  // the supervisor locates, verify judges — copy it, run it, read the
+  // verdict in your own terminal.
+  const judgeBox = document.getElementById("inspect-judge");
+  const seen = (lastStatus ? lastStatus.completeness.sessions : [])
+    .find(s => s.repo === story.repo && s.session === story.session);
+  if (seen && seen.judge) {
+    judgeBox.hidden = false;
+    judgeBox.replaceChildren();
+    judgeBox.appendChild(el("strong", "", "judge transcript "));
+    judgeBox.appendChild(el("span", "", "— commitments re-hashed " +
+      "against the harness transcript (run it yourself): "));
+    judgeBox.appendChild(el("code", "", seen.judge));
+    const copy = el("button", "walk", "copy");
+    copy.type = "button";
+    copy.style.marginLeft = "0.5rem";
+    copy.addEventListener("click", () =>
+      navigator.clipboard.writeText(seen.judge));
+    judgeBox.appendChild(copy);
+  } else {
+    judgeBox.hidden = true;
+  }
 }
 
-function renderRecall(report) {
-  const timeline = document.getElementById("timeline");
-  timeline.replaceChildren();
-  for (const story of report.sessions) {
-    timeline.appendChild(storyRow(story));
-  }
-  if (!report.sessions.length) {
-    timeline.appendChild(el("p", "", "nothing remembered here — " +
-      "no session matches these filters."));
-  }
+function findScanSession(story) {
+  if (!lastStatus) return null;
+  const repo = lastStatus.repos.find(r => r.repo === story.repo);
+  return repo ? repo.sessions.find(s => s.session === story.session)
+              : null;
 }
 
 function asked() {
@@ -3841,24 +3996,25 @@ async function loadRecall() {
     renderTiles();
     renderGantt();
   } catch (error) {
-    document.getElementById("timeline").textContent =
+    document.getElementById("inspect-meta").textContent =
       "recall did not answer: " + error;
   }
 }
 
 // --- search: the writer's word, findable ----------------------------
 
-// A hit links into the timeline: focus the session's repo, then scroll
-// to its story once the timeline has re-answered.
+// A hit links into the worktable: focus the session's repo, then
+// select its row once the sessions pane has re-answered.
 async function visit(hit) {
   document.getElementById("ask-repo").value = hit.repo;
   await loadRecall();
   const where = hit.repo + "/" + hit.session;
-  for (const row of document.querySelectorAll("#timeline .story")) {
+  const story = (shownRecall ? shownRecall.sessions : [])
+    .find(s => s.repo + "/" + s.session === where);
+  if (story) selectSession(story);
+  for (const row of document.querySelectorAll("#sessions-body tr")) {
     if (row.dataset.where === where) {
-      row.classList.add("found-you");
       row.scrollIntoView({behavior: "smooth", block: "center"});
-      setTimeout(() => row.classList.remove("found-you"), 2500);
     }
   }
 }
