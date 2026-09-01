@@ -47,8 +47,10 @@ def forge_chain(repo_dir, session, steps, actor="forge"):
                "n": 0, "prev": None, "ts": steps[0][0], "v": "0.1"}
     genesis["entry_hash"] = spec_hash(genesis)
     entries = [genesis]
-    for i, (ts, action) in enumerate(steps, start=1):
-        entry = {"n": i, "ts": ts, "actor": actor, "action": action,
+    for i, step in enumerate(steps, start=1):
+        ts, action = step[0], step[1]
+        who = step[2] if len(step) > 2 else actor
+        entry = {"n": i, "ts": ts, "actor": who, "action": action,
                  "files": [], "prev": entries[-1]["entry_hash"]}
         entry["entry_hash"] = spec_hash(entry)
         entries.append(entry)
@@ -107,6 +109,34 @@ class DigestTest(RecallBase):
         self.assertIn("testimony", out)
         self.assertIn("show", out)
         self.assertIn("search", out)
+
+    def test_bookkeeping_rows_are_skipped_but_stay_addressable(self):
+        # ADR-0017: the digest renders memory of the work, never the
+        # chain talking about itself — readers filter, the recorder
+        # never does. The tag falls to the last *rendered* row when a
+        # session ends on a commitment.
+        repo = self.repo("alpha")
+        mark = "transcript-commitment: bytes=9 sha256=" + "0" * 64
+        _, hashes = forge_chain(
+            repo, "eeee5555-5555-5555-5555-555555555555", [
+                ("2026-08-20T10:00:00Z", "Edit: one.py"),
+                ("2026-08-20T10:05:00Z", "Bash: pytest -q"),
+                ("2026-08-20T10:06:00Z", mark, "receipts"),
+            ])
+        result = run_py(SUPERVISOR, "digest", "--repo", str(repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertNotIn("transcript-commitment", out)
+        self.assertNotIn(hashes[3][:8], out)
+        self.assertIn(hashes[1][:8], out)
+        for line in out.splitlines():
+            if hashes[2][:8] in line:
+                self.assertIn("last recorded action", line)
+        # Unweighted, never hidden: show still fetches it by address.
+        shown = run_py(SUPERVISOR, "show", hashes[3][:8],
+                       "--repo", str(repo))
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("transcript-commitment", shown.stdout)
 
     def test_budget_cap_keeps_newest_and_says_so(self):
         repo = self.repo("alpha")

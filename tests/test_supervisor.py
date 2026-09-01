@@ -1140,6 +1140,29 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(plus["state"], "ENDED-SURPLUS")
         self.assertIn("evidence", plus["words"])
 
+    def test_bookkeeping_entries_never_count_as_receipts(self):
+        # ADR-0017: a transcript commitment is the recorder's own voice
+        # (actor "receipts", like genesis) — an entry no tool event owes.
+        # Counting it would manufacture SURPLUS on every committed
+        # session: a machine-wide self-inflicted false scar.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-mark",
+                         entries=2)
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "receipts", "--action",
+             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
+            capture_output=True, check=True)
+        write_transcript(self.witness, self.root / "alpha", "sess-mark",
+                         event_times=[ago(120), ago(60)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        watched = self.states(result)["sess-mark"]
+        self.assertEqual(watched["state"], "OK")
+        self.assertEqual(watched["receipts"], 2)
+
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         nowhere = Path(self._tmp.name) / "no-such-layout" / "projects"

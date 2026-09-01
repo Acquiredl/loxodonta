@@ -1165,11 +1165,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                               "verdict": verdict}
 
         # The session's receipt tally for the completeness watch: the
-        # whole sibling family counts; each genesis is administrative.
+        # whole sibling family counts, minus the recorder's own voice —
+        # genesis and transcript commitments carry actor "receipts" and
+        # are owed by no tool event, so counting them would manufacture
+        # SURPLUS on every committed session (ADR-0017).
         family = families.setdefault((repo, session),
                                      {"receipts": 0, "last": None,
                                       "moments": []})
-        logged = [e for e in entries if e.get("n") != 0]
+        logged = [e for e in entries if e.get("actor") != "receipts"]
         family["receipts"] += len(logged)
         stamps = [e["ts"] for e in logged if isinstance(e.get("ts"), str)]
         if stamps:
@@ -1738,7 +1741,9 @@ def day_span(ts):
 
 def gather(logs):
     """(families, rows): sibling chains folded per session (ADR-0004),
-    genesis excluded — administrative, not memory. Rows arrive sorted
+    bookkeeping excluded — genesis and transcript commitments are the
+    chain talking about itself, not memory of the work (ADR-0017);
+    search and `show` still reach them by address. Rows arrive sorted
     oldest-first; ties break on chain name then n, deterministically."""
     families = {}
     rows = []
@@ -1748,7 +1753,7 @@ def gather(logs):
             session, {"count": 0, "first": None, "last": None,
                       "final": None})
         for entry in read_entries(log):
-            if entry.get("n") == 0:
+            if entry.get("actor") == "receipts":
                 continue
             ts = entry.get("ts") if isinstance(entry.get("ts"), str) else ""
             rows.append({"session": session, "log": log, "ts": ts,

@@ -255,19 +255,29 @@ def file_reference(base, raw_path):
     return {"path": path, "sha256": sha256}
 
 
-def append_entry(log, actor, action, file_paths):
-    """Append one chained entry. Shared by `log` and `run` — run introduces
-    no new schema fields (SPEC §7)."""
+def build_references(log, file_paths):
+    """The sorted {path, sha256} list for an append, or (None, 1) with
+    the complaint printed — shared by `log`/`run`/`hook` so all three
+    refuse the same ways."""
     base, problem = files_base(log)
     if problem and file_paths:
         print(f"error: {problem}", file=sys.stderr)
-        return 1
+        return None, 1
     try:
         files = [file_reference(base, p) for p in file_paths]
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
-        return 1
+        return None, 1
     files.sort(key=lambda ref: ref["path"])  # by path bytes (SPEC §3)
+    return files, 0
+
+
+def append_entry(log, actor, action, file_paths):
+    """Append one chained entry. Shared by `log` and `run` — run introduces
+    no new schema fields (SPEC §7)."""
+    files, code = build_references(log, file_paths)
+    if files is None:
+        return code
     # From here the tail is read, extended, and written as one unit. A
     # racing writer that slips between the read and the write tears the
     # line or forks the chain at the same `n` (ADR-0004).
@@ -1054,6 +1064,40 @@ HOOK_SUMMARY_KEYS = ("file_path", "notebook_path", "command", "path",
                      "pattern", "url", "query", "prompt")
 
 
+# ADR-0017: every COMMITMENT_CADENCE entries, the chain commits the
+# harness transcript's byte-prefix — the transcript is the writer-reachable
+# flesh of a forensic rebuild, and a committed prefix can never be
+# rewritten undetected again. The window is the honesty: bytes newer than
+# the latest commitment stay rewritable until the next one.
+COMMITMENT_CADENCE = 25
+
+
+def commit_transcript_due(log, transcript_path):
+    """Append a transcript commitment when the tail lands on a cadence
+    boundary. Called with the chain lock held, right after a hook
+    receipt. Every failure path is a silent skip, never fatal: a hook
+    that failed the session over the transcript would teach the
+    operator to turn the hook off."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return
+    try:
+        last = tail_entry(read_log(log))
+    except FileNotFoundError:
+        return
+    if last is None or last["n"] == 0 or last["n"] % COMMITMENT_CADENCE:
+        return
+    try:
+        with open(transcript_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return
+    # The pinned grammar (SPEC §2.2): the prefix is committed from byte
+    # zero every time, so each commitment re-covers everything before it.
+    action = (f"transcript-commitment: bytes={len(data)} "
+              f"sha256={hashlib.sha256(data).hexdigest()}")
+    append_locked(log, "receipts", action, [])
+
+
 def one_line(text, limit=160):
     """Whitespace collapsed to single spaces, truncated with an ellipsis —
     action is one line (SPEC §2), and receipts are not transcripts."""
@@ -1281,7 +1325,21 @@ def cmd_hook(args):
             continue
         file_paths.append(relative.replace(os.sep, "/"))
 
-    return append_entry(log, args.actor, action, file_paths)
+    files, code = build_references(log, file_paths)
+    if files is None:
+        return code
+    # One lock for the receipt and any due transcript commitment: a
+    # racing sibling process between the two could steal the cadence
+    # boundary, and a commitment that sometimes silently misses its
+    # window is the kind of flake an operator learns to shrug at.
+    try:
+        with ChainLock(log):
+            code = append_locked(log, args.actor, action, files)
+            if code == 0:
+                commit_transcript_due(log, payload.get("transcript_path"))
+            return code
+    except LockTimeout:
+        return locked_out(log)
 
 
 # --- Hook installer -----------------------------------------------------------

@@ -563,5 +563,95 @@ class HookWorktreeTest(unittest.TestCase):
         self.assertFalse((main / "receipts").exists())
 
 
+class TranscriptCommitmentTest(unittest.TestCase):
+    """ADR-0017: every 25 entries the hook commits the harness
+    transcript's byte-prefix as a bookkeeping entry — the chain commits
+    the flesh by reference. Driven through the public CLI with stdin
+    payloads, like every hook behavior."""
+
+    CADENCE = 25
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+        self.transcript = self.workdir / "transcript.jsonl"
+
+    def entries(self, session="sess-1234abcd"):
+        log = self.workdir / f"receipts-{session}.jsonl"
+        return [json.loads(line)
+                for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def commitments(self):
+        return [e for e in self.entries()
+                if e["action"].startswith("transcript-commitment:")]
+
+    def drive(self, calls, transcript=True):
+        for i in range(calls):
+            body = payload(tool="Bash", tool_input={"command": f"step {i}"})
+            if transcript:
+                body["transcript_path"] = str(self.transcript)
+            result = run_hook(body, cwd=self.workdir)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_25th_entry_triggers_a_transcript_commitment(self):
+        self.transcript.write_bytes(b"the diary, page one\n")
+
+        self.drive(self.CADENCE)
+
+        entries = self.entries()
+        # genesis + 25 tool receipts + 1 commitment
+        self.assertEqual(len(entries), self.CADENCE + 2)
+        commitment = entries[-1]
+        self.assertEqual(commitment["n"], self.CADENCE + 1)
+        self.assertEqual(commitment["actor"], "receipts")
+        self.assertEqual(commitment["files"], [])
+        # The pinned grammar — a golden line, like canonical form: an
+        # independent implementation must produce these exact bytes.
+        self.assertEqual(
+            commitment["action"],
+            "transcript-commitment: bytes=20 sha256=f29203b62a3754c1"
+            "0035541fc436ac31ef426b6d56cfd9bf81e89fc44cac08a7")
+        verify = run_receipts("verify", "--log",
+                              "receipts-sess-1234abcd.jsonl",
+                              cwd=self.workdir)
+        self.assertEqual(verify.returncode, 0, verify.stdout)
+
+    def test_cadence_repeats_and_commits_the_grown_prefix(self):
+        self.transcript.write_bytes(b"page one\n")
+        self.drive(self.CADENCE)
+        # The diary grows between boundaries; the next commitment must
+        # cover the whole prefix from byte zero, not the delta.
+        with open(self.transcript, "ab") as f:
+            f.write(b"page two\n")
+        # 24 more tool receipts land n=27..50 -> second boundary at 50.
+        self.drive(self.CADENCE - 1)
+
+        marks = self.commitments()
+        self.assertEqual([m["n"] for m in marks],
+                         [self.CADENCE + 1, 2 * self.CADENCE + 1])
+        first, second = (int(m["action"].split("bytes=")[1].split()[0])
+                         for m in marks)
+        self.assertEqual(first, len(b"page one\n"))
+        self.assertEqual(second, len(b"page one\npage two\n"))
+
+    def test_without_a_transcript_path_no_commitment_is_written(self):
+        self.drive(self.CADENCE, transcript=False)
+
+        entries = self.entries()
+        self.assertEqual(len(entries), self.CADENCE + 1)
+        self.assertEqual(self.commitments(), [])
+
+    def test_unreadable_transcript_skips_the_commitment_never_fails(self):
+        # Skipped, never fatal: a hook that failed the session over the
+        # transcript would teach the operator to turn the hook off.
+        self.drive(self.CADENCE)  # transcript_path points at nothing
+
+        self.assertFalse(self.transcript.exists())
+        entries = self.entries()
+        self.assertEqual(len(entries), self.CADENCE + 1)
+        self.assertEqual(self.commitments(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
