@@ -273,6 +273,25 @@ class DashboardTest(ServerFixture):
                      'id="filters"'):
             self.assertIn(kept, page)
 
+    def test_the_activity_pane_draws_the_store(self):
+        # Slice 4 of the #48 shape: pane two's second tab draws the
+        # store — receipts per session, tempo against the store's own
+        # norm (with the watch's honest empty state), looks per day
+        # (red rides a HOT word, never colour alone), plus the
+        # working-hours clock and the session gantt, moved in whole.
+        page = self.page()
+        self.assertIn('id="p2-activity"', page)
+        self.assertIn('data-p2="activity"', page)
+        for chart in ("chart-receipts", "chart-tempo", "chart-looks"):
+            self.assertIn('id="' + chart + '"', page)
+        self.assertIn("no session ran hot", page)
+        self.assertIn("HOT", page)
+        self.assertIn('id="clock"', page)
+        self.assertIn('id="gantt"', page)
+        # No chart library, no canvas fingerprinting — bars are SVG
+        # built in the page's own script.
+        self.assertIn("createElementNS", page)
+
     def test_the_page_carries_the_consumption_watch(self):
         # Issue #67: hot sessions render in the events section, in the
         # investigate voice — and the status endpoint carries the watch

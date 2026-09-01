@@ -2680,6 +2680,22 @@ PAGE = """<!doctype html>
   .pane-empty { color: var(--faint); padding: 1.2rem;
                 font-size: 0.85rem; }
   .tabpane { padding: 0; }
+  .p2tab { font: inherit; font-size: 0.7rem; font-family: var(--mono);
+           color: var(--faint); background: none; border: 0;
+           border-radius: 0.3rem; padding: 0.1rem 0.5rem;
+           cursor: pointer; }
+  .p2tab.on { color: var(--fg); background: var(--surface2); }
+  .chartbox { padding: 0.7rem 0.9rem 0.4rem; }
+  .chartbox h3 { margin: 0 0 0.3rem; font-size: 0.72rem;
+                 letter-spacing: 0.08em; text-transform: uppercase;
+                 color: var(--dim); }
+  .chartbox .testimony { font-size: 0.72rem; padding: 0; }
+  .clab { font-family: var(--mono); font-size: 10px; fill: var(--dim); }
+  .cval { font-family: var(--mono); font-size: 10px; fill: var(--fg); }
+  .cbar { fill: var(--accent); opacity: 0.85; }
+  .cbar.hot { fill: var(--grave); }
+  .cnorm { stroke: var(--dim); stroke-width: 1.5;
+           stroke-dasharray: 4 4; }
   .tabpane > .testimony { padding: 0.6rem 0.8rem 0; margin: 0; }
   #pane-projects #tiles { margin: 0.8rem; }
   #pane-search #ask-search { width: calc(100% - 1.6rem);
@@ -2963,32 +2979,53 @@ this page draws them and decides nothing</footer>
       </div>
     </div>
     <div class="pane">
-      <div class="phead"><span class="no">[2]</span> inspect — the
-      chain as <code>receipts verify</code> sees it</div>
+      <div class="phead"><span class="no">[2]</span>
+        <button type="button" class="p2tab on" data-p2="inspect">inspect</button>
+        <button type="button" class="p2tab" data-p2="activity">activity</button>
+        <span>— the chain as <code>receipts verify</code> sees it,
+        or the store drawn</span></div>
       <div class="pbody">
-        <div id="inspect-meta" class="pane-empty">click a session on
-        the left — its chains, claims, and actions land here</div>
-        <div id="inspect-judge" hidden></div>
-        <div id="inspect-chains"></div>
+        <div id="p2-inspect">
+          <div id="inspect-meta" class="pane-empty">click a session on
+          the left — its chains, claims, and actions land here</div>
+          <div id="inspect-judge" hidden></div>
+          <div id="inspect-chains"></div>
+        </div>
+        <div id="p2-activity" hidden>
+          <div class="chartbox">
+            <h3>receipts per session — last ten</h3>
+            <div id="chart-receipts"></div>
+          </div>
+          <div class="chartbox">
+            <h3>busiest hour vs the store's norm</h3>
+            <div id="chart-tempo"></div>
+          </div>
+          <div class="chartbox">
+            <h3>looks per day — fourteen days</h3>
+            <p class="testimony">red marks a day that carried an alarm;
+            an unread day is a gap, not a quiet day</p>
+            <div id="chart-looks"></div>
+          </div>
+          <div class="chartbox">
+            <h3>working hours</h3>
+            <p class="testimony">when receipts actually arrive, in your
+            own timezone — the selfish view: what your weeks really
+            look like</p>
+            <div id="clock">remembering…</div>
+          </div>
+          <div class="chartbox">
+            <h3>sessions on one axis</h3>
+            <p class="testimony">every session of the last fourteen
+            days, drawn from the completeness watch — a hatched tail is
+            receipts the session owed and never wrote. Reasons to look,
+            never verdicts</p>
+            <div id="gantt">remembering…</div>
+            <div id="axis"></div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
-</section>
-
-<section id="hours">
-  <h2>working hours</h2>
-  <p class="testimony">when receipts actually arrive, in your own
-  timezone — the selfish view: what your weeks really look like</p>
-  <div id="clock">remembering…</div>
-</section>
-
-<section id="sessions">
-  <h2>sessions</h2>
-  <p class="testimony">every session of the last fourteen days on one
-  axis, drawn from the completeness watch — a hatched tail is receipts
-  the session owed and never wrote. Reasons to look, never verdicts</p>
-  <div id="gantt">remembering…</div>
-  <div id="axis"></div>
 </section>
 
 <section id="firedrill" hidden>
@@ -3547,6 +3584,7 @@ function render(report) {
   renderStrip(report);
   renderAttention(report);
   renderFortnight(report);
+  if (!document.getElementById("p2-activity").hidden) renderCharts();
   renderTiles();
   renderGantt();
 
@@ -3977,6 +4015,100 @@ function selectSession(story) {
   } else {
     judgeBox.hidden = true;
   }
+}
+
+// Pane two's own tabs: inspection or the store drawn. The charts
+// speak the house rules — one hue per chart, values reachable as
+// text, red only for status and never alone (a HOT word rides it).
+function showPane2(name) {
+  for (const b of document.querySelectorAll(".p2tab")) {
+    b.classList.toggle("on", b.dataset.p2 === name);
+  }
+  document.getElementById("p2-inspect").hidden = name !== "inspect";
+  document.getElementById("p2-activity").hidden = name !== "activity";
+  if (name === "activity") renderCharts();
+}
+for (const b of document.querySelectorAll(".p2tab")) {
+  b.addEventListener("click", () => showPane2(b.dataset.p2));
+}
+
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs) {
+  const node = document.createElementNS(SVGNS, tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    node.setAttribute(key, value);
+  }
+  return node;
+}
+
+// Thin horizontal bars, rounded data ends, direct value labels, ink
+// for text and one hue for marks; an optional dashed norm line.
+function hbars(host, items, unit, norm) {
+  host.replaceChildren();
+  if (!items.length) return;
+  const peak = Math.max(norm || 0, ...items.map(i => i.v), 1);
+  const W = 420, LEFT = 100, BARS = W - LEFT - 58, ROW = 24;
+  const svg = svgEl("svg",
+    {viewBox: "0 0 " + W + " " + (items.length * ROW + 6),
+     role: "img", style: "width:100%;height:auto"});
+  items.forEach((item, i) => {
+    const y = i * ROW;
+    const w = Math.max(3, Math.round(item.v / peak * BARS));
+    const label = svgEl("text", {x: LEFT - 8, y: y + 14,
+      "text-anchor": "end", "class": "clab"});
+    label.textContent = item.label;
+    svg.appendChild(label);
+    const bar = svgEl("rect", {x: LEFT, y: y + 4, width: w, height: 13,
+      rx: 4, "class": "cbar" + (item.hot ? " hot" : "")});
+    const tip = svgEl("title", {});
+    tip.textContent = item.label + ": " + item.v + " " + unit;
+    bar.appendChild(tip);
+    svg.appendChild(bar);
+    const value = svgEl("text", {x: LEFT + w + 7, y: y + 15,
+      "class": "cval"});
+    value.textContent = item.v + (item.hot ? " · HOT" : "");
+    svg.appendChild(value);
+  });
+  if (norm) {
+    const x = LEFT + Math.round(norm / peak * BARS);
+    svg.appendChild(svgEl("line", {x1: x, x2: x, y1: 0,
+      y2: items.length * ROW, "class": "cnorm"}));
+    const cap = svgEl("text", {x: x + 5, y: 10, "class": "clab"});
+    cap.textContent = "norm " + norm;
+    svg.appendChild(cap);
+  }
+  host.appendChild(svg);
+}
+
+function renderCharts() {
+  const recent = (shownRecall ? shownRecall.sessions : [])
+    .slice(0, 10).map(story => ({label: story.session.slice(0, 8),
+                                 v: story.entries}));
+  hbars(document.getElementById("chart-receipts"), recent, "receipts");
+
+  const tempoHost = document.getElementById("chart-tempo");
+  const consumption = (lastStatus && lastStatus.consumption) ||
+    {sessions: [], norm: null};
+  if (consumption.sessions.length) {
+    hbars(tempoHost, consumption.sessions.map(s => ({
+      label: s.session.slice(0, 8), v: s.busiest_hour, hot: true})),
+      "calls in the busiest hour",
+      consumption.norm ? consumption.norm.median_busiest_hour : 0);
+  } else {
+    tempoHost.replaceChildren();
+    tempoHost.appendChild(el("p", "testimony", consumption.norm
+      ? "no session ran hot — the norm holds at " +
+        consumption.norm.median_busiest_hour + " calls in a busiest " +
+        "hour (" + consumption.norm.sessions_counted + " sessions " +
+        "counted). Testimony, never a verdict."
+      : "no tempo to draw yet"));
+  }
+
+  const days = ((lastStatus && lastStatus.history) || []).map(row => ({
+    label: row.day.slice(5), v: row.looks || 0,
+    hot: row.watched && (row.alarms || 0) > 0}));
+  hbars(document.getElementById("chart-looks"), days, "look(s)");
 }
 
 function findScanSession(story) {
