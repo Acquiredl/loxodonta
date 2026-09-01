@@ -219,6 +219,79 @@ class DashboardTest(ServerFixture):
         self.assertIn("RECEIPTS STOPPED ARRIVING", page)
         self.assertIn("all quiet", page)
 
+    def test_the_rail_carries_status_and_the_attention_queue(self):
+        # The redesign's shell (#48, ratified 2026-09-01): a sticky rail
+        # holds the status block, the attention queue, and the fortnight;
+        # the work area holds everything the operator chose to look at.
+        page = self.page()
+        self.assertIn('id="rail"', page)
+        self.assertIn('id="work"', page)
+        self.assertLess(page.index('id="rail"'), page.index('id="work"'))
+        self.assertIn('id="attention"', page)
+        # The queue's ordering contract: live alarms outrank damaged
+        # history, which outranks reasons to look.
+        self.assertIn('const SEVERITY = ["alarm", "regenerated", '
+                      '"broken", "tripwire", "hot"];', page)
+        # The designed empty state — quiet is never blank.
+        self.assertIn("nothing wants your eyes", page)
+
+    def test_the_page_asks_nothing_of_any_other_host(self):
+        # The cockpit renders offline: system fonts only, no CDN, no
+        # third-party requests of any kind (#48 ruling).
+        page = self.page()
+        for outside in ("fonts.googleapis", "fonts.gstatic", "cdn.",
+                        "//unpkg", "@import", 'src="http',
+                        'href="http'):
+            self.assertNotIn(outside, page)
+
+    def test_the_worktable_splits_sessions_from_inspection(self):
+        # Slice 2 of the #48 shape: pane one is what you are looking
+        # at (the sessions table), pane two is the thing under
+        # inspection (chains as verify saw them, walk/judge actions).
+        page = self.page()
+        self.assertIn('id="worktable"', page)
+        self.assertIn('id="sessions-table"', page)
+        self.assertIn('id="inspect-chains"', page)
+        self.assertIn("click a row to inspect", page)
+        self.assertIn("walk this session", page)
+        # The ADR-0017 surfacing: the judge command renders copy-ready,
+        # and only for sessions the watch paired with a transcript.
+        self.assertIn('id="inspect-judge"', page)
+        self.assertIn("judge transcript", page)
+        self.assertIn("seen.judge", page)
+
+    def test_the_worktable_carries_all_four_tabs(self):
+        # Slice 3 of the #48 shape: projects, search, and evidence join
+        # sessions in pane one — the old full-width sections retire, and
+        # every id they carried keeps its name inside its tab.
+        page = self.page()
+        for tab in ("sessions", "projects", "search", "evidence"):
+            self.assertIn('data-tab="' + tab + '"', page)
+            self.assertIn('id="pane-' + tab + '"', page)
+        for kept in ('id="tiles"', 'id="ask-search"', 'id="tripwire"',
+                     'id="watch"', 'id="consumption"', 'id="anchors"',
+                     'id="filters"'):
+            self.assertIn(kept, page)
+
+    def test_the_activity_pane_draws_the_store(self):
+        # Slice 4 of the #48 shape: pane two's second tab draws the
+        # store — receipts per session, tempo against the store's own
+        # norm (with the watch's honest empty state), looks per day
+        # (red rides a HOT word, never colour alone), plus the
+        # working-hours clock and the session gantt, moved in whole.
+        page = self.page()
+        self.assertIn('id="p2-activity"', page)
+        self.assertIn('data-p2="activity"', page)
+        for chart in ("chart-receipts", "chart-tempo", "chart-looks"):
+            self.assertIn('id="' + chart + '"', page)
+        self.assertIn("no session ran hot", page)
+        self.assertIn("HOT", page)
+        self.assertIn('id="clock"', page)
+        self.assertIn('id="gantt"', page)
+        # No chart library, no canvas fingerprinting — bars are SVG
+        # built in the page's own script.
+        self.assertIn("createElementNS", page)
+
     def test_the_page_carries_the_consumption_watch(self):
         # Issue #67: hot sessions render in the events section, in the
         # investigate voice — and the status endpoint carries the watch
@@ -288,7 +361,8 @@ class FortnightTest(ServerFixture):
         self.assertIn('id="fortnight"', page)
         self.assertLess(page.index('id="strip"'), page.index('id="fortnight"'),
                         "the alarm still leads; the trend explains it")
-        self.assertLess(page.index('id="fortnight"'), page.index('id="recall"'),
+        self.assertLess(page.index('id="fortnight"'),
+                        page.index('id="worktable"'),
                         "context for the alarm precedes the memory view")
         self.assertIn("trend or a one-off", page,
                       "the band says which question it answers")
@@ -629,7 +703,10 @@ class RecallTest(ServerFixture):
 
         self.assertIn("what was attempted", page,
                       "the testimony label is the surface's first claim")
-        self.assertLess(page.index('id="recall"'), page.index('id="band"'),
+        # The memory view (the sessions pane) leads the worktable;
+        # evidence — tripwire, watch, anchors — sits behind its own tab.
+        self.assertLess(page.index('id="pane-sessions"'),
+                        page.index('id="pane-evidence"'),
                         "the memory view lands first; alarms sit around it")
 
     def test_timeline_lists_sessions_across_repos_newest_first(self):
