@@ -1765,6 +1765,46 @@ def gather(logs):
     return families, rows
 
 
+def tool_of(action):
+    """The collapse key for a digest row: the tool label the hook
+    writes before the first colon (`Read: ...` -> `Read`), or the
+    whole action when there is none. A prefix rule is tool-agnostic
+    on purpose — it cannot rot the way a tool taxonomy would (#66)."""
+    return str(action).partition(":")[0].strip()
+
+
+def collapse_runs(rows):
+    """Consecutive same-actor, same-tool rows folded into rendered
+    units (#66) — the recorder never filters, readers collapse
+    (ADR-0016 ruling 3). A unit's line stands on the run's last
+    entry: its address resolves like any other, and `timeline`
+    around it unrolls the rest of the run."""
+    units = []
+    for row in rows:
+        entry = row["entry"]
+        key = (entry.get("actor"), tool_of(entry.get("action", "")))
+        if units and units[-1]["key"] == key:
+            units[-1]["rows"].append(row)
+        else:
+            units.append({"key": key, "rows": [row]})
+    return units
+
+
+def run_action(unit):
+    """The action text a unit renders: a lone row speaks for itself;
+    a run says how long it was, the shared tool, and where it ended —
+    `14x Read, last: supervisor.py`. The newest detail is shown
+    because it is what the session did most recently; the rest is one
+    `timeline` away."""
+    rows = unit["rows"]
+    action = str(rows[-1]["entry"].get("action", ""))
+    if len(rows) == 1:
+        return action
+    label, _, rest = action.partition(":")
+    prefix = f"{len(rows)}x {label.strip()}"
+    return f"{prefix}, last: {rest.strip()}" if rest.strip() else prefix
+
+
 def scan_testimony(repo):
     """The last scan's verdicts for this repo's chains, read from
     whichever baseline covers it: the store's, where the default scan
@@ -1816,12 +1856,24 @@ def cmd_digest(args):
     total = len(rows)
     if not total:
         return 0  # nothing to recall; the hook must stay silent, not nag
-    shown = rows[-max(args.limit, 1):]
+    # Collapse before capping (#66): the budget counts rendered rows,
+    # so a Read flood folds to one line instead of scrolling the story
+    # out of the window. Runs never cross sessions.
+    by_session = {}
+    for row in rows:
+        by_session.setdefault(row["session"], []).append(row)
+    units = [unit for session_rows in by_session.values()
+             for unit in collapse_runs(session_rows)]
+    units.sort(key=lambda u: (u["rows"][-1]["ts"],
+                              u["rows"][-1]["log"].name,
+                              u["rows"][-1]["entry"].get("n") or 0))
+    shown = units[-max(args.limit, 1):]
+    reached = sum(len(unit["rows"]) for unit in shown)
 
     lines = [f"== recall digest -- {repo.name} ({repo.as_posix()}) =="]
     memory = f"memory: {len(families)} sessions, {total} entries"
-    if len(shown) < total:
-        memory += f"; showing last {len(shown)} (search reaches the rest)"
+    if reached < total:
+        memory += f"; showing last {reached} (search reaches the rest)"
     lines.append(memory)
     scanned, verdicts = scan_testimony(repo)
     if scanned:
@@ -1840,20 +1892,22 @@ def cmd_digest(args):
                      "run loxodonta verify for a verdict")
 
     groups = {}
-    for row in shown:
-        groups.setdefault(row["session"], []).append(row)
-    for session in sorted(groups, key=lambda s: groups[s][-1]["ts"]):
+    for unit in shown:
+        groups.setdefault(unit["rows"][-1]["session"], []).append(unit)
+    for session in sorted(groups,
+                          key=lambda s: groups[s][-1]["rows"][-1]["ts"]):
         family = families[session]
         lines.append("")
         lines.append(f"-- session {session[:8]} "
                      f"({day_span(family['first'])} .. "
                      f"{day_span(family['last'])}, "
                      f"{family['count']} entries) --")
-        for row in groups[session]:
+        for unit in groups[session]:
+            row = unit["rows"][-1]
             entry = row["entry"]
             line = (f"{address_of(entry)}  {hhmm(row['ts'])}  "
                     f"{clip(entry.get('actor', '?'), 16)}  "
-                    f"{clip(entry.get('action', ''))}")
+                    f"{clip(run_action(unit))}")
             if entry.get("entry_hash") == family["final"]:
                 line += "   <- last recorded action"
             lines.append(line)
