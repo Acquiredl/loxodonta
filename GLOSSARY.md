@@ -119,7 +119,7 @@ The package's sidecar list: a small document, **written last**, holding the chai
 
 ### Seal
 
-An outer commitment applied to the [manifest](#manifest) hash from beyond the package. Two kinds, answering orthogonal questions: the **anchor** (ADR-0003, pointed at the manifest hash) says *when* — the only seal the issuer cannot forge later, because a signature has no clock and no one can anchor into the past; the [**issuer signature**](#issuer-signature) says *who* (ADR-0008). The manifest commits its declared seal set, so a stripped seal is `SEAL-MISSING`, never a silent downgrade. An unsealed package can verify at most `SELF-CONSISTENT` — indistinguishable from a wholesale regeneration. Package verdicts name the mechanism, never the conclusion — see Anti-terms.
+An outer commitment applied to the [manifest](#manifest) hash from beyond the package. Two kinds, answering orthogonal questions: the **anchor** (ADR-0003, pointed at the manifest hash) says *when* — the only seal the issuer cannot forge later, because a signature has no clock and no one can anchor into the past; the [**issuer signature**](#issuer-signature) says *who* (ADR-0008). The manifest commits its declared seal set, so a stripped seal is `SEAL-MISSING`, never a silent downgrade. An unsealed package can verify at most `SELF-CONSISTENT` — indistinguishable from a wholesale regeneration. Package verdicts name the mechanism, never the conclusion — see Anti-terms. Anti-use: the [transcript commitment](#transcript-commitment) is not a seal — it is writer-authored and inner, protected only by the chain; the word stays reserved for outer commitments (ADR-0017).
 
 ### Issuer signature
 
@@ -161,6 +161,14 @@ The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers 
 
 The property receipts deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`receipts run`, pipeline gate scripts, the Stage C harness hook) — and is judged against [coverage](#coverage). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
 
+### Bookkeeping entry
+
+An entry the recorder writes in its own voice — `actor: "receipts"`, the same voice as [genesis](#genesis) — rather than on behalf of a tool call: today, genesis and the [transcript commitment](#transcript-commitment). The actor field is the mechanical marker every reader keys on: the witness excludes bookkeeping from the receipts count (an entry no tool event owes must not manufacture `SURPLUS`), and the [digest](#digest) skips bookkeeping rows (they are the chain talking about itself, not memory of the work). Search and `show` still reach them by [entry address](#entry-address) — unweighted, never hidden (ADR-0017).
+
+### Transcript commitment
+
+A [bookkeeping entry](#bookkeeping-entry) that fingerprints the harness transcript as it grows: `action: "transcript-commitment: bytes=N sha256=<hex>"` — the hash of the transcript's first N bytes, taken from byte zero every time, appended by the hook every 25 entries (ADR-0017). It extends tamper-evidence to the rich record *by reference, forward from each commitment*: once a region is committed, rewriting it is detectable forever (`verify --transcript`, verdict `TRANSCRIPT-DIVERGED`); before it is committed, rewriting it is free — the window is at most ~25 calls, plus the tail after the last commitment. The anti-claim, spelled out: the commitment is **writer-authored** — an adversary who rewrites the transcript before its first commitment gets the forgery faithfully committed; garbage in, faithfully committed garbage. Detection latency, not protection — the same sentence as the tripwire, one artifact over. Deliberately **not** called a seal: a [seal](#seal) is an outer commitment from beyond the package; this is inner, chain-protected bookkeeping.
+
 ### Anchor *(Stage B)*
 
 An external commitment of the chain head to a system the log owner doesn't control — OpenTimestamps onto the Bitcoin blockchain. Closes the whole-chain-regeneration gap named in ADR-0001. Anchor proofs live beside the log, not inside the entry format.
@@ -178,7 +186,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## States and transitions
 
-- Verification verdict is one of: `VALID` (exit 0) | `BROKEN` (exit 1, chain integrity failed at ≥1 entries) | `FILES-DIVERGED` (exit 2, chain intact but a referenced file was modified since logging) | `HEAD-MISMATCH` (exit 3, chain internally valid but its head differs from the operator's head record — the whole-chain-regeneration case). `UNSUPPORTED-VERSION` (exit 4) is a refusal to judge, not a verdict: the log's genesis declares a format this verifier doesn't speak.
+- Verification verdict is one of: `VALID` (exit 0) | `BROKEN` (exit 1, chain integrity failed at ≥1 entries) | `FILES-DIVERGED` (exit 2, chain intact but a referenced file was modified since logging) | `HEAD-MISMATCH` (exit 3, chain internally valid but its head differs from the operator's head record — the whole-chain-regeneration case) | `TRANSCRIPT-DIVERGED` (exit 5, chain intact but the transcript no longer matches a [transcript commitment](#transcript-commitment) — a committed prefix was rewritten or truncated; ADR-0017). `UNSUPPORTED-VERSION` (exit 4) is a refusal to judge, not a verdict: the log's genesis declares a format this verifier doesn't speak. When verdicts compete, the graver sets the exit: `BROKEN` > `HEAD-MISMATCH` > `TRANSCRIPT-DIVERGED` > `FILES-DIVERGED` — transcript divergence is never innocent; working-tree drift usually is. A *missing* transcript is a note, never a verdict: the harness cleans transcripts on a retention cycle.
 - A log never transitions backward: append is the only legal write; anything else moves the verdict to `BROKEN`.
 
 ---
@@ -204,7 +212,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`
 - Related out-of-scope decisions: none yet.
 
 ---
