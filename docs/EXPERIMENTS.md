@@ -82,3 +82,37 @@ on a tampered entry refused to bless it (warning, exit 1). A separate
 fresh agent followed the README with no prior context; every recorder
 claim held as written — including, unplanned, the flagship one: the
 agent mistyped a `run` command, and the failure was receipted anyway.
+
+## 4. The transcript-commitment envelope (2026-08-31, ADR-0017)
+
+Measured on the author's machine (Windows 11, CPython 3.13, NVMe),
+synthetic transcripts of random bytes, medians over repeated runs:
+
+| What | 1 MB | 10 MB | 50 MB |
+|---|---|---|---|
+| open + read + sha256 of the whole prefix | 0.9 ms | 9.6 ms | 48.0 ms |
+
+End-to-end through the real hook (10 MB transcript, 5 runs each): an
+off-boundary call medians **153 ms**, the boundary call — tool receipt
+*plus* transcript hash *plus* commitment append under the same lock —
+medians **156 ms**. Interpreter startup dominates both; the commitment
+itself is noise until transcripts reach tens of MB, and even a 50 MB
+transcript adds ~50 ms to one call in 25 (~2 ms amortized). Lock
+behavior is unchanged in shape: the boundary call holds the same
+per-chain lock once, slightly longer — the ADR-0016 burst arithmetic
+gains no new term.
+
+**The append-only assumption, live:** the first real commitment landed
+during the session that shipped the feature (entry 126, 1,679,210
+bytes) and was judged minutes later, after the transcript had grown
+past it: `COMMITMENT HOLDS`. In-session growth is append-only as
+assumed. Two harness behaviors remain to falsify before the README
+claims anything — **resume** and **compaction** — either could
+lawfully rewrite earlier bytes without breaking any feature of its
+own. The drill: end a session that holds commitments, resume it, work
+a few calls, then run the judge command `scan` prints for it; earlier
+commitments must still hold. Until that passes, the claim stays here
+and not in the README. (Indirect comfort, not proof: the completeness
+witness has paired transcripts with chains across weeks of long
+sessions without surplus scars, so compaction at least preserves tool
+events — byte-stability is the open question.)
