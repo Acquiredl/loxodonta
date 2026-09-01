@@ -106,13 +106,13 @@ gains no new term.
 during the session that shipped the feature (entry 126, 1,679,210
 bytes) and was judged minutes later, after the transcript had grown
 past it: `COMMITMENT HOLDS`. In-session growth is append-only as
-assumed. Two harness behaviors remain to falsify before the README
-claims anything — **resume** and **compaction** — either could
-lawfully rewrite earlier bytes without breaking any feature of its
-own. The drill: end a session that holds commitments, resume it, work
-a few calls, then run the judge command `scan` prints for it; earlier
-commitments must still hold. Until that passes, the claim stays here
-and not in the README. (Indirect comfort, not proof: the completeness
-witness has paired transcripts with chains across weeks of long
-sessions without surplus scars, so compaction at least preserves tool
-events — byte-stability is the open question.)
+assumed. The **resume drill** ran the same day: the session was closed,
+restarted, and resumed, worked a few more calls, and the judge command
+re-run — `COMMITMENT HOLDS (entry 126)` again. Close-and-resume does
+not rewrite committed bytes, so the README carries the claim. The one
+behavior still unobserved is **compaction**: no commitment has yet been
+judged across a context compaction, and the claim's fine print stays
+honest about it until one is. (Indirect comfort, not proof: the
+completeness witness has paired transcripts with chains across weeks of
+long sessions without surplus scars, so compaction at least preserves
+tool events — byte-stability across it is the remaining question.)
