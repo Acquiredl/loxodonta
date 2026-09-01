@@ -947,6 +947,132 @@ def watch_completeness(root, witness, families, everywhere=False,
     return watch
 
 
+# --- Consumption --------------------------------------------------------------
+# The consumption watch (issue #67; OWASP GenAI LLM06 mitigation #8):
+# wide coverage (ADR-0016) makes the chains a record of tool tempo —
+# entries per session per hour — so a runaway loop or recursion without
+# a clear end state shows up as a session burning far above this
+# store's own norm. Everything read here is testimony (writer-stamped
+# timestamps and action lines), so the watch never raises the scan exit
+# and owns no verdicts. The boundary of the issue, held on purpose:
+# this tool evidences someone else's circuit breaker; it never is one
+# (.out-of-scope/001 — the hook stays outcome-blind).
+
+# A session runs hot when its busiest sliding hour reaches HOT_TIMES x
+# the median busiest hour of every *other* session, and at least
+# HOT_FLOOR — below one entry a minute nothing is runaway, however
+# small the norm. Peak against peaks, deliberately: an ordinary busy
+# hour towers over the median *hour* of a store full of quiet ones
+# (the first cut flagged a fifth of this machine's honest history);
+# against other sessions' peaks, that same history sat inside 3x while
+# a runaway loop still stands clear of it. The env knobs are the test
+# suite's threshold handle.
+HOT_TIMES = int(os.environ.get("SUPERVISOR_HOT_TIMES", 3))
+HOT_FLOOR = int(os.environ.get("SUPERVISOR_HOT_FLOOR", 60))
+
+CONSUMPTION_WORDS = {
+    "RUNNING-HOT": "receipts arriving far above this store's norm and "
+                   "still coming — a runaway loop or recursion without a "
+                   "clear end state looks like this. Evidence for your "
+                   "hand on the brake, never a brake itself.",
+    "ENDED-HOT": "a session that burned far above the store's norm and "
+                 "has gone quiet — kept as evidence, not a siren.",
+}
+
+
+def tool_of(action):
+    """The tool inside an action line, the way the hook writes one —
+    "Tool: summary" or a bare tool name. A line from any other writer
+    is its own label, whole: testimony rendered, never interpreted."""
+    head, sep, _ = str(action).partition(": ")
+    return head if sep else str(action)
+
+
+def busiest_hour(moments):
+    """One session's peak tempo: the sliding hour holding the most
+    entries, as (count, window start, dominant tool, its count). Two
+    pointers over the sorted timestamps; ties keep the earliest
+    window, so the figure never wobbles between looks."""
+    stamped = sorted(m for m in moments if m[0] is not None)
+    best, start = (0, None, None, 0), 0
+    for end in range(len(stamped)):
+        while (stamped[end][0] - stamped[start][0]).total_seconds() >= 3600:
+            start += 1
+        if end - start + 1 > best[0]:
+            window = [tool for _, tool in stamped[start:end + 1]]
+            top = max(set(window), key=window.count)
+            best = (len(window), stamped[start][0], top, window.count(top))
+    return best
+
+
+def median_of(counts):
+    ordered = sorted(counts)
+    mid = len(ordered) // 2
+    return (ordered[mid] if len(ordered) % 2
+            else (ordered[mid - 1] + ordered[mid]) / 2)
+
+
+def watch_consumption(families, now):
+    """The consumption half of a tick: every census session's tempo
+    against the store's norm, the hot ones surfaced. A session's
+    drawers merge exactly as the completeness watch merges them — the
+    tempo belongs to the session, not the drawer — and its home is the
+    drawer holding most of it, ties to the first name."""
+    sessions = {}
+    for (repo, session), family in sorted(families.items()):
+        group = sessions.setdefault(session, {"moments": [], "homes": []})
+        moments = family.get("moments", ())
+        group["moments"].extend(moments)
+        group["homes"].append((len(moments), repo))
+    peaks = {name: busiest_hour(group["moments"])
+             for name, group in sessions.items()}
+    # A session with no timestamped entries has no peak — it neither
+    # sets the norm nor gets judged against one.
+    samples = {name: peak[0] for name, peak in peaks.items() if peak[0]}
+    if not samples:
+        return {"norm": {"sessions_counted": 0,
+                         "words": "no timestamped entries yet — there is "
+                                  "no norm to deviate from"},
+                "sessions": []}
+    watch = {
+        "norm": {
+            "median_busiest_hour": median_of(samples.values()),
+            "sessions_counted": len(samples),
+            "words": (f"hot means a busiest hour of at least "
+                      f"max({HOT_FLOOR}, {HOT_TIMES} x the median busiest "
+                      "hour of every other session) — a session never "
+                      "sets its own norm. The norm is context for a "
+                      "flag, never a verdict; timestamps are testimony"),
+        },
+        "sessions": [],
+    }
+    for session, group in sorted(sessions.items()):
+        # Deviation needs a norm the session did not write: the other
+        # sessions' peaks. A store holding only this session has no
+        # norm to deviate from, and says nothing rather than guessing.
+        others = [peak for name, peak in samples.items() if name != session]
+        if not others:
+            continue
+        threshold = max(HOT_FLOOR, HOT_TIMES * median_of(others))
+        count, began, top, top_count = peaks[session]
+        if count < threshold:
+            continue
+        last = max((when for when, _ in group["moments"]
+                    if when is not None), default=None)
+        live = (last is not None
+                and (now - last).total_seconds() < IDLE_END_SECONDS)
+        state = "RUNNING-HOT" if live else "ENDED-HOT"
+        home = min(group["homes"], key=lambda h: (-h[0], h[1]))[1]
+        watch["sessions"].append({
+            "repo": home, "session": session, "state": state,
+            "busiest_hour": count, "threshold": threshold,
+            "window_start": began.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "top_tool": top, "top_tool_count": top_count,
+            "words": CONSUMPTION_WORDS[state],
+        })
+    return watch
+
+
 # --- Scan ---------------------------------------------------------------------
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
@@ -1041,12 +1167,21 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         # The session's receipt tally for the completeness watch: the
         # whole sibling family counts; each genesis is administrative.
         family = families.setdefault((repo, session),
-                                     {"receipts": 0, "last": None})
+                                     {"receipts": 0, "last": None,
+                                      "moments": []})
         logged = [e for e in entries if e.get("n") != 0]
         family["receipts"] += len(logged)
         stamps = [e["ts"] for e in logged if isinstance(e.get("ts"), str)]
         if stamps:
             family["last"] = max(family["last"] or "", max(stamps))
+        # And the same entries as (when, tool) moments for the
+        # consumption watch — a stamp without a zone is read as UTC, so
+        # one odd writer can never make two timestamps incomparable.
+        for e in logged:
+            when = parse_when(e.get("ts"))
+            if when is not None and when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            family["moments"].append((when, tool_of(e.get("action"))))
 
     for relpath in remembered:
         if relpath not in heads and not (root / relpath).exists():
@@ -1070,6 +1205,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     completeness = watch_completeness(root, witness, families,
                                       everywhere=store,
                                       calibration=calibration)
+    # The consumption watch never touches `worst`: a hot session is a
+    # reason to look, and the brake is the operator's (issue #67).
+    consumption = watch_consumption(families, now)
     # Only a live alarm raises the exit: an ended deficit is evidence,
     # and a siren that never stops sounding trains the operator to
     # ignore the band (the dogfood's lesson).
@@ -1102,6 +1240,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "history": fortnight(days, now),
         "baseline": baseline,
         "completeness": completeness,
+        "consumption": consumption,
         # Which recorder is actually running. Never raises the exit:
         # drift is a reason to look, and the operator's to resolve.
         "recorder": recorder_drift(witness),
@@ -2426,6 +2565,11 @@ PAGE = """<!doctype html>
   .watch-row.quiet { opacity: 0.6; }
   .watch-row.quiet .chip { color: inherit;
                            border-color: color-mix(in srgb, currentColor 40%, transparent); }
+  /* The consumption watch borrows the tripwire's investigate voice:
+     a hot session is a reason to look, deliberately unlike any
+     verdict tier and never as loud as a live completeness alarm. */
+  .watch-row.hot { border: 3px solid #6d28a8; background: #6d28a81a; }
+  .watch-row.hot .chip { background: #6d28a8; color: #fff; }
 
   /* The anchor panel: the block height is the operator's half of the
      regeneration defense, so it is the biggest thing in each row. */
@@ -2554,10 +2698,12 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
 
 <section id="events">
   <h2>events</h2>
-  <p class="testimony">what changed since the last look, and which
-  sessions are behind their witness — reasons to look, never verdicts</p>
+  <p class="testimony">what changed since the last look, which sessions
+  are behind their witness, and which are burning far above the store's
+  norm — reasons to look, never verdicts</p>
   <div id="tripwire"></div>
   <div id="watch"></div>
+  <div id="consumption"></div>
 </section>
 
 <section id="sessions">
@@ -3086,6 +3232,40 @@ function render(report) {
   if (report.completeness.calibration) {
     watch.appendChild(el("p", "claim",
       report.completeness.calibration.words));
+  }
+
+  // The consumption watch (issue #67, OWASP LLM06 #8): sessions
+  // burning far above the store's own norm — evidence for the
+  // operator's circuit breaker, never a breaker. Nothing here raises
+  // the exit or colours the strip; a quiet store draws nothing.
+  const burn = document.getElementById("consumption");
+  burn.replaceChildren();
+  const consumption = report.consumption || {sessions: []};
+  const hotRow = s => {
+    const row = el("div", "watch-row " +
+                   (s.state === "RUNNING-HOT" ? "hot" : "quiet"));
+    row.appendChild(el("span", "chip", s.state));
+    row.appendChild(el("span", "file", s.repo + " · " + s.session +
+      " · busiest hour " + s.busiest_hour + " entries, " +
+      s.top_tool + " ran " + s.top_tool_count + " of them"));
+    if (s.words) row.appendChild(el("p", "claim", s.words));
+    return row;
+  };
+  for (const s of consumption.sessions.filter(
+      s => s.state === "RUNNING-HOT")) {
+    burn.appendChild(hotRow(s));
+  }
+  const cooled = consumption.sessions.filter(
+    s => s.state !== "RUNNING-HOT");
+  if (cooled.length) {
+    const fold = el("details");
+    fold.appendChild(el("summary", "", cooled.length +
+      " session(s) that ran hot and ended — kept as evidence"));
+    for (const s of cooled) fold.appendChild(hotRow(s));
+    burn.appendChild(fold);
+  }
+  if (consumption.sessions.length && consumption.norm) {
+    burn.appendChild(el("p", "claim", consumption.norm.words));
   }
 
   renderAnchors(report);
