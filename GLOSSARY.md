@@ -161,6 +161,10 @@ The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers 
 
 The property receipts deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`receipts run`, pipeline gate scripts, the Stage C harness hook) — and is judged against [coverage](#coverage). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
 
+### Session lifecycle
+
+The supervisor's reading of a session's temporal state (ADR-0018), decided by **observation epochs** — the reader's own diary of when its scans saw each chain's head move — never by the writer's timestamps, which render only as display testimony. Three pieces: the **dormancy** state (*awake* → *waning* → *dormant*, flat env-tunable tiers, thresholds frozen only after measurement); the **reawakening** event — a dormant chain growing again by clean appends, one-shot, spoken in the investigate voice ("several quiet days, or someone riding an old session; yours to tell apart") and never the exit code; and the **uncommitted tail** annotation — an ended session whose chain's last entry is a tool receipt, meaning no exit commitment ever locked its final transcript bytes. Effective-dated like everything the witness judges, and deliberately **not called "unsealed"**: [seal](#seal) stays ADR-0007's word for outer commitments. The **tail keeper** closes what the annotation reports: the scan tick writes the missing exit commitment itself for idle-ended sessions, shrinking the open tail to one scan cadence — the anchor keeper's pattern, first applied to appending a chain entry.
+
 ### Bookkeeping entry
 
 An entry the recorder writes in its own voice — `actor: "receipts"`, the same voice as [genesis](#genesis) — rather than on behalf of a tool call: today, genesis and the [transcript commitment](#transcript-commitment). The actor field is the mechanical marker every reader keys on: the witness excludes bookkeeping from the receipts count (an entry no tool event owes must not manufacture `SURPLUS`), and the [digest](#digest) skips bookkeeping rows (they are the chain talking about itself, not memory of the work). Search and `show` still reach them by [entry address](#entry-address) — unweighted, never hidden (ADR-0017).
@@ -212,7 +216,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`, `adrs/0018-session-lifecycle-reading.md`
 - Related out-of-scope decisions: none yet.
 
 ---

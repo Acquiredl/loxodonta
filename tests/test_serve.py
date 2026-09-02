@@ -231,7 +231,8 @@ class DashboardTest(ServerFixture):
         # The queue's ordering contract: live alarms outrank damaged
         # history, which outranks reasons to look.
         self.assertIn('const SEVERITY = ["alarm", "regenerated", '
-                      '"broken", "tripwire", "hot"];', page)
+                      '"broken", "tripwire", "hot",\n'
+                      '                  "reawakened"];', page)
         # The designed empty state — quiet is never blank.
         self.assertIn("nothing wants your eyes", page)
 
@@ -302,6 +303,18 @@ class DashboardTest(ServerFixture):
         # No chart library, no canvas fingerprinting — bars are SVG
         # built in the page's own script.
         self.assertIn("createElementNS", page)
+
+    def test_the_page_carries_the_lifecycle_reading(self):
+        # ADR-0018: reawakenings speak in the investigate voice in the
+        # evidence tab and the attention queue; dormancy only ever dims.
+        page = self.page()
+        self.assertIn('id="lifecycle"', page)
+        self.assertIn("REAWAKENED", page)
+        self.assertIn("dormant", page)
+        _, _, status = self.get("/api/status")
+        report = json.loads(status)
+        self.assertIn("lifecycle", report)
+        self.assertIn("events", report["lifecycle"])
 
     def test_the_page_carries_the_consumption_watch(self):
         # Issue #67: hot sessions render in the events section, in the

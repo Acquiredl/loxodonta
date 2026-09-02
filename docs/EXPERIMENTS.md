@@ -116,3 +116,29 @@ honest about it until one is. (Indirect comfort, not proof: the
 completeness witness has paired transcripts with chains across weeks of
 long sessions without surplus scars, so compaction at least preserves
 tool events — byte-stability across it is the remaining question.)
+
+## 5. The lifecycle gap measurement (2026-09-01, ADR-0018)
+
+Before the dormancy thresholds froze, the real store's intra-session
+gaps were measured: every pair of consecutive receipts within a
+session, across all drawers (36 sessions, 3,560 gaps, bookkeeping
+entries excluded).
+
+| statistic | value |
+|---|---|
+| median gap | 10 s |
+| p95 | ~7 min |
+| p99 | ~68 min |
+| gaps > 24h | 5 |
+| gaps > 48h | 5 (50h, 95h, 173h ×3) |
+
+The verdict: the 24h/48h defaults survive. Every observed 24h+ gap
+was also 48h+ — the waning band captures nothing dishonest, and the
+five dormant-tier resumes were all the operator genuinely reopening
+sessions days later. Those *will* fire the reawakening signal, by
+design: at roughly one or two a week it is a legible investigate
+cadence, and "someone reopened an old session" is exactly the fact
+the signal exists to surface — the words leave whose hands it was to
+the operator. Thresholds stay env-tunable
+(`SUPERVISOR_WANING_SECONDS`, `SUPERVISOR_DORMANT_SECONDS`) for
+stores with different rhythms.
