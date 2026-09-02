@@ -508,6 +508,10 @@ IDLE_END_SECONDS = int(os.environ.get("SUPERVISOR_IDLE_END_SECONDS", 1800))
 WANING_SECONDS = int(os.environ.get("SUPERVISOR_WANING_SECONDS", 86400))
 DORMANT_SECONDS = int(os.environ.get("SUPERVISOR_DORMANT_SECONDS",
                                      172800))
+# The tail keeper (ADR-0018 ruling 6): on by default — protective
+# recording does not ask permission (ADR-0017's reasoning) — and
+# disableable for stores where the operator wants annotations only.
+TAIL_KEEPER = os.environ.get("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
 
@@ -903,6 +907,40 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
                                  and arrived < deficit_since)
     state = classify(tools, receipts, ended, idle, deficit_age, silent)
     return state, tools
+
+
+def keep_tails(sessions):
+    """The tail keeper (ADR-0018 ruling 6): for every ended session the
+    watch annotated tail-uncommitted, write the missing exit commitment
+    through the recorder itself — the public seam, ADR-0005 discipline —
+    by handing `loxodonta hook` a SessionEnd payload. A commitment is
+    honest whenever it is taken; it commits the transcript's bytes as
+    they are now. Every failure is a silent skip: the recorder's ending
+    branch already refuses damaged tails, missing transcripts, and lost
+    locks on its own, and an exit-keeper that complained would be noise
+    nobody can act on. Returns how many commitments actually landed."""
+    kept = 0
+    for row in sessions:
+        if not row.get("uncommitted_tail") or not row.get("home"):
+            continue
+        payload = json.dumps({
+            "session_id": row["session"],
+            "hook_event_name": "SessionEnd",
+            "reason": "tail-keeper",
+            "transcript_path": row.get("transcript", ""),
+        }).encode("utf-8")
+        try:
+            done = subprocess.run(
+                [sys.executable, str(LOXODONTA), "hook",
+                 "--log-dir", row["home"]],
+                input=payload, capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        # The recorder exits 0 for skips too; an appended entry is the
+        # only proof a commitment landed.
+        if done.returncode == 0 and b"logged entry" in done.stdout:
+            kept += 1
+    return kept
 
 
 def lifecycle_tier(last_grew, now):
@@ -1396,6 +1434,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                                       everywhere=store,
                                       calibration=calibration,
                                       sessionend=sessionend)
+    # The keeper closes what the annotation reports — after the rows
+    # are judged, so this scan says the truth it saw and the next scan
+    # sees the tails committed.
+    kept = keep_tails(completeness["sessions"]) if TAIL_KEEPER else 0
     # The consumption watch never touches `worst`: a hot session is a
     # reason to look, and the brake is the operator's (issue #67).
     consumption = watch_consumption(families, now)
@@ -1437,7 +1479,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         # verdicts — deliberately not in baseline.events, whose words
         # mean "appends cannot explain this"; a reawakening is exactly
         # appends explaining everything.
-        "lifecycle": {"events": list(awakened.values())},
+        "lifecycle": {"events": list(awakened.values()), "kept": kept},
         # Which recorder is actually running. Never raises the exit:
         # drift is a reason to look, and the operator's to resolve.
         "recorder": recorder_drift(witness),

@@ -1405,6 +1405,79 @@ class CompletenessTest(unittest.TestCase):
 
         self.assertEqual(report["lifecycle"]["events"], [])
 
+    def tail_entries(self, session):
+        log = (self.root / "alpha" / "receipts"
+               / f"receipts-{session}.jsonl")
+        return [json.loads(l) for l in
+                log.read_text(encoding="utf-8").splitlines()]
+
+    def seed_epoch(self):
+        self.edit_baseline(lambda data: data.update(
+            {"sessionend": {"wired": True,
+                            "since": "2026-01-01T00:00:00Z"}}))
+
+    def test_the_tail_keeper_writes_the_missing_exit_commitment(self):
+        # ADR-0018 ruling 6: the scan closes what the annotation
+        # reports — the missing exit commitment lands through the
+        # recorder's own machinery, and the annotation clears on the
+        # next look.
+        make_chain(self.root / "alpha" / "receipts", "sess-keep",
+                   entries=2)
+        transcript = write_transcript(
+            self.witness, self.root / "alpha", "sess-keep",
+            event_times=[ago(7200), ago(7100)], idle=7000)
+        install_witness_hook(self.witness, sessionend=True)
+        self.scan()
+        self.seed_epoch()
+
+        swept = self.states(self.scan())["sess-keep"]
+        self.assertTrue(swept["uncommitted_tail"],
+                        "the sweeping scan still tells the truth it saw")
+
+        entries = self.tail_entries("sess-keep")
+        last = entries[-1]
+        self.assertEqual(last["actor"], "receipts")
+        self.assertIn("transcript-commitment: bytes="
+                      + str(transcript.stat().st_size), last["action"])
+        after = self.states(self.scan())["sess-keep"]
+        self.assertNotIn("uncommitted_tail", after,
+                         "the next look sees the tail committed")
+
+    def test_the_keeper_is_disableable_and_leaves_the_annotation(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-off",
+                   entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-off",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+        install_witness_hook(self.witness, sessionend=True)
+        quiet = {**os.environ, "SUPERVISOR_TAIL_KEEPER": "0"}
+        self.scan(env=quiet)
+        self.seed_epoch()
+
+        row = self.states(self.scan(env=quiet))["sess-off"]
+
+        self.assertTrue(row["uncommitted_tail"])
+        self.assertEqual(self.tail_entries("sess-off")[-1]["actor"],
+                         "claude-code", "nothing was appended")
+
+    def test_the_keeper_skips_a_damaged_tail(self):
+        # ADR-0004's rule holds for the keeper too: a torn tail cannot
+        # anchor a commitment, and the skip is silent.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-torn",
+                         entries=2)
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        write_transcript(self.witness, self.root / "alpha", "sess-torn",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+        install_witness_hook(self.witness, sessionend=True)
+        self.scan()
+        self.seed_epoch()
+        before = log.read_text(encoding="utf-8")
+
+        result = self.scan()
+
+        self.assertEqual(log.read_text(encoding="utf-8"), before,
+                         "the damaged chain was not extended")
+
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         nowhere = Path(self._tmp.name) / "no-such-layout" / "projects"
