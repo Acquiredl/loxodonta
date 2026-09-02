@@ -215,15 +215,17 @@ def read_baseline(path):
         calibration = [epoch for epoch in data.get("calibration", [])
                        if isinstance(epoch, dict)
                        and isinstance(epoch.get("matchers"), list)]
+        sessionend = data.get("sessionend")
         return (chains, keeper if isinstance(keeper, dict) else {},
-                calibration, None)
+                calibration,
+                sessionend if isinstance(sessionend, dict) else {}, None)
     except FileNotFoundError:
-        return {}, {}, [], None  # cold start: seed silently
+        return {}, {}, [], {}, None  # cold start: seed silently
     except (ValueError, KeyError, TypeError, AttributeError,
             json.JSONDecodeError, OSError):
-        return {}, {}, [], ("the baseline could not be read — remembering "
-                            "afresh from this look; it was trusted for "
-                            "nothing either way")
+        return {}, {}, [], {}, ("the baseline could not be read — "
+                                "remembering afresh from this look; it "
+                                "was trusted for nothing either way")
 
 
 def diff_baseline(remembered, relpath, entries):
@@ -497,6 +499,14 @@ def assess_anchors(detail, entries):
 # Ratified thresholds; the env knobs are the test suite's clock handle.
 GRACE_SECONDS = int(os.environ.get("SUPERVISOR_GRACE_SECONDS", 30))
 IDLE_END_SECONDS = int(os.environ.get("SUPERVISOR_IDLE_END_SECONDS", 1800))
+# The lifecycle tiers (ADR-0018): flat and legible on purpose, decided
+# by observation epochs — how long the supervisor's own looks have seen
+# a session's chains not move. Defaults survived the real-store gap
+# measurement (docs/EXPERIMENTS.md §5): honest week-later resumes exist
+# and are meant to surface — reasons to look, never alarms.
+WANING_SECONDS = int(os.environ.get("SUPERVISOR_WANING_SECONDS", 86400))
+DORMANT_SECONDS = int(os.environ.get("SUPERVISOR_DORMANT_SECONDS",
+                                     172800))
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
 
@@ -562,6 +572,40 @@ def hook_matchers(witness):
         if wired:
             matchers.append(str(rule.get("matcher", "*")))
     return matchers
+
+
+def sessionend_wired(witness):
+    """True when a recorder SessionEnd hook is observably wired beside
+    the witness layout — the exit commitment's precondition, and the
+    uncommitted-tail annotation's gate (ADR-0018)."""
+    try:
+        settings = json.loads((witness.parent / "settings.json")
+                              .read_text(encoding="utf-8"))
+        rules = settings["hooks"]["SessionEnd"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return any(
+        isinstance(rule, dict)
+        and any(isinstance(hook, dict)
+                and any(marker in str(hook.get("command", ""))
+                        for marker in ("receipts", "loxodonta"))
+                for hook in rule.get("hooks", [])
+                if isinstance(rule.get("hooks"), list))
+        for rule in (rules if isinstance(rules, list) else []))
+
+
+def sessionend_epoch(remembered, witness, now):
+    """Since when the exit commitment has been possible (ADR-0018): the
+    calibration pattern's third use. First observation of a wired
+    SessionEnd hook stamps now — the supervisor claims no knowledge
+    older than its own memory — and only sessions active after that
+    epoch are ever judged for an uncommitted tail: everything earlier
+    is uncommitted by history, not by misbehavior."""
+    wired = sessionend_wired(witness)
+    since = remembered.get("since") if isinstance(remembered, dict) else None
+    if wired and not since:
+        since = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"wired": wired, "since": since}
 
 
 def calibrate(remembered, witness, now):
@@ -860,8 +904,23 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     return state, tools
 
 
+def lifecycle_tier(last_grew, now):
+    """The dormancy tier (ADR-0018), from observed stillness alone:
+    how long the supervisor's own looks have seen no movement. Returns
+    (tier, seconds) or None when nothing has been observed yet."""
+    when = parse_when(last_grew)
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    still = (now - when).total_seconds()
+    tier = ("dormant" if still >= DORMANT_SECONDS
+            else "waning" if still >= WANING_SECONDS else "awake")
+    return tier, int(still)
+
+
 def watch_completeness(root, witness, families, everywhere=False,
-                       calibration=None):
+                       calibration=None, sessionend=None):
     """The completeness half of a tick: every census session paired with
     its transcript, plus witnessed sessions that never grew a chain at
     all — the disabled-hook case the census alone can never see.
@@ -907,6 +966,7 @@ def watch_completeness(root, witness, families, everywhere=False,
         if judge:
             entry["judge"] = judge
         watch["sessions"].append(entry)
+        return entry
 
     # One session, one watch. A single session's receipts can span
     # drawers: a worktree session logs to the main repo's drawer
@@ -922,7 +982,15 @@ def watch_completeness(root, witness, families, everywhere=False,
         group = sessions.setdefault(session, {"drawers": [], "last": None})
         group["drawers"].append((family["receipts"], repo))
         if family["last"]:
+            was_newest = group["last"] is None or family["last"] > group["last"]
             group["last"] = max(group["last"] or "", family["last"])
+            # The tail that matters is the one still being written to —
+            # the family whose receipts are newest (ADR-0018).
+            if was_newest and "tail_committed" in family:
+                group["tail_committed"] = family["tail_committed"]
+                group["home"] = family.get("home")
+        if family.get("last_grew", "") > (group.get("last_grew") or ""):
+            group["last_grew"] = family["last_grew"]
         if "committed_log" in family and "judge_log" not in group:
             group["judge_log"] = family["committed_log"]
     for group in sessions.values():
@@ -961,7 +1029,27 @@ def watch_completeness(root, witness, families, everywhere=False,
             judge = (f'python "{LOXODONTA.as_posix()}" verify '
                      f'--log "{group["judge_log"]}" '
                      f'--transcript "{transcript.as_posix()}"')
-        add(repo, session, state, tools, receipts, spans, judge=judge)
+        row = add(repo, session, state, tools, receipts, spans, judge=judge)
+        # The lifecycle facts (ADR-0018), quiet fields on the row.
+        tier = lifecycle_tier(group.get("last_grew"), now)
+        if tier:
+            row["dormancy"] = {"tier": tier[0], "still_seconds": tier[1],
+                               "since": group["last_grew"]}
+        # The uncommitted tail: annotated only where the exit commitment
+        # was possible (effective-dated on the wiring epoch) and the
+        # session has ended with a tool receipt as its final word.
+        # Neutral fact, never alarm-shaped: on clients with no clean
+        # exit this is the common case, and the tail keeper closes it.
+        if (sessionend and sessionend.get("wired") and sessionend.get("since")
+                and state.startswith("ENDED")
+                and group.get("tail_committed") is False
+                and (group.get("last") or "") > sessionend["since"]):
+            row["uncommitted_tail"] = True
+            row["tail_note"] = ("tail uncommitted — no exit commitment "
+                                "recorded")
+            row["transcript"] = transcript.as_posix()
+            if group.get("home"):
+                row["home"] = group["home"]
 
     # Chainless sessions: only transcript folders under this root are
     # this scan's business; a folder's name past the root prefix is the
@@ -1129,10 +1217,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     else:
         baseline_path = root / BASELINE_NAME
         daybook = root / DAYBOOK_NAME
-    remembered, keeper, calibration, note = read_baseline(baseline_path)
+    (remembered, keeper, calibration, sessionend,
+     note) = read_baseline(baseline_path)
     # Observe the wired matchers before anything is judged, so this
     # tick's own judgments use a memory that includes this tick's look.
     calibration = calibrate(calibration, witness, now)
+    sessionend = sessionend_epoch(sessionend, witness, now)
     events = []
     heads = {}
     families = {}
@@ -1196,12 +1286,23 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                            "change": change,
                            "investigate": CHANGE_WORDS[change]})
         if entries:
+            # The lifecycle's clock (ADR-0018): the reader's own diary
+            # of when it last saw this head move. An unchanged head
+            # carries its stamp forward; a new or moved head — or a
+            # baseline that predates the field — stamps this look, so
+            # stillness only exists once it has actually been observed.
+            known = remembered.get(relpath) or {}
+            last_grew = (known.get("last_grew")
+                         if known.get("head") == entries[-1].get("entry_hash")
+                         and known.get("last_grew")
+                         else now.strftime("%Y-%m-%dT%H:%M:%SZ"))
             heads[relpath] = {"n": entries[-1].get("n"),
                               "head": entries[-1].get("entry_hash"),
                               # For the digest's last-scan line (Stage E):
                               # a remembered verdict is testimony like the
                               # rest of this file, never the verdict itself.
-                              "verdict": verdict}
+                              "verdict": verdict,
+                              "last_grew": last_grew}
 
         # The session's receipt tally for the completeness watch: the
         # whole sibling family counts, minus the recorder's own voice —
@@ -1232,6 +1333,19 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                     "transcript-commitment:")
                 for e in entries):
             family["committed_log"] = (root / relpath).as_posix()
+        # The lifecycle facts (ADR-0018): the family's newest observed
+        # movement, and whether the family's last chain ends in a
+        # commitment (siblings sort after their parent, so the chain
+        # seen last is the one still being written to).
+        if entries:
+            grew = heads[relpath]["last_grew"]
+            if grew > (family.get("last_grew") or ""):
+                family["last_grew"] = grew
+            family["tail_committed"] = (
+                entries[-1].get("actor") == "receipts"
+                and str(entries[-1].get("action", "")).startswith(
+                    "transcript-commitment:"))
+            family["home"] = (root / relpath).parent.as_posix()
 
     for relpath in remembered:
         if relpath not in heads and not (root / relpath).exists():
@@ -1248,13 +1362,15 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "chains": heads,
         "keeper": keeper,
         "calibration": calibration,
+        "sessionend": sessionend,
     }, indent=2) + "\n", encoding="utf-8")
     if events:
         worst = max(worst, 5)
 
     completeness = watch_completeness(root, witness, families,
                                       everywhere=store,
-                                      calibration=calibration)
+                                      calibration=calibration,
+                                      sessionend=sessionend)
     # The consumption watch never touches `worst`: a hot session is a
     # reason to look, and the brake is the operator's (issue #67).
     consumption = watch_consumption(families, now)

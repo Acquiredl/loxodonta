@@ -779,17 +779,23 @@ def ago(seconds):
 
 
 def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash",
-                         command="python loxodonta.py hook"):
+                         command="python loxodonta.py hook",
+                         sessionend=False):
     """The harness settings beside the witness layout, wiring a receipts
     PostToolUse hook for the given tools — what tells the watch which
     tool events owe a receipt. `command` is the wired command line, the
-    seam the recorder-drift notice reads to find the executed file."""
+    seam the recorder-drift notice reads to find the executed file.
+    `sessionend` wires the exit-commitment hook too (ADR-0018)."""
     witness.mkdir(parents=True, exist_ok=True)
-    (witness.parent / "settings.json").write_text(json.dumps({
-        "hooks": {"PostToolUse": [{"matcher": matcher, "hooks": [
+    hooks = {"PostToolUse": [{"matcher": matcher, "hooks": [
+        {"type": "command", "command": command},
+    ]}]}
+    if sessionend:
+        hooks["SessionEnd"] = [{"hooks": [
             {"type": "command", "command": command},
-        ]}]},
-    }), encoding="utf-8")
+        ]}]
+    (witness.parent / "settings.json").write_text(
+        json.dumps({"hooks": hooks}), encoding="utf-8")
 
 
 def write_transcript(witness, project, session, event_times=(),
@@ -1243,6 +1249,96 @@ class CompletenessTest(unittest.TestCase):
                          event_times=[ago(30)])
         rerun = self.states(self.scan())["sess-plain"]
         self.assertNotIn("judge", rerun)
+
+    def baseline(self):
+        return self.root / ".supervisor-baseline.json"
+
+    def edit_baseline(self, mutate):
+        data = json.loads(self.baseline().read_text(encoding="utf-8"))
+        mutate(data)
+        self.baseline().write_text(json.dumps(data), encoding="utf-8")
+
+    def test_dormancy_reads_the_supervisors_own_clock(self):
+        # ADR-0018: the tier comes from observation epochs — the
+        # baseline's diary of when a look last saw the head move —
+        # never from writer timestamps. First observation seeds "now",
+        # so no session is dormant until stillness has been watched.
+        make_chain(self.root / "alpha" / "receipts", "sess-still",
+                   entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-still",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+
+        first = self.states(self.scan())["sess-still"]
+        self.assertEqual(first["dormancy"]["tier"], "awake",
+                         "stillness starts at the first observation")
+
+        def age(data):
+            for known in data["chains"].values():
+                known["last_grew"] = "2026-08-25T00:00:00Z"
+        self.edit_baseline(age)
+        second = self.states(self.scan())["sess-still"]
+        self.assertEqual(second["dormancy"]["tier"], "dormant")
+        self.assertGreater(second["dormancy"]["still_seconds"],
+                           2 * 86400)
+
+    def test_uncommitted_tail_is_annotated_only_after_the_epoch(self):
+        # ADR-0018 ruling 5: the annotation is effective-dated on the
+        # SessionEnd wiring epoch — sessions before it are uncommitted
+        # by history, not by misbehavior, and carry no field at all.
+        install_witness_hook(self.witness, sessionend=True)
+        make_chain(self.root / "alpha" / "receipts", "sess-tail",
+                   entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-tail",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+
+        first = self.states(self.scan())["sess-tail"]
+        self.assertNotIn("uncommitted_tail", first,
+                         "the epoch starts at first observation; older "
+                         "sessions are never judged")
+
+        self.edit_baseline(lambda data: data.update(
+            {"sessionend": {"wired": True,
+                            "since": "2026-01-01T00:00:00Z"}}))
+        second = self.states(self.scan())["sess-tail"]
+        self.assertTrue(second["uncommitted_tail"])
+        self.assertIn("tail uncommitted", second["tail_note"])
+
+    def test_a_committed_tail_is_never_annotated(self):
+        install_witness_hook(self.witness, sessionend=True)
+        log = make_chain(self.root / "alpha" / "receipts", "sess-sealed",
+                         entries=2)
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "receipts", "--action",
+             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
+            capture_output=True, check=True)
+        write_transcript(self.witness, self.root / "alpha", "sess-sealed",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+        self.scan()
+        self.edit_baseline(lambda data: data.update(
+            {"sessionend": {"wired": True,
+                            "since": "2026-01-01T00:00:00Z"}}))
+
+        row = self.states(self.scan())["sess-sealed"]
+
+        self.assertNotIn("uncommitted_tail", row)
+
+    def test_no_wired_sessionend_never_annotates(self):
+        # Default witness settings carry no SessionEnd hook: the exit
+        # commitment was never possible, so nothing is judged for it —
+        # even with an epoch seeded into the baseline.
+        make_chain(self.root / "alpha" / "receipts", "sess-nowire",
+                   entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-nowire",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+        self.scan()
+        self.edit_baseline(lambda data: data.update(
+            {"sessionend": {"wired": True,
+                            "since": "2026-01-01T00:00:00Z"}}))
+
+        row = self.states(self.scan())["sess-nowire"]
+
+        self.assertNotIn("uncommitted_tail", row)
 
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
