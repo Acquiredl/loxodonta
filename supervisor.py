@@ -336,7 +336,8 @@ def remember_look(path, now):
 # move on every tick, and a report that changes when nothing changed
 # would break the one invariant worth having here — two looks at an
 # unchanged store say the same thing, whether printed or served.
-PAINTED = ("worst", "chains", "broken", "events", "alarms")
+PAINTED = ("worst", "chains", "broken", "events", "alarms",
+           "reawakenings")
 
 
 def fortnight(days, now):
@@ -1224,6 +1225,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     calibration = calibrate(calibration, witness, now)
     sessionend = sessionend_epoch(sessionend, witness, now)
     events = []
+    awakened = {}
     heads = {}
     families = {}
     # Walk in display order — repo, then session, then sibling sequence —
@@ -1303,6 +1305,29 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                               # rest of this file, never the verdict itself.
                               "verdict": verdict,
                               "last_grew": last_grew}
+            # The reawakening (ADR-0018): clean growth after dormant-tier
+            # observed stillness — one-shot, spoken in the investigate
+            # voice, never the exit. Rewrites belong to the tripwire, and
+            # bookkeeping-only growth (the cadence or the tail keeper
+            # writing commitments) is the recorder speaking, not the
+            # session acting — it never wakes anything.
+            woke = lifecycle_tier(known.get("last_grew"), now)
+            if (change is None and known.get("head")
+                    and entries[-1].get("entry_hash") != known.get("head")
+                    and woke and woke[0] == "dormant"
+                    and any(isinstance(e, dict)
+                            and isinstance(e.get("n"), int)
+                            and e["n"] > (known.get("n") or 0)
+                            and e.get("actor") != "receipts"
+                            for e in entries)):
+                awakened[(repo, session)] = {
+                    "repo": repo, "session": session, "log": relpath,
+                    "still_seconds": woke[1],
+                    "words": (f"grew after {woke[1] // 86400}d of "
+                              "observed stillness — several quiet days, "
+                              "or someone riding an old session; yours "
+                              "to tell apart"),
+                }
 
         # The session's receipt tally for the completeness watch: the
         # whole sibling family counts, minus the recorder's own voice —
@@ -1388,6 +1413,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     days = remember_day(daybook, now, {
         "worst": worst, "chains": len(census), "broken": damaged,
         "events": len(events), "alarms": alarms,
+        "reawakenings": len(awakened),
     })
 
     baseline = {"file": baseline_path.as_posix(), "events": events}
@@ -1407,6 +1433,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "baseline": baseline,
         "completeness": completeness,
         "consumption": consumption,
+        # The lifecycle events (ADR-0018): reasons to look, never
+        # verdicts — deliberately not in baseline.events, whose words
+        # mean "appends cannot explain this"; a reawakening is exactly
+        # appends explaining everything.
+        "lifecycle": {"events": list(awakened.values())},
         # Which recorder is actually running. Never raises the exit:
         # drift is a reason to look, and the operator's to resolve.
         "recorder": recorder_drift(witness),
@@ -2787,6 +2818,7 @@ PAGE = """<!doctype html>
                        border-bottom: 1px solid var(--line); }
   #sessions-table tr { cursor: pointer; }
   #sessions-table tr:hover td { background: var(--surface2); }
+  #sessions-table tr.dormant td { opacity: 0.55; }
   #sessions-table tr.sel td { background:
       color-mix(in srgb, var(--accent) 8%, transparent);
     border-left: 2px solid var(--accent); }
@@ -3095,6 +3127,7 @@ this page draws them and decides nothing</footer>
           <div id="tripwire"></div>
           <div id="watch"></div>
           <div id="consumption"></div>
+          <div id="lifecycle"></div>
           <div id="anchors">
             <p class="testimony">the block height is your half of the
             regeneration defense — confirm it against a Bitcoin block
@@ -3335,7 +3368,8 @@ function renderStrip(report) {
 // alarms outrank damaged history, which outranks reasons to look
 // (tripwire events, hot sessions). Everything else on the page is
 // deliberately quiet.
-const SEVERITY = ["alarm", "regenerated", "broken", "tripwire", "hot"];
+const SEVERITY = ["alarm", "regenerated", "broken", "tripwire", "hot",
+                  "reawakened"];
 
 function attentionItems(report) {
   const items = [];
@@ -3378,6 +3412,11 @@ function attentionItems(report) {
         text: s.repo + " · " + s.session.slice(0, 8) +
               " — burning far above the store's norm", tab: "evidence"});
     }
+  }
+  for (const w of ((report.lifecycle || {}).events || [])) {
+    items.push({rank: "reawakened", tone: "look", chip: "REAWAKENED",
+      text: w.repo + " · " + w.session.slice(0, 8) + " — " + w.words,
+      repo: w.repo, session: w.session});
   }
   items.sort((a, b) =>
     SEVERITY.indexOf(a.rank) - SEVERITY.indexOf(b.rank));
@@ -3845,6 +3884,18 @@ function render(report) {
     burn.appendChild(el("p", "claim", consumption.norm.words));
   }
 
+  // The lifecycle events (ADR-0018): a dormant chain grew again — the
+  // investigate voice, beside the other reasons to look.
+  const woke = document.getElementById("lifecycle");
+  woke.replaceChildren();
+  for (const w of ((report.lifecycle || {}).events || [])) {
+    const row = el("div", "watch-row hot");
+    row.appendChild(el("span", "chip", "REAWAKENED"));
+    row.appendChild(el("span", "file", w.repo + " · " + w.session));
+    row.appendChild(el("p", "claim", w.words));
+    woke.appendChild(row);
+  }
+
   renderAnchors(report);
 
   const ask = document.getElementById("ask-repo");
@@ -4084,7 +4135,15 @@ function sessionRow(story) {
   if (row.dataset.where === selectedWhere) row.className = "sel";
   const addr = el("td", "addr", story.session.slice(0, 8));
   addr.title = story.session;
-  row.appendChild(addr);
+  // Dormancy is scaffolding, shown dimly (ADR-0018): the state never
+  // shouts — only the reawakening does.
+  const seen = lastStatus && lastStatus.completeness.sessions.find(
+    s => s.repo === story.repo && s.session === story.session);
+  if (seen && seen.dormancy && seen.dormancy.tier === "dormant") {
+    row.classList.add("dormant");
+    addr.title += " · dormant — no observed movement for " +
+      Math.round(seen.dormancy.still_seconds / 86400) + "d";
+  }
   row.appendChild(el("td", "", story.repo));
   row.appendChild(el("td", "num", String(story.entries)));
   row.appendChild(el("td", "when", spanText(story)));

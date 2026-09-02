@@ -1340,6 +1340,71 @@ class CompletenessTest(unittest.TestCase):
 
         self.assertNotIn("uncommitted_tail", row)
 
+    def test_a_dormant_chain_growing_again_reawakens(self):
+        # ADR-0018: clean growth after dormant-tier observed stillness
+        # is the one lifecycle event — investigate voice, never the
+        # exit code, counted by the day book.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-wake",
+                         entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-wake",
+                         event_times=[ago(120), ago(60)])
+        self.scan()
+        self.edit_baseline(lambda data: [
+            known.update({"last_grew": "2026-08-25T00:00:00Z"})
+            for known in data["chains"].values()])
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "Bash: it stirs"],
+            capture_output=True, check=True)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        events = report["lifecycle"]["events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["session"], "sess-wake")
+        self.assertIn("observed stillness", events[0]["words"])
+        today = [r for r in report["history"] if r.get("watched")][-1]
+        self.assertGreaterEqual(today.get("reawakenings", 0), 1)
+
+    def test_bookkeeping_growth_never_reawakens(self):
+        # The cadence — or the tail keeper — writing commitments is the
+        # recorder speaking, not the session acting.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-book",
+                         entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-book",
+                         event_times=[ago(120), ago(60)])
+        self.scan()
+        self.edit_baseline(lambda data: [
+            known.update({"last_grew": "2026-08-25T00:00:00Z"})
+            for known in data["chains"].values()])
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "receipts", "--action",
+             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
+            capture_output=True, check=True)
+
+        report = json.loads(self.scan().stdout)
+
+        self.assertEqual(report["lifecycle"]["events"], [])
+
+    def test_growth_from_awake_stillness_never_reawakens(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-busy",
+                         entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-busy",
+                         event_times=[ago(120), ago(60)])
+        self.scan()
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "Bash: still working"],
+            capture_output=True, check=True)
+
+        report = json.loads(self.scan().stdout)
+
+        self.assertEqual(report["lifecycle"]["events"], [])
+
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         nowhere = Path(self._tmp.name) / "no-such-layout" / "projects"
