@@ -59,14 +59,19 @@ The shape, as ratified:
   Nothing from `scan --json` passes through unnamed, so a new scan key
   can never leak by default. A **machine block**: recorder commit,
   Python version, OS family (not release), the hook matcher in force,
-  store size (chains, entries, bytes), the day-book summary, lifecycle
+  which harnesses recorded (by actor), store size (chains, entries,
+  bytes), the day-book summary, lifecycle
   counts, and the scan exit code. **Per session:** session id, repo as
   an ordinal (`repo-1`, `repo-2`; never the basename), entry count,
   time span, verdict, commitment status, completeness state with owed
   and received counts, dormancy tier, consumption state, sibling count,
-  bookkeeping count, and a tool histogram over hook-actor entries only
-  (everything else folds into one `other` bucket). No paths, no action
-  lines, no file references, no anchor calendar URLs.
+  bookkeeping count, and a tool histogram over hook-actor entries only,
+  whose keys come from a written list of harness built-ins: MCP calls
+  fold into one `mcp` bucket (a server name says which servers a sender
+  runs, and a custom one can be named after an employer), Agents SDK
+  function tools into `function` (their names are the sender's own
+  words), and anything else into `other`. No paths, no action lines,
+  no file references, no anchor calendar URLs.
 - **The file opens with a `redaction` block in plain words** saying
   what was removed and why, so the sender reads the rule before the
   data and the issue template can quote it.
