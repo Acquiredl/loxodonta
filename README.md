@@ -2,6 +2,8 @@
 
 *An elephant never forgets.*
 
+[![tests](https://github.com/Acquiredl/loxodonta/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Acquiredl/loxodonta/actions/workflows/tests.yml)
+
 > **Status: work in progress.** I chose to publish this early rather than polish it privately. The code is real and the test suite holds every claim below, but this README has not had its final editing pass — some sections will still be rewritten. Read it as an honest draft.
 
 **loxodonta** is a flight recorder for AI agents. I run agents on my machine all day, and at some point the obvious question hit me: if anyone ever asks "what exactly did the agent do", all I have is a plain log file. And a plain log proves nothing. Anyone can edit it after the fact, delete the embarrassing line, backdate an entry. Including the agent itself, which has filesystem access and every reason to look good.
@@ -164,6 +166,21 @@ A few places this has already earned its keep for me, beyond the daily timeline:
 | A compromised writer lying at write time | no | garbage in, faithfully chained garbage out |
 | The writer omitting an entry entirely | not by the chain | a never-written entry leaves no break; completeness comes from the integration (`run`, the hook), and the supervisor alarms on the gap |
 | Regenerating the whole chain from scratch | tiered | `verify --expect-head` against your recorded head, or an anchor: a regenerated chain can only carry young anchors |
+
+## send me what your machine saw
+
+Everything above has been proven on exactly one machine: mine. The thresholds, the witness, the numbers in the docs all came out of one store. The thing I need most now is not a feature, it is evidence that the recorder holds up somewhere else, and a look at what real workloads look like when they are not my workloads.
+
+So there is a one-command way to send that back, and it is built so you can read every byte before it leaves:
+
+```
+python supervisor.py export           # writes a redacted summary and prints it
+python supervisor.py export --send    # uploads it as a secret gist under your account, opens a field-data issue here
+```
+
+The export is built from a list of fields I wrote down, not from your scan output with things crossed out. No paths, no command lines, no repo names (they become `repo-1`, `repo-2`), no file references. It opens with a plain-words block saying what was removed. Raw chains are a separate opt-in that shows you a sample line and asks first, because chains carry command lines and that is your call, not mine. `--send` runs `gh` under your login, so the gist stays yours and you can delete it. The design is [ADR-0021](adrs/0021-field-data-export-is-allowlisted-and-sent-through-gh.md).
+
+What comes back gets read into [docs/FIELD-DATA.md](docs/FIELD-DATA.md), one row per export with what it taught, so you can see whether sending it was worth anything. Bug reports with a chain attached are just as welcome; [CONTRIBUTING.md](CONTRIBUTING.md) has the short version of how this repo works.
 
 ## planned
 
