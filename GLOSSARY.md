@@ -75,6 +75,10 @@ One line of the receipt log: a JSON object with exactly `n`, `ts`, `actor`, `act
 
 The entry with `n == 0` and `prev == null` — the only entry allowed a null `prev`, and the only entry carrying `v`, the format version. Written by `receipts init` with pinned contents (`actor: "receipts"`, `action: "genesis"`, `files: []`); only its timestamp varies. The chain's title page: who started it, when, and under which rulebook — all hash-committed, so a chain can't be relabeled to a different version without breaking. Derived trail designs extend the title page: their genesis payload must commit every ingredient whose change alters output (format version, engine identity, prompt hash, check-catalog version, evaluation-suite version), so "why did this assessment change" always has a recorded answer (ADR-0006, provenance corollary).
 
+### Tool version
+
+Which recorder and supervisor a person is running: a semantic version in one constant per file (`TOOL_VERSION`), tagged at every promotion to `main`, and the same in both files by test. Decoupled from the *format* version the [genesis](#genesis) carries: the format says which chains the tool can read and is frozen at `0.1` (SPEC §2.1); the tool version moves with releases. `--version` on either file prints both beside the checkout's commit — the [recorder notice](#recorder-notice)'s fact, read from local git only, `unknown` outside a checkout. A version is a label on the file, never a channel to fetch a newer one (ADR-0015, ADR-0022).
+
 ### Canonical form
 
 The deterministic serialization of an entry (minus its `entry_hash` field) defined by the six rules in `docs/SPEC.md` §4: sorted keys, compact separators, UTF-8, integers only, no trailing newline. **The hash is always computed over canonical form**, regardless of how the line is written on disk.
