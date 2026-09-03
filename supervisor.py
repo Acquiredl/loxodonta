@@ -54,6 +54,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socketserver
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -2723,6 +2724,14 @@ class Watchtower(ThreadingHTTPServer):
     """The threading server, with its one scan serialized: requests
     share the current tick's report instead of each spawning their own
     census of verify subprocesses."""
+
+    def server_bind(self):
+        # The stdlib's server_bind looks up the bound host's fully
+        # qualified name, a reverse DNS query nothing here ever reads.
+        # On a macOS runner that query hangs ~35 s per process, which
+        # every `serve` test paid at startup. Bind, name it ourselves.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def remember_look(self):
         """One opening of the front page, under the scan lock — the day

@@ -16,6 +16,7 @@ import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import socketserver
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -95,6 +96,14 @@ def expected_merkle_root(head_hex, nonce, prefix, suffix):
 
 # --- Fake calendar ------------------------------------------------------------
 
+class FakeCalendar(HTTPServer):
+    def server_bind(self):
+        # Skip the stdlib's reverse DNS lookup of the bound host: unused
+        # here, and a ~35 s stall on macOS runners.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 class FakeCalendarHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # keep test output clean
@@ -138,7 +147,7 @@ class AnchorTest(unittest.TestCase):
         self.log_path = self.workdir / "receipts.jsonl"
         self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
 
-        self.server = HTTPServer(("127.0.0.1", 0), FakeCalendarHandler)
+        self.server = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
         self.server.nonce = b"fake-nonce"
         self.server.prefix = b"left-branch"
         self.server.suffix = b"right-branch"
