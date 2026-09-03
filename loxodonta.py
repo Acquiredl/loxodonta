@@ -1181,9 +1181,12 @@ def cmd_explain(args):
 # One chain per session (SPEC §8: one writer per log; parallel sessions
 # are sibling chains, never a shared file).
 
-# The most descriptive scalar a tool call has, in preference order.
+# The most descriptive scalar a tool call has, in preference order. The
+# last, `summary`, is the adapters' fallback (ADR-0020): a harness whose
+# tool arguments carry none of the named keys may say what happened in
+# one line of its own — and it loses to any named key that is present.
 HOOK_SUMMARY_KEYS = ("file_path", "notebook_path", "command", "path",
-                     "pattern", "url", "query", "prompt")
+                     "pattern", "url", "query", "prompt", "summary")
 
 
 # ADR-0017: every COMMITMENT_CADENCE entries, the chain commits the
@@ -1385,6 +1388,13 @@ def cmd_hook(args):
     project = None
     if log_dir is None:
         env_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        # A harness that sets no CLAUDE_PROJECT_DIR names the project in
+        # the payload instead — Codex and the Agents SDK adapter send
+        # `cwd` (ADR-0020). The environment wins when both are present.
+        payload_cwd = payload.get("cwd")
+        if not env_project and isinstance(payload_cwd, str) \
+                and os.path.isdir(payload_cwd):
+            env_project = payload_cwd
         if env_project:
             project = main_repo_root(env_project)
             log_dir = os.path.join(store_home(), "receipts",
@@ -1546,6 +1556,113 @@ DIGEST_MARKER = "supervisor.py"
 # still wearing this exact string is provably an unmodified install —
 # the fingerprint the widening below keys on.
 PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
+# Codex caps a SessionEnd hook at three seconds (its docs); asking for
+# more is asking to be killed mid-seal.
+CODEX_SESSION_END_TIMEOUT = 3
+
+
+def recorder_command(actor=None):
+    """The hook command the installers write: this interpreter, this
+    file, no shell expansion — the hook resolves the project itself, so
+    one command works on every platform. `actor` names the harness the
+    receipts will say acted (ADR-0020)."""
+    python = sys.executable.replace(os.sep, "/")
+    self_path = os.path.abspath(__file__).replace(os.sep, "/")
+    command = f'"{python}" "{self_path}" hook'
+    return command + (f" --actor {actor}" if actor else "")
+
+
+def heal_hooks(blocks, markers, command):
+    """Replace our hook commands whose script no longer exists — the
+    migration path after a rename or a move: honoring a dangling
+    command as 'already installed' would leave recording silently
+    dead. A command whose script is still on disk is someone's working
+    install and is left alone."""
+    count = 0
+    for block in blocks:
+        for hook in block.get("hooks", []):
+            old = hook.get("command", "")
+            if old == command or not any(m in old for m in markers):
+                continue
+            try:
+                script = next((p for p in shlex.split(old)
+                               if any(m in p for m in markers)), None)
+            except ValueError:
+                continue
+            if script and not os.path.isfile(script):
+                hook["command"] = command
+                count += 1
+    return count
+
+
+def block_is_ours(block, markers=RECORDER_MARKERS):
+    return any(marker in h.get("command", "")
+               for h in block.get("hooks", [])
+               for marker in markers)
+
+
+def write_hooks_file(path, settings):
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(settings, indent=2) + "\n")
+
+
+def codex_hooks_path():
+    """Where Codex reads user-level hooks: $CODEX_HOME/hooks.json,
+    default ~/.codex/hooks.json."""
+    home = (os.environ.get("CODEX_HOME")
+            or os.path.join(os.path.expanduser("~"), ".codex"))
+    return os.path.join(home, "hooks.json")
+
+
+def install_codex_hooks():
+    """The Codex half of install-hook (ADR-0020): the same PostToolUse
+    and SessionEnd blocks, in Codex's hooks.json, with the actor named
+    so recall rows say which harness acted. Codex's matcher is a regex,
+    so `.*` is its every-tool-call. No SessionStart digest here: Codex
+    injects hook context only through a JSON envelope, and the digest
+    is reachable over MCP (ADR-0019) already."""
+    path = codex_hooks_path()
+    settings = load_settings(path)
+    if settings is None:
+        return 1
+    had_backup = backup_settings(path)
+    record = recorder_command("codex")
+    hooks = settings.setdefault("hooks", {})
+    installed = []
+
+    post = hooks.setdefault("PostToolUse", [])
+    healed = heal_hooks(post, RECORDER_MARKERS, record)
+    if not any(block_is_ours(b) for b in post):
+        post.append({"matcher": ".*",
+                     "hooks": [{"type": "command", "command": record,
+                                "timeout": 30}]})
+        installed.append(f"PostToolUse: {record}")
+    end = hooks.setdefault("SessionEnd", [])
+    healed += heal_hooks(end, RECORDER_MARKERS, record)
+    if not any(block_is_ours(b) for b in end):
+        end.append({"hooks": [{"type": "command", "command": record,
+                               "timeout": CODEX_SESSION_END_TIMEOUT}]})
+        installed.append(f"SessionEnd: {record}")
+
+    if not installed and not healed:
+        print(f"already installed in {path}")
+        return 0
+    write_hooks_file(path, settings)
+    print(f"installed in {path}"
+          + (" (previous version saved as hooks.json.bak)"
+             if had_backup else ""))
+    for line in installed:
+        print(f"  {line}")
+    if healed:
+        print(f"  healed {healed} hook command(s) whose script had "
+              "moved — now pointing at this install")
+    print("Codex asks you to review new hooks once: open Codex and run "
+          "/hooks to trust them.")
+    print("every NEW Codex session on this machine then leaves a chain in")
+    print(f"the store ({os.path.join(store_home(), 'receipts')}), one "
+          "drawer per project —")
+    print("the same store your Claude Code sessions write to.")
+    return 0
 
 
 def cmd_install_hook(args):
@@ -1555,12 +1672,14 @@ def cmd_install_hook(args):
     missing on re-run. The commands carry no shell expansion — both
     tools read CLAUDE_PROJECT_DIR themselves — and the digest is
     fail-open: a short timeout, and a chainless repo renders nothing.
-    Restart open sessions afterwards: hooks load at start."""
+    Restart open sessions afterwards: hooks load at start. With
+    --codex, the Codex half runs instead (install_codex_hooks)."""
+    if args.codex:
+        return install_codex_hooks()
     python = sys.executable.replace(os.sep, "/")
     here = os.path.dirname(os.path.abspath(__file__))
-    self_path = os.path.abspath(__file__).replace(os.sep, "/")
     supervisor = os.path.join(here, "supervisor.py")
-    record = f'"{python}" "{self_path}" hook'
+    record = recorder_command()
     digest = f'"{python}" "{supervisor.replace(os.sep, "/")}" digest'
     path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 
@@ -1571,36 +1690,10 @@ def cmd_install_hook(args):
 
     hooks = settings.setdefault("hooks", {})
     installed = []
-
-    def heal(blocks, markers, command):
-        """Replace our hook commands whose script no longer exists —
-        the migration path after a rename or a move: honoring a
-        dangling command as 'already installed' would leave recording
-        silently dead. A command whose script is still on disk is
-        someone's working install and is left alone."""
-        count = 0
-        for block in blocks:
-            for hook in block.get("hooks", []):
-                old = hook.get("command", "")
-                if old == command or not any(m in old for m in markers):
-                    continue
-                try:
-                    script = next((p for p in shlex.split(old)
-                                   if any(m in p for m in markers)), None)
-                except ValueError:
-                    continue
-                if script and not os.path.isfile(script):
-                    hook["command"] = command
-                    count += 1
-        return count
+    heal, ours = heal_hooks, block_is_ours  # shared with the Codex half
 
     post = hooks.setdefault("PostToolUse", [])
     healed = heal(post, RECORDER_MARKERS, record)
-
-    def ours(block):
-        return any(marker in h.get("command", "")
-                   for h in block.get("hooks", [])
-                   for marker in RECORDER_MARKERS)
 
     # Coverage goes wide (ADR-0016): a recorder block still wearing the
     # old shipped default is provably ours and provably stale — widened
@@ -1666,8 +1759,7 @@ def cmd_install_hook(args):
         print(f"already installed in {path}")
         return 0
 
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps(settings, indent=2) + "\n")
+    write_hooks_file(path, settings)
     print(f"installed in {path}"
           + (" (previous version saved as settings.json.bak)"
              if had_backup else ""))
@@ -1682,27 +1774,17 @@ def cmd_install_hook(args):
     return 0
 
 
-def cmd_uninstall_hook(args):
-    """Remove exactly our hooks — recorder (either era's name) and
-    digest — from the user-level settings, leaving everything else
-    untouched. The symmetric half of install-hook."""
-    path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
-    settings = load_settings(path)
-    if settings is None:
-        return 1
-    if not settings:
-        print("nothing installed: no user-level settings file")
-        return 0
-
-    ours = RECORDER_MARKERS + (DIGEST_MARKER,)
+def remove_our_hooks(hooks, events, markers):
+    """Drop our hook entries from each event's blocks, keeping every
+    foreign entry and dropping an event only when nothing is left in
+    it. Returns the events something was removed from."""
     removed = []
-    hooks = settings.get("hooks", {})
-    for event in ("PostToolUse", "SessionStart", "SessionEnd"):
+    for event in events:
         kept_blocks = []
         for block in hooks.get(event, []):
             entries = [h for h in block.get("hooks", [])
                        if not any(marker in h.get("command", "")
-                                  for marker in ours)]
+                                  for marker in markers)]
             if len(entries) != len(block.get("hooks", [])):
                 removed.append(event)
             if entries or "hooks" not in block:
@@ -1712,16 +1794,39 @@ def cmd_uninstall_hook(args):
             hooks[event] = kept_blocks
         elif event in hooks:
             del hooks[event]
+    return removed
 
+
+def cmd_uninstall_hook(args):
+    """Remove exactly our hooks — recorder (either era's name) and
+    digest — from the user-level settings, leaving everything else
+    untouched. The symmetric half of install-hook; --codex mirrors
+    the Codex half."""
+    if args.codex:
+        path = codex_hooks_path()
+        events = ("PostToolUse", "SessionEnd")
+        markers = RECORDER_MARKERS
+    else:
+        path = os.path.join(os.path.expanduser("~"), ".claude",
+                            "settings.json")
+        events = ("PostToolUse", "SessionStart", "SessionEnd")
+        markers = RECORDER_MARKERS + (DIGEST_MARKER,)
+    settings = load_settings(path)
+    if settings is None:
+        return 1
+    if not settings:
+        print(f"nothing installed: no hooks file at {path}")
+        return 0
+
+    removed = remove_our_hooks(settings.get("hooks", {}), events, markers)
     if not removed:
         print(f"nothing of ours found in {path}")
         return 0
 
     backup_settings(path)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps(settings, indent=2) + "\n")
+    write_hooks_file(path, settings)
     print(f"removed from {path}: {', '.join(sorted(set(removed)))}"
-          " (previous version saved as settings.json.bak)")
+          f" (previous version saved as {os.path.basename(path)}.bak)")
     return 0
 
 
@@ -1801,15 +1906,22 @@ def main(argv=None):
                                 help="command the prompt is piped to "
                                      "(default: `claude -p`)")
     explain_parser.set_defaults(func=cmd_explain)
-    sub.add_parser(
+    install_parser = sub.add_parser(
         "install-hook",
         help="wire the Claude Code hooks machine-wide: every session "
-             "leaves receipts, and starts with a recall digest"
-        ).set_defaults(func=cmd_install_hook)
-    sub.add_parser(
+             "leaves receipts, and starts with a recall digest")
+    install_parser.add_argument(
+        "--codex", action="store_true",
+        help="wire Codex CLI instead: PostToolUse and SessionEnd into "
+             "$CODEX_HOME/hooks.json (ADR-0020)")
+    install_parser.set_defaults(func=cmd_install_hook)
+    uninstall_parser = sub.add_parser(
         "uninstall-hook",
-        help="remove exactly those hooks from the user settings again"
-        ).set_defaults(func=cmd_uninstall_hook)
+        help="remove exactly those hooks from the user settings again")
+    uninstall_parser.add_argument(
+        "--codex", action="store_true",
+        help="remove the Codex hooks instead")
+    uninstall_parser.set_defaults(func=cmd_uninstall_hook)
 
     if argv is None:
         argv = sys.argv[1:]

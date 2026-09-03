@@ -25,13 +25,15 @@ The process that appends entries to the log — in the target use case, an AI ag
 
 The writer/operator split is the load-bearing idea of the project: in Acu (the predecessor), writer and operator were the same person, so log tampering was "self-sabotage" and a plain JSONL file sufficed. An AI agent with filesystem access is a semi-trusted third party operating inside your machine — that is what makes the chain earn its keep.
 
+An entry's `actor` names the harness the writer ran under — `claude-code`, `codex`, `openai-agents` — so recall rows on a machine running several harnesses say which one acted (ADR-0020). It is testimony like the rest of the line.
+
 ### Head record
 
 An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin. A [supervisor](#supervisor)'s baseline is deliberately **not** a head record — see the distinction there.
 
 ### Supervisor
 
-An operator-side reader process that continuously verifies receipt logs against its [baseline](#baseline) and shouts on change — **a tripwire with a memory**. Its claim is detection latency only: it shortens the window between tampering and discovery and raises the cost of tampering; it is never a wall. Everything it stores is writer-reachable, so nothing it holds is a [head record](#head-record); anchors remain the only hard boundary (ADR-0002 stands unamended). It may drive anchoring — keeping heads anchored and proofs upgraded — and that is how the head-record ritual is honestly automated: the out-of-reach property comes from the anchor, never from the supervisor. The tripwire watches the *log*, not the machine: this is a flight-recorder accessory, not an intrusion-detection system. The supervisor is the repo's *reader* tool, serving two mornings from one file: suspicion (`scan`, the alarm band) and memory ([recall](#recall) — the front page, and the agent-facing digest/search/show surface of ADR-0009).
+An operator-side reader process that continuously verifies receipt logs against its [baseline](#baseline) and shouts on change — **a tripwire with a memory**. Its claim is detection latency only: it shortens the window between tampering and discovery and raises the cost of tampering; it is never a wall. Everything it stores is writer-reachable, so nothing it holds is a [head record](#head-record); anchors remain the only hard boundary (ADR-0002 stands unamended). It may drive anchoring — keeping heads anchored and proofs upgraded — and that is how the head-record ritual is honestly automated: the out-of-reach property comes from the anchor, never from the supervisor. The tripwire watches the *log*, not the machine: this is a flight-recorder accessory, not an intrusion-detection system. The supervisor is the repo's *reader* tool, serving two mornings from one file: suspicion (`scan`, the alarm band) and memory ([recall](#recall) — the front page, the agent-facing digest/search/show surface of ADR-0009, and the same surface served read-only over MCP to any harness, ADR-0019).
 
 ### Baseline
 
@@ -160,6 +162,10 @@ The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers 
 ### Completeness
 
 The property receipts deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`receipts run`, pipeline gate scripts, the Stage C harness hook) — and is judged against [coverage](#coverage). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
+
+### Adapter
+
+The integration for one harness: whatever turns that harness's tool-call events into the hook payload and hands it to `loxodonta hook` (ADR-0020). An adapter never writes the chain format itself. Three ship: the Claude Code hook and the Codex hook, both processes the harness spawns after each call, and the OpenAI Agents SDK trace processor, which runs inside the agent program. That difference is the adapter's *trust position*: a harness hook sits outside the agent program entirely; an in-process processor cannot be skipped by the model but can be by the program's author. Every adapter's docs name its position. [Coverage](#coverage) is read per harness (Codex fires after a failed command; Claude Code does not), and the completeness witness exists for Claude Code's transcript layout only.
 
 ### Session lifecycle
 

@@ -49,6 +49,8 @@ python supervisor.py search "lock" --all      # every repo under your root
 python supervisor.py timeline 413d5fdf        # what happened around that entry
 ```
 
+The same five readings are also an MCP server — `python supervisor.py mcp` — so an agent that can't run the hook (Codex, an Agents SDK program, any MCP client) reads the same memory in the same words. It is read-only by decision: an agent may read its history here, never append to it ([docs/MCP.md](docs/MCP.md)).
+
 Because the address is a hash prefix, `show` re-hashes what it fetched and confirms it matches — the pointers into your memory are self-verifying. And because recall is reading, not judging, none of this runs `verify` or prints a verdict: the digest cites the supervisor's last scan and labels it testimony, and the real verdict stays one command away. A repo can opt out of cross-repo results by dropping a `receipts/.unlisted` marker beside its chains — its memory then renders only inside that repo.
 
 ## quickstart
@@ -99,7 +101,20 @@ One honest note on timing: an anchor hardens history **up to the anchored head**
 
 For Claude Code, a `PostToolUse` hook turns every completed tool call into a receipt automatically, which is how the timeline above got written — `install-hook` wires it, [docs/HOOK.md](docs/HOOK.md) explains it.
 
-The recorder itself doesn't care who writes to it. Anything that can run a command can leave a receipt, so `loxodonta run` and `loxodonta log` work with any framework today, and wiring another stack in automatically means writing one small adapter against its tool-call events. Claude Code is the only shipped adapter right now because it's what I use daily. Adapters for other frameworks are on the planned list below.
+The same hook payload is the contract for every other harness, so recording isn't tied to my stack:
+
+```
+python loxodonta.py install-hook            # Claude Code: PostToolUse + SessionEnd + the session-start digest
+python loxodonta.py install-hook --codex    # Codex CLI: the same two events into ~/.codex/hooks.json (trust them once with /hooks)
+```
+
+```python
+from agents import add_trace_processor            # OpenAI Agents SDK: three lines in your program
+from adapters.openai_agents import ReceiptRecorder
+add_trace_processor(ReceiptRecorder())
+```
+
+All three write to the same store, one drawer per project, with the actor naming the harness (`claude-code`, `codex`, `openai-agents`), so a machine running several leaves one memory. The honest differences — Codex records failed commands where Claude Code fires no hook, the SDK adapter runs inside your program rather than one process out, and only Claude Code sessions get the completeness alarm today — are in [docs/HOOK.md](docs/HOOK.md#other-harnesses). The recorder itself doesn't care who writes to it: anything that can run a command can leave a receipt through `loxodonta run` or `loxodonta log`, and writing another adapter is producing that one payload.
 
 ## the supervisor
 
@@ -152,7 +167,7 @@ A few places this has already earned its keep for me, beyond the daily timeline:
 
 ## planned
 
-A better viewer for reviewing the logs — most likely growing the localhost page in `supervisor serve` into full memory navigation, so browsing history doesn't require the CLI (still open to change). Adapters for other agent frameworks, so recording isn't tied to my stack. A richer query surface if shelling out ever proves insufficient — filters and aggregation are deliberately not built until the plain commands above fall short. New work happens on the `dev` branch; `main` stays stable and everything on it holds the claims above.
+A better viewer for reviewing the logs — most likely growing the localhost page in `supervisor serve` into full memory navigation, so browsing history doesn't require the CLI (still open to change). More adapters as harnesses earn them, and a completeness witness for Codex sessions once its transcript layout settles. A richer query surface if shelling out ever proves insufficient — filters and aggregation are deliberately not built until the plain commands above fall short. New work happens on the `dev` branch; `main` stays stable and everything on it holds the claims above.
 
 ## license
 
