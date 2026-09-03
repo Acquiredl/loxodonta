@@ -2642,6 +2642,13 @@ EXPORT_WORDS = (
     "every command line, and you were shown one and asked first.")
 
 
+def write_lf(path, text):
+    """Write text with LF line endings on every platform. (Path.write_text
+    grew its newline= argument in 3.10; the README promises 3.9.)"""
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
 def histogram_key(entry):
     """The histogram key for one entry: the tool name a hook actor's
     action line starts with (tool_of above), or `other` for anything
@@ -2856,7 +2863,7 @@ def cmd_export(args):
         bundle = out.with_name(out.stem + "-raw.zip")
 
     body = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    out.write_text(body, encoding="utf-8", newline="\n")
+    write_lf(out, body)
     print(body, end="")
     print(f"written: {out.name}", file=sys.stderr)
     if bundle is not None:
@@ -2875,8 +2882,7 @@ def send_export(data, out, bundle):
     issue = out.with_name(out.stem + ".issue.md")
     gh = shutil.which("gh")
     if gh is None:
-        issue.write_text(issue_body(data, None, bundle is not None),
-                         encoding="utf-8", newline="\n")
+        write_lf(issue, issue_body(data, None, bundle is not None))
         print("gh is not on PATH, so nothing was sent. The export and an "
               f"issue body ({issue.name}) are beside you: upload the export "
               "as a secret gist and open a field-data issue on "
@@ -2897,8 +2903,7 @@ def send_export(data, out, bundle):
         return 1
     lines = gist.stdout.strip().splitlines()
     gist_url = lines[-1] if lines else "<gist link>"
-    issue.write_text(issue_body(data, gist_url, bundle is not None),
-                     encoding="utf-8", newline="\n")
+    write_lf(issue, issue_body(data, gist_url, bundle is not None))
     title = (f"field-data: {machine['os']} / {len(data['sessions'])} "
              f"sessions / {stamp}")
     filed = subprocess.run([gh, "issue", "create", "--repo", FIELD_DATA_REPO,

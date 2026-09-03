@@ -225,12 +225,12 @@ def fake_gh(bin_dir, log):
     """A `gh` that records its argv and answers with URLs, on both
     shell families."""
     posix = bin_dir / "gh"
-    posix.write_text(
+    posix.write_bytes((  # LF on every platform; 3.9's write_text has no newline=
         "#!/bin/sh\n"
         f"printf '%s\\n' \"$*\" >> \"{log.as_posix()}\"\n"
         "if [ \"$1\" = gist ]; then echo https://gist.github.com/fake/abc123;"
-        " else echo https://github.com/Acquiredl/loxodonta/issues/999; fi\n",
-        encoding="utf-8", newline="\n")
+        " else echo https://github.com/Acquiredl/loxodonta/issues/999; fi\n"
+    ).encode("utf-8"))
     posix.chmod(0o755)
     (bin_dir / "gh.cmd").write_text(
         "@echo off\r\n"
