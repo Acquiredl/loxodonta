@@ -97,7 +97,8 @@ class McpClient:
                             meta=meta)
 
     def close(self):
-        self.proc.stdin.close()
+        # communicate() closes stdin itself once it has nothing to write;
+        # closing it first makes POSIX communicate() flush a closed file.
         try:
             out, err = self.proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:
