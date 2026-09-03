@@ -1,6 +1,6 @@
 # ADR-0019: The recall surface speaks MCP, read-only, from the supervisor
 
-**Status:** proposed 2026-09-02 (awaiting restate-to-ratify)
+**Status:** accepted 2026-09-02 (restate-to-ratify passed)
 
 ## Context
 

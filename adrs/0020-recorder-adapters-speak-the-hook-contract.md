@@ -1,6 +1,6 @@
 # ADR-0020: Recorder adapters speak the hook contract — Codex hooks and the Agents SDK trace processor
 
-**Status:** proposed 2026-09-02 (awaiting restate-to-ratify)
+**Status:** accepted 2026-09-02 (restate-to-ratify passed)
 
 ## Context
 
