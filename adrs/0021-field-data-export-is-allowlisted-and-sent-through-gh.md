@@ -1,6 +1,6 @@
 # ADR-0021: Field-data export is built by allowlist, redacted by default, and sent through `gh`
 
-**Status:** proposed 2026-09-03 (rulings Q1–Q4 ratified in the share-plan grill of 2026-09-02; restate-to-ratify pending)
+**Status:** accepted 2026-09-03 (rulings Q1–Q4 ratified in the share-plan grill of 2026-09-02; restate-to-ratify passed)
 
 **Deciders:** Acquiredl
 
