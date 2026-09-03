@@ -218,7 +218,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 - ~~blockchain~~ — implies consensus, multiple writers, and tokens. This is a single-writer hash chain; say *hash chain*.
 - ~~immutable~~ — overclaims. Nothing prevents mutation; mutation is detected. Say *tamper-evident* (and *anchored* once Stage B applies).
-- ~~audit log / audit trail~~ — Acu's term for its *non-chained* JSONL gate log, the system this project improves on. Using it here blurs exactly the distinction the project exists to make. Say *receipt log*.
+- ~~audit log / audit trail~~ — two reasons. Publicly: the phrase promises a *complete, authoritative* record, and this tool guarantees integrity of what was logged, never that everything was logged ([completeness](#completeness) is the integration's job; failed calls fire no hook; the chain holds action lines, not the full transcript). Internally: it is Acu's term for its *non-chained* JSONL gate log, the system this project improves on, and using it here blurs exactly the distinction the project exists to make. The verb *audit* is not banned. Say *receipt log*.
 - ~~signature~~ *(unqualified)*, and ~~writer signature~~ in any form — no keys exist in v0.1, and the writer signing its own history proves nothing: the signer is the adversary (ADR-0001, unamended). The word now requires its qualifier: the [issuer signature](#issuer-signature) exists for derived packages (ADR-0008); no other signature does.
 - ~~authentic / verified / genuine~~ *(in verdict output only)* — a verifier that prints these draws the operator's conclusion for them, the same overclaim as "immutable". Verdicts name the mechanism: `SELF-CONSISTENT`, `ANCHORED`, `SIGNED` (ADR-0007). Ordinary prose is unaffected.
 
