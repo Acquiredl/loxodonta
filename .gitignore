@@ -4,6 +4,7 @@ __pycache__/
 receipts.jsonl
 *.ots
 
-# operator-side journal - never shipped
+# operator-side journals - never shipped
 DOGFOOD.md
 dogfood.py
+METACOG.md
