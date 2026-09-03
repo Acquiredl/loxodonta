@@ -1572,6 +1572,21 @@ def recorder_command(actor=None):
     return command + (f" --actor {actor}" if actor else "")
 
 
+def supervisor_path():
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, "supervisor.py")
+
+
+def digest_command(payload=False):
+    """The SessionStart command: this interpreter, the supervisor beside
+    this file, `digest`. With `payload`, the digest takes its repo from
+    the hook payload's `cwd` — for a harness that sets no
+    CLAUDE_PROJECT_DIR (ADR-0020)."""
+    python = sys.executable.replace(os.sep, "/")
+    command = f'"{python}" "{supervisor_path().replace(os.sep, "/")}" digest'
+    return command + (" --payload" if payload else "")
+
+
 def heal_hooks(blocks, markers, command):
     """Replace our hook commands whose script no longer exists — the
     migration path after a rename or a move: honoring a dangling
@@ -1615,12 +1630,13 @@ def codex_hooks_path():
 
 
 def install_codex_hooks():
-    """The Codex half of install-hook (ADR-0020): the same PostToolUse
-    and SessionEnd blocks, in Codex's hooks.json, with the actor named
-    so recall rows say which harness acted. Codex's matcher is a regex,
-    so `.*` is its every-tool-call. No SessionStart digest here: Codex
-    injects hook context only through a JSON envelope, and the digest
-    is reachable over MCP (ADR-0019) already."""
+    """The Codex half of install-hook (ADR-0020): the same PostToolUse,
+    SessionEnd, and SessionStart blocks, in Codex's hooks.json, with the
+    actor named so recall rows say which harness acted. Codex's matcher
+    is a regex, so `.*` is its every-tool-call. Codex adds a hook's
+    plain-text stdout to the model's context, so the digest ships
+    unchanged — told to take the repo from the payload, since Codex
+    sets no CLAUDE_PROJECT_DIR."""
     path = codex_hooks_path()
     settings = load_settings(path)
     if settings is None:
@@ -1643,6 +1659,15 @@ def install_codex_hooks():
         end.append({"hooks": [{"type": "command", "command": record,
                                "timeout": CODEX_SESSION_END_TIMEOUT}]})
         installed.append(f"SessionEnd: {record}")
+    digest = digest_command(payload=True)
+    if os.path.isfile(supervisor_path()):
+        start = hooks.setdefault("SessionStart", [])
+        healed += heal_hooks(start, (DIGEST_MARKER,), digest)
+        if not any(block_is_ours(b, (DIGEST_MARKER,)) for b in start):
+            start.append({"matcher": "startup|clear|compact",
+                          "hooks": [{"type": "command", "command": digest,
+                                     "timeout": 5}]})
+            installed.append(f"SessionStart: {digest}")
 
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -1676,11 +1701,9 @@ def cmd_install_hook(args):
     --codex, the Codex half runs instead (install_codex_hooks)."""
     if args.codex:
         return install_codex_hooks()
-    python = sys.executable.replace(os.sep, "/")
-    here = os.path.dirname(os.path.abspath(__file__))
-    supervisor = os.path.join(here, "supervisor.py")
+    supervisor = supervisor_path()
     record = recorder_command()
-    digest = f'"{python}" "{supervisor.replace(os.sep, "/")}" digest'
+    digest = digest_command()
     path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 
     settings = load_settings(path)
@@ -1802,15 +1825,11 @@ def cmd_uninstall_hook(args):
     digest — from the user-level settings, leaving everything else
     untouched. The symmetric half of install-hook; --codex mirrors
     the Codex half."""
-    if args.codex:
-        path = codex_hooks_path()
-        events = ("PostToolUse", "SessionEnd")
-        markers = RECORDER_MARKERS
-    else:
-        path = os.path.join(os.path.expanduser("~"), ".claude",
-                            "settings.json")
-        events = ("PostToolUse", "SessionStart", "SessionEnd")
-        markers = RECORDER_MARKERS + (DIGEST_MARKER,)
+    path = (codex_hooks_path() if args.codex
+            else os.path.join(os.path.expanduser("~"), ".claude",
+                              "settings.json"))
+    events = ("PostToolUse", "SessionStart", "SessionEnd")
+    markers = RECORDER_MARKERS + (DIGEST_MARKER,)
     settings = load_settings(path)
     if settings is None:
         return 1
@@ -1912,8 +1931,8 @@ def main(argv=None):
              "leaves receipts, and starts with a recall digest")
     install_parser.add_argument(
         "--codex", action="store_true",
-        help="wire Codex CLI instead: PostToolUse and SessionEnd into "
-             "$CODEX_HOME/hooks.json (ADR-0020)")
+        help="wire Codex CLI instead: PostToolUse, SessionEnd, and the "
+             "SessionStart digest into $CODEX_HOME/hooks.json (ADR-0020)")
     install_parser.set_defaults(func=cmd_install_hook)
     uninstall_parser = sub.add_parser(
         "uninstall-hook",

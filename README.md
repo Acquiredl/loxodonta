@@ -105,7 +105,7 @@ The same hook payload is the contract for every other harness, so recording isn'
 
 ```
 python loxodonta.py install-hook            # Claude Code: PostToolUse + SessionEnd + the session-start digest
-python loxodonta.py install-hook --codex    # Codex CLI: the same two events into ~/.codex/hooks.json (trust them once with /hooks)
+python loxodonta.py install-hook --codex    # Codex CLI: the same three events into ~/.codex/hooks.json (trust them once with /hooks)
 ```
 
 ```python

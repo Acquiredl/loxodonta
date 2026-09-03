@@ -75,9 +75,17 @@ The shape, as built:
   Codex's transcript is its rollout JSONL; transcript commitments and
   the SessionEnd seal work unchanged because they hash bytes, not
   shapes. Its SessionEnd budget is capped at three seconds, which the
-  installer honors. No SessionStart digest for Codex in this slice:
-  Codex injects hook context only through a JSON envelope, and the
-  digest is reachable over MCP (ADR-0019) already.
+  installer honors. *(Addendum 2026-09-03: this ADR first said Codex
+  injects hook context only through a JSON envelope and shipped no
+  SessionStart digest. Codex's current hooks documentation says the
+  opposite — plain-text stdout "is added as extra developer context" —
+  so the digest ships for Codex too, as a third block: `supervisor.py
+  digest --payload`, the flag telling the digest to take its repo from
+  the SessionStart payload's `cwd`, since Codex sets no
+  CLAUDE_PROJECT_DIR and the hook process's working directory is
+  nobody's promise. The flag is explicit rather than implied because
+  under `supervisor mcp` stdin is the wire; the digest must never read
+  it unasked.)*
 - **Agents SDK: the span is the event.** `on_span_end` for spans of
   type `function` (which covers MCP tools, wrapped by the SDK as
   function tools) and `handoff`. Chosen over the lifecycle hooks
@@ -141,9 +149,9 @@ The shape, as built:
 - A harness offers no post-call event at all and only a stream (e.g.
   `codex exec --json`) — a stream tailer would be a resident process,
   and residency belongs to the supervisor, not the recorder.
-- Codex's SessionStart gains a plain-text context path, or the digest
+- ~~Codex's SessionStart gains a plain-text context path, or the digest
   gains a JSON envelope — then the digest injection can ship for Codex
-  too.
+  too.~~ *Fired 2026-09-03: it already had one; see the addendum above.*
 
 ## Alternatives considered
 

@@ -2089,10 +2089,26 @@ def scan_testimony(repo):
     return None, []
 
 
+def payload_cwd():
+    """The `cwd` a harness hook payload names on stdin, or None. Read
+    only when `digest --payload` asks (ADR-0020): a harness that sets
+    no CLAUDE_PROJECT_DIR — Codex — says which repo a session is in
+    here and nowhere else. Never read implicitly: under `mcp`, stdin
+    is the wire."""
+    try:
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    return cwd if isinstance(cwd, str) and os.path.isdir(cwd) else None
+
+
 def cmd_digest(args):
     """The session-start injection: local by design ("all memory" means
     all reachable, never all injected), budget-capped, zero subprocess
     spawns — recall owns no verdicts, so nothing here runs verify."""
+    if getattr(args, "payload", False) and not args.repo             and not os.environ.get("CLAUDE_PROJECT_DIR"):
+        args.repo = payload_cwd()  # the environment wins when present
     repo = invoking_repo(args)
     families, rows = gather(project_chains(repo))
     if args.since:
@@ -4884,6 +4900,11 @@ def main(argv):
                              "else the current directory)")
     digest.add_argument("--limit", type=int, default=DIGEST_LIMIT,
                         help=f"most rows shown (default {DIGEST_LIMIT})")
+    digest.add_argument("--payload", action="store_true",
+                        help="read the harness's SessionStart payload on "
+                             "stdin and take the repo from its cwd when "
+                             "neither --repo nor CLAUDE_PROJECT_DIR names "
+                             "one (Codex wiring, ADR-0020)")
     digest.add_argument("--since", default=None, metavar="YYYY-MM-DD",
                         help="only entries on or after this date")
     digest.set_defaults(func=cmd_digest)

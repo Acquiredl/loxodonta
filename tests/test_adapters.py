@@ -5,8 +5,9 @@ processor.
 Both adapters speak the hook contract — the JSON payload `loxodonta
 hook` already reads — so the recorder learns two small things (a
 payload's `cwd` names the project when the harness sets no
-CLAUDE_PROJECT_DIR; `summary` is a last-resort action key) and the
-installer learns one more home (`~/.codex/hooks.json`). Tests drive the
+CLAUDE_PROJECT_DIR; `summary` is a last-resort action key), the
+installer learns one more home (`~/.codex/hooks.json`), and the digest
+learns to take its repo from the SessionStart payload (`--payload`). Tests drive the
 public CLI and the adapter's public class; nothing reaches into
 internals, and every chain written is judged by `loxodonta verify`.
 """
@@ -22,6 +23,7 @@ from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
+SUPERVISOR = REPO_ROOT / "supervisor.py"
 sys.path.insert(0, str(REPO_ROOT))
 
 from adapters.openai_agents import ReceiptRecorder  # noqa: E402
@@ -30,6 +32,18 @@ from adapters.openai_agents import ReceiptRecorder  # noqa: E402
 def run_loxodonta(*args, stdin=None, env=None, cwd=None):
     result = subprocess.run(
         [sys.executable, str(LOXODONTA), *args], cwd=cwd,
+        input=(json.dumps(stdin).encode("utf-8")
+               if isinstance(stdin, dict) else stdin),
+        capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", **(env or {})})
+    result.stdout = result.stdout.decode("utf-8", errors="replace")
+    result.stderr = result.stderr.decode("utf-8", errors="replace")
+    return result
+
+
+def run_supervisor(*args, stdin=None, env=None, cwd=None):
+    result = subprocess.run(
+        [sys.executable, str(SUPERVISOR), *args], cwd=cwd,
         input=(json.dumps(stdin).encode("utf-8")
                if isinstance(stdin, dict) else stdin),
         capture_output=True,
@@ -112,6 +126,35 @@ class CodexHookTest(unittest.TestCase):
         self.assertFalse((self.root / "receipts").exists())
         self.assertFalse(list(self.root.glob("receipts-*.jsonl")))
 
+    def test_session_start_digest_reads_the_payload_cwd(self):
+        # Hook in, digest out — the pair the installer wires. The
+        # digest process runs somewhere else entirely; only the
+        # SessionStart payload's cwd says which repo's memory to render.
+        self.hook(codex_payload(self.project, tool="Bash",
+                                tool_input={"command": "cargo build"}))
+        start = {"session_id": "019374ab-codex-session",
+                 "hook_event_name": "SessionStart", "source": "startup",
+                 "transcript_path": None, "cwd": str(self.project)}
+        out = run_supervisor("digest", "--payload", stdin=start,
+                             env=self.env, cwd=str(self.root))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("cargo build", out.stdout)
+        self.assertIn("recall digest -- someproject", out.stdout)
+        # The environment still wins when a harness sets it.
+        other = self.root / "otherproject"
+        other.mkdir()
+        out = run_supervisor("digest", "--payload", stdin=start,
+                             env={**self.env, "CLAUDE_PROJECT_DIR": str(other)},
+                             cwd=str(self.root))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout, "")  # no chains there: silence
+        # No payload at all falls back to the working directory, and
+        # a chainless one stays silent — never a crash at session start.
+        out = run_supervisor("digest", "--payload", stdin=b"",
+                             env=self.env, cwd=str(other))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout, "")
+
     def test_claude_project_dir_still_outranks_the_payload_cwd(self):
         other = self.root / "otherproject"
         other.mkdir()
@@ -171,7 +214,7 @@ class CodexInstallTest(unittest.TestCase):
     def hooks(self, path=None):
         return json.loads((path or self.hooks_path).read_text("utf-8"))
 
-    def test_writes_hooks_json_with_post_tool_use_and_session_end(self):
+    def test_writes_hooks_json_with_all_three_events(self):
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         hooks = self.hooks()["hooks"]
@@ -187,6 +230,19 @@ class CodexInstallTest(unittest.TestCase):
         end = hooks["SessionEnd"][0]["hooks"][0]
         self.assertEqual(end["command"], command)
         self.assertLessEqual(end["timeout"], 3)  # Codex caps SessionEnd
+        # The session-start digest: Codex adds plain-text hook stdout
+        # to the model's context, so the same digest ships here — told
+        # to take the repo from the payload, since Codex sets no
+        # CLAUDE_PROJECT_DIR and the hook's cwd is nobody's promise.
+        start = hooks["SessionStart"][0]
+        self.assertEqual(start["matcher"], "startup|clear|compact")
+        digest = start["hooks"][0]["command"]
+        self.assertIn("supervisor.py", digest)
+        self.assertIn(" digest", digest)
+        self.assertIn("--payload", digest)
+        self.assertTrue(start["hooks"][0]["timeout"])
+        for line in ("PostToolUse", "SessionEnd", "SessionStart"):
+            self.assertIn(line, result.stdout)
         # Codex asks the user to trust new hooks once; the installer says so.
         self.assertIn("/hooks", result.stdout)
         # The Claude Code settings are not touched by a Codex install.
@@ -233,6 +289,7 @@ class CodexInstallTest(unittest.TestCase):
                     for h in b["hooks"]]
         self.assertEqual(commands, ["python3 notify.py"])
         self.assertNotIn("SessionEnd", hooks)
+        self.assertNotIn("SessionStart", hooks)
         again = run_loxodonta("uninstall-hook", "--codex", env=self.env)
         self.assertIn("nothing of ours", again.stdout)
 
