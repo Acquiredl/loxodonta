@@ -78,12 +78,13 @@ class ExportBase(unittest.TestCase):
         run(LOXODONTA, "log", "--log", str(self.log), "--actor", "receipts",
             "--action", "transcript-commitment: bytes=10 sha256=00")
 
-    def hook(self, session, tool, tool_input):
+    def hook(self, session, tool, tool_input, actor=None):
         payload = json.dumps({"session_id": session,
                               "hook_event_name": "PostToolUse",
                               "tool_name": tool, "tool_input": tool_input,
                               "tool_response": {}})
-        result = run(LOXODONTA, "hook", stdin=payload,
+        result = run(LOXODONTA, "hook", *(["--actor", actor] if actor else []),
+                     stdin=payload,
                      env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
         self.assertEqual(result.returncode, 0, text(result)[1])
 
@@ -137,7 +138,7 @@ class ExportFileTest(ExportBase):
         self.assertEqual(list(data), ["redaction", "export", "machine",
                                       "sessions"])
         self.assertEqual(sorted(data["machine"]), sorted([
-            "recorder_commit", "python", "os", "matchers", "store",
+            "recorder_commit", "python", "os", "matchers", "actors", "store",
             "day_book", "lifecycle", "scan_exit"]))
         self.assertEqual(sorted(data["machine"]["store"]),
                          ["bytes", "chains", "entries"])
@@ -176,6 +177,44 @@ class ExportFileTest(ExportBase):
         self.assertEqual(machine["scan_exit"], 0)
         self.assertIsInstance(machine["day_book"], list)
         self.assertEqual(sorted(machine["lifecycle"]), ["events", "kept"])
+
+    def test_tool_names_come_from_a_written_list(self):
+        # A tool name is kept only when it is on the list of harness
+        # built-ins written in supervisor.py. MCP tool names say which
+        # servers a sender runs (and a custom server can be named after
+        # an employer); an Agents SDK function name is the sender's own
+        # word. Neither is on the list: MCP calls fold into one `mcp`
+        # bucket, everything else unknown into `other`.
+        self.hook(SESSION, "mcp__Acme_Jira__create_ticket", {"summary": "x"})
+        self.hook(SESSION, "mcp__Other_Server__do_thing", {"summary": "y"})
+        self.hook(SESSION, "WebFetch", {"url": "https://example.test/"})
+        self.hook(SESSION, "query_payroll_db", {"summary": "q"},
+                  actor="openai-agents")
+        self.hook(SESSION, "handoff", {"summary": "to triage"},
+                  actor="openai-agents")
+        result = self.export()
+        self.assertEqual(result.returncode, 0, text(result)[1])
+        body = self.exported_file().read_text("utf-8")
+        for name in ("Acme_Jira", "Other_Server", "create_ticket", "do_thing",
+                     "payroll"):
+            self.assertNotIn(name, body, name)
+        data = json.loads(body)
+        row = next(s for s in data["sessions"] if s["session"] == SESSION)
+        self.assertEqual(row["tools"], {"Bash": 2, "Edit": 1, "WebFetch": 1,
+                                        "function": 1, "handoff": 1,
+                                        "mcp": 2, "other": 1})
+        removed = " ".join(data["redaction"]["removed"]).lower()
+        for word in ("mcp", "function", "tool name"):
+            self.assertIn(word, removed)
+
+    def test_machine_names_the_harnesses_that_recorded(self):
+        # The issue template asks which harness(es) recorded; the export
+        # answers from the actors it saw — harness names only, never a
+        # hand-chosen actor string (the tester above is not a harness).
+        self.hook(OTHER_SESSION, "shell", {"command": "ls"}, actor="codex")
+        self.export()
+        data = json.loads(self.exported_file().read_text("utf-8"))
+        self.assertEqual(data["machine"]["actors"], ["claude-code", "codex"])
 
     def test_matchers_are_the_wired_coverage_at_scan_time(self):
         # The scan reads the harness settings beside the witness layout;
@@ -301,6 +340,7 @@ class ExportSendTest(ExportBase):
         self.assertIn("allowlist", body.lower())
         self.assertIn("- [x]", body)
         self.assertIn("- [ ] *(raw bundles only)*", body)
+        self.assertIn("**Harness(es) recorded:** claude-code", body)
         for secret in (HOME_SECRET, PROJECT_SECRET, COMMAND_SECRET):
             self.assertNotIn(secret, body)
         self.assertIn("field-data: ", issue)

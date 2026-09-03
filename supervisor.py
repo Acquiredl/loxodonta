@@ -2617,12 +2617,37 @@ FIELD_DATA_REPO = "Acquiredl/loxodonta"
 # entries, foreign actors — is one `other` bucket.
 HOOK_ACTORS = ("claude-code", "codex", "openai-agents")
 BOOKKEEPING_ACTOR = "receipts"
-TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]{0,60}$")
+# The tool names the histogram may carry: the harnesses' own built-ins,
+# written down here. A name is the harness's word rather than the
+# sender's only when it is on this list. MCP tool names say which
+# servers a sender runs (a custom one can be named after an employer)
+# and an Agents SDK function is named by the sender; both fold by kind,
+# and anything else unknown folds into `other`. A new built-in shows up
+# as `other` until it is added here: the allowlist fails closed.
+EXPORT_TOOLS = (
+    # Claude Code
+    "Agent", "Task", "AskUserQuestion", "Bash", "PowerShell", "BashOutput",
+    "KillShell", "Edit", "MultiEdit", "Write", "Read", "Glob", "Grep", "LS",
+    "NotebookEdit", "NotebookRead", "WebFetch", "WebSearch", "TodoWrite",
+    "TodoRead", "Skill", "ToolSearch", "TaskOutput", "TaskStop", "Monitor",
+    "SendUserFile", "ScheduleWakeup", "ListAgents", "SendMessage",
+    "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree",
+    "Artifact", "Workflow", "ReportFindings", "SuggestSkills", "ListSkills",
+    "CronCreate", "CronDelete", "CronList",
+    # Codex CLI
+    "shell", "shell_command", "exec_command", "write_stdin", "apply_patch",
+    "update_plan", "view_image", "web_search",
+    # OpenAI Agents SDK adapter (function tools fold to `function` below)
+    "handoff",
+)
 EXPORT_REMOVED = [
     "every path (the store, the witness, the recorder, your home directory)",
     "every command line and action line",
     "every file reference and fingerprint",
     "every repo name (repos become repo-1, repo-2, ... in first-seen order)",
+    "every tool name that is not a harness built-in on the written list "
+    "(MCP calls fold into one 'mcp' bucket, Agents SDK function tools into "
+    "'function', anything else into 'other')",
     "every anchor calendar URL and proof",
     "every word the scan wrote for a human (the 'words' fields)",
 ]
@@ -2632,6 +2657,7 @@ EXPORT_KEPT = [
     "verdicts and states: VALID/BROKEN, completeness, dormancy, consumption",
     "timestamps: when sessions started and ended, and the day book",
     "the recorder's commit, your Python version, and your OS family",
+    "which harnesses recorded (claude-code, codex, openai-agents), by actor",
 ]
 EXPORT_WORDS = (
     "This file was built by an allowlist: the fields below are the only "
@@ -2651,15 +2677,20 @@ def write_lf(path, text):
 
 def histogram_key(entry):
     """The histogram key for one entry: the tool name a hook actor's
-    action line starts with (tool_of above), or `other` for anything
-    that is not a hook receipt. The name must look like a tool name; a
-    hand-logged line wearing a hook actor still cannot smuggle text
-    in."""
-    if entry.get("actor") not in HOOK_ACTORS:
+    action line starts with, kept only when it is on EXPORT_TOOLS;
+    `mcp` for any MCP tool; `function` for an Agents SDK function tool
+    (the adapter's actor, any name but `handoff`); `other` for anything
+    else, hand-logged lines included. A line wearing a hook actor still
+    cannot smuggle text in: nothing off the list passes."""
+    actor = entry.get("actor")
+    if actor not in HOOK_ACTORS:
         return "other"
-    action = str(entry.get("action", ""))
-    head = action.split(":", 1)[0].strip()
-    return head if TOOL_NAME.match(head) else "other"
+    head = str(entry.get("action", "")).split(":", 1)[0].strip()
+    if head.startswith("mcp__"):
+        return "mcp"
+    if actor == "openai-agents" and head != "handoff":
+        return "function"
+    return head if head in EXPORT_TOOLS else "other"
 
 
 def export_sessions(report):
@@ -2676,6 +2707,7 @@ def export_sessions(report):
     ordinal = {}
     rows = []
     store = {"chains": 0, "entries": 0, "bytes": 0}
+    actors = set()  # which harnesses recorded: HOOK_ACTORS only
     newest = None  # the sample line a raw bundle shows first
     for repo in report.get("repos", []):
         label = ordinal.setdefault(repo.get("repo"),
@@ -2706,6 +2738,8 @@ def export_sessions(report):
                     continue
                 key = histogram_key(entry)
                 tools[key] = tools.get(key, 0) + 1
+                if entry.get("actor") in HOOK_ACTORS:
+                    actors.add(entry["actor"])
                 # Newest by timestamp, then by position in its chain:
                 # receipts stamp whole seconds, so a burst of calls
                 # shares one stamp and the later entry must still win.
@@ -2740,7 +2774,7 @@ def export_sessions(report):
                 "bookkeeping": bookkeeping,
                 "tools": dict(sorted(tools.items())),
             })
-    return rows, store, ordinal, newest
+    return rows, store, ordinal, sorted(actors), newest
 
 
 def build_export(report):
@@ -2748,7 +2782,7 @@ def build_export(report):
     the sender reads the rule before the data, and the issue template
     quotes it."""
     import platform
-    sessions, store, ordinal, newest = export_sessions(report)
+    sessions, store, ordinal, actors, newest = export_sessions(report)
     day_book = [{k: day.get(k) for k in ("day", "looks", "watched", "worst",
                                          "chains", "broken", "events",
                                          "alarms", "reawakenings")}
@@ -2773,6 +2807,7 @@ def build_export(report):
             "python": "%d.%d" % sys.version_info[:2],
             "os": platform.system(),
             "matchers": matchers,
+            "actors": actors,
             "store": store,
             "day_book": day_book,
             "lifecycle": {"events": len(lifecycle.get("events") or []),
@@ -2821,6 +2856,8 @@ def issue_body(data, gist_url, raw):
         f"{machine['store']['chains']} chains, "
         f"{machine['store']['entries']} entries, "
         f"{len(data['sessions'])} sessions.",
+        "",
+        f"**Harness(es) recorded:** {', '.join(machine['actors']) or 'none'}",
         "",
         f"**Tools seen:** {', '.join(seen) or 'none'}",
         "",
