@@ -54,6 +54,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socketserver
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -2597,6 +2598,329 @@ def cmd_mcp(args):
     return 0
 
 
+# --- Export: field data (ADR-0021) -------------------------------------------
+# `supervisor export` is how a stranger sends back what the recorder saw
+# on their machine without publishing their username, their project
+# names, or their shell history. Everything in the file is named below,
+# by allowlist: nothing from the scan passes through unnamed, so a new
+# scan field can never leak by default. The sender reads the file
+# before it goes (it is printed), and it goes under their own GitHub
+# login (`--send` runs `gh`: a secret gist, then a field-data issue on
+# this repo from the template). Raw chains are a separate opt-in that
+# shows a sample line and asks first, because chains carry command
+# lines and that is the sender's call.
+
+EXPORT_VERSION = 1
+FIELD_DATA_REPO = "Acquiredl/loxodonta"
+# The harness actors whose entries are tool calls (ADR-0020). Their
+# action lines start with the tool name; everything else — hand-logged
+# entries, foreign actors — is one `other` bucket.
+HOOK_ACTORS = ("claude-code", "codex", "openai-agents")
+BOOKKEEPING_ACTOR = "receipts"
+TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]{0,60}$")
+EXPORT_REMOVED = [
+    "every path (the store, the witness, the recorder, your home directory)",
+    "every command line and action line",
+    "every file reference and fingerprint",
+    "every repo name (repos become repo-1, repo-2, ... in first-seen order)",
+    "every anchor calendar URL and proof",
+    "every word the scan wrote for a human (the 'words' fields)",
+]
+EXPORT_KEPT = [
+    "session ids (random UUIDs the harness assigned)",
+    "counts: entries, chains, bytes, tools per session, owed and received",
+    "verdicts and states: VALID/BROKEN, completeness, dormancy, consumption",
+    "timestamps: when sessions started and ended, and the day book",
+    "the recorder's commit, your Python version, and your OS family",
+]
+EXPORT_WORDS = (
+    "This file was built by an allowlist: the fields below are the only "
+    "fields it can contain, named in supervisor.py, and nothing else from "
+    "the scan passes through. Read it before you send it. It carries no "
+    "paths, no command lines, no repo names, and no file references. If "
+    "you sent a raw bundle as well, that is different: raw chains carry "
+    "every command line, and you were shown one and asked first.")
+
+
+def write_lf(path, text):
+    """Write text with LF line endings on every platform. (Path.write_text
+    grew its newline= argument in 3.10; the README promises 3.9.)"""
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def histogram_key(entry):
+    """The histogram key for one entry: the tool name a hook actor's
+    action line starts with (tool_of above), or `other` for anything
+    that is not a hook receipt. The name must look like a tool name; a
+    hand-logged line wearing a hook actor still cannot smuggle text
+    in."""
+    if entry.get("actor") not in HOOK_ACTORS:
+        return "other"
+    action = str(entry.get("action", ""))
+    head = action.split(":", 1)[0].strip()
+    return head if TOOL_NAME.match(head) else "other"
+
+
+def export_sessions(report):
+    """One row per (drawer, session) in the scan, joined to the
+    completeness and consumption sections by session id alone. The
+    completeness section names repos by the witness's folder slug — a
+    path in disguise — so it is never read for its name."""
+    completeness = {s.get("session"): s
+                    for s in report.get("completeness", {}).get("sessions", [])
+                    if isinstance(s, dict)}
+    consumption = {s.get("session"): s
+                   for s in report.get("consumption", {}).get("sessions", [])
+                   if isinstance(s, dict)}
+    ordinal = {}
+    rows = []
+    store = {"chains": 0, "entries": 0, "bytes": 0}
+    newest = None  # the sample line a raw bundle shows first
+    for repo in report.get("repos", []):
+        label = ordinal.setdefault(repo.get("repo"),
+                                   f"repo-{len(ordinal) + 1}")
+        for sess in repo.get("sessions", []):
+            entries = []
+            for chain in sess.get("chains", []):
+                log = Path(chain["log"])
+                entries.extend(read_entries(log))
+                store["chains"] += 1
+                try:
+                    store["bytes"] += log.stat().st_size
+                except OSError:
+                    pass
+            store["entries"] += len(entries)
+            stamps = sorted(e["ts"] for e in entries
+                            if isinstance(e.get("ts"), str))
+            tools = {}
+            bookkeeping = commitments = 0
+            for entry in entries:
+                if not entry.get("n"):
+                    continue  # genesis is neither an action nor bookkeeping
+                if entry.get("actor") == BOOKKEEPING_ACTOR:
+                    bookkeeping += 1
+                    if str(entry.get("action", "")).startswith(
+                            "transcript-commitment"):
+                        commitments += 1
+                    continue
+                key = histogram_key(entry)
+                tools[key] = tools.get(key, 0) + 1
+                # Newest by timestamp, then by position in its chain:
+                # receipts stamp whole seconds, so a burst of calls
+                # shares one stamp and the later entry must still win.
+                if entry.get("actor") in HOOK_ACTORS and isinstance(
+                        entry.get("ts"), str):
+                    rank = (entry["ts"], int(entry.get("n") or 0))
+                    if newest is None or rank > newest[0]:
+                        newest = (rank, str(entry.get("action", "")))
+            watched = completeness.get(sess.get("session"), {})
+            hot = consumption.get(sess.get("session"), {})
+            dormancy = watched.get("dormancy") or {}
+            chains = sess.get("chains", [])
+            rows.append({
+                "session": sess.get("session"),
+                "repo": label,
+                "entries": len(entries),
+                "span": {"first": stamps[0] if stamps else None,
+                         "last": stamps[-1] if stamps else None},
+                "verdict": (chains[-1].get("verdict") if chains else None),
+                "commitments": commitments,
+                "completeness": {"state": watched.get("state", "UNWITNESSED"),
+                                 "owed": watched.get("tools"),
+                                 "received": watched.get("receipts")},
+                "dormancy": dormancy.get("tier"),
+                "consumption": hot.get("state"),
+                "siblings": len(chains),
+                "bookkeeping": bookkeeping,
+                "tools": dict(sorted(tools.items())),
+            })
+    return rows, store, ordinal, newest
+
+
+def build_export(report):
+    """The allowlisted file. `redaction` is the first key on purpose:
+    the sender reads the rule before the data, and the issue template
+    quotes it."""
+    import platform
+    sessions, store, ordinal, newest = export_sessions(report)
+    day_book = [{k: day.get(k) for k in ("day", "looks", "watched", "worst",
+                                         "chains", "broken", "events",
+                                         "alarms", "reawakenings")}
+                for day in report.get("history", []) if isinstance(day, dict)]
+    baseline = read_baseline(Path(store_home()) / "baseline.json")
+    calibration = baseline.get("calibration") if isinstance(baseline, dict) \
+        else None
+    matchers = matchers_at(calibration, report.get("scanned")) \
+        if calibration else None
+    lifecycle = report.get("lifecycle") or {}
+    recorder = report.get("recorder") or {}
+    data = {
+        "redaction": {"words": EXPORT_WORDS, "removed": EXPORT_REMOVED,
+                      "kept": EXPORT_KEPT},
+        "export": {"version": EXPORT_VERSION,
+                   "written": report.get("scanned"),
+                   "tool": "loxodonta supervisor export"},
+        "machine": {
+            "recorder_commit": recorder.get("head"),
+            "python": "%d.%d" % sys.version_info[:2],
+            "os": platform.system(),
+            "matchers": matchers,
+            "store": store,
+            "day_book": day_book,
+            "lifecycle": {"events": len(lifecycle.get("events") or []),
+                          "kept": lifecycle.get("kept", 0)},
+            "scan_exit": report.get("exit"),
+        },
+        "sessions": sessions,
+    }
+    return data, ordinal, newest
+
+
+def write_raw_bundle(report, ordinal, path):
+    """Chain bytes and anchor sidecars, drawers renamed to their
+    ordinals, no project.json: the one export that carries command
+    lines, written only after the sender said yes."""
+    import zipfile
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for repo in report.get("repos", []):
+            label = ordinal.get(repo.get("repo"), "repo-0")
+            for sess in repo.get("sessions", []):
+                for chain in sess.get("chains", []):
+                    log = Path(chain["log"])
+                    bundle.write(log, f"{label}/{log.name}")
+                    sidecar = log.with_name(log.name + ".anchors.jsonl")
+                    if sidecar.exists():
+                        bundle.write(sidecar, f"{label}/{sidecar.name}")
+
+
+def issue_body(data, gist_url, raw):
+    """The field-data issue, from the template's shape: the gist link,
+    the redaction block verbatim, the consent lines."""
+    redaction = json.dumps(data["redaction"], indent=2, ensure_ascii=False)
+    machine = data["machine"]
+    seen = sorted({tool for s in data["sessions"] for tool in s["tools"]})
+    return "\n".join([
+        f"**Export:** {gist_url or '<gist link>'}",
+        "",
+        "**What the export says it removed:**",
+        "",
+        "```",
+        redaction,
+        "```",
+        "",
+        f"**Machine:** {machine['os']}, Python {machine['python']}, "
+        f"recorder {machine['recorder_commit'] or 'unknown'}, "
+        f"{machine['store']['chains']} chains, "
+        f"{machine['store']['entries']} entries, "
+        f"{len(data['sessions'])} sessions.",
+        "",
+        f"**Tools seen:** {', '.join(seen) or 'none'}",
+        "",
+        "**Anything that surprised you:** ",
+        "",
+        "---",
+        "",
+        "- [x] The export was built by the tool's allowlist; I did not "
+        "edit it by hand.",
+        "- [x] I read the export before sending it and I am fine with it "
+        "being public in this issue and in `docs/FIELD-DATA.md`.",
+        f"- [{'x' if raw else ' '}] *(raw bundles only)* I ran "
+        "`export --raw`, read the sample action line it showed me, and "
+        "answered yes.",
+        "",
+    ])
+
+
+def cmd_export(args):
+    """Write the allowlisted export (and, on --raw, the bundle), print
+    it, and on --send hand it to `gh`. The scan underneath is one
+    ordinary tick: it remembers its baseline like any other."""
+    root = store_receipts()
+    report = scan_root(root, witness=Path(args.witness), store=True)
+    data, ordinal, newest = build_export(report)
+    stamp = str(report.get("scanned") or "")[:10] or "undated"
+    out = (Path(args.out) if args.out
+           else Path.cwd() / f"loxodonta-export-{stamp}.json")
+
+    bundle = None
+    if args.raw:
+        if newest is None:
+            print("nothing to bundle: no hook receipts in the store",
+                  file=sys.stderr)
+            return 1
+        print("A raw bundle carries every chain byte-for-byte, which means "
+              "every command line your agents ran. One of yours, the "
+              "newest, reads:", file=sys.stderr)
+        print(f"    {newest[1]}", file=sys.stderr)
+        print("Everything in the bundle looks like that. Type yes to write "
+              "it, anything else to stop: ", end="", file=sys.stderr,
+              flush=True)
+        answer = sys.stdin.readline().strip().lower()
+        if answer != "yes":
+            print("stopped; nothing written", file=sys.stderr)
+            return 1
+        bundle = out.with_name(out.stem + "-raw.zip")
+
+    body = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    write_lf(out, body)
+    print(body, end="")
+    print(f"written: {out.name}", file=sys.stderr)
+    if bundle is not None:
+        write_raw_bundle(report, ordinal, bundle)
+        print(f"written: {bundle.name} (raw chains)", file=sys.stderr)
+
+    if not args.send:
+        return 0
+    return send_export(data, out, bundle)
+
+
+def send_export(data, out, bundle):
+    """`gh` twice, under the sender's login: a secret gist of the files,
+    then the issue. The issue body is written beside the export first,
+    so a missing `gh` leaves everything needed to file by hand."""
+    issue = out.with_name(out.stem + ".issue.md")
+    gh = shutil.which("gh")
+    if gh is None:
+        write_lf(issue, issue_body(data, None, bundle is not None))
+        print("gh is not on PATH, so nothing was sent. The export and an "
+              f"issue body ({issue.name}) are beside you: upload the export "
+              "as a secret gist and open a field-data issue on "
+              f"{FIELD_DATA_REPO} with that body.", file=sys.stderr)
+        return 1
+    machine = data["machine"]
+    stamp = str(data["export"]["written"] or "")[:10]
+    files = [str(out)] + ([str(bundle)] if bundle else [])
+    # `gh gist create` is secret unless told --public; there is no
+    # --secret flag to say it twice, so the test pins the absence.
+    gist = subprocess.run([gh, "gist", "create", "--desc",
+                           f"loxodonta field data {stamp}", *files],
+                          capture_output=True, encoding="utf-8",
+                          errors="replace")
+    if gist.returncode != 0:
+        print(f"gh gist create failed: {gist.stderr.strip()}",
+              file=sys.stderr)
+        return 1
+    lines = gist.stdout.strip().splitlines()
+    gist_url = lines[-1] if lines else "<gist link>"
+    write_lf(issue, issue_body(data, gist_url, bundle is not None))
+    title = (f"field-data: {machine['os']} / {len(data['sessions'])} "
+             f"sessions / {stamp}")
+    filed = subprocess.run([gh, "issue", "create", "--repo", FIELD_DATA_REPO,
+                            "--label", "field-data", "--title", title,
+                            "--body-file", str(issue)],
+                           capture_output=True, encoding="utf-8",
+                           errors="replace")
+    if filed.returncode != 0:
+        print(f"gist is up at {gist_url}, but gh issue create failed: "
+              f"{filed.stderr.strip()}. The issue body is in {issue.name}; "
+              f"file it by hand on {FIELD_DATA_REPO}.", file=sys.stderr)
+        return 1
+    print(f"sent: {gist_url}", file=sys.stderr)
+    print(f"filed: {filed.stdout.strip()}", file=sys.stderr)
+    return 0
+
+
 # --- Fire drill ---------------------------------------------------------------
 # The tamper playground graduated into its honest job: copy one chain
 # into a sandbox, run the four-way battery, and show every expected
@@ -2723,6 +3047,14 @@ class Watchtower(ThreadingHTTPServer):
     """The threading server, with its one scan serialized: requests
     share the current tick's report instead of each spawning their own
     census of verify subprocesses."""
+
+    def server_bind(self):
+        # The stdlib's server_bind looks up the bound host's fully
+        # qualified name, a reverse DNS query nothing here ever reads.
+        # On a macOS runner that query hangs ~35 s per process, which
+        # every `serve` test paid at startup. Bind, name it ourselves.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def remember_look(self):
         """One opening of the front page, under the scan lock — the day
@@ -4937,6 +5269,26 @@ def main(argv):
                           "(default: CLAUDE_PROJECT_DIR, else the "
                           "working directory)")
     mcp.set_defaults(func=cmd_mcp)
+    export = sub.add_parser(
+        "export",
+        help="field data for the project: an allowlisted, redacted "
+             "summary of this machine's store, printed before it goes "
+             "anywhere (ADR-0021)")
+    export.add_argument("--witness", default=str(WITNESS_ROOT),
+                        help="the harness transcript layout the scan "
+                             "underneath reads (same as scan)")
+    export.add_argument("--out", default=None,
+                        help="file to write (default: "
+                             "loxodonta-export-<date>.json here)")
+    export.add_argument("--raw", action="store_true",
+                        help="also bundle the chains themselves, "
+                             "byte-for-byte; shows a sample line and asks "
+                             "first, because chains carry command lines")
+    export.add_argument("--send", action="store_true",
+                        help="upload as a secret gist under your gh login "
+                             "and open a field-data issue on "
+                             f"{FIELD_DATA_REPO}")
+    export.set_defaults(func=cmd_export)
 
     args = parser.parse_args(argv)
     return args.func(args)

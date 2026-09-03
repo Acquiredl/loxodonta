@@ -1,0 +1,34 @@
+# The suite, on the three platforms and the oldest and newest Python the
+# README promises (3.9+). Stdlib only: there is nothing to install, so a
+# green run here is the claim "the recorder holds on a machine that is
+# not the author's" made by someone other than the author.
+name: tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  suite:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python: "3.9"}
+          - {os: ubuntu-latest, python: "3.11"}
+          - {os: ubuntu-latest, python: "3.13"}
+          - {os: windows-latest, python: "3.13"}
+          - {os: macos-latest, python: "3.13"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: unit tests through the public CLI
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m unittest discover -s tests -v

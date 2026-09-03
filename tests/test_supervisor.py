@@ -132,8 +132,8 @@ class StoreScanTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name) / "storehome"
-        self.witness = Path(self._tmp.name) / "no-witness"
+        self.home = Path(self._tmp.name).resolve() / "storehome"
+        self.witness = Path(self._tmp.name).resolve() / "no-witness"
         self.witness.mkdir()
 
     def drawer(self, slug, project_path):
@@ -144,8 +144,8 @@ class StoreScanTest(unittest.TestCase):
         return d
 
     def test_scan_with_no_root_sweeps_the_store(self):
-        alpha = self.drawer("alpha-11111111", r"C:\work\alpha")
-        beta = self.drawer("beta-22222222", r"C:\work\beta")
+        alpha = self.drawer("alpha-11111111", "C:/work/alpha")
+        beta = self.drawer("beta-22222222", "C:/work/beta")
         make_chain(alpha, "sess-aaaa", entries=3)
         make_chain(beta, "sess-bbbb")
 
@@ -161,7 +161,7 @@ class StoreScanTest(unittest.TestCase):
         self.assertEqual(chain["entries"], 4)
 
     def test_store_scan_keeps_its_baseline_beside_the_store(self):
-        drawer = self.drawer("alpha-11111111", r"C:\work\alpha")
+        drawer = self.drawer("alpha-11111111", "C:/work/alpha")
         make_chain(drawer, "sess-aaaa")
 
         run_store_scan(self.home, self.witness)
@@ -209,9 +209,9 @@ class AdoptTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name) / "repos"
+        self.root = Path(self._tmp.name).resolve() / "repos"
         self.root.mkdir()
-        self.home = Path(self._tmp.name) / "storehome"
+        self.home = Path(self._tmp.name).resolve() / "storehome"
 
     def drawers(self):
         receipts = self.home / "receipts"
@@ -329,7 +329,7 @@ class AdoptTest(unittest.TestCase):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
                    entries=3)
         run_adopt(self.home, self.root)
-        witness = Path(self._tmp.name) / "no-witness"
+        witness = Path(self._tmp.name).resolve() / "no-witness"
         witness.mkdir()
 
         result = run_store_scan(self.home, witness)
@@ -344,7 +344,7 @@ class ScanCensusTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
 
     def test_scan_reports_a_chain_with_its_verdict_as_json(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
@@ -455,7 +455,7 @@ class ScanVerdictTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
 
     def tamper(self, log):
         lines = log.read_text(encoding="utf-8").splitlines()
@@ -594,7 +594,7 @@ class ScanAnchorTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
 
     def test_an_anchored_chain_is_a_distinct_claim_not_just_valid(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
@@ -646,7 +646,7 @@ class BaselineTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.baseline = self.root / ".supervisor-baseline.json"
 
     def events(self, result):
@@ -858,7 +858,7 @@ class DaybookTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.daybook = self.root / ".supervisor-daybook.json"
 
     def rows(self, result):
@@ -964,9 +964,9 @@ class CompletenessTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name) / "repos"
+        self.root = Path(self._tmp.name).resolve() / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name) / "witness"
+        self.witness = Path(self._tmp.name).resolve() / "witness"
         install_witness_hook(self.witness)
 
     def scan(self, *extra, env=None):
@@ -1480,7 +1480,7 @@ class CompletenessTest(unittest.TestCase):
 
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        nowhere = Path(self._tmp.name) / "no-such-layout" / "projects"
+        nowhere = Path(self._tmp.name).resolve() / "no-such-layout" / "projects"
 
         result = run_scan(self.root, "--witness", str(nowhere))
 
@@ -1549,9 +1549,9 @@ class CalibrationTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name) / "repos"
+        self.root = Path(self._tmp.name).resolve() / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name) / "witness"
+        self.witness = Path(self._tmp.name).resolve() / "witness"
         self.baseline = self.root / ".supervisor-baseline.json"
 
     def scan(self, *extra, env=None):
@@ -1697,7 +1697,7 @@ class AnchorKeeperTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
 
     def start_calendar(self):
         server = HTTPServer(("127.0.0.1", 0), FakeCalendarHandler)
@@ -1921,7 +1921,7 @@ class DrillTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
 
     def drill(self, log):
         return subprocess.run(
@@ -1987,7 +1987,7 @@ class DrillTest(unittest.TestCase):
                          "a refused drill writes nothing")
 
     def test_a_chain_outside_the_root_is_refused(self):
-        elsewhere = Path(self._tmp.name).parent
+        elsewhere = Path(self._tmp.name).resolve().parent
 
         result = self.drill(elsewhere / "receipts-nope.jsonl")
 
@@ -2004,7 +2004,7 @@ class WalkFindingsTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name) / "repos"
+        self.root = Path(self._tmp.name).resolve() / "repos"
         self.root.mkdir()
 
     def test_scan_counts_entries_not_raw_lines(self):
@@ -2025,7 +2025,7 @@ class WalkFindingsTest(unittest.TestCase):
         # name matches the layout) must cost one session's watch, never
         # the whole scan.
         make_chain(self.root / "alpha" / "receipts", "sess-dirx")
-        witness = Path(self._tmp.name) / "witness"
+        witness = Path(self._tmp.name).resolve() / "witness"
         install_witness_hook(witness)
         (witness / "anyproj").mkdir(parents=True)
         (witness / "anyproj" / "sess-dirx.jsonl").mkdir()
@@ -2068,9 +2068,9 @@ class RecorderDriftTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name) / "repos"
+        self.root = Path(self._tmp.name).resolve() / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name) / "witness"
+        self.witness = Path(self._tmp.name).resolve() / "witness"
 
     def git(self, *args, cwd):
         return subprocess.run(["git", *args], cwd=str(cwd),
@@ -2078,7 +2078,7 @@ class RecorderDriftTest(unittest.TestCase):
 
     def make_checkout(self, branch="main"):
         """A git checkout holding a stand-in recorder, wired as the hook."""
-        home = Path(self._tmp.name) / "recorder"
+        home = Path(self._tmp.name).resolve() / "recorder"
         home.mkdir()
         script = home / "loxodonta.py"
         script.write_text("# stand-in recorder\n", encoding="utf-8")
@@ -2121,7 +2121,7 @@ class RecorderDriftTest(unittest.TestCase):
     def test_a_recorder_outside_git_is_unknown_never_an_error(self):
         # No repo, no git, no upstream: say so plainly rather than
         # guessing or failing the scan over it.
-        home = Path(self._tmp.name) / "loose"
+        home = Path(self._tmp.name).resolve() / "loose"
         home.mkdir()
         script = home / "loxodonta.py"
         script.write_text("# loose recorder\n", encoding="utf-8")
@@ -2152,11 +2152,11 @@ class ConsumptionTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name) / "repos"
+        self.root = Path(self._tmp.name).resolve() / "repos"
         self.root.mkdir()
         # Pinned to an empty layout: consumption reads only chains, and
         # the completeness watch must not read the developer's machine.
-        self.witness = Path(self._tmp.name) / "witness" / "projects"
+        self.witness = Path(self._tmp.name).resolve() / "witness" / "projects"
 
     def scan(self, env=None):
         return run_scan(self.root, "--witness", str(self.witness), env=env)

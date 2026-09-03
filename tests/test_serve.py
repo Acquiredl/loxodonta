@@ -97,7 +97,7 @@ class ServerFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
 
     def serve(self, extra_env=None):
         """Start `serve` on an ephemeral port and read the announced URL."""
@@ -166,7 +166,7 @@ class StoreServeTest(ServerFixture):
         return d
 
     def test_status_and_recall_read_the_drawers(self):
-        alpha = self.drawer("alpha-11111111", r"C:\work\alpha")
+        alpha = self.drawer("alpha-11111111", "C:/work/alpha")
         make_chain(alpha, "sess-aaaa", entries=3)
         self.serve_store()
 
@@ -180,7 +180,7 @@ class StoreServeTest(ServerFixture):
         self.assertEqual(timeline["sessions"][0]["session"], "sess-aaaa")
 
     def test_search_and_walker_reach_drawer_chains(self):
-        alpha = self.drawer("alpha-11111111", r"C:\work\alpha")
+        alpha = self.drawer("alpha-11111111", "C:/work/alpha")
         log = make_chain(alpha, "sess-aaaa")
         log_entry(log, "the drawer needle")
         self.serve_store()
