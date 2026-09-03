@@ -572,6 +572,53 @@ class ScanSummaryTest(RecallBase):
         for row in rows.values():
             self.assertEqual(row.get("verdict"), "VALID")
 
+    def scan_then_digest(self, repo):
+        witness = self.root / "no-witness"
+        witness.mkdir(exist_ok=True)
+        scan = run_py(SUPERVISOR, "scan", "--root", str(self.root),
+                      "--witness", str(witness), "--json")
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        line = out.split("last scan:")[1].splitlines()[0]
+        return scan, line
+
+    def test_superseded_tear_is_cited_as_such_not_as_fresh_damage(self):
+        # A torn tail that recording already moved past (-002 sibling,
+        # ADR-0004) stands the scan's exit down; the digest cited the
+        # same chain as plain "1 BROKEN" at every session start for
+        # three weeks. It cites what the scan said: BROKEN, superseded.
+        repo = self.repo("alpha")
+        session = "abcd1234-1234-1234-1234-123456789abc"
+        torn, _ = forge_chain(repo, session,
+                              [("2026-08-14T10:00:00Z", "first work")])
+        with torn.open("a", encoding="utf-8") as f:
+            f.write('{"n": 2, "ts": "2026-08-14T10:01:00Z", "act')
+        sibling = torn.with_name(f"receipts-{session}-002.jsonl")
+        forge_chain(repo, session + "-002",
+                    [("2026-08-14T10:02:00Z", "recording continued")])
+        (repo / "receipts" / f"receipts-{session}-002.jsonl").replace(sibling)
+        scan, line = self.scan_then_digest(repo)
+        self.assertEqual(scan.returncode, 0, scan.stdout + scan.stderr)
+        self.assertIn("1 BROKEN (superseded)", line)
+        self.assertIn("1 VALID", line)
+        baseline = json.loads(
+            (self.root / ".supervisor-baseline.json").read_text(
+                encoding="utf-8"))
+        rows = {k: v for k, v in baseline["chains"].items()}
+        torn_row = next(v for k, v in rows.items() if k.endswith(torn.name))
+        self.assertTrue(torn_row.get("superseded"))
+
+    def test_fresh_tear_without_a_sibling_still_shouts(self):
+        repo = self.repo("alpha")
+        session = "abcd1234-1234-1234-1234-123456789abd"
+        torn, _ = forge_chain(repo, session,
+                              [("2026-08-14T10:00:00Z", "first work")])
+        with torn.open("a", encoding="utf-8") as f:
+            f.write('{"n": 2, "ts": "2026-08-14T10:01:00Z", "act')
+        scan, line = self.scan_then_digest(repo)
+        self.assertNotEqual(scan.returncode, 0)
+        self.assertIn("1 BROKEN", line)
+        self.assertNotIn("superseded", line)
+
 
 class InstallerTest(RecallBase):
     def run_installer(self, *args):
