@@ -224,7 +224,10 @@ class DigestTest(RecallBase):
         # Different-tool neighbours keep their own uncollapsed lines.
         self.assertIn("Edit: one.py", out)
         self.assertIn("Bash: pytest -q", out)
-        self.assertNotIn("1x", out)
+        # No entry row says "1x": a single call renders bare. Only rows
+        # are judged; the header quotes the repo path, and a temp dir
+        # name can happen to contain "1x" (it did, once, on CI).
+        self.assertNotRegex(out, r" 1x [A-Za-z]")
 
     def test_budget_counts_rendered_rows_not_entries(self):
         # The fix the issue asks for: a Read flood must not scroll the

@@ -91,7 +91,10 @@ class HookTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        # Resolved: macOS's temp root is a symlink (/var -> /private/var)
+        # and the hook judges "inside the project" by path spelling
+        # against the cwd the process reports, which is the real path.
+        self.workdir = Path(self._tmp.name).resolve()
 
     def session_log(self, session="sess-1234abcd"):
         return self.workdir / f"receipts-{session}.jsonl"
@@ -439,7 +442,7 @@ class HookWorktreeTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        self.workdir = Path(self._tmp.name).resolve()
         self.store = self.workdir / "storehome"
 
     def env_for(self, project):
@@ -574,7 +577,7 @@ class TranscriptCommitmentTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        self.workdir = Path(self._tmp.name).resolve()
         self.transcript = self.workdir / "transcript.jsonl"
 
     def entries(self, session="sess-1234abcd"):
