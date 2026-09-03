@@ -2724,7 +2724,12 @@ def export_sessions(report):
                 "entries": len(entries),
                 "span": {"first": stamps[0] if stamps else None,
                          "last": stamps[-1] if stamps else None},
-                "verdict": (chains[-1].get("verdict") if chains else None),
+                # The worst sibling speaks for the session: a session
+                # whose first chain broke and whose recording moved to
+                # -002 is the finding field data exists to surface, and
+                # the last sibling alone would have called it VALID.
+                "verdict": (max(chains, key=lambda c: c.get("exit", 0))
+                            .get("verdict") if chains else None),
                 "commitments": commitments,
                 "completeness": {"state": watched.get("state", "UNWITNESSED"),
                                  "owed": watched.get("tools"),
@@ -2748,9 +2753,11 @@ def build_export(report):
                                          "chains", "broken", "events",
                                          "alarms", "reawakenings")}
                 for day in report.get("history", []) if isinstance(day, dict)]
-    baseline = read_baseline(Path(store_home()) / "baseline.json")
-    calibration = baseline.get("calibration") if isinstance(baseline, dict) \
-        else None
+    # The scan underneath just rewrote the store's baseline, calibration
+    # included; read it back the way the scan does (a tuple, not a
+    # dict — the first dry run shipped `matchers: null` for that).
+    _, _, calibration, _, _ = read_baseline(
+        Path(store_home()) / "baseline.json")
     matchers = matchers_at(calibration, report.get("scanned")) \
         if calibration else None
     lifecycle = report.get("lifecycle") or {}

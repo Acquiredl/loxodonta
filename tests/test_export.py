@@ -177,6 +177,35 @@ class ExportFileTest(ExportBase):
         self.assertIsInstance(machine["day_book"], list)
         self.assertEqual(sorted(machine["lifecycle"]), ["events", "kept"])
 
+    def test_matchers_are_the_wired_coverage_at_scan_time(self):
+        # The scan reads the harness settings beside the witness layout;
+        # the export reports the matchers in force when it was written.
+        (self.root / "settings.json").write_text(json.dumps({
+            "hooks": {"PostToolUse": [{
+                "matcher": "Edit|Write",
+                "hooks": [{"type": "command",
+                           "command": "python loxodonta.py hook"}]}]}}),
+            encoding="utf-8")
+        result = self.export()
+        self.assertEqual(result.returncode, 0, text(result)[1])
+        data = json.loads(self.exported_file().read_text("utf-8"))
+        self.assertEqual(data["machine"]["matchers"], ["Edit|Write"])
+
+    def test_a_broken_sibling_is_the_sessions_verdict(self):
+        # Tail damage moves the recording to a -002 sibling; the session
+        # then has one BROKEN chain and one VALID one. The export must
+        # say BROKEN — that is the finding it exists to carry.
+        self.hook(SESSION + "-002", "Write", {"file_path": "x.py"})
+        raw = self.log.read_bytes()
+        self.assertIn(b"pytest -q", raw)
+        self.log.write_bytes(raw.replace(b"pytest -q", b"pytest -x"))
+        result = self.export()
+        self.assertEqual(result.returncode, 0, text(result)[1])
+        data = json.loads(self.exported_file().read_text("utf-8"))
+        row = next(s for s in data["sessions"] if s["session"] == SESSION)
+        self.assertEqual(row["siblings"], 2)
+        self.assertEqual(row["verdict"], "BROKEN")
+
     def test_out_names_the_file(self):
         target = self.work / "mine.json"
         result = self.export("--out", str(target))
