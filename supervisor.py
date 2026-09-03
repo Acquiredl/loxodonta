@@ -14,6 +14,7 @@ here is a head record (GLOSSARY: Supervisor, Baseline).
   python supervisor.py show ADDRESS             # one entry, self-verifying
   python supervisor.py search TEXT [--all]      # the ladder past the digest
   python supervisor.py timeline ADDRESS         # context around one entry
+  python supervisor.py mcp [--repo DIR]         # the same recall, as an MCP server
   python supervisor.py scan --root DIR --json   # legacy: a folder of repos
 
 `scan` is one tick without timers: a census of every chain in the
@@ -40,7 +41,9 @@ Nothing is ever offered off-machine.
 """
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -2289,6 +2292,292 @@ def cmd_timeline(args):
         print(f"{address_of(e)}  {hhmm(str(e.get('ts', '')))}  "
               f"{clip(e.get('actor', ''), 16)}  "
               f"{clip(e.get('action', ''))}{mark}")
+    return 0
+
+
+# --- MCP: recall on the wire (ADR-0019) ---------------------------------------
+# `supervisor mcp` speaks the Model Context Protocol over stdin/stdout so
+# any harness that speaks MCP — not only the one that runs our hooks —
+# can read this machine's agent memory. Five tools, one-to-one with the
+# recall commands above, in the CLI's own words: the model reads exactly
+# what a shell user reads. There is no write path on this surface. The
+# recorder stays in the harness hook, outside the writer's volition
+# (ADR-0002); an agent may read its history here but never append to it
+# through a tool it controls.
+#
+# Two protocol eras are served, decided per request and never from
+# session state: a request whose `_meta` carries `io.modelcontextprotocol/`
+# keys is modern (revision 2026-07-28, stateless, `resultType` on every
+# result); anything else is the legacy `initialize` handshake (2025-11-25
+# and earlier). One wire rule above all: nothing but MCP messages ever
+# reaches stdout, so every tool call runs under a redirect.
+
+MCP_MODERN_VERSIONS = ("2026-07-28",)
+MCP_LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26",
+                       "2024-11-05")
+MCP_META = "io.modelcontextprotocol/"
+MCP_SERVER_INFO = {"name": "loxodonta-recall", "version": "1"}
+MCP_INSTRUCTIONS = (
+    "loxodonta recall: the receipt chains this machine's agents left "
+    "behind, read as memory. Every tool renders testimony (what the "
+    "writer said happened) except verify, which runs the chain's judge "
+    "and returns its verdict as-is. This surface never writes: receipts "
+    "come from the harness hook, not from the agent. Start with digest "
+    "for the current repo; search reaches further; show and timeline "
+    "pull detail by entry address; verify judges one chain.")
+MCP_READ_ONLY = {"readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False}
+
+
+def mcp_prop(kind, text):
+    return {"type": kind, "description": text}
+
+
+MCP_SCOPE_PROPS = {
+    "repo": mcp_prop("string", "repo directory (default: the server's "
+                               "--repo, else the working directory)"),
+    "all": mcp_prop("boolean", "reach every repo in the store (unlisted "
+                               "repos stay invisible from outside "
+                               "themselves)"),
+}
+MCP_ADDRESS_PROP = mcp_prop(
+    "string", "entry address: 4 to 64 lowercase hex chars of an entry "
+              "hash; any unambiguous prefix resolves")
+
+
+def mcp_tool(name, description, properties, required=()):
+    schema = {"type": "object", "properties": properties,
+              "additionalProperties": False}
+    if required:
+        schema["required"] = list(required)
+    return {"name": name, "description": description,
+            "inputSchema": schema, "annotations": dict(MCP_READ_ONLY)}
+
+
+# Fixed order: clients cache the list and prompt caches key on it.
+MCP_TOOLS = [
+    mcp_tool("digest",
+             "This repo's recent history as one-line rows, each with an "
+             "entry address, grouped by session, runs of one tool "
+             "collapsed, budget-capped. Testimony rendered from receipt "
+             "chains; owns no verdicts. Start here.",
+             {"repo": MCP_SCOPE_PROPS["repo"],
+              "limit": mcp_prop("integer",
+                                f"most rows shown (default {DIGEST_LIMIT})"),
+              "since": mcp_prop("string",
+                                "only entries on or after YYYY-MM-DD")}),
+    mcp_tool("show",
+             "One full receipt by entry address. Re-hashed on fetch, so "
+             "the pointer is self-verifying.",
+             {"address": MCP_ADDRESS_PROP, **MCP_SCOPE_PROPS},
+             required=("address",)),
+    mcp_tool("search",
+             "Free-text search over action lines: this repo's chains, or "
+             "every repo in the store with all=true. Matched counts "
+             "everything; limit only caps what is shown.",
+             {"text": mcp_prop("string", "text to find in action lines"),
+              "limit": mcp_prop("integer", "most hits shown (default 20)"),
+              **MCP_SCOPE_PROPS},
+             required=("text",)),
+    mcp_tool("timeline",
+             "The rows around one entry address in its own chain: how "
+             "that moment unfolded.",
+             {"address": MCP_ADDRESS_PROP,
+              "before": mcp_prop("integer", "rows before (default 3)"),
+              "after": mcp_prop("integer", "rows after (default 3)"),
+              **MCP_SCOPE_PROPS},
+             required=("address",)),
+    mcp_tool("verify",
+             "Run the judge on the chain holding this entry address "
+             "(loxodonta verify --log) and return its verdict and exit "
+             "code as-is: VALID, BROKEN, and the rest. The one tool here "
+             "that is not testimony.",
+             {"address": MCP_ADDRESS_PROP, **MCP_SCOPE_PROPS},
+             required=("address",)),
+]
+MCP_TYPES = {"string": str, "integer": int, "boolean": bool}
+
+
+def mcp_check(tool, arguments):
+    """Argument problems, in words the model can act on — validated
+    before any command runs, so a typo never reaches the chains."""
+    schema = tool["inputSchema"]
+    problems = [f"missing required argument: {name}"
+                for name in schema.get("required", ()) if name not in arguments]
+    for name, value in arguments.items():
+        prop = schema["properties"].get(name)
+        if prop is None:
+            problems.append(f"unknown argument: {name}")
+            continue
+        want = MCP_TYPES[prop["type"]]
+        if not isinstance(value, want) or (want is int
+                                           and isinstance(value, bool)):
+            problems.append(f"{name} must be {prop['type']}")
+    return problems
+
+
+def mcp_namespace(name, arguments, default_repo):
+    """The argparse namespace the CLI command would have built — the
+    same defaults the parser declares, so the two surfaces cannot
+    drift apart."""
+    ns = argparse.Namespace(repo=arguments.get("repo") or default_repo,
+                            all=bool(arguments.get("all", False)), root=None)
+    if name == "digest":
+        ns.limit = arguments.get("limit", DIGEST_LIMIT)
+        ns.since = arguments.get("since")
+    elif name == "search":
+        ns.text = arguments["text"]
+        ns.limit = arguments.get("limit", 20)
+    else:
+        ns.address = arguments["address"]
+        if name == "timeline":
+            ns.before = arguments.get("before", 3)
+            ns.after = arguments.get("after", 3)
+    return ns
+
+
+def mcp_call(name, arguments, default_repo):
+    """Run one tool. Returns (text, is_error): the CLI's stdout and
+    stderr, and whether its exit code said something went wrong."""
+    tool = next(t for t in MCP_TOOLS if t["name"] == name)
+    problems = mcp_check(tool, arguments)
+    if problems:
+        return "\n".join(problems) + "\n", True
+    ns = mcp_namespace(name, arguments, default_repo)
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            if name == "verify":
+                match, code = resolve_address(ns)
+                if match is None:
+                    return out.getvalue() + err.getvalue(), True
+                log = match[0]
+                judged = subprocess.run(
+                    [sys.executable, str(LOXODONTA), "verify",
+                     "--log", str(log)],
+                    capture_output=True, encoding="utf-8", errors="replace",
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                text = (f"chain: {log.as_posix()}\n" + judged.stdout
+                        + judged.stderr)
+                return text, judged.returncode != 0
+            command = {"digest": cmd_digest, "show": cmd_show,
+                       "search": cmd_search_cli, "timeline": cmd_timeline}
+            code = command[name](ns)
+        except SystemExit as stop:  # argparse-style exits inside a command
+            code = stop.code if isinstance(stop.code, int) else 1
+        except Exception as failure:  # never take the server down
+            err.write(f"error: {failure}\n")
+            code = 1
+    text = out.getvalue()
+    if name == "digest" and code == 0 and not text.strip():
+        # The hook needs silence for a chainless repo; a tool that
+        # returns nothing teaches the model the tool is broken.
+        text = (f"no receipts recorded under "
+                f"{invoking_repo(ns).as_posix()}\n")
+    return text + err.getvalue(), code != 0
+
+
+def mcp_error(id_, code, message, data=None):
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": id_, "error": error}
+
+
+def mcp_result(id_, result, modern):
+    if modern:
+        result = dict(result)
+        result.setdefault("resultType", "complete")
+        meta = dict(result.get("_meta") or {})
+        meta[MCP_META + "serverInfo"] = MCP_SERVER_INFO
+        result["_meta"] = meta
+    return {"jsonrpc": "2.0", "id": id_, "result": result}
+
+
+def mcp_dispatch(message, default_repo):
+    """One reply for one request; None for a notification (never
+    answered) or a response (clients do not send them; nothing to say)."""
+    if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+        id_ = message.get("id") if isinstance(message, dict) else None
+        return mcp_error(id_, -32600, "Invalid Request")
+    method = message.get("method")
+    id_ = message.get("id")
+    if not isinstance(method, str) or id_ is None:
+        return None
+    params = message.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    meta = params.get("_meta") if isinstance(params.get("_meta"), dict) \
+        else {}
+    modern = any(isinstance(k, str) and k.startswith(MCP_META) for k in meta)
+    if modern:
+        version = meta.get(MCP_META + "protocolVersion")
+        if not isinstance(version, str) \
+                or MCP_META + "clientCapabilities" not in meta:
+            return mcp_error(id_, -32602,
+                             "Invalid params: _meta must carry "
+                             f"{MCP_META}protocolVersion and "
+                             f"{MCP_META}clientCapabilities")
+        if version not in MCP_MODERN_VERSIONS:
+            return mcp_error(id_, -32022, "Unsupported protocol version",
+                             {"supported": list(MCP_MODERN_VERSIONS),
+                              "requested": version})
+
+    if method == "ping":
+        return mcp_result(id_, {}, modern)
+    if method == "initialize":
+        asked = params.get("protocolVersion")
+        version = asked if asked in MCP_LEGACY_VERSIONS \
+            else MCP_LEGACY_VERSIONS[0]
+        return mcp_result(id_, {
+            "protocolVersion": version,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": MCP_SERVER_INFO,
+            "instructions": MCP_INSTRUCTIONS}, modern)
+    if method == "server/discover":
+        return mcp_result(id_, {
+            "supportedVersions": list(MCP_MODERN_VERSIONS),
+            "capabilities": {"tools": {}},
+            "instructions": MCP_INSTRUCTIONS}, modern)
+    if method == "tools/list":
+        return mcp_result(id_, {"tools": MCP_TOOLS}, modern)
+    if method == "tools/call":
+        name = params.get("name")
+        if not any(t["name"] == name for t in MCP_TOOLS):
+            return mcp_error(id_, -32602, f"Unknown tool: {name}")
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            return mcp_error(id_, -32602, "arguments must be an object")
+        text, is_error = mcp_call(name, arguments, default_repo)
+        return mcp_result(id_, {"content": [{"type": "text", "text": text}],
+                                "isError": is_error}, modern)
+    return mcp_error(id_, -32601, f"Method not found: {method}")
+
+
+def cmd_mcp(args):
+    """Serve recall over stdio until the client closes stdin. Bytes in,
+    bytes out: the console codepage never touches the wire."""
+    wire = sys.stdout.buffer
+    for raw in sys.stdin.buffer:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            reply = mcp_error(None, -32700, "Parse error")
+        else:
+            reply = mcp_dispatch(message, args.repo)
+        if reply is None:
+            continue
+        try:
+            wire.write((json.dumps(reply, ensure_ascii=False) + "\n")
+                       .encode("utf-8"))
+            wire.flush()
+        except OSError:
+            return 0  # the client hung up; there is nobody to answer
     return 0
 
 
@@ -4618,6 +4907,15 @@ def main(argv):
     timeline.add_argument("--before", type=int, default=3)
     timeline.add_argument("--after", type=int, default=3)
     timeline.set_defaults(func=cmd_timeline)
+    mcp = sub.add_parser(
+        "mcp",
+        help="the recall surface as an MCP server on stdio — digest, "
+             "show, search, timeline, verify; read-only (ADR-0019)")
+    mcp.add_argument("--repo", default=None,
+                     help="default repo for tool calls that name none "
+                          "(default: CLAUDE_PROJECT_DIR, else the "
+                          "working directory)")
+    mcp.set_defaults(func=cmd_mcp)
 
     args = parser.parse_args(argv)
     return args.func(args)
