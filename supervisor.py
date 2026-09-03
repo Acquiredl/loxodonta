@@ -1346,6 +1346,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                               # a remembered verdict is testimony like the
                               # rest of this file, never the verdict itself.
                               "verdict": verdict,
+                              # A torn tail that recording already moved
+                              # past (ADR-0004) stood the exit down above;
+                              # remembered so the digest can cite it as
+                              # the quiet evidence it is, not fresh damage.
+                              "superseded": stood_down,
                               "last_grew": last_grew}
             # The reawakening (ADR-0018): clean growth after dormant-tier
             # observed stillness — one-shot, spoken in the investigate
@@ -2082,7 +2087,9 @@ def scan_testimony(repo):
         chains = data.get("chains")
         if not isinstance(scanned, str) or not isinstance(chains, dict):
             continue
-        verdicts = [str(row["verdict"]) for relpath, row in chains.items()
+        verdicts = [str(row["verdict"])
+                    + (" (superseded)" if row.get("superseded") else "")
+                    for relpath, row in chains.items()
                     if isinstance(row, dict) and "verdict" in row
                     and covers(relpath, path.parent)]
         if verdicts:

@@ -1184,7 +1184,12 @@ class BrokenPipeTest(ReceiptsCliTest):
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         process.stdout.close()  # reader hangs up, like `| head` does
-        _, stderr = process.communicate()
+        # Read stderr directly: communicate() would start a reader
+        # thread on the stdout we just closed, and on Windows that
+        # thread dies with its own traceback in the test output.
+        stderr = process.stderr.read()
+        process.stderr.close()
+        process.wait()
 
         self.assertNotIn("Traceback", stderr)
 
