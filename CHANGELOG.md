@@ -19,4 +19,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `SECURITY.md`, `CODE_OF_CONDUCT.md`, and a pull request template.
 - The demo store builder under `tools/`: a deterministic multi-session store, the only source for screenshots and README excerpts.
 
+### Changed
+
+- The README, rebuilt from the positioning brief: tagline, badge row, the two sentences, three reasons, the tamper demo as terminal text, Install, a numbered Quick start, and two reading paths; the status banner is gone, and the recorded-task excerpt comes from the demo store.
+
 [Unreleased]: https://github.com/Acquiredl/loxodonta/compare/main...dev
