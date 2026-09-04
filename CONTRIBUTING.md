@@ -3,11 +3,11 @@
 Thanks for looking. This is a small repo with strong opinions, and most of
 them are written down. Reading three files first saves everyone a round trip:
 
-- `GLOSSARY.md` — the vocabulary, used exactly. Note the anti-terms: this is
+- `GLOSSARY.md`: the vocabulary, used exactly. Note the anti-terms: this is
   not a blockchain, nothing here is immutable, and it is not an audit log.
-- `docs/SPEC.md` — the receipt format, frozen at v0.1. The canonical-JSON
+- `docs/SPEC.md`: the receipt format, frozen at v0.1. The canonical-JSON
   rules in §4 are the load-bearing part.
-- `adrs/` — the decisions that are hard to reverse. If a change fights one of
+- `adrs/`: the decisions that are hard to reverse. If a change fights one of
   them, the ADR is what to argue with, not the code.
 
 ## The three rules that shape every change
@@ -25,6 +25,19 @@ them are written down. Reading three files first saves everyone a round trip:
    ```
    python -m unittest discover -s tests
    ```
+
+## The one local check
+
+The repo enforces its own vocabulary. `tools/house_check.py` fails on the
+GLOSSARY anti-terms anywhere (the refutation form, "not immutable", is
+allowed), on em dashes in the front-door files (README, SECURITY,
+CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT), and on overclaim words there
+("prove", "guarantee", "always"); elsewhere those words only warn. CI runs
+exactly this command, so passing it locally is passing CI:
+
+```
+python tools/house_check.py
+```
 
 ## Branches
 

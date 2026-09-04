@@ -32,7 +32,7 @@ receipts must let anyone holding a receipt log detect whether its history was ed
 
 - **Ed25519 signatures per entry** — rejected for v0.1: key management is the entire UX cost of the tool, and a lost key bricks verification; solves authorship, which is not the Stage A problem.
 - **Merkle tree over entries** — rejected: buys efficient partial proofs (prove entry 5 without revealing entries 1–4), which no current use case needs; costs significant explainability. A linear chain *is* a degenerate Merkle structure; upgrading later doesn't break the entry format.
-- **Signed git commits as the log** (one commit per receipt) — rejected: couples the audit trail to git presence and habits, drags the full working tree into every receipt, and makes "drop into any pipeline" false.
+- **Signed git commits as the log** (one commit per receipt) — rejected: couples the record to git presence and habits, drags the full working tree into every receipt, and makes "drop into any pipeline" false.
 
 ## References
 

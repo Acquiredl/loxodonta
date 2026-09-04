@@ -32,3 +32,18 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: python -m unittest discover -s tests -v
+
+  # The house checker: the repo's own vocabulary (GLOSSARY anti-terms, the
+  # front door's no-em-dash and no-overclaim rules) enforced by the same
+  # stdlib script a contributor runs locally. One platform is enough; the
+  # rules are about words, not operating systems.
+  house:
+    name: house checker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: the repo's vocabulary, enforced
+        run: python tools/house_check.py
