@@ -15,17 +15,20 @@ receipts must let anyone holding a receipt log detect whether its history was ed
 ## Consequences
 
 **What gets easier:**
+
 - Zero key management: nothing to generate, store, rotate, or lose. `receipts init` works in one second with no setup.
 - Stdlib-only implementation (`hashlib`, `json`) — no crypto dependencies, auditable in an afternoon.
 - Verification requires only the file itself; any third party can verify without any public-key distribution.
 - The layman explanation stays one sentence: "every entry contains the fingerprint of the one before it."
 
 **What gets harder or more constrained:**
+
 - The chain proves *internal consistency*, not *authorship* — it cannot say **who** wrote an entry.
 - The log owner can rewrite history wholesale by regenerating every hash. Until an anchor exists, the guarantee is only "not edited since the chain was built," not "not edited since the events happened."
 - Multi-writer scenarios (several agents, one log) have no per-writer accountability.
 
 **What we'll have to revisit if this changes:**
+
 - If receipts ever targets adversarial multi-party settings (client + contractor both writing), per-entry signatures return to the table — likely as an optional layer on top of the same canonical form, since the canonical bytes are exactly what a signature would sign.
 
 ## Alternatives considered

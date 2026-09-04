@@ -1,0 +1,24 @@
+# Markdown hygiene on every push and pull request: markdownlint over the
+# README, docs, ADRs, and templates, with the rule set in .markdownlint.yml
+# (the defaults minus line length and three house-style exceptions). Runs
+# here only; nothing to install locally, so a stray heading or a list glued
+# to its paragraph is caught on a machine that is not the author's.
+name: markdownlint
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v24
+        with:
+          globs: |
+            **/*.md
+            !node_modules
+            !.claude

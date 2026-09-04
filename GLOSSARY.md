@@ -3,6 +3,7 @@
 Ubiquitous language for this repo. The shared vocabulary between the codebase, its author, and the agent.
 
 Every term in this file should be:
+
 - Used in the code (variable names, file names, type names, function names).
 - Used in your planning docs (PRDs, issues, ADRs).
 - Used in conversations with the agent.

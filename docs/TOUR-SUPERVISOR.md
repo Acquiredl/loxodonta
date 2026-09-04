@@ -247,8 +247,8 @@ resolve chains under the root; sidecars and path escapes get 404.
 nothing fetched from anywhere but this machine. Writer-supplied text
 — action lines, session names, verify's own words — reaches the DOM
 through `textContent` only, because a receipt is adversary input and
-must never become markup in the operator's browser. The layout (issue
-#48) is a status rail beside a tabbed worktable: the rail carries the
+must never become markup in the operator's browser. The layout (issue #48)
+is a status rail beside a tabbed worktable: the rail carries the
 verdict block, the severity-sorted attention queue, and the fourteen
 days; the worktable splits what you are looking at (sessions,
 projects, search, evidence) from the thing under inspection (a
@@ -269,4 +269,3 @@ its expectation after a damaged line, so the next entry visibly fails
 to connect. This is the one check the suite cannot automate end-to-end
 (a browser must run it), which is why the fire-drill checklist ends
 with it.
-
