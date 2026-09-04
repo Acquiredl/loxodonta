@@ -1,5 +1,13 @@
 # GLOSSARY — loxodonta
 
+**Where to start.** This file is long and most of it is reference. The reading order:
+
+1. [Roles](#roles) — the operator and the writer, the two parties in the trust story; every other term is named relative to them.
+2. [Core domain](#core-domain) — receipt log, entry, entry hash, chain head, file reference: the nouns the code is built from.
+3. [Anti-terms](#anti-terms-deliberately-not-used) — the words this repo refuses, and why. Read them before writing a sentence about the tool.
+
+The rest (relationships, states, sub-terms, cross-references) is for looking up a term as you meet it in the code and the docs.
+
 Ubiquitous language for this repo. The shared vocabulary between the codebase, its author, and the agent.
 
 Every term in this file should be:
