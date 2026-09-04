@@ -48,6 +48,16 @@ def entry_hash(entry_without_hash):
 
 
 def now_ts():
+    # SOURCE_DATE_EPOCH (the reproducible-builds convention: integer Unix
+    # seconds, UTC) overrides the wall clock so the demo store builder
+    # (tools/demo_store.py) writes byte-identical chains on every run.
+    # Nothing is given away: timestamps are testimony either way, and the
+    # writer, being the adversary, could always have said any time it
+    # liked (ADR-0002).
+    epoch = os.environ.get("SOURCE_DATE_EPOCH", "")
+    if epoch.isdigit():
+        return datetime.fromtimestamp(int(epoch), timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
