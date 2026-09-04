@@ -181,8 +181,12 @@ class DemoStoreTest(unittest.TestCase):
                                 for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 imported.add((node.module or "").split(".")[0])
-        self.assertTrue(imported <= sys.stdlib_module_names,
-                        imported - sys.stdlib_module_names)
+        # The stdlib modules a builder that only plays the harness needs.
+        # A fixed list rather than sys.stdlib_module_names, which arrived
+        # in Python 3.10; the README promises 3.9.
+        allowed = {"argparse", "datetime", "json", "os", "shutil",
+                   "subprocess", "sys"}
+        self.assertTrue(imported <= allowed, imported - allowed)
         self.assertNotIn("loxodonta", imported)
         self.assertNotIn("supervisor", imported)
         # It never names a chain file: the recorder owns every chain byte.
