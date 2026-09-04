@@ -44,6 +44,13 @@ The Markdown has two more checks, and they run in CI only: markdownlint
 their reasons in `lychee.toml`; it also runs weekly, so a link that dies
 quietly still gets noticed). Neither needs anything installed here.
 
+## The voice rule
+
+Drafts may come from anywhere: a person, an agent, a template. Every sentence
+on the front door (README, SECURITY, CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT)
+is the author's, and README edits are reviewed on that basis. A pull request
+that rewrites front-door prose is taken as a draft, not merged as written.
+
 ## Branches
 
 `main` is stable and every claim in the README is true of it. Work happens on
