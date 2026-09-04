@@ -1,0 +1,82 @@
+# The release, cut by the tag. Every promotion to main gets a tag and a
+# GitHub release carrying loxodonta.py, supervisor.py, and a SHA256SUMS
+# file over both, so a stranger can check the file that records their
+# sessions against what the author published (ADR-0022). The tag has to
+# match TOOL_VERSION in both files, and the release notes are the
+# matching CHANGELOG section; a mismatch or a missing section stops the
+# release rather than publishing a wrong one. No third-party action:
+# the release is created by the gh CLI the runner already carries,
+# with the workflow's own token, the same command a person would type.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    name: tag ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: the tag matches TOOL_VERSION in both files
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - "$TAG" <<'PY'
+          import re, sys
+          tag = sys.argv[1]
+          want = tag[1:] if tag.startswith("v") else tag
+          constant = re.compile(r'^TOOL_VERSION = "(\d+\.\d+\.\d+)"$', re.M)
+          wrong = []
+          for name in ("loxodonta.py", "supervisor.py"):
+              found = constant.findall(open(name, encoding="utf-8").read())
+              have = found[0] if len(found) == 1 else "none"
+              if have != want:
+                  wrong.append(f"{name} says TOOL_VERSION {have}, tag {tag} says {want}")
+          if wrong:
+              sys.exit("tag and tool version disagree:\n  " + "\n  ".join(wrong))
+          print(f"both files say {want}, tag {tag} agrees")
+          PY
+
+      - name: SHA256SUMS over the two files
+        run: |
+          sha256sum loxodonta.py supervisor.py > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: release notes from the CHANGELOG section
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - "$TAG" <<'PY'
+          import re, sys
+          version = sys.argv[1].lstrip("v")
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          # The section is everything between "## [x.y.z]" and the next
+          # "## " heading, the reference-link block at the bottom, or the
+          # end of the file, whichever comes first.
+          section = re.search(
+              r"^## \[" + re.escape(version) + r"\][^\n]*\n(.*?)"
+              r"(?=^## |^\[[^\]]+\]: |\Z)",
+              text, re.M | re.S)
+          notes = section.group(1).strip() if section else ""
+          if not notes:
+              sys.exit(f"CHANGELOG.md has no section for [{version}], or it is empty; "
+                       "the promotion pull request writes it")
+          open("RELEASE_NOTES.md", "w", encoding="utf-8").write(notes + "\n")
+          print(notes)
+          PY
+
+      - name: the release, with both files and their sums attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" loxodonta.py supervisor.py SHA256SUMS \
+            --title "$TAG" --notes-file RELEASE_NOTES.md

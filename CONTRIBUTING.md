@@ -75,3 +75,47 @@ contract, and the hook's test suite is yours.
 If a change is hard to reverse, surprising without context, or a real
 trade-off, it gets an ADR in `adrs/` before it gets code. Small choices do
 not. When unsure, open an issue and ask; the answer is usually short.
+
+## Releases
+
+Every promotion of `dev` to `main` gets a tag and a GitHub release carrying
+`loxodonta.py`, `supervisor.py`, and a `SHA256SUMS` file over both, so a
+person can check the file they downloaded against what was published
+(ADR-0022). The tool version is semantic and decoupled from the receipt
+format, which stays at `0.1`. The ritual, in order:
+
+1. Branch a throwaway `promote/<date>` from `dev` and open a pull request
+   from it into `main`.
+2. In that pull request, move the entries under `## [Unreleased]` in
+   `CHANGELOG.md` to a new `## [x.y.z] - YYYY-MM-DD` heading, add the
+   version's compare link at the bottom, and bump `TOOL_VERSION` in both
+   `loxodonta.py` and `supervisor.py` to `x.y.z`. Minor per promotion;
+   patch for a hotfix cherry-picked to `main`. The two files carry one
+   version and the suite checks that they agree.
+3. Merge the pull request once the suite and the house checker are green.
+4. On `main`, tag the merge commit `vx.y.z` and push the tag:
+
+   ```
+   git tag vx.y.z && git push origin vx.y.z
+   ```
+
+5. CI takes it from there (`.github/workflows/release.yml`): it checks the
+   tag against `TOOL_VERSION` in both files, builds `SHA256SUMS`, takes the
+   matching CHANGELOG section as the notes, and publishes the release with
+   the three files attached. A mismatched tag or a missing section stops
+   the release.
+6. Check the sums once by hand. Download the three files from the release
+   page into an empty folder and run:
+
+   ```
+   sha256sum -c SHA256SUMS
+   ```
+
+   On Windows, `certutil -hashfile loxodonta.py SHA256` (and the same for
+   `supervisor.py`) prints each sum; compare it by eye with the line in
+   `SHA256SUMS`. If a sum disagrees, the release is wrong, not the file:
+   delete the release and the tag, find out why, and cut it again.
+
+`1.0.0` waits for one export from another machine read into
+`docs/FIELD-DATA.md` (ADR-0022). Until then, minor versions may change
+behavior, and each CHANGELOG entry says so when they do.
