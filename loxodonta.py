@@ -18,6 +18,11 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+# Two versions, moving independently (ADR-0022): TOOL_VERSION says which
+# recorder is running; FORMAT_VERSION says which chains it can read. The
+# format is frozen (SPEC §2.1); the tool is tagged at every promotion,
+# together with supervisor.py — the two constants must agree.
+TOOL_VERSION = "0.1.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -1859,8 +1864,44 @@ def head_record(value):
     return v
 
 
+def checkout_commit(home):
+    """The short commit of the checkout `home` sits in, or "unknown" —
+    the same fact the recorder notice reports (ADR-0015). Local git only:
+    a version is a label on the file, never a channel to fetch a newer
+    one."""
+    try:
+        asked = subprocess.run(
+            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
+            capture_output=True, encoding="utf-8")
+    except (OSError, ValueError):
+        return "unknown"
+    return asked.stdout.strip() if asked.returncode == 0 else "unknown"
+
+
+def version_line(prog, home):
+    """Three identities on one line: tool, format, commit (ADR-0022)."""
+    return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
+            f"commit {checkout_commit(home)})")
+
+
+class VersionAction(argparse.Action):
+    """`--version`, answered only when asked: the commit is one git
+    question, and the hook path must not pay for it on every call."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        home = os.path.dirname(os.path.abspath(__file__))
+        print(version_line(parser.prog, home))
+        parser.exit()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="loxodonta", description=__doc__)
+    parser.add_argument("--version", action=VersionAction,
+                        help="print tool version, format version, and "
+                             "the checkout's commit, then exit")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--log", default=DEFAULT_LOG, help="receipt log path")
     sub = parser.add_subparsers(dest="command", required=True)

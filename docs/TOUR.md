@@ -26,7 +26,7 @@ The file reads in seven clusters:
 | 4 | Anchoring | The minimal OpenTimestamps subset (ADR-0003) |
 | 5 | The walk & verdicts | `verify` / `report` / `explain` |
 | 6 | The hook | One tool call, one entry, no volition (SPEC §8) |
-| 7 | CLI wiring & epilogue | argparse assembly and the broken-pipe death |
+| 7 | CLI wiring & epilogue | argparse assembly, `--version`, and the broken-pipe death |
 
 Reading order mirrors trust order: before you can believe anything about
 chains, locks, anchors, or hooks, "the bytes of an entry" has to be a
@@ -438,6 +438,20 @@ so every command's shared flags behave identically because they *are*
 the same flags. And each subcommand registers its handler via
 `set_defaults(func=...)` — dispatch with no if-ladder to fall out of
 sync with the menu.
+
+**`--version`** is the one flag that belongs to no subcommand. It
+prints three identities on one line — `loxodonta 0.1.0 (format 0.1,
+commit 638dc8c)` — because the tool and the format are versioned
+independently (ADR-0022): `TOOL_VERSION` says which recorder you are
+running and is tagged together with `supervisor.py`; `FORMAT_VERSION`
+says which chains it can read and is frozen (SPEC §2.1). The commit is
+the checkout's `HEAD`, the same fact the supervisor's recorder notice
+reports, read from local git only — `unknown` when the file sits
+outside any checkout, as a release asset does. The flag is a custom
+`argparse.Action` rather than the stock `version=` string so the git
+question is asked only when `--version` is, never on the hook path.
+Nothing fetches and nothing updates: a version is a label on the file,
+not a channel to a newer one (ADR-0015).
 
 **The `run --` split** happens *before* argparse ever runs: everything
 after `--` is sliced off and handed to the wrapped command verbatim,

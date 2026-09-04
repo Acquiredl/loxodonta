@@ -134,6 +134,13 @@ the writer a second road to the one file that has to stay honest
 (ADR-0002). Behind-counts name their fetch date, because a stale count
 that reads as reassurance is worse than no count.
 
+The notice's commit is also the third field of `--version`, on either
+file: `supervisor 0.1.0 (format 0.1, commit 638dc8c)` — the tool
+version (tagged together with `loxodonta.py`; the two constants must
+agree, and the suite says so), the frozen receipt format, and the
+checkout's `HEAD`, or `unknown` outside a checkout (ADR-0022). Same
+rule as the notice: it reports and never updates.
+
 ## 3. The tick — `scan_root`, `adopt`, the exit ladder
 
 `scan_root` is where the patrol and the specialists assemble into one
