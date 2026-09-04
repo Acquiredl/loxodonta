@@ -26,6 +26,19 @@ them are written down. Reading three files first saves everyone a round trip:
    python -m unittest discover -s tests
    ```
 
+## The one local check
+
+The repo enforces its own vocabulary. `tools/house_check.py` fails on the
+GLOSSARY anti-terms anywhere (the refutation form, "not immutable", is
+allowed), on em dashes in the front-door files (README, SECURITY,
+CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT), and on overclaim words there
+("prove", "guarantee", "always"); elsewhere those words only warn. CI runs
+exactly this command, so passing it locally is passing CI:
+
+```
+python tools/house_check.py
+```
+
 ## Branches
 
 `main` is stable and every claim in the README is true of it. Work happens on
