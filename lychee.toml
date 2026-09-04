@@ -1,0 +1,25 @@
+# lychee, the link checker, reads this on every run (.github/workflows/links.yml).
+# Every link in the Markdown is checked, web address or relative path, except
+# the ones excluded here. Each exclusion says why.
+
+# A dead link fails the run; no progress bar in the CI log.
+no_progress = true
+
+# Slow hosts get twenty seconds and two more tries before they count as dead.
+timeout = 20
+max_retries = 2
+
+# The supervisor serves on the loopback only (localhost, 127.0.0.1). Those are
+# addresses on the reader's own machine, never on the web, so they are not
+# checked. Private ranges (10.x, 192.168.x) are excluded for the same reason.
+exclude_loopback = true
+exclude_private = true
+
+exclude = [
+  # Reserved example domains: placeholders in worked examples, not real hosts.
+  '^https?://([a-z0-9-]+\.)?example\.(com|org|net)',
+  '^https?://[^/]+\.invalid',
+]
+
+# Never tracked, never checked: agent worktrees and any npm cache.
+exclude_path = [".claude", "node_modules"]

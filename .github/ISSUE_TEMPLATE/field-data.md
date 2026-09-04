@@ -9,7 +9,7 @@ labels: field-data
      filing by hand, paste the link to your secret gist below and copy the
      `redaction` block from the top of the export file. -->
 
-**Export:** <gist link>
+**Export:** `<gist link>`
 
 **What the export says it removed:**
 

@@ -474,7 +474,7 @@ layer, since pipe death can strike any command that prints.
 
 ---
 
-*This tour was written during the 2026-08-21 readability walk (issue
-#10) and is maintained as reference documentation. If a section here
+*This tour was written during the 2026-08-21 readability walk (issue #10)
+and is maintained as reference documentation. If a section here
 contradicts the code, the code moved — fix the tour in the same commit
 next time.*

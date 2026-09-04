@@ -39,6 +39,11 @@ exactly this command, so passing it locally is passing CI:
 python tools/house_check.py
 ```
 
+The Markdown has two more checks, and they run in CI only: markdownlint
+(rules in `.markdownlint.yml`) and lychee, the link checker (exclusions and
+their reasons in `lychee.toml`; it also runs weekly, so a link that dies
+quietly still gets noticed). Neither needs anything installed here.
+
 ## Branches
 
 `main` is stable and every claim in the README is true of it. Work happens on
