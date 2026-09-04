@@ -3,11 +3,11 @@
 Thanks for looking. This is a small repo with strong opinions, and most of
 them are written down. Reading three files first saves everyone a round trip:
 
-- `GLOSSARY.md` — the vocabulary, used exactly. Note the anti-terms: this is
+- `GLOSSARY.md`: the vocabulary, used exactly. Note the anti-terms: this is
   not a blockchain, nothing here is immutable, and it is not an audit log.
-- `docs/SPEC.md` — the receipt format, frozen at v0.1. The canonical-JSON
+- `docs/SPEC.md`: the receipt format, frozen at v0.1. The canonical-JSON
   rules in §4 are the load-bearing part.
-- `adrs/` — the decisions that are hard to reverse. If a change fights one of
+- `adrs/`: the decisions that are hard to reverse. If a change fights one of
   them, the ADR is what to argue with, not the code.
 
 ## The three rules that shape every change
