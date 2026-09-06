@@ -6,9 +6,11 @@
 
 Every completed tool call your agent makes leaves a receipt, and one command tells you whether history was touched. The agent has the same access to that log as to everything else on the machine: a prompt-injected session can add tool calls that never ran, remove the ones that would give it away, and rewrite the file as if nothing happened. loxodonta is built with that agent as the adversary. Every receipt carries the hash of the one before it, so an edit, a deletion, or a reorder breaks the chain, and an anchor puts the chain head where no rewrite on the machine can reach.
 
-- **The bad day.** A prompt-injected session keeps leaving receipts, because the hook fires outside the agent's control. Afterward you have what it did, in order, whether that record was touched since, and a redacted export to study. One layer among several against the OWASP Top 10 for LLM applications, never the only one.
-- **Memory.** Git holds the result and the transcript holds everything, at megabytes, until the harness prunes it. The chain is the index: a few KB per session, what was read, what was tried, what was thrown away, what never became a commit, written by the hook and not by the agent's own summary. Every new session starts with it in front of it, and a month later it is still there.
-- **The anchor.** At moments you choose, the chain head is committed to Bitcoin through OpenTimestamps, free and without a wallet. Everything up to an anchored head is on record as of that block: the one piece of evidence a rewrite on the machine cannot forge.
+- **The bad day.** A prompt-injected session keeps leaving receipts, because the hook fires outside the agent's control. Afterward you have what it did, in order, whether that record was touched since, and a redacted export to study. In the OWASP Top 10 for LLM applications this is the forensic layer for LLM01, prompt injection, and the monitored tool use that LLM03, excessive agency, prescribes: one layer among several, never the only one.
+- **Memory.** Git holds the result and the transcript holds everything, at megabytes, for as long as the harness keeps it (Claude Code's default is thirty days). The chain is the index: a few KB per session, what was read, what was tried, what was thrown away, what never became a commit, written by the hook and not by the agent's own summary. Every new session starts with it in front of it, and a month later it is still there.
+- **The anchor.** At moments you choose, the chain head is committed to Bitcoin through OpenTimestamps, free and without a wallet. Bitcoin is the anchor built in, not the only kind possible: the head is a plain hash, and anything off the machine that will hold a hash with a time serves. Everything up to an anchored head is on record as of that block: the one piece of evidence a rewrite on the machine cannot forge.
+
+Two receipts, a verdict, then the agent rewrites its own log to hide what it touched, then a verdict again:
 
 ```
 $ python loxodonta.py init
@@ -19,7 +21,7 @@ $ python loxodonta.py log --actor claude-code --action "Bash: git push origin ma
 logged entry 2
 $ python loxodonta.py verify
 VALID
-$ sed -i 's/deploy.yml/README.md/' receipts.jsonl        # the record now says it edited README.md
+$ sed -i 's/Edit: deploy.yml/Edit: README.md/' receipts.jsonl   # the cover-up: entry 1 now claims a harmless edit
 $ python loxodonta.py verify
 BROKEN at entry 1: entry_hash does not match canonical form
 ```
@@ -39,14 +41,14 @@ python loxodonta.py --version     # loxodonta 0.1.0 (format 0.1, commit ...)
 
 ## Quick start
 
-1. **Wire the hook.** One command. Every new session on this machine then leaves a chain in the store, one drawer per project. Restart any session already open.
+1. **Wire the hook.** One command. Every new session on this machine then leaves a chain in the store, one drawer per project. Restart any session already open. There is no service and no scheduled job: the command writes one entry into the harness's own settings file, and the harness runs the recorder as a child process after each completed tool call, with your privileges and nothing more. It stays wired across reboots because the settings file does, and `uninstall-hook` removes exactly that entry. The settings file sits on the same machine as the agent, which is why the supervisor below watches for receipts going quiet.
 
    ```
    python loxodonta.py install-hook            # Claude Code
    python loxodonta.py install-hook --codex    # Codex CLI
    ```
 
-2. **Run a session.** Use your agent as usual. Each completed tool call is one receipt, and the session's chain lands in `~/.loxodonta/receipts/<project>/`.
+2. **Run a session.** Use your agent as usual. Each completed tool call is one receipt, and the session's chain lands in your home folder under `~/.loxodonta/receipts/<project>/` (`C:\Users\<you>\.loxodonta\receipts\` on Windows): one file per session, in a drawer named after the project folder plus a short hash so two folders with the same name never share one.
 
 3. **Look.** The supervisor reads the store and decides nothing itself: verdicts come from the recorder's own `verify`.
 
