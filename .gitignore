@@ -8,3 +8,6 @@ receipts.jsonl
 DOGFOOD.md
 dogfood.py
 METACOG.md
+
+# drill sandbox, if a reader runs `supervisor drill` inside the repo
+.supervisor-drill/
