@@ -25,6 +25,9 @@ DEMO_STORE = REPO_ROOT / "tools" / "demo_store.py"
 
 # The session whose digest is the README's recorded-task excerpt.
 STORY_SESSION = "7c1f3a2e-4b8d-4f0e-9a61-2d5e8c3b7f10"
+# The bad-day session (#148), and its committed copy under docs/demo.
+BAD_DAY_SESSION = "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907"
+COMMITTED_BAD_DAY = REPO_ROOT / "docs" / "demo" / "bad-day-session.jsonl"
 
 
 def run(script, *args, env=None, cwd=None):
@@ -135,8 +138,13 @@ class DemoStoreTest(unittest.TestCase):
                 self.assertNotIn(word.lower(), masked,
                                  f"{word!r} in {relpath}")
             # Any absolute path the store holds stays under the neutral
-            # home (JSON strings, backslashes read as slashes).
+            # home (JSON strings, backslashes read as slashes). A URL is
+            # not a filesystem path — the bad-day session records the
+            # site it fetched — so a scheme like `https://` is not the
+            # `C:/` or `/home` this guards against.
             for token in body.replace("\\\\", "/").split('"'):
+                if "://" in token:
+                    continue
                 if ":/" in token or token.startswith("/"):
                     self.assertTrue(
                         token.startswith(self.home.as_posix().lower()),
@@ -171,6 +179,61 @@ class DemoStoreTest(unittest.TestCase):
         self.assertEqual(digest.returncode, 0, digest.stderr)
         for needle in ("tests/test_todo.py", "unittest", "git commit"):
             self.assertIn(needle, digest.stdout)
+
+    def test_the_bad_day_session_ends_on_the_recorder_going_dark(self):
+        found = (self.home / ".loxodonta" / "receipts").glob(
+            f"*/receipts-{BAD_DAY_SESSION}.jsonl")
+        chain = next(found, None)
+        self.assertIsNotNone(chain, "the bad-day session is missing")
+        actions = [e["action"] for e in entries(chain)]
+        # The story the receipts tell: a page fetched from the injected
+        # site, the credentials file read, then off the machine, then the
+        # recorder switched off. That last edit is the final receipt; the
+        # silence after it is the completeness alarm's job, not the
+        # chain's.
+        self.assertTrue(any(a.startswith("WebFetch:")
+                            and "getrichnow.example.com" in a
+                            for a in actions), actions)
+        self.assertTrue(any(a.startswith("Read: .env") for a in actions),
+                        actions)
+        self.assertIn("settings.json", actions[-1])
+        self.assertIn("loxodonta", actions[-1])
+        # The credentials file was fingerprinted: the receipt proves which
+        # file was read, not merely that a read happened.
+        read_env = [e for e in entries(chain)
+                    if e["action"].startswith("Read: .env")][0]
+        self.assertEqual([ref["path"] for ref in read_env["files"]], [".env"])
+
+    def test_committed_bad_day_copy_is_a_fresh_build_byte_for_byte(self):
+        # The file under docs/demo is what a reader clicks; it must be the
+        # builder's own bytes, or a README walk over it could drift from
+        # what the tool produces. LF, like the recorder writes (.gitattributes).
+        self.assertTrue(COMMITTED_BAD_DAY.is_file(),
+                        f"{COMMITTED_BAD_DAY} is missing")
+        fresh = next((self.home / ".loxodonta" / "receipts").glob(
+            f"*/receipts-{BAD_DAY_SESSION}.jsonl"))
+        self.assertEqual(COMMITTED_BAD_DAY.read_bytes(), fresh.read_bytes())
+
+    def test_the_committed_bad_day_chain_verifies_and_drills(self):
+        # A reader can prove the chain to themselves: verify says VALID,
+        # and drill catches every tamper on a sandbox copy. Run in a temp
+        # root so the repo stays clean.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            copy = root / COMMITTED_BAD_DAY.name
+            copy.write_bytes(COMMITTED_BAD_DAY.read_bytes())
+            verify = run(LOXODONTA, "verify", "--log", str(copy))
+            self.assertEqual(verify.returncode, 0, verify.stderr)
+            self.assertIn("VALID", verify.stdout)
+            drill = run(SUPERVISOR, "drill", "--root", str(root),
+                        "--log", str(copy), "--json")
+            self.assertEqual(drill.returncode, 0,
+                             drill.stdout + drill.stderr)
+            report = json.loads(drill.stdout)
+            caught = {d["tamper"] for d in report["drills"]}
+            self.assertEqual(caught,
+                             {"edit", "delete", "reorder", "regenerate"},
+                             report)
 
     def test_builder_speaks_only_the_public_cli(self):
         source = DEMO_STORE.read_text(encoding="utf-8")
