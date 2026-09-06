@@ -142,3 +142,110 @@ the signal exists to surface — the words leave whose hands it was to
 the operator. Thresholds stay env-tunable
 (`SUPERVISOR_WANING_SECONDS`, `SUPERVISOR_DORMANT_SECONDS`) for
 stores with different rhythms.
+
+## 6. The orientation-cost measurement (pre-registered, second repo)
+
+This section is written before any agent launches (#130, PRD #120). It
+decides what the README's memory reason may say. It extends the recall
+quiz (§2) in three ways: a second repo that does not build the tool, a
+third arm that reads the raw harness transcript, and a cost measure, not
+only a correctness one.
+
+**The repo.** `todo`, a small command-line todo list built with the tool
+recording it but not developing it. One dense session on 2026-09-01: 64
+receipts in the project's drawer, plus a 12-receipt worktree drawer, and
+the harness transcript still on disk. The session's history carries the
+three shapes the measurement needs: work git can see, work only the chain
+can see, and a volume of detail only the transcript holds.
+
+**The question this settles.** Not "is the chain more correct than git" —
+§2 answered that. The new question is the one a reader asks: if the
+transcript already holds everything, does the chain add anything but a
+copy? The three arms are built to separate correctness from cost, because
+that is where the answer lives: the chain and the transcript hold the
+same facts, but one is an index of a few KB and the other is most of a
+megabyte to wade through.
+
+**Arms.** Three, three fresh agents each (N = 3), no session context, a
+fixed tool-call budget, same model family across all nine:
+
+- **Arm A** — the session-start digest and the read-only recall commands
+  (`digest` / `show` / `search` / `timeline`), plus git and the working
+  tree. The tool as an operator runs it.
+- **Arm B** — the raw harness transcript file on disk and ordinary file
+  tools, no digest and no recall. The world where the transcript is the
+  memory. Whether an agent can orient in a ~720 KB transcript at all, and
+  at what cost, is part of what this measures.
+- **Arm C** — git and the working tree only. The world without the
+  recorder. Told plainly that an honest "cannot determine" beats a guess.
+
+**Measures.** Per agent: **correctness** against the rubric; **tool calls
+to orient** (the headline cost measure, as in §2); and a **token
+estimate** read from each agent's own transcript usage records where the
+harness wrote them (secondary, reported when available, never the claim's
+sole support). Plus one mechanical measure, below.
+
+**Rubric**, fixed here: `2` correct and specific; `1` partial, or an
+honest "cannot determine" where the source genuinely cannot know; `0`
+wrong. Twelve points per agent over the six questions.
+
+**The questions and their ground truth** (derived from the store, the
+transcript, and git before launch; the quiz agents do not read this
+file):
+
+1. *(git-visible)* What was the last change committed, and what did it
+   do? — Commit `5c5339b`, "close code walk: glossary seeded, Gate 2
+   review discharged in METACOG".
+2. *(git-visible)* How does the `rm` command decide which item to remove,
+   and how were out-of-range numbers handled? — 1-based lookup reusing
+   the shared bounds check (`pick_item`); commits `af0d9e2` then
+   `a945026` (rm reuses the `pick_item` result instead of discarding it).
+3. *(chain-only)* Was any of this work done in a git worktree, and does
+   that worktree still exist? — Yes: the session wrote `GLOSSARY.md` and
+   `METACOG.md` under `.claude/worktrees/todo-cli-v1-eeb1aa/`; that
+   worktree is gone from `git worktree list` now. Git shows no trace that
+   the work happened in a worktree; the chain records every write there.
+4. *(chain-only, sub-commit)* What was the exact final recorded action of
+   the session? — Receipt 63: the `git add GLOSSARY.md METACOG.md; git
+   commit` PowerShell call, immediately after a full test run (receipt
+   62). Git's finest answer is the commit; the chain has the minute and
+   the step before it.
+5. *(chain-only, integrity)* Is any recorded history of this session
+   damaged or truncated? — No; the chain verifies VALID end to end. Git
+   and the transcript cannot answer this at all.
+6. *(tempo)* Which tool did the session lean on most, and roughly how
+   often? — PowerShell, by a wide margin: 24 of the 64 receipts in the
+   main drawer. Git cannot know; the transcript can be made to count, at
+   a cost.
+
+**The mechanical size measure.** Chain bytes versus transcript bytes for
+the same session, by file size. Method: the session's chain file against
+its harness transcript file. Measured 2026-09-06 on the worktree
+session: chain `3,955` bytes, transcript `738,079` bytes — a **187×**
+ratio. This is the number behind "a few KB per session": the chain is the
+index, the transcript is the volume it indexes.
+
+**Results.** *(Filled after the run; the table below is the shape.)*
+
+| Agent | Arm | Score | Tool calls | Token estimate | Confabulations |
+|---|---|---|---|---|---|
+| A1 | digest + recall | | | | |
+| A2 | digest + recall | | | | |
+| A3 | digest + recall | | | | |
+| B1 | transcript only | | | | |
+| B2 | transcript only | | | | |
+| B3 | transcript only | | | | |
+| C1 | git only | | | | |
+| C2 | git only | | | | |
+| C3 | git only | | | | |
+
+**What the result may license.** If Arm A reaches the chain-only facts at
+a fraction of Arm B's cost while Arm C misses them, the README's memory
+reason may state the index-versus-volume claim with the size ratio as its
+number. If Arm B orients as cheaply as Arm A, the reason keeps to "what
+git cannot tell you" and drops any cost claim. A productivity claim is
+out of scope either way (the PRD, §2's standing rule).
+
+**Caveats.** *(Completed with the results, in §2's voice: N per arm, one
+repo and one session, shared model family, and any arm that was faster on
+facts it could see.)*
