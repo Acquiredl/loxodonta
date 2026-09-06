@@ -12,6 +12,8 @@ Every completed tool call your agent makes leaves a receipt, and one command tel
 
 Two receipts, a verdict, then the agent rewrites its own log to hide what it touched, then a verdict again:
 
+<!-- pin:tamper-demo -->
+
 ```
 $ python loxodonta.py init
 initialized receipts.jsonl
@@ -60,6 +62,8 @@ python loxodonta.py --version     # loxodonta 0.1.0 (format 0.1, commit ...)
 
 **Try it on a chain of your own.** The demo above is six commands; copy them into an empty folder. For a pipeline with no harness, `run` wraps any command and writes the receipt after it exits, whatever it did:
 
+<!-- pin:quickstart-tryit -->
+
 ```
 python loxodonta.py init
 python loxodonta.py run --actor agent -- python --version   # a receipt the command cannot skip
@@ -87,6 +91,8 @@ receipt log: docs/demo/bad-day-session.jsonl (6 entries)
 The fetched page carried a prompt injection. Entry 3 is the agent reading a credentials file, fingerprinted, so the receipt names the exact file. Entry 4 sends it off the machine. Entry 5 is the cover-up: the agent strips the recorder's hook from the settings file so nothing more is logged. That edit is the last receipt, because the hook fired on it before it took effect. After it the chain goes silent, and silence while a session is live is the one thing the [supervisor](#the-supervisor) alarms on that the chain cannot report about itself.
 
 You still lost the credentials. What you have is the record of how: which page, which file, in what order, and the point where the agent tried to go dark. And it holds up to inspection. `verify` walks it, and `drill` copies it to a sandbox and rehearses every tamper against it, each one caught:
+
+<!-- pin:bad-day-check -->
 
 ```
 python loxodonta.py verify --log docs/demo/bad-day-session.jsonl   # VALID
