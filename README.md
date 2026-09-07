@@ -228,6 +228,10 @@ python supervisor.py drill --root ~/repos --log <chain>   # rehearse detection o
 python supervisor.py adopt --root ~/repos     # one-time move of pre-store chains into the store (--dry-run to preview)
 ```
 
+![The supervisor dashboard over the demo store: a verdict strip reading "all quiet, 4 chains, every receipt accounted for" with the recorder notice under it, an attention list saying nothing wants your eyes, a fourteen-day band with one watched day, and a sessions table listing four todo sessions with their receipt counts and time spans; the inspect pane on the right waits for a row to be clicked.](docs/images/dashboard.png)
+
+*`supervisor serve` over the [demo store](tools/demo_store.py), captured headless; no real store appears in a tracked image.*
+
 `scan` needs no arguments: the store is its universe. `--root <folder>` scans a legacy folder-of-repos layout instead (every `<repo>/receipts/` under it, plus chains stranded in old worktrees), the mode `adopt` migrates you out of. Scan adds two exit codes of its own: `5`, the baseline tripwire (a chain changed in a way appends can't explain since the last look) and `6`, the completeness alarm (a session is visibly active while receipts stop arriving, the failure nothing else watches for).
 
 Under the verdict strip sits a fourteen-day band, one cell per day, carrying that day's worst claim. The strip says what is true now; the band says whether now is unusual. A day nobody looked at is drawn as a gap rather than a quiet day, and that is deliberate: detection latency is a function of how often you actually look, so a run of unread days is the one failure the chains cannot report about themselves.
