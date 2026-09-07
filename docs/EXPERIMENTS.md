@@ -246,9 +246,9 @@ protocol.
 | B1 | transcript only | 11/12 | 9 | 23K / 675K | 0 |
 | B2 | transcript only | 11/12 | 15 (1 denied) | 43K / 1.17M | 0 |
 | B3 | transcript only | 11/12 | 13 | 23K / 999K | 0 |
-| C1 | git only | 12/12 | 9 | 18K / 553K | 0 |
-| C2 | git only | 12/12 | 7 | 9K / 400K | 0 |
-| C3 | git only | 12/12 | 8 | 14K / 484K | 0 |
+| C1 | git only | 8/12 | 9 | 18K / 553K | 0 |
+| C2 | git only | 8/12 | 7 | 9K / 400K | 0 |
+| C3 | git only | 8/12 | 8 | 14K / 484K | 0 |
 
 ¹ Two `Glob` calls issued in parallel raced the hook's counter file.
 ² Said the empty `.claude/worktrees/` folder was absent; it is present.
@@ -260,8 +260,11 @@ questions answered; **B** 12.3 calls, 30K out, 948K in, six of six;
 **Where the points went.** Arm C answered the two git-visible questions
 in full and said "cannot determine" on the other four, each time for the
 right reason ("the reflog is absent; this checkout is a copy"). The
-rubric scores that honesty at 2, so C's 12/12 measures honesty, not
-coverage: it answered two of six. Arm A answered Q1–Q4 and Q6 correct
+rubric scores an honest "cannot determine" at 1, as §2 did (its git-only
+agents scored 10/12 for the same reason), so C's 8/12 is two questions
+answered in full and four points for honesty: it answered two of six.
+(The run's Arm C prompt said such an answer was "worth full marks"; the
+pre-registered rubric governs, and the table above follows it.) Arm A answered Q1–Q4 and Q6 correct
 and specific, Q4 to the second (receipt 63 at 22:06:25Z, the full test
 run before it). On Q5 the digest labels its `VALID` line testimony and
 points at `verify`, which recall does not expose; all three A agents
