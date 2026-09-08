@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `install-hook --publish-head URL` (ADR-0025): opt in once, and every session end publishes the chain head to a remote the credentials on this machine cannot delete from (a chat incoming webhook, a retention-locked bucket), after the tail commitment and before the anchor, quietly and best-effort inside the same session-end budget. `hook --publish URL` carries it; a re-run of the installer without the flag turns it off; `uninstall-hook` removes it. What leaves is `head`, `n`, `session`, `ts`, `event`, and one readable line under both `text` and `content`; never a path, a project name, an action line, or chain bytes. Codex refuses the flag until the cost of one POST inside its three-second cap is measured.
+
 ## [0.2.0] - 2026-09-08
 
 The release after the measurement: what the orientation-cost run (EXPERIMENTS §6) found is fixed or stated, the window between anchors is closed for anyone who opts in at install, and the front door says how the repo is built.

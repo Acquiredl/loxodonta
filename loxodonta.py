@@ -664,13 +664,12 @@ def anchor_and_upgrade(log, calendars, budget):
         return min(SESSION_END_CALL, deadline - time.monotonic())
 
     try:
-        lines = read_log(log)
-        last = json.loads(lines[-1]) if lines else None
-    except (OSError, ValueError):
+        last = tail_entry(read_log(log))
+    except OSError:
         return
-    if not isinstance(last, dict) or "entry_hash" not in last:
-        return
-    head, n = last["entry_hash"], last.get("n")
+    if last is None:
+        return  # a damaged tail cannot be anchored
+    head, n = last["entry_hash"], last["n"]
     anchored = {r["head"] for r in (read_anchor_records(log) or [])
                 if isinstance(r, dict) and "head" in r}
     if head not in anchored:
