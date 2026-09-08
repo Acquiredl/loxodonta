@@ -51,6 +51,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -2303,13 +2304,20 @@ def resolve_address(args):
               file=sys.stderr)
         return None, 1
     repo, logs = recall_scope(args)
+    where = "the root" if getattr(args, "all", False) else repo.as_posix()
+    return match_address(prefix, logs, where)
+
+
+def match_address(prefix, logs, where):
+    """The one entry among `logs` whose hash starts with `prefix`, or
+    the refusal: none (named by `where`), or ambiguous with the
+    candidates listed. Shared by the recall commands and by `package`,
+    which searches the whole store (ADR-0026 ruling 1)."""
     matches = [(log, entry) for log in logs
                for entry in read_entries(log)
                if isinstance(entry.get("entry_hash"), str)
                and entry["entry_hash"].startswith(prefix)]
     if not matches:
-        where = "the root" if getattr(args, "all", False) \
-            else repo.as_posix()
         print(f"no entry under {where} matches {prefix} - "
               "widen with --all, or search instead", file=sys.stderr)
         return None, 1
@@ -3060,6 +3068,276 @@ def send_export(data, out, bundle):
         return 1
     print(f"sent: {gist_url}", file=sys.stderr)
     print(f"filed: {filed.stdout.strip()}", file=sys.stderr)
+    return 0
+
+
+# --- Package (ADR-0026, applying ADR-0007) ------------------------------------
+# One session's chains with their anchor sidecars, the project record, a
+# witness snapshot labelled testimony, and a plain-words README, listed by
+# a manifest written last: the package a stranger can verify on a clean
+# machine with `loxodonta verify-package` and nothing else. The supervisor
+# builds and the recorder judges (ADR-0005, ADR-0009), so the recipient
+# downloads the one file that already verifies a bare chain.
+
+PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
+PACKAGE_SEALS = []   # declared seals; --anchor and --sign are later slices
+# The completeness row travels with these fields only: no judge command,
+# no transcript path, no home. Paths the recipient cannot follow are
+# noise, and the project record already carries the one that matters.
+WITNESS_FIELDS = ("repo", "session", "state", "tools", "receipts",
+                  "deficit", "words")
+WITNESS_WORDS = (
+    "testimony: the supervisor's completeness reading of this session "
+    "and the scan's verdicts at packaging, as the packing machine "
+    "reported them. `loxodonta verify-package` checks that these bytes "
+    "are unchanged since packaging and draws no verdict from them "
+    "(ADR-0026).")
+
+
+def store_sessions():
+    """{session: [chains]} over every drawer in the store, siblings
+    included, in drawer then sibling order (ADR-0004: a -002 sibling
+    belongs to the session its name says)."""
+    sessions = {}
+    for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
+        if log.name.endswith(".anchors.jsonl"):
+            continue
+        sessions.setdefault(session_of(log), []).append(log)
+    return sessions
+
+
+def chain_listing(log):
+    """How the manifest lists a chain (ADR-0026 ruling 3): by head and
+    entry count, never by file hash. The head is the commitment, and
+    the verifier recomputes it by walking, so a Windows unzip that
+    changes line endings changes nothing the manifest says."""
+    head = None
+    for entry in read_entries(log):
+        if isinstance(entry.get("entry_hash"), str):
+            head = entry["entry_hash"]
+    lines = log.read_text(encoding="utf-8").splitlines()
+    sidecar = log.with_name(log.name + ".anchors.jsonl")
+    return {"path": log.name, "head": head, "entries": len(lines),
+            "anchors": sidecar.name if sidecar.exists() else None}
+
+
+def artifact_listing(path):
+    """How the manifest lists a post-close artifact: sha256 of its bytes
+    and their count, because nothing else commits it (ADR-0026 ruling 3)."""
+    data = path.read_bytes()
+    return {"path": path.name, "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data)}
+
+
+def witness_snapshot(report, session, chains):
+    """The witness's word on one session, labelled testimony in the
+    file itself: its completeness row and the scan's verdict for each
+    of its chains, as this scan reported them (ADR-0026 ruling 2)."""
+    row = next((s for s in report.get("completeness", {}).get("sessions", [])
+                if s.get("session") == session), None)
+    names = {log.name for log in chains}
+    verdicts = [{"log": Path(chain["log"]).name, "verdict": chain["verdict"],
+                 "entries": chain["entries"], "anchored": chain["anchored"]}
+                for repo in report.get("repos", [])
+                for sess in repo.get("sessions", [])
+                for chain in sess.get("chains", [])
+                if Path(chain["log"]).name in names]
+    return {
+        "testimony": WITNESS_WORDS,
+        "scanned": report.get("scanned"),
+        "session": session,
+        "completeness": ({k: row[k] for k in WITNESS_FIELDS if k in row}
+                         if row else None),
+        "scan": {"exit": report.get("exit"), "chains": verdicts},
+    }
+
+
+def package_readme(session, project, packed, chains, witness):
+    """The plain-words page a recipient reads first: what is inside, how
+    to verify it, what each layer shows and does not. It may print the
+    chain heads, which exist before it is written; it never prints the
+    manifest's hash, which does not exist yet (ADR-0007 ruling 2)."""
+    state = (witness.get("completeness") or {}).get("state", "none")
+    lines = [
+        f"# loxodonta package: session {session}",
+        "",
+        f"Project `{project}`, packed {packed} by loxodonta supervisor "
+        f"{TOOL_VERSION}, format `{PACKAGE_FORMAT}`. This is the receipt "
+        "log of one AI agent session: one line per completed tool call, "
+        "hash-chained, as the recorder wrote it on the machine where the "
+        "session ran (docs/SPEC.md).",
+        "",
+        "## What is inside",
+        "",
+    ]
+    for chain in chains:
+        lines.append(f"- `{chain['path']}`: a chain of {chain['entries']} "
+                     f"entries, head `{chain['head']}`.")
+        if chain["anchors"]:
+            lines.append(f"- `{chain['anchors']}`: its anchor sidecar, the "
+                         "OpenTimestamps proofs the recorder collected for "
+                         "this chain's heads.")
+    lines += [
+        "- `project.json`: the project record, the absolute path of the "
+        "project on the machine that recorded it. Off that machine it "
+        "points nowhere, which the verifier says in so many words.",
+        "- `witness.json`: the supervisor's completeness reading of this "
+        f"session at packaging (state: {state}) and the verdict its scan "
+        "gave each chain. Labelled testimony in the file: the verifier "
+        "confirms these bytes are unchanged and draws no verdict from them.",
+        "- `manifest.json`: the list of everything above, written last. "
+        "Chains are listed by head and entry count, the other files by "
+        "sha256 and byte count. Its hash is the only surface a seal "
+        "applies to, and this package declares no seals.",
+        "",
+        "## How to verify",
+        "",
+        "Get `loxodonta.py` from a release you trust "
+        "(https://github.com/Acquiredl/loxodonta/releases; check it "
+        "against the release's `SHA256SUMS`). Python 3.9 or newer, no "
+        "dependencies. Then, on the zip or on the unpacked folder:",
+        "",
+        "    python loxodonta.py verify-package <this package>",
+        "",
+        "It prints the manifest's summary, the recorder's own verdict for "
+        "each chain, the file references it cannot check off the machine, "
+        "each artifact against the manifest, then the package verdict and "
+        "one line of residual trust. Exit 0 is `SELF-CONSISTENT`; 1 is "
+        "`CHAIN-BROKEN`; 2 is `ARTIFACT-DIVERGED`; 4 is "
+        "`UNSUPPORTED-FORMAT`, a refusal (docs/PACKAGE.md).",
+        "",
+        "## What each layer shows, and what it does not",
+        "",
+        "- The chain walk shows that no entry was edited, removed, or "
+        "reordered since the chain was written. It does not show that "
+        "the recorder was told the truth: the agent's harness supplied "
+        "every action line, and the timestamps are its word.",
+        "- An anchor line under a chain shows that chain's head existed "
+        "by the Bitcoin block it names; the printed merkle root is yours "
+        "to confirm against a block source you trust. An anchor speaks "
+        "for its chain, never for this package as a set.",
+        "- The witness snapshot is testimony: the reader's reading on the "
+        "packing machine, carried along unaltered, never checked against "
+        "anything here.",
+        "- The manifest shows that every file here is the one that was "
+        "packed. With no seal declared, the whole package could have "
+        "been regenerated wholesale and then packed, and nothing inside "
+        "it could tell you: `SELF-CONSISTENT` states that limit.",
+        "- File contents are not here. Each entry carries the path and "
+        "the sha256 of the file the agent touched, as it stood then; the "
+        "files themselves travel separately or not at all.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_package(session, chains, report, stage, packed):
+    """Assemble one package in `stage`, in ADR-0007's write order: chain
+    snapshot and sidecars, then the artifacts, then the README, then the
+    manifest last. Returns the file names in the order they were written,
+    which is the order the zip keeps."""
+    drawer = chains[0].parent
+    written = []
+    listings = []
+    artifacts = []
+    for log in chains:
+        shutil.copyfile(log, stage / log.name)
+        written.append(log.name)
+        listing = chain_listing(stage / log.name)
+        listings.append(listing)
+        if listing["anchors"]:
+            shutil.copyfile(log.with_name(listing["anchors"]),
+                            stage / listing["anchors"])
+            written.append(listing["anchors"])
+            artifacts.append(artifact_listing(stage / listing["anchors"]))
+    record = drawer / "project.json"
+    if record.exists():
+        shutil.copyfile(record, stage / "project.json")
+        written.append("project.json")
+        artifacts.append(artifact_listing(stage / "project.json"))
+    witness = witness_snapshot(report, session, chains)
+    write_lf(stage / "witness.json",
+             json.dumps(witness, indent=2, ensure_ascii=False) + "\n")
+    written.append("witness.json")
+    artifacts.append(artifact_listing(stage / "witness.json"))
+    project = drawer_name(drawer)
+    write_lf(stage / "README.md",
+             package_readme(session, project, packed, listings, witness))
+    written.append("README.md")
+    artifacts.append(artifact_listing(stage / "README.md"))
+    manifest = {
+        "format": PACKAGE_FORMAT,
+        "packed": packed,
+        "tool": f"loxodonta supervisor {TOOL_VERSION}",
+        "unit": {"kind": "session", "session": session, "project": project},
+        "chains": listings,
+        "artifacts": artifacts,
+        "seals": list(PACKAGE_SEALS),
+    }
+    write_lf(stage / "manifest.json",
+             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+    written.append("manifest.json")
+    return written
+
+
+def zip_package(stage, written, out):
+    """The default shape: one zip, members in write order, so the
+    manifest is the last member too."""
+    import zipfile
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
+        for name in written:
+            package.write(stage / name, name)
+
+
+def select_session(selector, sessions):
+    """The session a selector names, with its chains: a session id, or
+    an entry address inside it, resolved over the whole store with the
+    recall commands' rules. (None, None) after the refusal is printed."""
+    if selector in sessions:
+        return selector, sessions[selector]
+    if ADDRESS_RE.match(selector.lower()):
+        logs = [log for chains in sessions.values() for log in chains]
+        match, _ = match_address(selector.lower(), logs, "the store")
+        if match is None:
+            return None, None
+        session = session_of(match[0])
+        return session, sessions[session]
+    print(f"error: {selector!r} is neither a session in the store nor an "
+          "entry address (4 to 64 hex characters)", file=sys.stderr)
+    return None, None
+
+
+def cmd_package(args):
+    """Build one package of a session (ADR-0026 ruling 1: by id or by an
+    entry address inside it, siblings included). The scan underneath is
+    one ordinary tick, as export's is: its completeness row and verdicts
+    are the witness snapshot."""
+    sessions = store_sessions()
+    session, chains = select_session(args.selector, sessions)
+    if session is None:
+        return 1
+    packed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    default = Path.cwd() / f"loxodonta-package-{session}"
+    out = Path(args.out) if args.out else (
+        default if args.folder else default.with_name(default.name + ".zip"))
+    if out.exists():
+        print(f"error: {out} already exists; choose another --out",
+              file=sys.stderr)
+        return 1
+    report = scan_root(store_receipts(), witness=Path(args.witness),
+                       store=True)
+    if args.folder:
+        out.mkdir(parents=True)
+        written = write_package(session, chains, report, out, packed)
+    else:
+        with tempfile.TemporaryDirectory() as staging:
+            written = write_package(session, chains, report, Path(staging),
+                                    packed)
+            zip_package(Path(staging), written, out)
+    print(f"written: {out.name} (session {session}, {len(chains)} chain(s), "
+          f"{len(written)} files)")
+    print(f'verify: python "{LOXODONTA.as_posix()}" verify-package '
+          f'"{out.as_posix()}"')
     return 0
 
 
@@ -5457,6 +5735,25 @@ def main(argv):
                              "and open a field-data issue on "
                              f"{FIELD_DATA_REPO}")
     export.set_defaults(func=cmd_export)
+    package = sub.add_parser(
+        "package",
+        help="one session as a package: its chains and anchor sidecars, "
+             "the project record, a witness snapshot labelled testimony, "
+             "a README, and a manifest written last; verified by "
+             "`loxodonta verify-package` alone (ADR-0026)")
+    package.add_argument("selector", metavar="SESSION|ADDRESS",
+                         help="a session id, or any entry address inside "
+                              "the session (siblings included either way)")
+    package.add_argument("--out", default=None,
+                         help="file (or, with --folder, folder) to write "
+                              "(default: loxodonta-package-<session>.zip "
+                              "here)")
+    package.add_argument("--folder", action="store_true",
+                         help="write an unpacked folder instead of a zip")
+    package.add_argument("--witness", default=str(WITNESS_ROOT),
+                         help="the harness transcript layout the scan "
+                              "underneath reads (same as scan)")
+    package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)
     return args.func(args)

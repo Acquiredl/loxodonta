@@ -13,10 +13,12 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import unicodedata
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 
 # Two versions, moving independently (ADR-0022): TOOL_VERSION says which
@@ -1173,6 +1175,232 @@ def cmd_verify(args):
     return 0
 
 
+# --- Package verification (ADR-0026, applying ADR-0007) -----------------------
+#
+# A package is a session's chains with their anchor sidecars, the project
+# record, a witness snapshot, and a README, listed by a manifest written
+# last (`supervisor package` builds it). The recorder judges it here,
+# layer by layer: its own verify output per chain, verbatim; each artifact
+# against the manifest; then the package verdict in ADR-0007's words. The
+# manifest's hash is the only sealing surface, and this package format
+# declares no seals yet, so the ceiling is SELF-CONSISTENT.
+
+PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
+
+# The package ladder (ADR-0026 ruling 7), mapped onto verify's own exits so
+# a script that reads those learns nothing new. Gravest wins, in this
+# order: a refusal, a broken chain, an anchor that is not this chain's
+# history, a transcript that no longer holds, an artifact off its manifest.
+# The seal rungs (`+ ANCHORED`, `+ SIGNED`; SEAL-INVALID, SEAL-MISSING at
+# exit 3) join this table when the seals do.
+PACKAGE_GRAVITY = (4, 1, 3, 5, 2, 0)
+PACKAGE_VERDICTS = {
+    0: ("SELF-CONSISTENT: every chain walks clean and every artifact matches "
+        "the manifest; indistinguishable from a wholesale regeneration, "
+        "since no seal is declared"),
+    1: "CHAIN-BROKEN: a chain in this package does not walk clean (its "
+       "lines above say where)",
+    2: "ARTIFACT-DIVERGED: something in this package is not what the "
+       "manifest lists (the lines above say what)",
+    3: "ANCHOR-MISMATCH: an anchor packaged with a chain is not evidence "
+       "for that chain (its lines above say which)",
+    5: "TRANSCRIPT-DIVERGED: a chain's transcript commitments contradict "
+       "each other (its lines above say where)",
+}
+RESIDUAL_TRUST = (
+    "residual trust: this package is unaltered since it was packed. That "
+    "the record inside is true and complete, and that it existed before "
+    "today, rests on the issuer's word alone, since no seal is declared.")
+
+
+def package_root(folder):
+    """Where the manifest sits: the folder itself, or its single
+    subfolder when the recipient re-zipped a folder rather than its
+    contents. Anything else is judged as given."""
+    if os.path.exists(os.path.join(folder, "manifest.json")):
+        return folder
+    inside = [os.path.join(folder, name) for name in os.listdir(folder)]
+    if len(inside) == 1 and os.path.isdir(inside[0]):
+        return inside[0]
+    return folder
+
+
+def read_manifest(folder):
+    """(manifest, None), or (None, the refusal line). A missing or
+    unreadable manifest and an unknown format tag are refusals to judge,
+    never verdicts (ADR-0007 ruling 5), the way UNSUPPORTED-VERSION is."""
+    try:
+        with open(os.path.join(folder, "manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        return None, ("UNSUPPORTED-FORMAT: no readable manifest.json here; "
+                      "not a loxodonta package")
+    tag = manifest.get("format") if isinstance(manifest, dict) else None
+    if tag != PACKAGE_FORMAT:
+        return None, (f'UNSUPPORTED-FORMAT: package is format "{tag}"; this '
+                      f'verifier speaks "{PACKAGE_FORMAT}"')
+    if not isinstance(manifest.get("chains"), list) \
+            or not isinstance(manifest.get("artifacts"), list):
+        return None, ("UNSUPPORTED-FORMAT: manifest.json lists no chains or "
+                      "no artifacts; not a loxodonta package")
+    return manifest, None
+
+
+def print_manifest_summary(path, manifest):
+    """The manifest's displayed fields, testimony like every convenience
+    copy (ADR-0007 ruling 3); the committed facts are judged below."""
+    unit = manifest.get("unit") or {}
+    seals = manifest.get("seals") or []
+    print(f"package: {path}")
+    print(f"format: {manifest['format']}")
+    print(f"packed: {manifest.get('packed')} by {manifest.get('tool')} "
+          "(testimony)")
+    print(f"unit: {unit.get('kind')} {unit.get('session')}, project "
+          f"{unit.get('project')}")
+    print(f"contents: {len(manifest['chains'])} chain(s), "
+          f"{len(manifest['artifacts'])} artifact(s), seals: "
+          f"{', '.join(map(str, seals)) if seals else 'none declared'}")
+
+
+def walked_listing(log):
+    """What the walk says about a packaged chain: its head, its line
+    count, and how many file references its entries carry. The same
+    walk verify uses; a chain is judged by walking, never by file hash
+    (ADR-0026 ruling 3)."""
+    lines = read_log(log)
+    entries, _, _ = walk(lines)
+    head = None
+    references = 0
+    for entry in entries:
+        if entry is None:
+            continue
+        if isinstance(entry.get("entry_hash"), str):
+            head = entry["entry_hash"]
+        references += len(entry.get("files") or [])
+    return head, len(lines), references
+
+
+def judge_chain(folder, listing):
+    """One chain of the package: the recorder's own verify, anchors
+    included, verbatim; then its walked head and length against the
+    manifest's. Returns (exit code, file references counted)."""
+    name = str(listing.get("path"))
+    head = str(listing.get("head"))
+    print(f"chain: {name} (manifest: head {head[:12]}…, "
+          f"{listing.get('entries')} entries)")
+    log = os.path.join(folder, name)
+    if not os.path.isfile(log):
+        print(f"{name}: MISSING (listed in the manifest, not in the package)")
+        return 2, 0
+    code = cmd_verify(argparse.Namespace(log=log, files=False,
+                                         expect_head=None, transcript=None,
+                                         anchors=True))
+    walked, count, references = walked_listing(log)
+    if walked != listing.get("head") or count != listing.get("entries"):
+        print(f"{name}: off the manifest: walks to head "
+              f"{(walked or 'none')[:12]}… with {count} lines, listed as "
+              f"{head[:12]}… with {listing.get('entries')}")
+        code = gravest([code, 2])
+    return code, references
+
+
+def judge_artifact(folder, listing):
+    """One post-close artifact against the manifest: sha256 and byte
+    count of the bytes as they are now. Returns True when it diverged.
+    The witness snapshot is testimony, and the line says so where the
+    file is judged: its bytes are checked, its words never are."""
+    name = str(listing.get("path"))
+    path = os.path.join(folder, name)
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        print(f"{name}: MISSING (listed in the manifest, not in the package)")
+        return True
+    digest = hashlib.sha256(data).hexdigest()
+    listed = str(listing.get("sha256"))
+    if digest != listed or len(data) != listing.get("bytes"):
+        print(f"{name}: DIVERGED from the manifest (sha256 {digest[:12]}…, "
+              f"{len(data)} bytes; listed {listed[:12]}…, "
+              f"{listing.get('bytes')} bytes)")
+        return True
+    note = ""
+    if name == "witness.json":
+        note = (" (testimony: the packing machine's reading, unaltered; no "
+                "verdict is drawn from it)")
+    print(f"{name}: matches the manifest (sha256 {digest[:12]}…, "
+          f"{len(data)} bytes){note}")
+    return False
+
+
+def print_unlisted(folder, manifest):
+    """Files in the package the manifest does not list: named, not
+    judged, so a reader is never misled by a file nothing vouches for."""
+    listed = {"manifest.json"}
+    listed.update(str(c.get("path")) for c in manifest["chains"])
+    listed.update(str(a.get("path")) for a in manifest["artifacts"])
+    for name in sorted(os.listdir(folder)):
+        if name not in listed:
+            print(f"unlisted: {name} (not in the manifest, not judged)")
+
+
+def gravest(codes):
+    for code in PACKAGE_GRAVITY:
+        if code in codes:
+            return code
+    return max(codes)
+
+
+def judge_package(shown, folder):
+    """The ladder, in ADR-0026 ruling 5's order: the manifest's summary,
+    each chain, the file references, each artifact, the package verdict,
+    then one line of residual trust when the verdict allows any."""
+    folder = package_root(folder)
+    manifest, refusal = read_manifest(folder)
+    if refusal:
+        print(refusal)
+        return 4
+    print_manifest_summary(shown, manifest)
+    codes = []
+    references = 0
+    for listing in manifest["chains"]:
+        code, counted = judge_chain(folder, listing)
+        codes.append(code)
+        references += counted
+    # Off the machine the project record points nowhere and FILES-
+    # UNRESOLVED would be the honest line (ADR-0012); the package says
+    # the same thing once, in plain words, instead of per chain.
+    print(f"file references: {references} recorded, not checkable off the "
+          "machine")
+    if any([judge_artifact(folder, a) for a in manifest["artifacts"]]):
+        codes.append(2)
+    print_unlisted(folder, manifest)
+    code = gravest(codes or [0])
+    print(PACKAGE_VERDICTS[code])
+    if code == 0:
+        print(RESIDUAL_TRUST)
+    return code
+
+
+def cmd_verify_package(args):
+    """`verify-package PATH`: a zip or an unpacked folder. A zip is
+    unpacked into a temporary folder and judged there, so a Windows
+    unzip and this command see the same bytes the same way."""
+    path = args.path
+    if os.path.isdir(path):
+        return judge_package(path, path)
+    if not os.path.isfile(path):
+        print(f"error: {path} not found", file=sys.stderr)
+        return 1
+    if not zipfile.is_zipfile(path):
+        print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
+              "not a loxodonta package")
+        return 4
+    with tempfile.TemporaryDirectory() as unpacked:
+        with zipfile.ZipFile(path) as package:
+            package.extractall(unpacked)
+        return judge_package(path, unpacked)
+
+
 def timeline_lines(entries, breaks, warns):
     """The human timeline, one string per line — report prints it, and
     explain hands it to the narrating model."""
@@ -2155,6 +2383,15 @@ def main(argv=None):
     verify_parser.add_argument("--anchors", action="store_true",
                                help="also judge anchor proofs, offline")
     verify_parser.set_defaults(func=cmd_verify)
+    package_parser = sub.add_parser(
+        "verify-package",
+        help="judge a package written by `supervisor package`, a zip or a "
+             "folder, layer by layer: each chain verbatim, each artifact "
+             "against the manifest, the package verdict last (ADR-0026)")
+    package_parser.add_argument("path", metavar="PATH",
+                                help="the package: a zip, or its unpacked "
+                                     "folder")
+    package_parser.set_defaults(func=cmd_verify_package)
     anchor_parser = sub.add_parser(
         "anchor", parents=[common],
         help="commit the chain head to Bitcoin via OpenTimestamps")
