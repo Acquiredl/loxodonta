@@ -12,7 +12,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Changed
 
-- Usage errors exit `64` (sysexits `EX_USAGE`) in both `loxodonta.py` and `supervisor.py`: an unknown flag, a missing required argument, or a malformed value (`--expect-head`, `--anchor-every`) no longer shares exit `2` with `FILES-DIVERGED`, so a verdict exit is never an argparse error. Argparse's message on stderr is unchanged, and every verdict exit is untouched: `0` to `5` from the recorder, `5`, `6`, `7` from `scan` (ADR-0026 ruling 7, #175).
+- Usage errors exit `64` (sysexits `EX_USAGE`) in both `loxodonta.py` and `supervisor.py`: an unknown flag, a missing required argument, or a malformed value (`--expect-head`, `--anchor-every`) no longer shares exit `2` with `FILES-DIVERGED`, so a verdict exit is never an argparse error. Argparse's message on stderr is unchanged, and every verdict exit is untouched: the recorder's `0` to `5`, and `scan`'s `0` to `7` (ADR-0026 ruling 7, #175).
 
 ## [0.2.0] - 2026-09-08
 

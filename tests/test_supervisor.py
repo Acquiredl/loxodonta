@@ -2247,6 +2247,39 @@ class ConsumptionTest(unittest.TestCase):
         self.assertEqual(report["consumption"]["norm"]["sessions_counted"], 0)
 
 
+class DashLeadingStoreTest(unittest.TestCase):
+    """Every path the supervisor hands the recorder travels as one
+    `--flag=value` token, so a store path that begins with a dash (a
+    relative LOXODONTA_HOME such as `-home`, run from its parent folder)
+    never reads as a flag to the recorder's parser, and scan's exit stays
+    inside its own ladder instead of carrying the recorder's usage exit."""
+
+    def test_a_dash_leading_store_path_scans_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            drawer = root / "-dashhome" / "receipts" / "alpha-11111111"
+            drawer.mkdir(parents=True)
+            (drawer / "project.json").write_text(
+                json.dumps({"path": str(root)}), encoding="utf-8")
+            make_chain(drawer, "sess-aaaa", entries=2)
+            witness = root / "no-witness"
+            witness.mkdir()
+
+            result = subprocess.run(
+                [sys.executable, str(SUPERVISOR), "scan", "--json",
+                 "--witness", str(witness)],
+                cwd=str(root), capture_output=True, encoding="utf-8",
+                env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                     "LOXODONTA_HOME": "-dashhome"})
+
+            self.assertEqual(result.returncode, 0,
+                             result.stdout + result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["exit"], 0)
+            (chain,) = chains_by_session(report)[(root.name, "sess-aaaa")]
+            self.assertEqual(chain["verdict"], "VALID")
+
+
 def run_supervisor(*args):
     """Invoke the supervisor as an operator would, with nothing prepared:
     a usage error is decided before any store is read."""

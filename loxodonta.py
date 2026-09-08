@@ -2133,13 +2133,16 @@ def main(argv=None):
     parser.add_argument("--version", action=VersionAction,
                         help="print tool version, format version, and "
                              "the checkout's commit, then exit")
-    common = UsageParser(add_help=False)
+    # Parents only donate arguments; the parser that errors is the
+    # subparser's, and add_subparsers gives every subparser `parser`'s
+    # class, so the helpers below stay plain.
+    common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--log", default=DEFAULT_LOG, help="receipt log path")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", parents=[common],
                    help="create a new receipt log with its genesis entry"
                    ).set_defaults(func=cmd_init)
-    actor_files = UsageParser(add_help=False)
+    actor_files = argparse.ArgumentParser(add_help=False)
     actor_files.add_argument("--actor", required=True, help="who acted")
     actor_files.add_argument("--file", action="append", default=[], metavar="PATH",
                              help="file to fingerprint (repeatable)")
@@ -2253,9 +2256,9 @@ if __name__ == "__main__":
     except OSError as e:
         # The reader hung up (`loxodonta report | head`) — no verdict was
         # asked of the lines that went unread; die quietly, not loudly.
-        # (This exit 1 reuses a verdict number, the one exit here that
-        # still does now that usage errors have their own, 64; scripts
-        # should trust the stdout verdict line, never the exit code alone.)
+        # (This exit 1 reuses a verdict number, the only one left now that
+        # usage errors exit 64 on their own, so scripts should trust the
+        # stdout verdict line, never the exit code alone.)
         # POSIX raises BrokenPipeError (EPIPE); Windows reports a plain
         # EINVAL from the closed handle instead, so match on both or the
         # quiet death is a traceback on half the platforms.

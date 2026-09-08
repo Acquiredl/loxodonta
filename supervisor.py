@@ -150,7 +150,7 @@ def verify(log):
     # supervisor that missed its one job.
     result = subprocess.run(
         [sys.executable, str(LOXODONTA), "verify", "--anchors",
-         "--log", str(log)],
+         f"--log={log}"],
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     lines = result.stdout.strip().splitlines()
@@ -447,7 +447,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     if sidecar.exists():
         finished = subprocess.run(
             [sys.executable, str(LOXODONTA), "anchor", "--upgrade",
-             "--log", str(log)],
+             f"--log={log}"],
             capture_output=True, encoding="utf-8", env=env)
         attempted = True
         if finished.returncode != 0:
@@ -459,7 +459,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
         ripe = born is not None and (now - born).total_seconds() >= cadence
         if head and ripe and head not in sidecar_heads(sidecar):
             command = [sys.executable, str(LOXODONTA), "anchor",
-                       "--log", str(log)]
+                       f"--log={log}"]
             for calendar in calendars:
                 command += ["--calendar", calendar]
             finished = subprocess.run(command, capture_output=True,
@@ -944,7 +944,7 @@ def keep_tails(sessions):
         try:
             done = subprocess.run(
                 [sys.executable, str(LOXODONTA), "hook",
-                 "--log-dir", row["home"]],
+                 f"--log-dir={row['home']}"],
                 input=payload, capture_output=True, timeout=60)
         except (OSError, subprocess.SubprocessError):
             continue
@@ -2282,7 +2282,7 @@ def cmd_verify(args):
         return code
     log = match[0]
     judged = subprocess.run(
-        [sys.executable, str(LOXODONTA), "verify", "--log", str(log)],
+        [sys.executable, str(LOXODONTA), "verify", f"--log={log}"],
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     print(f"chain: {log.as_posix()}")
@@ -5331,7 +5331,10 @@ def main(argv):
                         help="print tool version, format version, and "
                              "the checkout's commit, then exit")
     sub = parser.add_subparsers(dest="command", required=True)
-    watching = UsageParser(add_help=False)
+    # Parents only donate arguments; the parser that errors is the
+    # subparser's, and add_subparsers gives every subparser `parser`'s
+    # class, so the helpers below stay plain.
+    watching = argparse.ArgumentParser(add_help=False)
     watching.add_argument("--witness", default=str(WITNESS_ROOT),
                           help="the harness transcript layout (the "
                                "liveness witness for completeness)")
@@ -5388,7 +5391,7 @@ def main(argv):
 
     # The recall surface (Stage E, ADR-0009): digest is local by design;
     # show / search / timeline take --all to reach the whole root.
-    recall_common = UsageParser(add_help=False)
+    recall_common = argparse.ArgumentParser(add_help=False)
     recall_common.add_argument(
         "--repo", default=None,
         help="repo directory (default: CLAUDE_PROJECT_DIR, else the "
