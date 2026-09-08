@@ -141,6 +141,44 @@ class HookTest(unittest.TestCase):
         self.assertIn("pytest -q", entries[1]["action"])
         self.assertIn("git status", entries[2]["action"])
 
+    def test_long_action_is_cut_at_a_word_boundary(self):
+        # A receipt's action is one line (SPEC §2), cut with an ellipsis.
+        # The cut lands between words, never inside one: the todo chain's
+        # receipts read "publi…" and "noreply@ant…" before this (#157).
+        words = " ".join(f"word{i:03d}" for i in range(40))  # 319 chars
+        run_hook(payload(tool="Bash", tool_input={"command": words}),
+                 cwd=self.workdir)
+        action = self.entries()[1]["action"]
+        self.assertTrue(action.endswith("…"), action)
+        body = action[len("Bash: "):-1]
+        self.assertLessEqual(len(body), 160)
+        self.assertTrue(body.endswith(tuple(f"word{i:03d}" for i in range(40))),
+                        f"cut inside a word: {body[-12:]!r}")
+
+    def test_long_action_without_spaces_is_cut_at_the_limit(self):
+        # No word boundary anywhere near the limit (one long URL): the
+        # hard cut at the limit stands rather than dropping most of it.
+        url = "https://example.com/" + "a" * 300
+        run_hook(payload(tool="WebFetch", tool_input={"url": url}),
+                 cwd=self.workdir)
+        action = self.entries()[1]["action"]
+        body = action[len("WebFetch: "):-1]
+        self.assertEqual(len(body), 160)
+        self.assertTrue(action.endswith("…"))
+
+    def test_long_action_never_splits_a_combining_sequence(self):
+        # A base letter and its combining accent straddling the limit:
+        # the cut backs up so the accent is never orphaned at the edge.
+        head = "x" * 159
+        text = head + "e\u0301 tail words follow here"  # e + combining acute
+        run_hook(payload(tool="Bash", tool_input={"command": text}),
+                 cwd=self.workdir)
+        action = self.entries()[1]["action"]
+        body = action[len("Bash: "):-1]
+        self.assertNotEqual(body[-1], "e",
+                            "cut between a base letter and its accent")
+        self.assertLessEqual(len(body), 160)
+
     def test_two_sessions_get_sibling_chains(self):
         run_hook(payload(session="sess-aaaa"), cwd=self.workdir)
         run_hook(payload(session="sess-bbbb"), cwd=self.workdir)

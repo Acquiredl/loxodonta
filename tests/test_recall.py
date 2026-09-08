@@ -138,6 +138,26 @@ class DigestTest(RecallBase):
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertIn("transcript-commitment", shown.stdout)
 
+    def test_header_names_the_bookkeeping_it_keeps_out_of_the_rows(self):
+        # #154: the header counted work entries while the rows' addresses
+        # ran higher, and two agents read the difference as missing
+        # receipts. When a chain holds bookkeeping entries, the header
+        # says so and names the chain's last sequence number.
+        repo = self.repo("alpha")
+        mark = "transcript-commitment: bytes=9 sha256=" + "0" * 64
+        forge_chain(repo, "ffff6666-6666-6666-6666-666666666666", [
+            ("2026-08-20T10:00:00Z", "Edit: one.py"),
+            ("2026-08-20T10:01:00Z", mark, "receipts"),
+            ("2026-08-20T10:05:00Z", "Bash: pytest -q"),
+            ("2026-08-20T10:06:00Z", mark, "receipts"),
+        ])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        header = next(line for line in out.splitlines()
+                      if line.startswith("memory:"))
+        self.assertIn("2 entries", header)
+        self.assertIn("2 bookkeeping", header)
+        self.assertIn("n 4", header)
+
     def test_budget_cap_keeps_newest_and_says_so(self):
         repo = self.repo("alpha")
         steps = [(f"2026-08-20T10:{m:02d}:00Z", f"step {m}")

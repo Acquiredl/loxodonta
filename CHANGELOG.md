@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Changed
 
 - One session, one drawer (ADR-0023): every receipt of a session goes to the drawer its first receipt chose, so a project directory that resolves differently mid-session can no longer split a session's chain in two. Store-routed writes only; `--log-dir` and the cwd-local default are untouched.
+- The digest header says what it leaves out: when a chain holds bookkeeping entries (transcript commitments), the header adds `plus N bookkeeping entries not rendered (last n M)`, so a row's sequence number never reads as a missing receipt (#154).
 
 ### Added
 
@@ -21,6 +22,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Fixed
 
 - A worktree the harness deregistered under a running session still logs to its repository's drawer: the `.git` file names the repository even after `<main>/.git/worktrees/<name>` is gone.
+- A long action line is cut between words, never inside one, and never between a letter and its accent or inside an emoji sequence; a run with no space near the limit is still cut at the limit (#157).
 
 ## [0.1.0] - 2026-09-07
 
