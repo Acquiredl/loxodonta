@@ -3083,7 +3083,7 @@ def send_export(data, out, archive):
 # downloads the one file that already verifies a bare chain.
 
 PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
-PACKAGE_SEALS = []   # declared seals; --anchor and --sign are later slices
+PACKAGE_SEALS = ()   # declared seals; --anchor and --sign are later slices
 # The completeness row travels with these fields only: no judge command,
 # no transcript path, no home. Paths the recipient cannot follow are
 # noise, and the project record already carries the one that matters.
@@ -3245,8 +3245,8 @@ def write_package(session, chains, report, stage, packed):
     listings = []
     artifacts = []
     for log in chains:
-        # Listed from the drawer's copy, whose sidecar sits beside it;
-        # the snapshot has the same head and lines, byte for byte.
+        # Listed from the chain in its drawer, whose sidecar sits beside
+        # it; the snapshot has the same head and lines, byte for byte.
         listing = chain_listing(log)
         listings.append(listing)
         shutil.copyfile(log, stage / log.name)
