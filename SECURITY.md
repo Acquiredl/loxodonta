@@ -4,9 +4,7 @@
 
 Report privately through GitHub's private vulnerability reporting on this
 repository: the *Security* tab, then *Report a vulnerability*. That is the
-only channel; there is no email address. If the *Report a vulnerability*
-button is not there yet (the author enables it by hand in the repository
-settings), open a blank issue with no details and ask for a private channel.
+only channel; there is no email address.
 
 ## Scope
 
@@ -29,27 +27,31 @@ the machine can reach.
 
 These are the design, not vulnerabilities:
 
-- Anyone with write access to the store can rewrite a chain. That is the
-  stated gap (SPEC §8); head records and anchors are how the operator closes
-  it.
+- Anyone with write access to the store can rewrite a chain. The log is a
+  file, and whoever can write the file can rewrite it; the format states
+  that as a non-goal on purpose, and head records and anchors are how the
+  operator closes it ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
 - A compromised writer lying at write time is chained faithfully. Receipts
   are testimony.
 - A tool call that never fired the hook leaves no break. Completeness is the
   integration's job; the supervisor's witness alarms on the gap.
-- Chains are plaintext by design (SPEC §8). Action lines, paths, and the
-  digest are readable on purpose: in the forensic case the artifact is the
-  evidence. A report that "the log is readable" or "the log contains command
-  lines" is not a vulnerability.
+- Chains are plaintext by design. Action lines, paths, and the digest are
+  readable on purpose: in the forensic case the artifact is the evidence,
+  and a log the operator cannot read is not evidence. A report that "the log
+  is readable" or "the log contains command lines" is not a vulnerability
+  ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
 
 These are vulnerabilities, and reports of them are wanted:
 
 - A tamper that `verify` accepts: an edit, deletion, reorder, splice, or
-  regeneration that the chain rule or the canonical form (SPEC §4, §5) lets
-  through.
+  regeneration that gets past the rule that each receipt's hash covers the
+  receipt before it, or past the exact bytes that hash is computed over
+  ([SPEC §4 and §5](docs/SPEC.md#4-canonical-form-and-entry_hash)).
 - An anchor proof that verifies against a head it does not commit to.
 - A path by which a secret or file content reaches a receipt, an export, or
-  the digest. Receipts must never contain secrets (SPEC §8); one that does
-  is a bug in whatever wrote it.
+  the digest. A receipt holds a one-line action summary and file
+  fingerprints, never file contents, so a secret in one is a bug in whatever
+  wrote it ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
 - `serve` reachable from off the machine, or `mcp` gaining a write path.
 - `install-hook` writing anything into the harness settings beyond the
   documented hook entries.
