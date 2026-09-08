@@ -10,6 +10,27 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-08
+
+The release after the measurement: what the orientation-cost run (EXPERIMENTS §6) found is fixed or stated, the window between anchors is closed for anyone who opts in at install, and the front door says how the repo is built.
+
+### Changed
+
+- The coverage claim states its edge: what the harness does on a session's behalf outside any tool call (a worktree it merges when a session leaves it) fires no hook and leaves no receipt; HOOK.md, the GLOSSARY, and the README's defends-against table say so, and point at git's reflog for the pointer move (#156).
+- One session, one drawer (ADR-0023): every receipt of a session goes to the drawer its first receipt chose, so a project directory that resolves differently mid-session can no longer split a session's chain in two. Store-routed writes only; `--log-dir` and the cwd-local default are untouched.
+- The digest header says what it leaves out: when a chain holds bookkeeping entries (transcript commitments), the header adds `plus N bookkeeping entries not rendered (last n M)`, so a row's sequence number never reads as a missing receipt (#154).
+
+### Added
+
+- `install-hook --anchor-at-session-end` (ADR-0024): opt in once, and every session end anchors the chain head to Bitcoin through OpenTimestamps, after the tail commitment, quietly and best-effort under a fixed budget, then spends the leftover budget upgrading the drawer's pending proofs. `hook --anchor` and `hook --calendar` carry it. Nothing leaves the machine without the opt-in; the `gh` head ledger is rejected as writer-reachable.
+- `supervisor verify ADDRESS`: the recorder's verdict on the chain holding an entry address, printed verbatim with its exit code, the CLI twin of the MCP tool (ADR-0019, one-to-one restored). `show` names the chain's full path and the verify command; the digest footer names it too, so an agent holding an address never has to hunt for the chain file (#155).
+- A repository's recall (`digest`, `search`, `timeline`) also reads the drawers of its own harness worktrees (`<repo>/.claude/worktrees/`), so a session split before this release is shown whole.
+
+### Fixed
+
+- A worktree the harness deregistered under a running session still logs to its repository's drawer: the `.git` file names the repository even after `<main>/.git/worktrees/<name>` is gone.
+- A long action line is cut between words, never inside one, and never between a letter and its accent or inside an emoji sequence; a run with no space near the limit is still cut at the limit (#157).
+
 ## [0.1.0] - 2026-09-07
 
 The first tagged release, cut from the promotion that lands the presentation arc. The tool is versioned from here; the history before this tag lives in `adrs/` and `docs/HISTORY.md` (ADR-0022).
@@ -31,5 +52,6 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.1.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.2.0...dev
+[0.2.0]: https://github.com/Acquiredl/loxodonta/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Acquiredl/loxodonta/releases/tag/v0.1.0

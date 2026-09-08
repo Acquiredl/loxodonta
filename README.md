@@ -9,7 +9,7 @@ Every completed tool call your agent makes leaves a receipt, and one command tel
 
 - **The bad day.** A prompt-injected session keeps leaving receipts, because the hook fires outside the agent's control. Afterward you have what it did, in order, whether that record was touched since, and a redacted export to study. In the OWASP Top 10 for LLM applications this is the forensic layer for LLM01, prompt injection, and the monitored tool use that LLM03, excessive agency, prescribes: one layer among several, never the only one.
 - **Memory.** Git holds the result. The transcript holds everything, at megabytes, for as long as the harness keeps it (Claude Code's default is thirty days). The chain holds what git cannot tell you: what was read, what was tried, what was thrown away, what never became a commit, a few KB per session, written by the hook and not by the agent's own summary. Every new session starts with it in front of it, and a month later it is still there. Measured on two repos, not assumed ([docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)): fresh agents with the chain answered what git-only agents had to call "cannot determine"; agents handed the raw transcript answered as much at the same cost, so the claim is coverage over git, not cheapness over the transcript.
-- **The anchor.** At moments you choose, the chain head is committed to Bitcoin through OpenTimestamps, free and without a wallet. Bitcoin is the anchor built in, not the only kind possible: the head is a plain hash, and anything off the machine that will hold a hash with a time serves. Everything up to an anchored head is on record as of that block: the one piece of evidence a rewrite on the machine cannot forge.
+- **The anchor.** At moments you choose, or at every session end once you opt in at install, the chain head is committed to Bitcoin through OpenTimestamps, free and without a wallet. Bitcoin is the anchor built in, not the only kind possible: the head is a plain hash, and anything off the machine that will hold a hash with a time serves. Everything up to an anchored head is on record as of that block: the one piece of evidence a rewrite on the machine cannot forge.
 
 Two receipts, a verdict, then the agent rewrites its own log to hide what it touched, then a verdict again:
 
@@ -39,7 +39,7 @@ One file, Python 3.9 or newer, nothing to install. Download `loxodonta.py` and `
 
 ```
 sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Windows
-python loxodonta.py --version     # loxodonta 0.1.0 (format 0.1, commit ...)
+python loxodonta.py --version     # loxodonta 0.2.0 (format 0.1, commit ...)
 ```
 
 `main` is the stable branch: it is tested on Linux, macOS, and Windows, and every claim on this page is true of it. New work lands on `dev` and reaches `main` with a tag and a release.
@@ -136,7 +136,7 @@ python loxodonta.py verify --files    # also compare every logged file against d
 python loxodonta.py explain           # LLM narration of the log (testimony, not a verdict)
 ```
 
-One honest note on timing: an anchor hardens history **up to the anchored head**; entries written since your last anchor are protected by detection only until the next one. So anchor at meaningful moments (end of a session, end of a pipeline run), and copy the sidecar proof file somewhere the agent can't reach. A proof in your hands is evidence no rewrite on the machine can touch.
+One honest note on timing: an anchor hardens history **up to the anchored head**; entries written since your last anchor are protected by detection only until the next one. So anchor at meaningful moments (end of a session, end of a pipeline run), or let the hook do it: `python loxodonta.py install-hook --anchor-at-session-end` anchors every session's head when it ends, quietly, and a 32-byte digest is the only thing that leaves the machine. Either way, copy the sidecar proof file somewhere the agent can't reach. A proof in your hands is evidence no rewrite on the machine can touch.
 
 **Exit codes**, since scripts and cron will read them: `0` valid, `1` chain broken, `2` a logged file changed since its receipt (`verify --files`), `3` this is not the recorded history (head or anchor mismatch, the gravest tier). Argparse usage errors also exit `2`, so scripts should trust the stdout verdict line, never the exit code alone.
 
@@ -185,7 +185,7 @@ e2646aab  09:16Z  claude-code  Read: todo.py
 09d87676  09:22Z  claude-code  2x Bash, last: git commit -am "list: count from 1, the way people do"   <- last recorded action
 ```
 
-Every row carries an **entry address**, a short prefix of the entry's own hash, and three commands climb from there:
+Every row carries an **entry address**, a short prefix of the entry's own hash, and four commands climb from there:
 
 ```
 python supervisor.py digest                   # what the hook injects, by hand
@@ -193,6 +193,7 @@ python supervisor.py show 09d87676            # one full entry by address
 python supervisor.py search "unittest"        # the whole repo's chains, not just the window
 python supervisor.py search "unittest" --all  # every repo under your root
 python supervisor.py timeline 09d87676        # what happened around that entry
+python supervisor.py verify 09d87676          # the recorder's verdict on the chain holding that entry
 ```
 
 The same five readings are also an MCP server (`python supervisor.py mcp`), so an agent that can't run the hook (Codex, an Agents SDK program, any MCP client) reads the same memory in the same words. It is read-only by decision: an agent may read its history here, never append to it ([docs/MCP.md](docs/MCP.md)).
@@ -271,6 +272,7 @@ A few places this has already earned its keep for me, beyond the daily timeline:
 | Silently modifying a logged file later | yes | file's current hash differs from its receipt |
 | A compromised writer lying at write time | no | garbage in, faithfully chained garbage out |
 | The writer omitting an entry entirely | not by the chain | a never-written entry leaves no break; completeness comes from the integration (`run`, the hook), and the supervisor alarms on the gap |
+| The harness acting outside a tool call (a worktree it merges when a session leaves it) | no | no tool event, so no receipt; the commits it carries have theirs, and git's reflog holds the moment the pointer moved |
 | Regenerating the whole chain from scratch | tiered | `verify --expect-head` against your recorded head, or an anchor: a regenerated chain can only carry young anchors |
 
 ## Send me what your machine saw

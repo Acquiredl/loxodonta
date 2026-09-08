@@ -13,6 +13,7 @@ import os
 import shlex
 import subprocess
 import sys
+import unicodedata
 import time
 import urllib.error
 import urllib.request
@@ -22,7 +23,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.1.0"
+TOOL_VERSION = "0.2.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -598,14 +599,136 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
         f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 
 
-def calendar_request(url, data=None):
+def calendar_request(url, data=None, timeout=15):
     request = urllib.request.Request(
         url, data=data,
         headers={"Accept": "application/vnd.opentimestamps.v1",
                  "User-Agent": "loxodonta"},
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read(MAX_PROOF_BYTES)
+
+
+# --- The session-end anchor (ADR-0024) ---------------------------------------
+# A hook wired with --anchor anchors the chain head when the session
+# ends: after the tail commitment, under a budget that fits inside the
+# harness's SessionEnd timeout, quiet on every failure (an exit hook that
+# complains is noise nobody can act on), and spending whatever budget is
+# left upgrading the drawer's pending proofs so a machine that never runs
+# the supervisor still reaches Bitcoin-grade, one session late.
+
+def seal_session(log, transcript_path):
+    """The tail commitment (ADR-0017's named deferral, issue #79): a
+    clean exit seals the transcript's final bytes, closing the window
+    the every-25 cadence leaves open. Every failure path is a silent
+    skip: an exit hook that complains is noise nobody can act on, and
+    the harness's SessionEnd budget is short by design. Returns the
+    hook's exit code."""
+    action = transcript_commitment_action(transcript_path)
+    if action is None:
+        return 0
+    try:
+        with ChainLock(log):
+            try:
+                last = tail_entry(read_log(log))
+            except FileNotFoundError:
+                return 0
+            if last is None or last.get("action") == action:
+                # A damaged tail cannot anchor a seal, and a session
+                # that ended exactly on a cadence boundary with an
+                # unchanged transcript is already committed.
+                return 0
+            return append_locked(log, "receipts", action, [])
+    except LockTimeout:
+        return locked_out(log)
+
+
+SESSION_END_BUDGET = 12.0   # seconds, under the installer's 20 s timeout
+SESSION_END_CALL = 5.0      # seconds per calendar request
+
+
+def session_end_anchor(log, calendars, budget=SESSION_END_BUDGET):
+    """Anchor `log`'s head with the calendars, then upgrade pending
+    proofs in its folder, all inside `budget` seconds. Never raises,
+    never prints: staleness is the supervisor's to surface."""
+    try:
+        anchor_and_upgrade(log, calendars, budget)
+    except Exception:  # noqa: BLE001 - an exit hook that raises is noise
+        return
+
+
+def anchor_and_upgrade(log, calendars, budget):
+    deadline = time.monotonic() + budget
+
+    def remaining():
+        return min(SESSION_END_CALL, deadline - time.monotonic())
+
+    try:
+        lines = read_log(log)
+        last = json.loads(lines[-1]) if lines else None
+    except (OSError, ValueError):
+        return
+    if not isinstance(last, dict) or "entry_hash" not in last:
+        return
+    head, n = last["entry_hash"], last.get("n")
+    anchored = {r["head"] for r in (read_anchor_records(log) or [])
+                if isinstance(r, dict) and "head" in r}
+    if head not in anchored:
+        for calendar in calendars:
+            if remaining() <= 0:
+                break
+            url = calendar.rstrip("/")
+            try:
+                proof = calendar_request(url + "/digest",
+                                         data=bytes.fromhex(head),
+                                         timeout=remaining())
+                judge_proof(head, proof)
+                append_anchor_record(log, head, n, url, proof)
+            except (OSError, ProofError, ValueError):
+                continue
+    upgrade_pending_proofs(os.path.dirname(os.path.abspath(log)), remaining,
+                           deadline)
+
+
+def upgrade_pending_proofs(folder, remaining, deadline):
+    """Every pending proof in the folder's sidecars, oldest first, one
+    request each, until the deadline. Completed pairs are skipped."""
+    for name in sorted(os.listdir(folder)):
+        if not name.endswith(".anchors.jsonl"):
+            continue
+        chain = os.path.join(folder, name[:-len(".anchors.jsonl")])
+        completed, pending = set(), []
+        for record in (read_anchor_records(chain) or []):
+            if not isinstance(record, dict):
+                continue
+            try:
+                verdict = judge_proof(record["head"],
+                                      base64.b64decode(record["proof"]))
+            except (ProofError, KeyError, ValueError):
+                continue
+            key = (record["head"], record["calendar"])
+            if verdict[0] == "bitcoin":
+                completed.add(key)
+            else:
+                pending.append((record, verdict[1]))
+        for record, commitment_hex in pending:
+            if time.monotonic() >= deadline:
+                return
+            key = (record["head"], record["calendar"])
+            if key in completed:
+                continue
+            url = record["calendar"].rstrip("/")
+            try:
+                continuation = calendar_request(
+                    f"{url}/timestamp/{commitment_hex}", timeout=remaining())
+                upgraded = splice_continuation(
+                    base64.b64decode(record["proof"]), record["head"],
+                    continuation)
+            except (OSError, ProofError, ValueError):
+                continue
+            append_anchor_record(chain, record["head"], record["n"], url,
+                                 upgraded)
+            completed.add(key)
 
 
 def cmd_anchor(args):
@@ -1247,11 +1370,31 @@ def commit_transcript_due(log, transcript_path):
 
 def one_line(text, limit=160):
     """Whitespace collapsed to single spaces, truncated with an ellipsis —
-    action is one line (SPEC §2), and receipts are not transcripts."""
+    action is one line (SPEC §2), and receipts are not transcripts.
+
+    The cut lands between words when a space sits within the last forty
+    characters before the limit, so a receipt reads "…noreply@anthropic.com"
+    rather than "…noreply@ant" (#157); a run with no space there (one long
+    URL) is cut at the limit itself. It never orphans a combining mark or
+    a joiner at the edge either, so an accented letter or an emoji
+    sequence is dropped whole rather than split."""
     line = " ".join(str(text).split())
-    if len(line) > limit:
-        line = line[:limit] + "…"
-    return line
+    if len(line) <= limit:
+        return line
+    cut = limit
+    while cut > 0 and (unicodedata.combining(line[cut])
+                       or line[cut] in JOINERS or line[cut - 1] in JOINERS):
+        cut -= 1
+    space = line.rfind(" ", max(0, cut - 40), cut)
+    if space > 0:
+        cut = space
+    return line[:cut] + "…"
+
+
+# Code points that glue to a neighbour: the zero-width joiner of emoji
+# sequences, the variation selectors, and the skin-tone modifiers.
+JOINERS = frozenset({"\u200d", "\ufe0e", "\ufe0f"}
+                    | {chr(c) for c in range(0x1F3FB, 0x1F400)})
 
 
 def main_repo_root(project):
@@ -1284,13 +1427,54 @@ def main_repo_root(project):
         gitdir = line[len("gitdir:"):].strip()
         if not os.path.isabs(gitdir):
             gitdir = os.path.join(project, gitdir)
-        with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as f:
-            common = f.read().strip()
-        common = os.path.normpath(os.path.join(gitdir, common))
-        root = os.path.dirname(common)  # <main>/.git -> <main>
+        try:
+            with open(os.path.join(gitdir, "commondir"),
+                      encoding="utf-8") as f:
+                common = f.read().strip()
+            common = os.path.normpath(os.path.join(gitdir, common))
+            root = os.path.dirname(common)  # <main>/.git -> <main>
+        except OSError:
+            # A worktree the harness already deregistered (ADR-0023): the
+            # gitdir is gone, but the .git file still spells it as
+            # <main>/.git/worktrees/<name>, and <main> is in that string.
+            root = deregistered_main(gitdir)
+            if root is None:
+                return project
         return root if os.path.isdir(root) else project
     except OSError:
         return project
+
+
+def deregistered_main(gitdir):
+    """The main repository named by a worktree's gitdir path, read from
+    the path alone: everything before `/.git/worktrees/`. None when the
+    path is not shaped like a worktree's."""
+    spelled = gitdir.replace(os.sep, "/")
+    marker = "/.git/worktrees/"
+    at = spelled.find(marker)
+    return spelled[:at] if at > 0 else None
+
+
+def drawer_of_session(log_dir, session):
+    """One session, one drawer (ADR-0023): the session's first receipt
+    decides. When the resolved drawer holds no chain for this session yet
+    but another drawer in the store does, the receipt goes there, so a
+    resolution that changes mid-session (a worktree cleaned up under a
+    running session) can never split a session in two. The normal case
+    costs nothing: the resolved drawer already has the chain."""
+    name = f"receipts-{session}.jsonl"
+    if os.path.exists(os.path.join(log_dir, name)):
+        return log_dir
+    root = os.path.join(store_home(), "receipts")
+    try:
+        drawers = os.listdir(root)
+    except OSError:
+        return log_dir
+    for drawer in drawers:
+        other = os.path.join(root, drawer)
+        if other != log_dir and os.path.exists(os.path.join(other, name)):
+            return other
+    return log_dir
 
 
 def store_home():
@@ -1420,6 +1604,12 @@ def cmd_hook(args):
     # Session id becomes part of a filename: keep only safe characters.
     safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(session))
 
+    # One session, one drawer (ADR-0023), for store-routed writes only:
+    # an explicit --log-dir or the cwd-local default is the operator's
+    # own choice and is left alone.
+    if project is not None:
+        log_dir = drawer_of_session(log_dir, safe)
+
     if ending:
         # The tail commitment (ADR-0017's named deferral, issue #79): a
         # clean exit seals the transcript's final bytes, closing the
@@ -1434,24 +1624,13 @@ def cmd_hook(args):
         log = writable_chain(log_dir, safe)
         if not os.path.exists(log):
             return 0
-        action = transcript_commitment_action(
-            payload.get("transcript_path"))
-        if action is None:
-            return 0
-        try:
-            with ChainLock(log):
-                try:
-                    last = tail_entry(read_log(log))
-                except FileNotFoundError:
-                    return 0
-                if last is None or last.get("action") == action:
-                    # A damaged tail cannot anchor a seal, and a session
-                    # that ended exactly on a cadence boundary with an
-                    # unchanged transcript is already committed.
-                    return 0
-                return append_locked(log, "receipts", action, [])
-        except LockTimeout:
-            return locked_out(log)
+        code = seal_session(log, payload.get("transcript_path"))
+        # The commitment first, then the anchor (ADR-0024): the head
+        # that gets anchored is the sealed one, and a slow calendar can
+        # never cost the commitment.
+        if args.anchor:
+            session_end_anchor(log, args.calendar or DEFAULT_CALENDARS)
+        return code
 
     if not os.path.isdir(log_dir):
         os.makedirs(log_dir, exist_ok=True)
@@ -1576,15 +1755,18 @@ PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 CODEX_SESSION_END_TIMEOUT = 3
 
 
-def recorder_command(actor=None):
+def recorder_command(actor=None, anchor=False):
     """The hook command the installers write: this interpreter, this
     file, no shell expansion — the hook resolves the project itself, so
     one command works on every platform. `actor` names the harness the
-    receipts will say acted (ADR-0020)."""
+    receipts will say acted (ADR-0020); `anchor` is the session-end
+    anchor opt-in, carried on the SessionEnd command so the choice is
+    readable in the settings file (ADR-0024)."""
     python = sys.executable.replace(os.sep, "/")
     self_path = os.path.abspath(__file__).replace(os.sep, "/")
     command = f'"{python}" "{self_path}" hook'
-    return command + (f" --actor {actor}" if actor else "")
+    command += f" --actor {actor}" if actor else ""
+    return command + (" --anchor" if anchor else "")
 
 
 def supervisor_path():
@@ -1715,6 +1897,14 @@ def cmd_install_hook(args):
     Restart open sessions afterwards: hooks load at start. With
     --codex, the Codex half runs instead (install_codex_hooks)."""
     if args.codex:
+        if args.anchor_at_session_end:
+            # Codex caps a SessionEnd hook at three seconds, too short
+            # for a calendar round trip with any margin (ADR-0024).
+            print("error: --anchor-at-session-end is not wired for Codex: "
+                  "its SessionEnd hook is capped at three seconds, too "
+                  "short to reach a calendar with margin. Use the "
+                  "supervisor's --anchor-every instead.", file=sys.stderr)
+            return 1
         return install_codex_hooks()
     supervisor = supervisor_path()
     record = recorder_command()
@@ -1769,13 +1959,29 @@ def cmd_install_hook(args):
     # hooks a short shared budget by default, and a large transcript
     # deserves the read.
     end = hooks.setdefault("SessionEnd", [])
-    healed += heal(end, RECORDER_MARKERS, record)
+    record_end = recorder_command(anchor=args.anchor_at_session_end)
+    healed += heal(end, RECORDER_MARKERS, record_end)
+    # The session-end anchor opt-in rides on this command (ADR-0024).
+    # The install command states the choice each time: a re-run
+    # without the flag turns it off, and says so.
+    for block in end:
+        for hook in block.get("hooks", []):
+            old = hook.get("command", "")
+            if any(m in old for m in RECORDER_MARKERS) and old != record_end:
+                hook["command"] = record_end
+                installed.append(
+                    f"SessionEnd: {record_end}"
+                    + (" (now anchors at session end)"
+                       if args.anchor_at_session_end
+                       else " (no longer anchors at session end)"))
     if not any(ours(b) for b in end):
         end.append({
-            "hooks": [{"type": "command", "command": record,
+            "hooks": [{"type": "command", "command": record_end,
                        "timeout": 20}],
         })
-        installed.append(f"SessionEnd: {record}")
+        installed.append(f"SessionEnd: {record_end}"
+                         + (" (anchors at session end)"
+                            if args.anchor_at_session_end else ""))
 
     if os.path.isfile(supervisor):
         start = hooks.setdefault("SessionStart", [])
@@ -1968,6 +2174,15 @@ def main(argv=None):
                                   "else the working directory)")
     hook_parser.add_argument("--actor", default="claude-code",
                              help="actor recorded for hook entries")
+    hook_parser.add_argument("--anchor", action="store_true",
+                             help="at SessionEnd, anchor the chain head "
+                                  "and upgrade pending proofs, quietly "
+                                  "(ADR-0024; install-hook "
+                                  "--anchor-at-session-end wires this)")
+    hook_parser.add_argument("--calendar", action="append", default=None,
+                             metavar="URL",
+                             help="calendar for --anchor (repeatable; "
+                                  "default: the public pools)")
     hook_parser.set_defaults(func=cmd_hook)
     explain_parser = sub.add_parser(
         "explain", parents=[common],
@@ -1984,6 +2199,12 @@ def main(argv=None):
         "--codex", action="store_true",
         help="wire Codex CLI instead: PostToolUse, SessionEnd, and the "
              "SessionStart digest into $CODEX_HOME/hooks.json (ADR-0020)")
+    install_parser.add_argument(
+        "--anchor-at-session-end", action="store_true",
+        help="opt in: every session end anchors the chain head to Bitcoin "
+             "via OpenTimestamps, quietly and best-effort, and upgrades "
+             "pending proofs (ADR-0024). A 32-byte digest leaves the "
+             "machine at each session end; nothing else does")
     install_parser.set_defaults(func=cmd_install_hook)
     uninstall_parser = sub.add_parser(
         "uninstall-hook",

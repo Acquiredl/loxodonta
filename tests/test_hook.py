@@ -8,6 +8,7 @@ public CLI with stdin payloads, never internals.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -139,6 +140,44 @@ class HookTest(unittest.TestCase):
         self.assertEqual([e["n"] for e in entries], [0, 1, 2])
         self.assertIn("pytest -q", entries[1]["action"])
         self.assertIn("git status", entries[2]["action"])
+
+    def test_long_action_is_cut_at_a_word_boundary(self):
+        # A receipt's action is one line (SPEC §2), cut with an ellipsis.
+        # The cut lands between words, never inside one: the todo chain's
+        # receipts read "publi…" and "noreply@ant…" before this (#157).
+        words = " ".join(f"word{i:03d}" for i in range(40))  # 319 chars
+        run_hook(payload(tool="Bash", tool_input={"command": words}),
+                 cwd=self.workdir)
+        action = self.entries()[1]["action"]
+        self.assertTrue(action.endswith("…"), action)
+        body = action[len("Bash: "):-1]
+        self.assertLessEqual(len(body), 160)
+        self.assertTrue(body.endswith(tuple(f"word{i:03d}" for i in range(40))),
+                        f"cut inside a word: {body[-12:]!r}")
+
+    def test_long_action_without_spaces_is_cut_at_the_limit(self):
+        # No word boundary anywhere near the limit (one long URL): the
+        # hard cut at the limit stands rather than dropping most of it.
+        url = "https://example.com/" + "a" * 300
+        run_hook(payload(tool="WebFetch", tool_input={"url": url}),
+                 cwd=self.workdir)
+        action = self.entries()[1]["action"]
+        body = action[len("WebFetch: "):-1]
+        self.assertEqual(len(body), 160)
+        self.assertTrue(action.endswith("…"))
+
+    def test_long_action_never_splits_a_combining_sequence(self):
+        # A base letter and its combining accent straddling the limit:
+        # the cut backs up so the accent is never orphaned at the edge.
+        head = "x" * 159
+        text = head + "e\u0301 tail words follow here"  # e + combining acute
+        run_hook(payload(tool="Bash", tool_input={"command": text}),
+                 cwd=self.workdir)
+        action = self.entries()[1]["action"]
+        body = action[len("Bash: "):-1]
+        self.assertNotEqual(body[-1], "e",
+                            "cut between a base letter and its accent")
+        self.assertLessEqual(len(body), 160)
 
     def test_two_sessions_get_sibling_chains(self):
         run_hook(payload(session="sess-aaaa"), cwd=self.workdir)
@@ -487,6 +526,49 @@ class HookWorktreeTest(unittest.TestCase):
             (worktree / "receipts").exists(),
             "nothing should be written into the disposable worktree",
         )
+
+    def test_deregistered_worktree_still_logs_to_the_main_repos_drawer(self):
+        # The case that found ADR-0023: the harness deregistered the
+        # worktree under a running session. <main>/.git/worktrees/<name>
+        # is gone; the folder and its .git file remain, and that file
+        # still names the main repository.
+        main, worktree = self.make_worktree()
+        shutil.rmtree(main / ".git" / "worktrees")
+
+        result = run_hook(payload(session="sess-dereg"), self.workdir,
+                          extra_env=self.env_for(worktree))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        drawer = drawer_of(self.store, "mainrepo")
+        self.assertTrue((drawer / "receipts-sess-dereg.jsonl").exists())
+        names = [p.name for p in (self.store / "receipts").iterdir()]
+        self.assertFalse(any(n.startswith("feature-") for n in names),
+                         f"a drawer opened for the worktree's own path: {names}")
+
+    def test_a_sessions_receipts_follow_its_first_drawer(self):
+        # One session, one drawer (ADR-0023): the first receipt decides,
+        # and a later receipt whose project resolves somewhere else still
+        # lands in that drawer, never in a second one.
+        first = self.workdir / "alpha"
+        first.mkdir()
+        elsewhere = self.workdir / "beta"
+        elsewhere.mkdir()
+        run_hook(payload(session="sess-sticky"), self.workdir,
+                 extra_env=self.env_for(first))
+
+        result = run_hook(
+            payload(session="sess-sticky", tool="Bash",
+                    tool_input={"command": "ls"}),
+            self.workdir, extra_env=self.env_for(elsewhere))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        chain = drawer_of(self.store, "alpha") / "receipts-sess-sticky.jsonl"
+        lines = chain.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 3, lines)  # genesis + two receipts
+        self.assertIn("Bash: ls", lines[-1])
+        names = [p.name for p in (self.store / "receipts").iterdir()]
+        self.assertFalse(any(n.startswith("beta-") for n in names),
+                         f"a second drawer opened for the session: {names}")
 
     def test_sessions_from_two_worktrees_collect_in_one_drawer(self):
         _, first = self.make_worktree(worktree_name="feature-one")

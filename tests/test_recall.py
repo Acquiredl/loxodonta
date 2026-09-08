@@ -138,6 +138,26 @@ class DigestTest(RecallBase):
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertIn("transcript-commitment", shown.stdout)
 
+    def test_header_names_the_bookkeeping_it_keeps_out_of_the_rows(self):
+        # #154: the header counted work entries while the rows' addresses
+        # ran higher, and two agents read the difference as missing
+        # receipts. When a chain holds bookkeeping entries, the header
+        # says so and names the chain's last sequence number.
+        repo = self.repo("alpha")
+        mark = "transcript-commitment: bytes=9 sha256=" + "0" * 64
+        forge_chain(repo, "ffff6666-6666-6666-6666-666666666666", [
+            ("2026-08-20T10:00:00Z", "Edit: one.py"),
+            ("2026-08-20T10:01:00Z", mark, "receipts"),
+            ("2026-08-20T10:05:00Z", "Bash: pytest -q"),
+            ("2026-08-20T10:06:00Z", mark, "receipts"),
+        ])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        header = next(line for line in out.splitlines()
+                      if line.startswith("memory:"))
+        self.assertIn("2 entries", header)
+        self.assertIn("2 bookkeeping", header)
+        self.assertIn("n 4", header)
+
     def test_budget_cap_keeps_newest_and_says_so(self):
         repo = self.repo("alpha")
         steps = [(f"2026-08-20T10:{m:02d}:00Z", f"step {m}")
@@ -306,6 +326,34 @@ class StoreRecallTest(RecallBase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("pytest -q", out.stdout)
 
+    def test_repo_recall_includes_its_harness_worktree_drawers(self):
+        # A drawer recorded under <repo>/.claude/worktrees/ is the repo's
+        # history (ADR-0023): the store-era twin of the legacy rule. A
+        # sub-project elsewhere in the tree is not swept in. Both drawers
+        # are made the way a fallback makes them: plain folders, no .git
+        # file, so each resolves to itself.
+        repo = self.repo("alpha")
+        wt = repo / ".claude" / "worktrees" / "feature"
+        wt.mkdir(parents=True)
+        sub = repo / "packages" / "sub"
+        sub.mkdir(parents=True)
+        self.hook(repo, "aaaa1111-1111-1111-1111-111111111111", "main work")
+        self.hook(wt, "bbbb2222-2222-2222-2222-222222222222", "worktree tail")
+        self.hook(sub, "cccc3333-3333-3333-3333-333333333333",
+                  "sub-project work")
+        env = self.store_env(repo)
+
+        digest = run_py(SUPERVISOR, "digest", "--repo", str(repo),
+                        env_extra=env)
+        self.assertEqual(digest.returncode, 0, digest.stderr)
+        self.assertIn("main work", digest.stdout)
+        self.assertIn("worktree tail", digest.stdout)
+        self.assertNotIn("sub-project work", digest.stdout)
+
+        search = run_py(SUPERVISOR, "search", "tail", "--repo", str(repo),
+                        env_extra=env)
+        self.assertIn("worktree tail", search.stdout)
+
     def test_show_and_search_reach_store_chains(self):
         project = self.repo("alpha")
         self.hook(project, "bbbb2222-2222-2222-2222-222222222222",
@@ -425,6 +473,54 @@ class WorktreeRecallTest(RecallBase):
         result = run_py(SUPERVISOR, "digest", "--repo", str(stray))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "")
+
+
+class VerifyTest(RecallBase):
+    """`supervisor verify <address>`: the CLI twin of the MCP tool
+    (ADR-0019, one-to-one), and the answer to #155. Recall still owns
+    no verdict: this prints the chain's path and then the recorder's
+    own verdict verbatim, exit code and all."""
+
+    def test_verify_by_address_prints_the_chain_and_the_judges_verdict(self):
+        repo = self.repo("alpha")
+        log, hashes = forge_chain(
+            repo, "aaaa1111-1111-1111-1111-111111111111", [
+                ("2026-08-20T10:00:00Z", "Edit: one.py"),
+                ("2026-08-20T10:05:00Z", "Bash: pytest -q"),
+            ])
+        good = run_py(SUPERVISOR, "verify", hashes[1][:8], "--repo", str(repo))
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertIn(f"chain: {log.resolve().as_posix()}", good.stdout)
+        self.assertIn("VALID", good.stdout)
+        # Tamper with a past entry; the same command carries the break,
+        # and the exit code is the recorder's.
+        lines = log.read_text(encoding="utf-8").splitlines()
+        lines[1] = lines[1].replace("Edit: one.py", "Edit: two.py")
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        bad = run_py(SUPERVISOR, "verify", hashes[2][:8], "--repo", str(repo))
+        self.assertEqual(bad.returncode, 1, bad.stdout + bad.stderr)
+        self.assertIn("BROKEN", bad.stdout)
+
+    def test_show_names_the_chains_full_path_and_the_verify_command(self):
+        repo = self.repo("alpha")
+        log, hashes = forge_chain(
+            repo, "bbbb2222-2222-2222-2222-222222222222",
+            [("2026-08-20T10:00:00Z", "Edit: one.py")])
+        shown = run_py(SUPERVISOR, "show", hashes[1][:8], "--repo", str(repo))
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(f"chain: {log.resolve().as_posix()}", shown.stdout)
+        self.assertIn(f"verify {hashes[1][:8]}", shown.stdout)
+
+    def test_digest_footer_names_the_verify_command(self):
+        repo = self.repo("alpha")
+        forge_chain(repo, "cccc3333-3333-3333-3333-333333333333",
+                    [("2026-08-20T10:00:00Z", "Edit: one.py")])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        footer = [line for line in out.splitlines()
+                  if line.startswith("verify: python")]
+        self.assertEqual(len(footer), 1, out)
+        self.assertIn("verify <address>", footer[0])
+        self.assertIn(SUPERVISOR.resolve().as_posix(), footer[0])
 
 
 class ShowTest(RecallBase):
@@ -648,6 +744,31 @@ class InstallerTest(RecallBase):
         self.assertIn("digest", start)
         self.assertIn("startup|clear|compact",
                       json.dumps(settings["hooks"]["SessionStart"]))
+
+    def test_install_can_opt_in_to_session_end_anchoring(self):
+        # ADR-0024: the opt-in lives at install, on the wired SessionEnd
+        # command, readable in the settings file; PostToolUse is untouched.
+        result, home = self.run_installer("install-hook",
+                                          "--anchor-at-session-end")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        settings = self.settings(home)
+        end = settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
+        post = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(end.endswith(" --anchor"), end)
+        self.assertNotIn("--anchor", post)
+        self.assertIn("anchor", result.stdout.lower())
+
+    def test_install_without_the_flag_wires_no_anchor(self):
+        _, home = self.run_installer("install-hook")
+        self.assertNotIn("--anchor", json.dumps(self.settings(home)["hooks"]))
+
+    def test_uninstall_removes_the_anchoring_session_end_hook(self):
+        self.run_installer("install-hook", "--anchor-at-session-end")
+        result, home = self.run_installer("uninstall-hook")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = home / ".claude" / "settings.json"
+        left = path.read_text(encoding="utf-8") if path.exists() else "{}"
+        self.assertNotIn("loxodonta.py", left)
 
     def test_install_is_idempotent(self):
         _, home = self.run_installer("install-hook")

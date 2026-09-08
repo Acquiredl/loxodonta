@@ -1,7 +1,15 @@
 # Contributing
 
 Thanks for looking. This is a small repo with strong opinions, and most of
-them are written down. Reading three files first saves everyone a round trip:
+them are written down.
+
+One thing said plainly: most changes here are made by the author pairing
+with an agent, tests first, through the public CLI. The rules below are
+written so that a person or an agent can follow them equally, and the checks
+(the suite, the house checker, the front-door pin test) are what make that
+safe: a change is judged by what it does when run, not by who typed it.
+
+Reading three files first saves everyone a round trip:
 
 - `GLOSSARY.md`: the vocabulary, used exactly. Note the anti-terms: this is
   not a blockchain, nothing here is immutable, and it is not an audit log.
@@ -50,6 +58,24 @@ Drafts may come from anywhere: a person, an agent, a template. Every sentence
 on the front door (README, SECURITY, CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT)
 is the author's, and README edits are reviewed on that basis. A pull request
 that rewrites front-door prose is taken as a draft, not merged as written.
+
+## Working with an agent
+
+If an agent makes the change, give it the three files above in that order,
+then this one. It runs the suite and the house checker before it opens a
+pull request, like anyone. Four things it must never do, and the first four
+things a reviewer checks:
+
+- Add a dependency, or anything that has to be installed.
+- Change the receipt format. It is frozen at v0.1; a change means a new
+  format version and a new chain (SPEC §2), not an edit.
+- Merge front-door prose as written. Drafts are welcome; the sentences are
+  the author's.
+- Work on `main`. Branch from `dev`, open the pull request against `dev`.
+
+`AGENTS.md` at the root is the short form of this file, for harnesses that
+read it. An agent asked to wire loxodonta into someone else's project is a
+different case: that path is `docs/HOOK.md`, and the README says so.
 
 ## Branches
 

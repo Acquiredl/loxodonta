@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import socketserver
@@ -135,6 +136,113 @@ class FakeCalendarHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+class SessionEndAnchorTest(unittest.TestCase):
+    """ADR-0024: a hook wired with --anchor anchors the session's chain
+    head at SessionEnd, quietly and best-effort, and spends what is left
+    of its budget upgrading the drawer's pending proofs. Driven through
+    `loxodonta hook` with a SessionEnd payload, against the fake
+    calendar, exactly as the harness would run it."""
+
+    SESSION = "sess-end-0001"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.server = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
+        self.server.nonce = b"fake-nonce"
+        self.server.prefix = b"left-branch"
+        self.server.suffix = b"right-branch"
+        self.server.height = 850000
+        self.server.mode = "pending"
+        self.server.submitted = []
+        self.server.polled = []
+        self.server.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.chain = self.workdir / f"receipts-{self.SESSION}.jsonl"
+        self.sidecar = self.workdir / f"receipts-{self.SESSION}.jsonl.anchors.jsonl"
+
+    def hook(self, payload, *extra):
+        env = clean_env()
+        env["PYTHONIOENCODING"] = "utf-8"
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook", *extra],
+            cwd=self.workdir, input=json.dumps(payload).encode("utf-8"),
+            capture_output=True, env=env)
+        result.stdout = result.stdout.decode("utf-8", "replace")
+        result.stderr = result.stderr.decode("utf-8", "replace")
+        return result
+
+    def tool_call(self):
+        return self.hook({"session_id": self.SESSION,
+                          "hook_event_name": "PostToolUse",
+                          "tool_name": "Bash",
+                          "tool_input": {"command": "ls"},
+                          "tool_response": {}})
+
+    def session_end(self, *extra):
+        return self.hook({"session_id": self.SESSION,
+                          "hook_event_name": "SessionEnd"}, *extra)
+
+    def records(self):
+        return [json.loads(line) for line in
+                self.sidecar.read_text(encoding="utf-8").splitlines()]
+
+    def test_session_end_with_anchor_writes_a_sidecar_for_the_head(self):
+        self.tool_call()
+        head = run_receipts("head", "--log", str(self.chain),
+                            cwd=self.workdir).stdout.strip()
+        result = self.session_end("--anchor", "--calendar", self.server.url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")  # quiet
+        self.assertTrue(self.sidecar.exists(), "no sidecar written")
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["head"], head)
+        self.assertEqual(len(self.server.submitted), 1)
+
+    def test_session_end_without_anchor_leaves_no_sidecar(self):
+        self.tool_call()
+        result = self.session_end()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.sidecar.exists())
+        self.assertEqual(self.server.submitted, [])
+
+    def test_unreachable_calendar_is_quiet_fast_and_exits_zero(self):
+        self.tool_call()
+        closed = "http://127.0.0.1:9"  # discard port: nothing listens
+        started = time.monotonic()
+        result = self.session_end("--anchor", "--calendar", closed)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertFalse(self.sidecar.exists())
+
+    def test_an_already_anchored_head_is_not_anchored_twice(self):
+        self.tool_call()
+        self.session_end("--anchor", "--calendar", self.server.url)
+        self.session_end("--anchor", "--calendar", self.server.url)
+        self.assertEqual(len(self.server.submitted), 1)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_a_later_session_end_upgrades_the_pending_proof(self):
+        self.tool_call()
+        self.session_end("--anchor", "--calendar", self.server.url)
+        self.server.mode = "complete"
+        # A new head (one more receipt), so the next session end anchors
+        # again and, with its leftover budget, upgrades the older proof.
+        self.tool_call()
+        result = self.session_end("--anchor", "--calendar", self.server.url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(len(self.server.polled), 1, "no upgrade tried")
+        verify = run_receipts("verify", "--anchors", "--log",
+                              str(self.chain), cwd=self.workdir)
+        self.assertIn("ANCHORED", verify.stdout)
 
 
 class AnchorTest(unittest.TestCase):

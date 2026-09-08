@@ -288,8 +288,11 @@ survive contact with the transcript arm.
 - *Q6.* The transcript counts 38 PowerShell calls of 79; the main
   drawer's receipts give 24 of 61 (31 of 71 with the worktree drawer).
   Both arms named PowerShell and scored 2. The gap between 71 receipts
-  and 79 calls is unexplained (candidates: `ToolSearch`, MCP tools,
-  `Skill`) and is a finding, below.
+  and 79 calls is exactly the eight calls the transcript marks
+  `is_error` (seven PowerShell, one Read), which fire no hook: per tool,
+  calls minus failures equals receipts without remainder, `ToolSearch`,
+  `Skill`, and the MCP tool included (checked 2026-09-08, #158). That is
+  "every completed tool call" as the README states it.
 
 **Pilot** (same day, no budget, `origin` left in place). Means: A 26.3
 calls, 62K out, 1.91M in; B 14.3, 42K, 925K; C 11.3, 22K, 619K. All
@@ -330,4 +333,4 @@ reach a session's worktree-path drawer. The digest header's entry count
 agents. The digest hedges `VALID` as testimony and points at a command
 recall cannot run. The fast-forward merge is in the reflog and in
 neither chain. Action text is capped at 173 characters, twice cut
-mid-character. 71 receipts against 79 transcript tool calls.
+mid-character. 71 receipts against 79 transcript tool calls (resolved: the eight are the failed calls, #158).

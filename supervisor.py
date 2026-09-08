@@ -66,7 +66,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # supervisor is running and is tagged together with loxodonta.py — the
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
-TOOL_VERSION = "0.1.0"
+TOOL_VERSION = "0.2.0"
 FORMAT_VERSION = "0.1"
 
 
@@ -1840,8 +1840,18 @@ def main_repo_of(project):
         gitdir = Path(line[len("gitdir:"):].strip())
         if not gitdir.is_absolute():
             gitdir = project / gitdir
-        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
-        root = Path(os.path.normpath(gitdir / common)).parent
+        try:
+            common = (gitdir / "commondir").read_text(
+                encoding="utf-8").strip()
+            root = Path(os.path.normpath(gitdir / common)).parent
+        except OSError:
+            # A deregistered worktree (ADR-0023): the gitdir is gone, but
+            # its path still spells <main>/.git/worktrees/<name>.
+            spelled = gitdir.as_posix()
+            at = spelled.find("/.git/worktrees/")
+            if at <= 0:
+                return project
+            root = Path(spelled[:at])
         return root if root.is_dir() else project
     except OSError:
         return project
@@ -1917,15 +1927,50 @@ def repo_label(log):
     return parent.parent.name
 
 
-def project_chains(repo):
-    """One project's chains, wherever they live: its store drawer
-    (ADR-0011) — or, when the drawer holds nothing yet (pre-adopt),
-    the legacy repo layout, so the transition never blanks anyone's
-    memory. The drawer outranks a stale legacy folder once it holds
-    anything."""
+def worktree_drawers(repo):
+    """The store drawers of a repository's own harness worktrees: those
+    whose recorded project path lies under <repo>/.claude/worktrees/
+    (ADR-0023). A session that fell back to a worktree's own path, on
+    this machine before the one-session-one-drawer rule or on any
+    machine that ran v0.1.0, is still this repository's history. Narrow
+    on purpose: a sub-project elsewhere in the tree is its own memory."""
+    prefix = os.path.normcase(str(repo)).replace(os.sep, "/").rstrip("/") \
+        + "/.claude/worktrees/"
+    found = []
+    try:
+        drawers = sorted(p for p in store_receipts().iterdir() if p.is_dir())
+    except OSError:
+        return found
+    for drawer in drawers:
+        try:
+            recorded = json.loads((drawer / "project.json").read_text(
+                encoding="utf-8")).get("path", "")
+        except (OSError, ValueError, AttributeError):
+            continue
+        spelled = os.path.normcase(str(recorded)).replace(os.sep, "/")
+        if spelled.startswith(prefix):
+            found.append(drawer)
+    return found
+
+
+def store_chains(repo):
+    """A repository's chains in the store: its own drawer, then the
+    drawers of its harness worktrees (ADR-0023), in that order."""
     drawer = store_receipts() / project_slug(repo)
     logs = drawer_chains(drawer) if drawer.is_dir() else []
-    return logs or repo_chains(repo)
+    for extra in worktree_drawers(repo):
+        if extra != drawer:
+            logs.extend(drawer_chains(extra))
+    return logs
+
+
+def project_chains(repo):
+    """One project's chains, wherever they live: its store drawer and
+    its harness worktrees' drawers (ADR-0011, ADR-0023) — or, when the
+    store holds nothing yet (pre-adopt), the legacy repo layout, so the
+    transition never blanks anyone's memory. The store outranks a stale
+    legacy folder once it holds anything."""
+    return store_chains(repo) or repo_chains(repo)
 
 
 def recall_scope(args):
@@ -1938,7 +1983,7 @@ def recall_scope(args):
     boundary: the chains stay plain files."""
     repo = invoking_repo(args)
     drawer = store_receipts() / project_slug(repo)
-    logs = drawer_chains(drawer) if drawer.is_dir() else []
+    logs = store_chains(repo)
     if logs:
         if getattr(args, "all", False):
             known = set(logs)
@@ -2004,9 +2049,18 @@ def gather(logs):
         session = session_of(log)
         family = families.setdefault(
             session, {"count": 0, "first": None, "last": None,
-                      "final": None})
+                      "final": None, "bookkeeping": 0, "last_n": 0})
         for entry in read_entries(log):
+            n = entry.get("n")
+            if isinstance(n, int) and n > family["last_n"]:
+                family["last_n"] = n
             if entry.get("actor") == "receipts":
+                # Genesis is n 0; anything else the chain says about
+                # itself (a transcript commitment) is bookkeeping the
+                # header must own up to, or its count reads as a gap
+                # against the rows' own n (#154).
+                if isinstance(n, int) and n > 0:
+                    family["bookkeeping"] += 1
                 continue
             ts = entry.get("ts") if isinstance(entry.get("ts"), str) else ""
             rows.append({"session": session, "log": log, "ts": ts,
@@ -2070,11 +2124,13 @@ def scan_testimony(repo):
     the folder of repos above it). The baseline is trusted for nothing
     — which is exactly why recall may cite it: testimony citing
     testimony."""
-    slug = project_slug(repo) + "/"
+    slugs = [project_slug(repo) + "/"] + [
+        drawer.name + "/" for drawer in worktree_drawers(repo)]
 
     def in_drawer(relpath, base_dir):
-        # Store baseline rows are keyed <drawer-slug>/<chain>.
-        return relpath.startswith(slug)
+        # Store baseline rows are keyed <drawer-slug>/<chain>; a repo's
+        # harness worktree drawers are its history too (ADR-0023).
+        return any(relpath.startswith(slug) for slug in slugs)
 
     def under_repo(relpath, base_dir):
         try:
@@ -2148,6 +2204,14 @@ def cmd_digest(args):
 
     lines = [f"== recall digest -- {repo.name} ({repo.as_posix()}) =="]
     memory = f"memory: {len(families)} sessions, {total} entries"
+    kept_out = sum(f["bookkeeping"] for f in families.values())
+    if kept_out:
+        # Say what the count leaves out, and how far the chain's own n
+        # runs, so a reader who meets n 63 under a header saying 61 does
+        # not go looking for two missing receipts (#154).
+        last_n = max(f["last_n"] for f in families.values())
+        memory += (f", plus {kept_out} bookkeeping entries not rendered "
+                   f"(last n {last_n})")
     if reached < total:
         memory += f"; showing last {reached} (search reaches the rest)"
     lines.append(memory)
@@ -2162,10 +2226,10 @@ def cmd_digest(args):
             summary = ", ".join(f"{n} {v}"
                                 for v, n in sorted(counts.items()))
         lines.append(f"last scan: {scanned} - {summary} "
-                     "(testimony; run loxodonta verify to judge)")
+                     "(testimony; the verify line below judges a chain)")
     else:
         lines.append("last scan: none recorded - "
-                     "run loxodonta verify for a verdict")
+                     "the verify line below judges a chain")
 
     groups = {}
     for unit in shown:
@@ -2196,8 +2260,35 @@ def cmd_digest(args):
                  f'--repo "{repo.as_posix()}"')
     lines.append(f'search: python "{me}" search "text" '
                  f'--repo "{repo.as_posix()}" [--all]')
+    # The one line that leads to a verdict, and it is the recorder's:
+    # an agent holding an address must never have to hunt for the
+    # chain file to judge it (#155).
+    lines.append(f'verify: python "{me}" verify <address> '
+                 f'--repo "{repo.as_posix()}"')
     print("\n".join(lines))
     return 0
+
+
+def cmd_verify(args):
+    """The recorder's verdict on the chain holding one entry address:
+    the CLI twin of the MCP tool (ADR-0019, one-to-one), and the
+    answer to #155, where agents holding an address could not find the
+    chain to judge. Recall owns no verdict here either: it names the
+    chain, then prints `loxodonta verify --log` verbatim and returns
+    its exit code. `scan` is the supervisor's own tick over every chain;
+    this is one chain, by the handle the digest hands out."""
+    match, code = resolve_address(args)
+    if match is None:
+        return code
+    log = match[0]
+    judged = subprocess.run(
+        [sys.executable, str(LOXODONTA), "verify", "--log", str(log)],
+        capture_output=True, encoding="utf-8", errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    print(f"chain: {log.as_posix()}")
+    sys.stdout.write(judged.stdout)
+    sys.stderr.write(judged.stderr)
+    return judged.returncode
 
 
 def resolve_address(args):
@@ -2250,7 +2341,9 @@ def cmd_show(args):
     verified = recomputed == stored
 
     print(f"entry {stored}" + (" (self-verified)" if verified else ""))
-    print(f"chain: {log.name}  session: {session_of(log)[:8]}  "
+    # The chain's full path, not its file name: an agent that has this
+    # entry's address must be able to reach the file that holds it (#155).
+    print(f"chain: {log.as_posix()}  session: {session_of(log)[:8]}  "
           f"n: {entry.get('n')}")
     print(f"ts: {entry.get('ts', '')}  actor: {entry.get('actor', '')}")
     print(f"action: {entry.get('action', '')}")
@@ -2264,6 +2357,8 @@ def cmd_show(args):
         print("files: (none)")
     me = Path(__file__).resolve().as_posix()
     print(f'context: python "{me}" timeline {stored[:8]} '
+          f'--repo "{invoking_repo(args).as_posix()}"')
+    print(f'verify: python "{me}" verify {stored[:8]} '
           f'--repo "{invoking_repo(args).as_posix()}"')
     if not verified:
         print("WARNING: this entry does not verify against its own hash - "
@@ -2479,21 +2574,9 @@ def mcp_call(name, arguments, default_repo):
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
-            if name == "verify":
-                match, code = resolve_address(ns)
-                if match is None:
-                    return out.getvalue() + err.getvalue(), True
-                log = match[0]
-                judged = subprocess.run(
-                    [sys.executable, str(LOXODONTA), "verify",
-                     "--log", str(log)],
-                    capture_output=True, encoding="utf-8", errors="replace",
-                    env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-                text = (f"chain: {log.as_posix()}\n" + judged.stdout
-                        + judged.stderr)
-                return text, judged.returncode != 0
             command = {"digest": cmd_digest, "show": cmd_show,
-                       "search": cmd_search_cli, "timeline": cmd_timeline}
+                       "search": cmd_search_cli, "timeline": cmd_timeline,
+                       "verify": cmd_verify}
             code = command[name](ns)
         except SystemExit as stop:  # argparse-style exits inside a command
             code = stop.code if isinstance(stop.code, int) else 1
@@ -5323,6 +5406,13 @@ def main(argv):
         help="one full entry by entry address (self-verifying)")
     show.add_argument("address", help="entry-hash prefix, 4+ hex chars")
     show.set_defaults(func=cmd_show)
+    verify = sub.add_parser(
+        "verify", parents=[recall_common],
+        help="the recorder's verdict on the chain holding one entry "
+             "address (loxodonta verify --log, verbatim; exit code is "
+             "the recorder's)")
+    verify.add_argument("address", help="entry-hash prefix, 4+ hex chars")
+    verify.set_defaults(func=cmd_verify)
     search = sub.add_parser(
         "search", parents=[recall_common],
         help="free-text search over action lines, this repo or --all")

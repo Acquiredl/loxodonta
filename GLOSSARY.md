@@ -38,7 +38,7 @@ An entry's `actor` names the harness the writer ran under — `claude-code`, `co
 
 ### Head record
 
-An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin. A [supervisor](#supervisor)'s baseline is deliberately **not** a head record — see the distinction there.
+An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin. A [supervisor](#supervisor)'s baseline is deliberately **not** a head record — see the distinction there. Nor is a remote the machine can log in to: a gist or repository under the operator's own account is reachable by an agent running as the operator, token and all, so an automated "head ledger" there would be testimony, not a head record (ADR-0024). On a single machine the tool cannot automate a true head record; the anchor is that automation.
 
 ### Supervisor
 
@@ -158,7 +158,7 @@ A repo-level visibility declaration for cross-repo [recall](#recall): a marker f
 
 ### Store
 
-The one machine-wide home of every hook-written chain: `~/.loxodonta/receipts/<project-slug>/` (override: `LOXODONTA_HOME`), one subfolder per project, slug = `<basename>-<8 hex of the normalized project path's SHA256>` so two same-named projects can never share a drawer (ADR-0011). The store is the read side's unnamed default universe — `scan` with no arguments sweeps it; `--root` remains the explicit legacy mode. Chains in the store outlive their projects: the sessions most worth keeping are exactly the ones whose folder got deleted. The quickstart's cwd-local log is the deliberate exception — the sandbox stays touchable. Deleting the store is itself detectable from outside it: the baseline sits beside it, the witness lives at a different address, the anchor is unreachable.
+The one machine-wide home of every hook-written chain: `~/.loxodonta/receipts/<project-slug>/` (override: `LOXODONTA_HOME`), one subfolder per project, slug = `<basename>-<8 hex of the normalized project path's SHA256>` so two same-named projects can never share a drawer (ADR-0011). The store is the read side's unnamed default universe — `scan` with no arguments sweeps it; `--root` remains the explicit legacy mode. Chains in the store outlive their projects: the sessions most worth keeping are exactly the ones whose folder got deleted. **One session, one drawer:** every receipt of a session goes to the drawer its first receipt chose, whatever the project directory resolves to later (ADR-0023); a repository's recall also reads the drawers of its harness worktrees (`<repo>/.claude/worktrees/`). The quickstart's cwd-local log is the deliberate exception — the sandbox stays touchable. Deleting the store is itself detectable from outside it: the baseline sits beside it, the witness lives at a different address, the anchor is unreachable.
 
 ### Project record
 
@@ -170,7 +170,7 @@ The precise security claim of this tool: modifications to history are *always de
 
 ### Coverage
 
-The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers wired into the harness settings, *as of a moment in time* (ADR-0016 widened the shipped default to `*` — every completed tool call). Coverage is not [completeness](#completeness): coverage says which calls *owe*; the witness judges whether the owed receipts *arrived* — and it judges each session by the coverage in force at that session's time, never by today's rules. A failed or denied tool call sits outside coverage by harness design: no hook fires, so no receipt is owed.
+The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers wired into the harness settings, *as of a moment in time* (ADR-0016 widened the shipped default to `*` — every completed tool call). Coverage is not [completeness](#completeness): coverage says which calls *owe*; the witness judges whether the owed receipts *arrived* — and it judges each session by the coverage in force at that session's time, never by today's rules. A failed or denied tool call sits outside coverage by harness design: no hook fires, so no receipt is owed. So does anything the harness does on the session's behalf outside a tool call — a worktree it merges or prunes, a context compaction, its own git plumbing — because no tool event exists to hook (#156): git's reflog is the record for a repository pointer that moved that way, and the chain never claims it.
 
 ### Completeness
 
@@ -198,7 +198,7 @@ A [bookkeeping entry](#bookkeeping-entry) that fingerprints the harness transcri
 
 ### Anchor *(Stage B)*
 
-An external commitment of the chain head to a system the log owner doesn't control — OpenTimestamps onto the Bitcoin blockchain. Closes the whole-chain-regeneration gap named in ADR-0001. Anchor proofs live beside the log, not inside the entry format.
+An external commitment of the chain head to a system the log owner doesn't control — OpenTimestamps onto the Bitcoin blockchain. Closes the whole-chain-regeneration gap named in ADR-0001. Anchor proofs live beside the log, not inside the entry format. The **session-end anchor** (ADR-0024) is the same commitment made by the hook when a session ends, once the operator has opted in at install (`install-hook --anchor-at-session-end`): after the tail commitment, under a fixed budget, quiet on failure, with the leftover budget spent upgrading the drawer's pending proofs. Nothing leaves the machine without that opt-in, and nothing else automated does.
 
 ---
 
