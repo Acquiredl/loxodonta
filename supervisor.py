@@ -1840,8 +1840,18 @@ def main_repo_of(project):
         gitdir = Path(line[len("gitdir:"):].strip())
         if not gitdir.is_absolute():
             gitdir = project / gitdir
-        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
-        root = Path(os.path.normpath(gitdir / common)).parent
+        try:
+            common = (gitdir / "commondir").read_text(
+                encoding="utf-8").strip()
+            root = Path(os.path.normpath(gitdir / common)).parent
+        except OSError:
+            # A deregistered worktree (ADR-0023): the gitdir is gone, but
+            # its path still spells <main>/.git/worktrees/<name>.
+            spelled = gitdir.as_posix()
+            at = spelled.find("/.git/worktrees/")
+            if at <= 0:
+                return project
+            root = Path(spelled[:at])
         return root if root.is_dir() else project
     except OSError:
         return project
@@ -1917,15 +1927,50 @@ def repo_label(log):
     return parent.parent.name
 
 
-def project_chains(repo):
-    """One project's chains, wherever they live: its store drawer
-    (ADR-0011) — or, when the drawer holds nothing yet (pre-adopt),
-    the legacy repo layout, so the transition never blanks anyone's
-    memory. The drawer outranks a stale legacy folder once it holds
-    anything."""
+def worktree_drawers(repo):
+    """The store drawers of a repository's own harness worktrees: those
+    whose recorded project path lies under <repo>/.claude/worktrees/
+    (ADR-0023). A session that fell back to a worktree's own path, on
+    this machine before the one-session-one-drawer rule or on any
+    machine that ran v0.1.0, is still this repository's history. Narrow
+    on purpose: a sub-project elsewhere in the tree is its own memory."""
+    prefix = os.path.normcase(str(repo)).replace(os.sep, "/").rstrip("/") \
+        + "/.claude/worktrees/"
+    found = []
+    try:
+        drawers = sorted(p for p in store_receipts().iterdir() if p.is_dir())
+    except OSError:
+        return found
+    for drawer in drawers:
+        try:
+            recorded = json.loads((drawer / "project.json").read_text(
+                encoding="utf-8")).get("path", "")
+        except (OSError, ValueError, AttributeError):
+            continue
+        spelled = os.path.normcase(str(recorded)).replace(os.sep, "/")
+        if spelled.startswith(prefix):
+            found.append(drawer)
+    return found
+
+
+def store_chains(repo):
+    """A repository's chains in the store: its own drawer, then the
+    drawers of its harness worktrees (ADR-0023), in that order."""
     drawer = store_receipts() / project_slug(repo)
     logs = drawer_chains(drawer) if drawer.is_dir() else []
-    return logs or repo_chains(repo)
+    for extra in worktree_drawers(repo):
+        if extra != drawer:
+            logs.extend(drawer_chains(extra))
+    return logs
+
+
+def project_chains(repo):
+    """One project's chains, wherever they live: its store drawer and
+    its harness worktrees' drawers (ADR-0011, ADR-0023) — or, when the
+    store holds nothing yet (pre-adopt), the legacy repo layout, so the
+    transition never blanks anyone's memory. The store outranks a stale
+    legacy folder once it holds anything."""
+    return store_chains(repo) or repo_chains(repo)
 
 
 def recall_scope(args):
@@ -1938,7 +1983,7 @@ def recall_scope(args):
     boundary: the chains stay plain files."""
     repo = invoking_repo(args)
     drawer = store_receipts() / project_slug(repo)
-    logs = drawer_chains(drawer) if drawer.is_dir() else []
+    logs = store_chains(repo)
     if logs:
         if getattr(args, "all", False):
             known = set(logs)
@@ -2070,11 +2115,13 @@ def scan_testimony(repo):
     the folder of repos above it). The baseline is trusted for nothing
     — which is exactly why recall may cite it: testimony citing
     testimony."""
-    slug = project_slug(repo) + "/"
+    slugs = [project_slug(repo) + "/"] + [
+        drawer.name + "/" for drawer in worktree_drawers(repo)]
 
     def in_drawer(relpath, base_dir):
-        # Store baseline rows are keyed <drawer-slug>/<chain>.
-        return relpath.startswith(slug)
+        # Store baseline rows are keyed <drawer-slug>/<chain>; a repo's
+        # harness worktree drawers are its history too (ADR-0023).
+        return any(relpath.startswith(slug) for slug in slugs)
 
     def under_repo(relpath, base_dir):
         try:

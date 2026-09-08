@@ -306,6 +306,34 @@ class StoreRecallTest(RecallBase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("pytest -q", out.stdout)
 
+    def test_repo_recall_includes_its_harness_worktree_drawers(self):
+        # A drawer recorded under <repo>/.claude/worktrees/ is the repo's
+        # history (ADR-0023): the store-era twin of the legacy rule. A
+        # sub-project elsewhere in the tree is not swept in. Both drawers
+        # are made the way a fallback makes them: plain folders, no .git
+        # file, so each resolves to itself.
+        repo = self.repo("alpha")
+        wt = repo / ".claude" / "worktrees" / "feature"
+        wt.mkdir(parents=True)
+        sub = repo / "packages" / "sub"
+        sub.mkdir(parents=True)
+        self.hook(repo, "aaaa1111-1111-1111-1111-111111111111", "main work")
+        self.hook(wt, "bbbb2222-2222-2222-2222-222222222222", "worktree tail")
+        self.hook(sub, "cccc3333-3333-3333-3333-333333333333",
+                  "sub-project work")
+        env = self.store_env(repo)
+
+        digest = run_py(SUPERVISOR, "digest", "--repo", str(repo),
+                        env_extra=env)
+        self.assertEqual(digest.returncode, 0, digest.stderr)
+        self.assertIn("main work", digest.stdout)
+        self.assertIn("worktree tail", digest.stdout)
+        self.assertNotIn("sub-project work", digest.stdout)
+
+        search = run_py(SUPERVISOR, "search", "tail", "--repo", str(repo),
+                        env_extra=env)
+        self.assertIn("worktree tail", search.stdout)
+
     def test_show_and_search_reach_store_chains(self):
         project = self.repo("alpha")
         self.hook(project, "bbbb2222-2222-2222-2222-222222222222",

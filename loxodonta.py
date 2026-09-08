@@ -1284,13 +1284,54 @@ def main_repo_root(project):
         gitdir = line[len("gitdir:"):].strip()
         if not os.path.isabs(gitdir):
             gitdir = os.path.join(project, gitdir)
-        with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as f:
-            common = f.read().strip()
-        common = os.path.normpath(os.path.join(gitdir, common))
-        root = os.path.dirname(common)  # <main>/.git -> <main>
+        try:
+            with open(os.path.join(gitdir, "commondir"),
+                      encoding="utf-8") as f:
+                common = f.read().strip()
+            common = os.path.normpath(os.path.join(gitdir, common))
+            root = os.path.dirname(common)  # <main>/.git -> <main>
+        except OSError:
+            # A worktree the harness already deregistered (ADR-0023): the
+            # gitdir is gone, but the .git file still spells it as
+            # <main>/.git/worktrees/<name>, and <main> is in that string.
+            root = deregistered_main(gitdir)
+            if root is None:
+                return project
         return root if os.path.isdir(root) else project
     except OSError:
         return project
+
+
+def deregistered_main(gitdir):
+    """The main repository named by a worktree's gitdir path, read from
+    the path alone: everything before `/.git/worktrees/`. None when the
+    path is not shaped like a worktree's."""
+    spelled = gitdir.replace(os.sep, "/")
+    marker = "/.git/worktrees/"
+    at = spelled.find(marker)
+    return spelled[:at] if at > 0 else None
+
+
+def drawer_of_session(log_dir, session):
+    """One session, one drawer (ADR-0023): the session's first receipt
+    decides. When the resolved drawer holds no chain for this session yet
+    but another drawer in the store does, the receipt goes there, so a
+    resolution that changes mid-session (a worktree cleaned up under a
+    running session) can never split a session in two. The normal case
+    costs nothing: the resolved drawer already has the chain."""
+    name = f"receipts-{session}.jsonl"
+    if os.path.exists(os.path.join(log_dir, name)):
+        return log_dir
+    root = os.path.join(store_home(), "receipts")
+    try:
+        drawers = os.listdir(root)
+    except OSError:
+        return log_dir
+    for drawer in drawers:
+        other = os.path.join(root, drawer)
+        if other != log_dir and os.path.exists(os.path.join(other, name)):
+            return other
+    return log_dir
 
 
 def store_home():
@@ -1419,6 +1460,12 @@ def cmd_hook(args):
 
     # Session id becomes part of a filename: keep only safe characters.
     safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(session))
+
+    # One session, one drawer (ADR-0023), for store-routed writes only:
+    # an explicit --log-dir or the cwd-local default is the operator's
+    # own choice and is left alone.
+    if project is not None:
+        log_dir = drawer_of_session(log_dir, safe)
 
     if ending:
         # The tail commitment (ADR-0017's named deferral, issue #79): a
