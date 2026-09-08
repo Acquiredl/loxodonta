@@ -10,6 +10,18 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- One session, one drawer (ADR-0023): every receipt of a session goes to the drawer its first receipt chose, so a project directory that resolves differently mid-session can no longer split a session's chain in two. Store-routed writes only; `--log-dir` and the cwd-local default are untouched.
+
+### Added
+
+- A repository's recall (`digest`, `search`, `timeline`) also reads the drawers of its own harness worktrees (`<repo>/.claude/worktrees/`), so a session split before this release is shown whole.
+
+### Fixed
+
+- A worktree the harness deregistered under a running session still logs to its repository's drawer: the `.git` file names the repository even after `<main>/.git/worktrees/<name>` is gone.
+
 ## [0.1.0] - 2026-09-07
 
 The first tagged release, cut from the promotion that lands the presentation arc. The tool is versioned from here; the history before this tag lives in `adrs/` and `docs/HISTORY.md` (ADR-0022).

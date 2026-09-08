@@ -8,6 +8,7 @@ public CLI with stdin payloads, never internals.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -487,6 +488,49 @@ class HookWorktreeTest(unittest.TestCase):
             (worktree / "receipts").exists(),
             "nothing should be written into the disposable worktree",
         )
+
+    def test_deregistered_worktree_still_logs_to_the_main_repos_drawer(self):
+        # The case that found ADR-0023: the harness deregistered the
+        # worktree under a running session. <main>/.git/worktrees/<name>
+        # is gone; the folder and its .git file remain, and that file
+        # still names the main repository.
+        main, worktree = self.make_worktree()
+        shutil.rmtree(main / ".git" / "worktrees")
+
+        result = run_hook(payload(session="sess-dereg"), self.workdir,
+                          extra_env=self.env_for(worktree))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        drawer = drawer_of(self.store, "mainrepo")
+        self.assertTrue((drawer / "receipts-sess-dereg.jsonl").exists())
+        names = [p.name for p in (self.store / "receipts").iterdir()]
+        self.assertFalse(any(n.startswith("feature-") for n in names),
+                         f"a drawer opened for the worktree's own path: {names}")
+
+    def test_a_sessions_receipts_follow_its_first_drawer(self):
+        # One session, one drawer (ADR-0023): the first receipt decides,
+        # and a later receipt whose project resolves somewhere else still
+        # lands in that drawer, never in a second one.
+        first = self.workdir / "alpha"
+        first.mkdir()
+        elsewhere = self.workdir / "beta"
+        elsewhere.mkdir()
+        run_hook(payload(session="sess-sticky"), self.workdir,
+                 extra_env=self.env_for(first))
+
+        result = run_hook(
+            payload(session="sess-sticky", tool="Bash",
+                    tool_input={"command": "ls"}),
+            self.workdir, extra_env=self.env_for(elsewhere))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        chain = drawer_of(self.store, "alpha") / "receipts-sess-sticky.jsonl"
+        lines = chain.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 3, lines)  # genesis + two receipts
+        self.assertIn("Bash: ls", lines[-1])
+        names = [p.name for p in (self.store / "receipts").iterdir()]
+        self.assertFalse(any(n.startswith("beta-") for n in names),
+                         f"a second drawer opened for the session: {names}")
 
     def test_sessions_from_two_worktrees_collect_in_one_drawer(self):
         _, first = self.make_worktree(worktree_name="feature-one")
