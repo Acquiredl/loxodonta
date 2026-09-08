@@ -64,7 +64,7 @@ Proof bytes are stored exactly as calendars produced them (plus splicing on upgr
 Stage A: record the head out of the writer's reach, compare with `verify --expect-head`.
 Stage B replaces remembering a secret with two cheaper habits:
 
-1. **Anchor at meaningful moments** — end of a session, end of a pipeline run: `receipts anchor` (later, `--upgrade` once, any time after a few hours).
+1. **Anchor at meaningful moments** — end of a session, end of a pipeline run: `receipts anchor` (later, `--upgrade` once, any time after a few hours). Or opt in once and let the hook do it: `loxodonta install-hook --anchor-at-session-end` anchors every session's head when the session ends, after the tail commitment, under a twelve-second budget, quietly on failure, and spends the leftover budget upgrading the drawer's pending proofs (ADR-0024). What leaves the machine is the 32-byte head digest, to the public calendars, from your address, only after the opt-in. A same-account remote (a gist under your login) is not a head record for the same reason the supervisor's baseline is not: the agent on the machine can reach it.
 2. **When verifying, read the heights.** `verify --anchors` proves the math; only the operator can judge whether "existed by block H" is *old enough* to cover the history the log claims.
 
 Copying the sidecar off-machine remains recommended and makes the story airtight: proofs in hand, nothing on the writer's machine to trust at all.

@@ -18,6 +18,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Added
 
+- `install-hook --anchor-at-session-end` (ADR-0024): opt in once, and every session end anchors the chain head to Bitcoin through OpenTimestamps, after the tail commitment, quietly and best-effort under a fixed budget, then spends the leftover budget upgrading the drawer's pending proofs. `hook --anchor` and `hook --calendar` carry it. Nothing leaves the machine without the opt-in; the `gh` head ledger is rejected as writer-reachable.
 - `supervisor verify ADDRESS`: the recorder's verdict on the chain holding an entry address, printed verbatim with its exit code, the CLI twin of the MCP tool (ADR-0019, one-to-one restored). `show` names the chain's full path and the verify command; the digest footer names it too, so an agent holding an address never has to hunt for the chain file (#155).
 - A repository's recall (`digest`, `search`, `timeline`) also reads the drawers of its own harness worktrees (`<repo>/.claude/worktrees/`), so a session split before this release is shown whole.
 
