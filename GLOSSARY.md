@@ -170,7 +170,7 @@ The precise security claim of this tool: modifications to history are *always de
 
 ### Coverage
 
-The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers wired into the harness settings, *as of a moment in time* (ADR-0016 widened the shipped default to `*` — every completed tool call). Coverage is not [completeness](#completeness): coverage says which calls *owe*; the witness judges whether the owed receipts *arrived* — and it judges each session by the coverage in force at that session's time, never by today's rules. A failed or denied tool call sits outside coverage by harness design: no hook fires, so no receipt is owed.
+The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers wired into the harness settings, *as of a moment in time* (ADR-0016 widened the shipped default to `*` — every completed tool call). Coverage is not [completeness](#completeness): coverage says which calls *owe*; the witness judges whether the owed receipts *arrived* — and it judges each session by the coverage in force at that session's time, never by today's rules. A failed or denied tool call sits outside coverage by harness design: no hook fires, so no receipt is owed. So does anything the harness does on the session's behalf outside a tool call — a worktree it merges or prunes, a context compaction, its own git plumbing — because no tool event exists to hook (#156): git's reflog is the record for a repository pointer that moved that way, and the chain never claims it.
 
 ### Completeness
 
