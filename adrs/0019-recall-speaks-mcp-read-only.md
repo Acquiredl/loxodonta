@@ -153,6 +153,12 @@ Claude Code (`claude mcp add`), Codex (`~/.codex/config.toml`
   as-sibling-tool.md` (`verify` runs through the public CLI);
   `0020-recorder-adapters-for-other-harnesses.md` (the write side of
   harness neutrality).
+- Parity restored 2026-09-08 (#155): the CLI gained `supervisor verify
+  ADDRESS`, the twin of the MCP tool through the same function, so the
+  five tools are one-to-one with the CLI as this ADR states; `show` and
+  the digest footer now name the chain's path and the verify command,
+  after the orientation-cost run (EXPERIMENTS §6) showed agents holding
+  an address could not find the chain to judge.
 - Glossary terms: *Recall*, *Entry address*, *Testimony* (unchanged,
   load-bearing); *Supervisor* (role statement gains "and an MCP
   server").

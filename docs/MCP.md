@@ -16,7 +16,7 @@ decision, not an omission (ADR-0019).
 | `show` | `supervisor show ADDRESS` | one full receipt by entry address, re-hashed on fetch (self-verifying) |
 | `search` | `supervisor search TEXT [--all]` | free-text over action lines, this repo or the whole store |
 | `timeline` | `supervisor timeline ADDRESS` | the rows around one entry in its own chain |
-| `verify` | `loxodonta verify --log <chain>` | the judge's verdict for the chain holding that address, exit code and all |
+| `verify` | `supervisor verify ADDRESS` | the judge's verdict for the chain holding that address, exit code and all (`loxodonta verify --log`, run verbatim) |
 
 Every tool except `verify` renders testimony and says so (GLOSSARY:
 *Recall*). `verify` is the one tool that is not testimony: it spawns the

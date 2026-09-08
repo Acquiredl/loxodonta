@@ -475,6 +475,54 @@ class WorktreeRecallTest(RecallBase):
         self.assertEqual(result.stdout.strip(), "")
 
 
+class VerifyTest(RecallBase):
+    """`supervisor verify <address>`: the CLI twin of the MCP tool
+    (ADR-0019, one-to-one), and the answer to #155. Recall still owns
+    no verdict: this prints the chain's path and then the recorder's
+    own verdict verbatim, exit code and all."""
+
+    def test_verify_by_address_prints_the_chain_and_the_judges_verdict(self):
+        repo = self.repo("alpha")
+        log, hashes = forge_chain(
+            repo, "aaaa1111-1111-1111-1111-111111111111", [
+                ("2026-08-20T10:00:00Z", "Edit: one.py"),
+                ("2026-08-20T10:05:00Z", "Bash: pytest -q"),
+            ])
+        good = run_py(SUPERVISOR, "verify", hashes[1][:8], "--repo", str(repo))
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertIn(f"chain: {log.resolve().as_posix()}", good.stdout)
+        self.assertIn("VALID", good.stdout)
+        # Tamper with a past entry; the same command carries the break,
+        # and the exit code is the recorder's.
+        lines = log.read_text(encoding="utf-8").splitlines()
+        lines[1] = lines[1].replace("Edit: one.py", "Edit: two.py")
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        bad = run_py(SUPERVISOR, "verify", hashes[2][:8], "--repo", str(repo))
+        self.assertEqual(bad.returncode, 1, bad.stdout + bad.stderr)
+        self.assertIn("BROKEN", bad.stdout)
+
+    def test_show_names_the_chains_full_path_and_the_verify_command(self):
+        repo = self.repo("alpha")
+        log, hashes = forge_chain(
+            repo, "bbbb2222-2222-2222-2222-222222222222",
+            [("2026-08-20T10:00:00Z", "Edit: one.py")])
+        shown = run_py(SUPERVISOR, "show", hashes[1][:8], "--repo", str(repo))
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(f"chain: {log.resolve().as_posix()}", shown.stdout)
+        self.assertIn(f"verify {hashes[1][:8]}", shown.stdout)
+
+    def test_digest_footer_names_the_verify_command(self):
+        repo = self.repo("alpha")
+        forge_chain(repo, "cccc3333-3333-3333-3333-333333333333",
+                    [("2026-08-20T10:00:00Z", "Edit: one.py")])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        footer = [line for line in out.splitlines()
+                  if line.startswith("verify: python")]
+        self.assertEqual(len(footer), 1, out)
+        self.assertIn("verify <address>", footer[0])
+        self.assertIn(SUPERVISOR.resolve().as_posix(), footer[0])
+
+
 class ShowTest(RecallBase):
     def test_full_entry_self_verified(self):
         repo = self.repo("alpha")

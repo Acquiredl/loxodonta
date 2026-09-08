@@ -17,6 +17,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Added
 
+- `supervisor verify ADDRESS`: the recorder's verdict on the chain holding an entry address, printed verbatim with its exit code, the CLI twin of the MCP tool (ADR-0019, one-to-one restored). `show` names the chain's full path and the verify command; the digest footer names it too, so an agent holding an address never has to hunt for the chain file (#155).
 - A repository's recall (`digest`, `search`, `timeline`) also reads the drawers of its own harness worktrees (`<repo>/.claude/worktrees/`), so a session split before this release is shown whole.
 
 ### Fixed

@@ -2226,10 +2226,10 @@ def cmd_digest(args):
             summary = ", ".join(f"{n} {v}"
                                 for v, n in sorted(counts.items()))
         lines.append(f"last scan: {scanned} - {summary} "
-                     "(testimony; run loxodonta verify to judge)")
+                     "(testimony; the verify line below judges a chain)")
     else:
         lines.append("last scan: none recorded - "
-                     "run loxodonta verify for a verdict")
+                     "the verify line below judges a chain")
 
     groups = {}
     for unit in shown:
@@ -2260,8 +2260,35 @@ def cmd_digest(args):
                  f'--repo "{repo.as_posix()}"')
     lines.append(f'search: python "{me}" search "text" '
                  f'--repo "{repo.as_posix()}" [--all]')
+    # The one line that leads to a verdict, and it is the recorder's:
+    # an agent holding an address must never have to hunt for the
+    # chain file to judge it (#155).
+    lines.append(f'verify: python "{me}" verify <address> '
+                 f'--repo "{repo.as_posix()}"')
     print("\n".join(lines))
     return 0
+
+
+def cmd_verify(args):
+    """The recorder's verdict on the chain holding one entry address:
+    the CLI twin of the MCP tool (ADR-0019, one-to-one), and the
+    answer to #155, where agents holding an address could not find the
+    chain to judge. Recall owns no verdict here either: it names the
+    chain, then prints `loxodonta verify --log` verbatim and returns
+    its exit code. `scan` is the supervisor's own tick over every chain;
+    this is one chain, by the handle the digest hands out."""
+    match, code = resolve_address(args)
+    if match is None:
+        return code
+    log = match[0]
+    judged = subprocess.run(
+        [sys.executable, str(LOXODONTA), "verify", "--log", str(log)],
+        capture_output=True, encoding="utf-8", errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    print(f"chain: {log.as_posix()}")
+    sys.stdout.write(judged.stdout)
+    sys.stderr.write(judged.stderr)
+    return judged.returncode
 
 
 def resolve_address(args):
@@ -2314,7 +2341,9 @@ def cmd_show(args):
     verified = recomputed == stored
 
     print(f"entry {stored}" + (" (self-verified)" if verified else ""))
-    print(f"chain: {log.name}  session: {session_of(log)[:8]}  "
+    # The chain's full path, not its file name: an agent that has this
+    # entry's address must be able to reach the file that holds it (#155).
+    print(f"chain: {log.as_posix()}  session: {session_of(log)[:8]}  "
           f"n: {entry.get('n')}")
     print(f"ts: {entry.get('ts', '')}  actor: {entry.get('actor', '')}")
     print(f"action: {entry.get('action', '')}")
@@ -2328,6 +2357,8 @@ def cmd_show(args):
         print("files: (none)")
     me = Path(__file__).resolve().as_posix()
     print(f'context: python "{me}" timeline {stored[:8]} '
+          f'--repo "{invoking_repo(args).as_posix()}"')
+    print(f'verify: python "{me}" verify {stored[:8]} '
           f'--repo "{invoking_repo(args).as_posix()}"')
     if not verified:
         print("WARNING: this entry does not verify against its own hash - "
@@ -2543,21 +2574,9 @@ def mcp_call(name, arguments, default_repo):
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
-            if name == "verify":
-                match, code = resolve_address(ns)
-                if match is None:
-                    return out.getvalue() + err.getvalue(), True
-                log = match[0]
-                judged = subprocess.run(
-                    [sys.executable, str(LOXODONTA), "verify",
-                     "--log", str(log)],
-                    capture_output=True, encoding="utf-8", errors="replace",
-                    env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-                text = (f"chain: {log.as_posix()}\n" + judged.stdout
-                        + judged.stderr)
-                return text, judged.returncode != 0
             command = {"digest": cmd_digest, "show": cmd_show,
-                       "search": cmd_search_cli, "timeline": cmd_timeline}
+                       "search": cmd_search_cli, "timeline": cmd_timeline,
+                       "verify": cmd_verify}
             code = command[name](ns)
         except SystemExit as stop:  # argparse-style exits inside a command
             code = stop.code if isinstance(stop.code, int) else 1
@@ -5387,6 +5406,13 @@ def main(argv):
         help="one full entry by entry address (self-verifying)")
     show.add_argument("address", help="entry-hash prefix, 4+ hex chars")
     show.set_defaults(func=cmd_show)
+    verify = sub.add_parser(
+        "verify", parents=[recall_common],
+        help="the recorder's verdict on the chain holding one entry "
+             "address (loxodonta verify --log, verbatim; exit code is "
+             "the recorder's)")
+    verify.add_argument("address", help="entry-hash prefix, 4+ hex chars")
+    verify.set_defaults(func=cmd_verify)
     search = sub.add_parser(
         "search", parents=[recall_common],
         help="free-text search over action lines, this repo or --all")
