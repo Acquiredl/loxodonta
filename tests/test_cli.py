@@ -1225,5 +1225,58 @@ class GoldenFixtureTest(ReceiptsCliTest):
         self.assertEqual(result.stdout.strip(), self.GOLDEN_HEAD)
 
 
+class UsageExitTest(ReceiptsCliTest):
+    """Usage errors have their own exit, 64 (sysexits EX_USAGE), so no
+    verdict number is ever an argparse error (ADR-0026 ruling 7). Argparse
+    keeps its usual message on stderr; stdout never carries a verdict."""
+
+    def test_unknown_flag_exits_64_with_argparse_message(self):
+        run_receipts("init", cwd=self.workdir)
+
+        result = run_receipts("verify", "--no-such-flag", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("unrecognized arguments", result.stderr)
+        self.assertIn("usage:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for verdict in ("VALID", "BROKEN"):
+            self.assertNotIn(verdict, result.stdout)
+
+    def test_malformed_expect_head_exits_64_not_a_verdict_number(self):
+        # HeadTest already says a malformed head record is no verdict; this
+        # pins the number. 2 was FILES-DIVERGED's, and never usage's again.
+        run_receipts("init", cwd=self.workdir)
+
+        for bad in ("not-hex-at-all", "abc123"):  # garbage; wrong length
+            result = run_receipts(
+                "verify", "--expect-head", bad, cwd=self.workdir
+            )
+            self.assertEqual(result.returncode, 64,
+                             bad + ": " + result.stdout + result.stderr)
+            self.assertIn("expect-head", result.stderr)
+            self.assertIn("64 hex characters", result.stderr)
+
+    def test_missing_required_argument_exits_64(self):
+        run_receipts("init", cwd=self.workdir)
+        before = self.log_path.read_text(encoding="utf-8")
+
+        result = run_receipts("log", "--action", "did a thing", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("required", result.stderr)
+        self.assertIn("--actor", result.stderr)
+        self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
+
+    def test_run_without_separator_exits_64(self):
+        # The one usage error main() raises itself, after argparse is done:
+        # it must speak the same number as the ones argparse raises.
+        run_receipts("init", cwd=self.workdir)
+
+        result = run_receipts("run", "--actor", "agent", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("--", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

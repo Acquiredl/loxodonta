@@ -2113,18 +2113,33 @@ class VersionAction(argparse.Action):
         parser.exit()
 
 
+EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
+
+
+class UsageParser(argparse.ArgumentParser):
+    """argparse, with usage errors on an exit of their own. A wrong flag, a
+    missing argument, or a malformed value exits 64 instead of argparse's
+    stock 2, so no verdict exit is ever an argparse error (ADR-0026
+    ruling 7). The message is argparse's, unchanged, on stderr. Subparsers
+    inherit this class, so every command speaks the same number."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="loxodonta", description=__doc__)
+    parser = UsageParser(prog="loxodonta", description=__doc__)
     parser.add_argument("--version", action=VersionAction,
                         help="print tool version, format version, and "
                              "the checkout's commit, then exit")
-    common = argparse.ArgumentParser(add_help=False)
+    common = UsageParser(add_help=False)
     common.add_argument("--log", default=DEFAULT_LOG, help="receipt log path")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", parents=[common],
                    help="create a new receipt log with its genesis entry"
                    ).set_defaults(func=cmd_init)
-    actor_files = argparse.ArgumentParser(add_help=False)
+    actor_files = UsageParser(add_help=False)
     actor_files.add_argument("--actor", required=True, help="who acted")
     actor_files.add_argument("--file", action="append", default=[], metavar="PATH",
                              help="file to fingerprint (repeatable)")
@@ -2238,9 +2253,9 @@ if __name__ == "__main__":
     except OSError as e:
         # The reader hung up (`loxodonta report | head`) — no verdict was
         # asked of the lines that went unread; die quietly, not loudly.
-        # (This exit 1 — like argparse's exit 2 for usage errors — reuses
-        # a verdict number; scripts should trust the stdout verdict line,
-        # never the exit code alone.)
+        # (This exit 1 reuses a verdict number, the one exit here that
+        # still does now that usage errors have their own, 64; scripts
+        # should trust the stdout verdict line, never the exit code alone.)
         # POSIX raises BrokenPipeError (EPIPE); Windows reports a plain
         # EINVAL from the closed handle instead, so match on both or the
         # quiet death is a traceback on half the platforms.
