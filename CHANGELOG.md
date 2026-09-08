@@ -12,6 +12,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Changed
 
+- The coverage claim states its edge: what the harness does on a session's behalf outside any tool call (a worktree it merges when a session leaves it) fires no hook and leaves no receipt; HOOK.md, the GLOSSARY, and the README's defends-against table say so, and point at git's reflog for the pointer move (#156).
 - One session, one drawer (ADR-0023): every receipt of a session goes to the drawer its first receipt chose, so a project directory that resolves differently mid-session can no longer split a session's chain in two. Store-routed writes only; `--log-dir` and the cwd-local default are untouched.
 - The digest header says what it leaves out: when a chain holds bookkeeping entries (transcript commitments), the header adds `plus N bookkeeping entries not rendered (last n M)`, so a row's sequence number never reads as a missing receipt (#154).
 

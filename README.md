@@ -272,6 +272,7 @@ A few places this has already earned its keep for me, beyond the daily timeline:
 | Silently modifying a logged file later | yes | file's current hash differs from its receipt |
 | A compromised writer lying at write time | no | garbage in, faithfully chained garbage out |
 | The writer omitting an entry entirely | not by the chain | a never-written entry leaves no break; completeness comes from the integration (`run`, the hook), and the supervisor alarms on the gap |
+| The harness acting outside a tool call (a worktree it merges when a session leaves it) | no | no tool event, so no receipt; the commits it carries have theirs, and git's reflog holds the moment the pointer moved |
 | Regenerating the whole chain from scratch | tiered | `verify --expect-head` against your recorded head, or an anchor: a regenerated chain can only carry young anchors |
 
 ## Send me what your machine saw
