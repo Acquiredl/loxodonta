@@ -2049,9 +2049,18 @@ def gather(logs):
         session = session_of(log)
         family = families.setdefault(
             session, {"count": 0, "first": None, "last": None,
-                      "final": None})
+                      "final": None, "bookkeeping": 0, "last_n": 0})
         for entry in read_entries(log):
+            n = entry.get("n")
+            if isinstance(n, int) and n > family["last_n"]:
+                family["last_n"] = n
             if entry.get("actor") == "receipts":
+                # Genesis is n 0; anything else the chain says about
+                # itself (a transcript commitment) is bookkeeping the
+                # header must own up to, or its count reads as a gap
+                # against the rows' own n (#154).
+                if isinstance(n, int) and n > 0:
+                    family["bookkeeping"] += 1
                 continue
             ts = entry.get("ts") if isinstance(entry.get("ts"), str) else ""
             rows.append({"session": session, "log": log, "ts": ts,
@@ -2195,6 +2204,14 @@ def cmd_digest(args):
 
     lines = [f"== recall digest -- {repo.name} ({repo.as_posix()}) =="]
     memory = f"memory: {len(families)} sessions, {total} entries"
+    kept_out = sum(f["bookkeeping"] for f in families.values())
+    if kept_out:
+        # Say what the count leaves out, and how far the chain's own n
+        # runs, so a reader who meets n 63 under a header saying 61 does
+        # not go looking for two missing receipts (#154).
+        last_n = max(f["last_n"] for f in families.values())
+        memory += (f", plus {kept_out} bookkeeping entries not rendered "
+                   f"(last n {last_n})")
     if reached < total:
         memory += f"; showing last {reached} (search reaches the rest)"
     lines.append(memory)

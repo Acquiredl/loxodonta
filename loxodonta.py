@@ -13,6 +13,7 @@ import os
 import shlex
 import subprocess
 import sys
+import unicodedata
 import time
 import urllib.error
 import urllib.request
@@ -1247,11 +1248,31 @@ def commit_transcript_due(log, transcript_path):
 
 def one_line(text, limit=160):
     """Whitespace collapsed to single spaces, truncated with an ellipsis —
-    action is one line (SPEC §2), and receipts are not transcripts."""
+    action is one line (SPEC §2), and receipts are not transcripts.
+
+    The cut lands between words when a space sits within the last forty
+    characters before the limit, so a receipt reads "…noreply@anthropic.com"
+    rather than "…noreply@ant" (#157); a run with no space there (one long
+    URL) is cut at the limit itself. It never orphans a combining mark or
+    a joiner at the edge either, so an accented letter or an emoji
+    sequence is dropped whole rather than split."""
     line = " ".join(str(text).split())
-    if len(line) > limit:
-        line = line[:limit] + "…"
-    return line
+    if len(line) <= limit:
+        return line
+    cut = limit
+    while cut > 0 and (unicodedata.combining(line[cut])
+                       or line[cut] in JOINERS or line[cut - 1] in JOINERS):
+        cut -= 1
+    space = line.rfind(" ", max(0, cut - 40), cut)
+    if space > 0:
+        cut = space
+    return line[:cut] + "…"
+
+
+# Code points that glue to a neighbour: the zero-width joiner of emoji
+# sequences, the variation selectors, and the skin-tone modifiers.
+JOINERS = frozenset({"\u200d", "\ufe0e", "\ufe0f"}
+                    | {chr(c) for c in range(0x1F3FB, 0x1F400)})
 
 
 def main_repo_root(project):
