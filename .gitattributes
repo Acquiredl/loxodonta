@@ -1,0 +1,4 @@
+# The committed demo chain is a byte-for-byte copy of what the recorder
+# writes (LF-terminated JSON lines). It is compared against a fresh build
+# in the suite, so git must never rewrite its line endings on checkout.
+docs/demo/*.jsonl -text

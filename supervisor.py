@@ -16,6 +16,7 @@ here is a head record (GLOSSARY: Supervisor, Baseline).
   python supervisor.py timeline ADDRESS         # context around one entry
   python supervisor.py mcp [--repo DIR]         # the same recall, as an MCP server
   python supervisor.py scan --root DIR --json   # legacy: a folder of repos
+  python supervisor.py --version                # tool, format, and commit
 
 `scan` is one tick without timers: a census of every chain in the
 store (ADR-0011; --root walks a legacy folder of repos instead), a
@@ -60,6 +61,13 @@ from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
 LOXODONTA = HERE / "loxodonta.py"
+
+# Two versions, moving independently (ADR-0022): TOOL_VERSION says which
+# supervisor is running and is tagged together with loxodonta.py — the
+# two files' constants must agree (the suite says so); FORMAT_VERSION
+# is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
+TOOL_VERSION = "0.1.0"
+FORMAT_VERSION = "0.1"
 
 
 # --- Census -------------------------------------------------------------------
@@ -5201,9 +5209,28 @@ setInterval(loadActivity, 30000);
 """
 
 
+class VersionAction(argparse.Action):
+    """`--version`: tool, format, and the commit of the checkout this
+    file sits in — the recorder notice's fact, read the recorder notice's
+    way (local git only, never fetched: ADR-0015, ADR-0022). Answered
+    only when asked, so no other command pays for the git question."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        commit = git_say(HERE, "rev-parse", "--short", "HEAD") or "unknown"
+        print(f"{parser.prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
+              f"commit {commit})")
+        parser.exit()
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="supervisor",
                                      description=__doc__.splitlines()[0])
+    parser.add_argument("--version", action=VersionAction,
+                        help="print tool version, format version, and "
+                             "the checkout's commit, then exit")
     sub = parser.add_subparsers(dest="command", required=True)
     watching = argparse.ArgumentParser(add_help=False)
     watching.add_argument("--witness", default=str(WITNESS_ROOT),

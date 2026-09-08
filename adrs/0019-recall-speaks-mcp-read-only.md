@@ -74,7 +74,7 @@ The shape, as built:
   about two hundred readable lines. Every tool call runs under a
   stdout redirect so the CLI's `print` never touches the wire; stderr
   carries the CLI's error text back as a tool error (`isError`), so the
-  model reads "no entry under <repo> matches deadbeef" instead of a
+  model reads "no entry under `<repo>` matches deadbeef" instead of a
   protocol failure it cannot act on.
 - **Dual-era.** A request whose `_meta` carries
   `io.modelcontextprotocol/*` keys is served statelessly under

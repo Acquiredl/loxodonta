@@ -17,11 +17,13 @@ The open question was **how the OTS client gets into this repo.** CLAUDE.md perm
 ## Consequences
 
 **What gets easier:**
+
 - The repo keeps its identity: one file, stdlib only, readable top-to-bottom. A vendored client would be the largest body of unread code in a project whose moat is that everything can be read.
 - The proof format section becomes teachable — the OTS subset is ~150 commented lines, not a dependency boundary.
 - `verify` stays a pure function of local files: no network, no nondeterminism, usable air-gapped.
 
 **What gets harder or more constrained:**
+
 - **Unknown operations are a refusal, not a guess.** A proof using an operation outside the subset (`sha1`, `ripemd160`, `keccak256`) fails with a clear "this verifier does not implement op X" — today's calendars don't emit these on the digest path, but the failure mode is honest if that changes.
 - **The last hop is the operator's.** Offline replay proves "digest → merkle root R, claimed for block H." Whether R is really block H's root requires a block-header source (local node, explorer of choice). The tool prints exactly what to check and never pretends to have checked it.
 - **What an anchor proves is existence-by-block-H, not authorship.** A writer that regenerates the chain can re-anchor — but only into a *recent* block. Detection is freshness reasoning: a log claiming months of history whose earliest anchor is from yesterday is regenerated. `verify --anchors` therefore reports block heights prominently; judging their plausibility stays with the operator (same division of labor as the head record, with the out-of-reach property outsourced to Bitcoin).

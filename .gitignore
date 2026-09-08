@@ -1,9 +1,13 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 .venv/
 receipts.jsonl
 *.ots
 
-# operator-side journal - never shipped
+# operator-side journals - never shipped
 DOGFOOD.md
 dogfood.py
+METACOG.md
+
+# drill sandbox, if a reader runs `supervisor drill` inside the repo
+.supervisor-drill/

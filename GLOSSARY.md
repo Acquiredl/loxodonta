@@ -1,8 +1,17 @@
 # GLOSSARY — loxodonta
 
+**Where to start.** This file is long and most of it is reference. The reading order:
+
+1. [Roles](#roles) — the operator and the writer, the two parties in the trust story; every other term is named relative to them.
+2. [Core domain](#core-domain) — receipt log, entry, entry hash, chain head, file reference: the nouns the code is built from.
+3. [Anti-terms](#anti-terms-deliberately-not-used) — the words this repo refuses, and why. Read them before writing a sentence about the tool.
+
+The rest (relationships, states, sub-terms, cross-references) is for looking up a term as you meet it in the code and the docs.
+
 Ubiquitous language for this repo. The shared vocabulary between the codebase, its author, and the agent.
 
 Every term in this file should be:
+
 - Used in the code (variable names, file names, type names, function names).
 - Used in your planning docs (PRDs, issues, ADRs).
 - Used in conversations with the agent.
@@ -74,6 +83,10 @@ One line of the receipt log: a JSON object with exactly `n`, `ts`, `actor`, `act
 ### Genesis
 
 The entry with `n == 0` and `prev == null` — the only entry allowed a null `prev`, and the only entry carrying `v`, the format version. Written by `receipts init` with pinned contents (`actor: "receipts"`, `action: "genesis"`, `files: []`); only its timestamp varies. The chain's title page: who started it, when, and under which rulebook — all hash-committed, so a chain can't be relabeled to a different version without breaking. Derived trail designs extend the title page: their genesis payload must commit every ingredient whose change alters output (format version, engine identity, prompt hash, check-catalog version, evaluation-suite version), so "why did this assessment change" always has a recorded answer (ADR-0006, provenance corollary).
+
+### Tool version
+
+Which recorder and supervisor a person is running: a semantic version in one constant per file (`TOOL_VERSION`), tagged at every promotion to `main`, and the same in both files by test. Decoupled from the *format* version the [genesis](#genesis) carries: the format says which chains the tool can read and is frozen at `0.1` (SPEC §2.1); the tool version moves with releases. `--version` on either file prints both beside the checkout's commit — the [recorder notice](#recorder-notice)'s fact, read from local git only, `unknown` outside a checkout. A version is a label on the file, never a channel to fetch a newer one (ADR-0015, ADR-0022).
 
 ### Canonical form
 
@@ -218,7 +231,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 - ~~blockchain~~ — implies consensus, multiple writers, and tokens. This is a single-writer hash chain; say *hash chain*.
 - ~~immutable~~ — overclaims. Nothing prevents mutation; mutation is detected. Say *tamper-evident* (and *anchored* once Stage B applies).
-- ~~audit log / audit trail~~ — Acu's term for its *non-chained* JSONL gate log, the system this project improves on. Using it here blurs exactly the distinction the project exists to make. Say *receipt log*.
+- ~~audit log / audit trail~~ — two reasons. Publicly: the phrase promises a *complete, authoritative* record, and this tool guarantees integrity of what was logged, never that everything was logged ([completeness](#completeness) is the integration's job; failed calls fire no hook; the chain holds action lines, not the full transcript). Internally: it is Acu's term for its *non-chained* JSONL gate log, the system this project improves on, and using it here blurs exactly the distinction the project exists to make. The verb *audit* is not banned. Say *receipt log*.
 - ~~signature~~ *(unqualified)*, and ~~writer signature~~ in any form — no keys exist in v0.1, and the writer signing its own history proves nothing: the signer is the adversary (ADR-0001, unamended). The word now requires its qualifier: the [issuer signature](#issuer-signature) exists for derived packages (ADR-0008); no other signature does.
 - ~~authentic / verified / genuine~~ *(in verdict output only)* — a verifier that prints these draws the operator's conclusion for them, the same overclaim as "immutable". Verdicts name the mechanism: `SELF-CONSISTENT`, `ANCHORED`, `SIGNED` (ADR-0007). Ordinary prose is unaffected.
 

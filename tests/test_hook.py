@@ -743,3 +743,42 @@ class TranscriptCommitmentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClockOverrideTest(unittest.TestCase):
+    """SOURCE_DATE_EPOCH (the reproducible-builds convention) pins the
+    recorder's clock so a demo store (tools/demo_store.py) writes the
+    same bytes on every run. Timestamps are testimony either way: the
+    writer is the adversary and always could have said any time it
+    liked (ADR-0002)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+
+    def entries(self):
+        log = self.workdir / "receipts-sess-1234abcd.jsonl"
+        return [json.loads(line) for line in
+                log.read_text(encoding="utf-8").splitlines()]
+
+    def test_source_date_epoch_pins_the_timestamp(self):
+        from datetime import datetime, timezone
+        epoch = 1756000000
+        expected = datetime.fromtimestamp(epoch, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+
+        result = run_hook(payload(tool="Bash", tool_input={"command": "ls"}),
+                          cwd=self.workdir,
+                          extra_env={"SOURCE_DATE_EPOCH": str(epoch)})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = self.entries()
+        self.assertEqual([e["ts"] for e in entries], [expected, expected])
+
+    def test_without_the_variable_the_wall_clock_stamps_the_entry(self):
+        result = run_hook(payload(tool="Bash", tool_input={"command": "ls"}),
+                          cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.entries()[1]["ts"].startswith("20"))
+        self.assertNotEqual(self.entries()[1]["ts"], "2025-08-24T01:46:40Z")

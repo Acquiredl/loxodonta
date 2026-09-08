@@ -1,0 +1,8 @@
+# markdownlint rules for this repo: the defaults, minus the four below.
+# Each exception is house style already, README included, so the rule
+# would only ever flag prose the author wrote that way on purpose.
+default: true
+MD013: false  # line length: paragraphs are one line each, however long
+MD040: false  # fenced code language: bare fences hold terminal transcripts and receipts, not code
+MD060: false  # table column style: delimiter rows are written |---|---| with no padding
+MD036: false  # emphasis as heading: an italic one-liner (a date stamp, a pointer) stands alone by design

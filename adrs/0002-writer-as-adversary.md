@@ -25,6 +25,7 @@ This one reframing drove five v0.1 features, all decided in the same session:
 - **Tiered guarantee, stated honestly** — surgical tampering is caught unconditionally; regeneration is caught only against a head record (or, from Stage B, an anchor). The public claim must never blur the tiers.
 
 **What gets harder:**
+
 - The strongest Stage A guarantee requires an operator ritual (record the head out of reach). Drop-in users silently get the lower tier — docs must present the tiers explicitly.
 - Positioning discipline: this is an accountability/forensic-integrity layer (flight recorder), **not** a detection or prevention feature. "Security audit" phrasing overclaims; write-time lies remain garbage in, faithfully chained garbage out.
 

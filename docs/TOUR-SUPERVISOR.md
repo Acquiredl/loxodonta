@@ -134,6 +134,13 @@ the writer a second road to the one file that has to stay honest
 (ADR-0002). Behind-counts name their fetch date, because a stale count
 that reads as reassurance is worse than no count.
 
+The notice's commit is also the third field of `--version`, on either
+file: `supervisor 0.1.0 (format 0.1, commit 638dc8c)` — the tool
+version (tagged together with `loxodonta.py`; the two constants must
+agree, and the suite says so), the frozen receipt format, and the
+checkout's `HEAD`, or `unknown` outside a checkout (ADR-0022). Same
+rule as the notice: it reports and never updates.
+
 ## 3. The tick — `scan_root`, `adopt`, the exit ladder
 
 `scan_root` is where the patrol and the specialists assemble into one
@@ -240,8 +247,8 @@ resolve chains under the root; sidecars and path escapes get 404.
 nothing fetched from anywhere but this machine. Writer-supplied text
 — action lines, session names, verify's own words — reaches the DOM
 through `textContent` only, because a receipt is adversary input and
-must never become markup in the operator's browser. The layout (issue
-#48) is a status rail beside a tabbed worktable: the rail carries the
+must never become markup in the operator's browser. The layout (issue #48)
+is a status rail beside a tabbed worktable: the rail carries the
 verdict block, the severity-sorted attention queue, and the fourteen
 days; the worktable splits what you are looking at (sessions,
 projects, search, evidence) from the thing under inspection (a
@@ -262,4 +269,3 @@ its expectation after a damaged line, so the next entry visibly fails
 to connect. This is the one check the suite cannot automate end-to-end
 (a browser must run it), which is why the fire-drill checklist ends
 with it.
-

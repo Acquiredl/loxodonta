@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 672 104" width="672" height="104" role="img" aria-label="loxodonta">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 14px; white-space: pre; fill: #0f766e; }
+    @media (prefers-color-scheme: dark) { text { fill: #5eead4; } }
+  </style>
+  <text x="0" y="18" xml:space="preserve">db       .d88b.  db    db  .d88b.  d8888b.  .d88b.  d8b   db d888888b  .d8b.</text>
+  <text x="0" y="34" xml:space="preserve">88      .8P  Y8. `8b  d8' .8P  Y8. 88  `8D .8P  Y8. 888o  88 `~~88~~' d8' `8b</text>
+  <text x="0" y="50" xml:space="preserve">88      88    88  `8bd8'  88    88 88   88 88    88 88V8o 88    88    88ooo88</text>
+  <text x="0" y="66" xml:space="preserve">88      88    88  .dPYb.  88    88 88   88 88    88 88 V8o88    88    88~~~88</text>
+  <text x="0" y="82" xml:space="preserve">88booo. `8b  d8' .8P  Y8. `8b  d8' 88  .8D `8b  d8' 88  V888    88    88   88</text>
+  <text x="0" y="98" xml:space="preserve">Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</text>
+</svg>

@@ -1,0 +1,24 @@
+# Link rot check: lychee walks every link in the Markdown, web addresses and
+# relative file paths alike, on push and pull request, and once a week on a
+# schedule so a link that died while no one touched the repo still gets
+# noticed. Exclusions and their reasons live in lychee.toml. One broken link
+# fails the run.
+name: links
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  lychee:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --config lychee.toml './**/*.md'
+          fail: true
