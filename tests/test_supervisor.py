@@ -2245,3 +2245,37 @@ class ConsumptionTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["consumption"]["sessions"], [])
         self.assertEqual(report["consumption"]["norm"]["sessions_counted"], 0)
+
+
+def run_supervisor(*args):
+    """Invoke the supervisor as an operator would, with nothing prepared:
+    a usage error is decided before any store is read."""
+    return subprocess.run(
+        [sys.executable, str(SUPERVISOR), *args],
+        capture_output=True, encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+
+class UsageExitTest(unittest.TestCase):
+    """Usage errors exit 64 (sysexits EX_USAGE) here as in the recorder, so
+    scan's 5/6/7 and verify's 0..5 are never an argparse error (ADR-0026
+    ruling 7). Argparse's message stays on stderr; stdout stays empty."""
+
+    def test_unknown_flag_exits_64_with_argparse_message(self):
+        result = run_supervisor("scan", "--no-such-flag")
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("unrecognized arguments", result.stderr)
+        self.assertIn("usage:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_malformed_cadence_exits_64_not_a_verdict_number(self):
+        # parse_cadence raises ArgumentTypeError inside the scan subparser;
+        # the subparser must speak 64 too, or scan's own exits collide.
+        result = run_supervisor("scan", "--anchor-every", "soon")
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("anchor-every", result.stderr)
+        self.assertIn("not a cadence", result.stderr)
+        self.assertEqual(result.stdout, "")

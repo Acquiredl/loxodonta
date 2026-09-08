@@ -5308,14 +5308,30 @@ class VersionAction(argparse.Action):
         parser.exit()
 
 
+EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
+
+
+class UsageParser(argparse.ArgumentParser):
+    """argparse, with usage errors on an exit of their own, the recorder's
+    class twice over. A wrong flag, a missing argument, or a malformed
+    value exits 64 instead of argparse's stock 2, so scan's 5, 6, 7 and
+    verify's 0..5 are never an argparse error (ADR-0026 ruling 7). The
+    message is argparse's, unchanged, on stderr. Subparsers inherit this
+    class, so every command speaks the same number."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def main(argv):
-    parser = argparse.ArgumentParser(prog="supervisor",
-                                     description=__doc__.splitlines()[0])
+    parser = UsageParser(prog="supervisor",
+                         description=__doc__.splitlines()[0])
     parser.add_argument("--version", action=VersionAction,
                         help="print tool version, format version, and "
                              "the checkout's commit, then exit")
     sub = parser.add_subparsers(dest="command", required=True)
-    watching = argparse.ArgumentParser(add_help=False)
+    watching = UsageParser(add_help=False)
     watching.add_argument("--witness", default=str(WITNESS_ROOT),
                           help="the harness transcript layout (the "
                                "liveness witness for completeness)")
@@ -5372,7 +5388,7 @@ def main(argv):
 
     # The recall surface (Stage E, ADR-0009): digest is local by design;
     # show / search / timeline take --all to reach the whole root.
-    recall_common = argparse.ArgumentParser(add_help=False)
+    recall_common = UsageParser(add_help=False)
     recall_common.add_argument(
         "--repo", default=None,
         help="repo directory (default: CLAUDE_PROJECT_DIR, else the "
