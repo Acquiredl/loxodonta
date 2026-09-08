@@ -38,7 +38,11 @@ An entry's `actor` names the harness the writer ran under — `claude-code`, `co
 
 ### Head record
 
-An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin. A [supervisor](#supervisor)'s baseline is deliberately **not** a head record — see the distinction there. Nor is a remote the machine can log in to: a gist or repository under the operator's own account is reachable by an agent running as the operator, token and all, so an automated "head ledger" there would be testimony, not a head record (ADR-0024). On a single machine the tool cannot automate a true head record; the anchor is that automation.
+An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin. A [supervisor](#supervisor)'s baseline is deliberately **not** a head record — see the distinction there. A remote counts when it is off the machine **and the credentials present on the machine cannot delete or overwrite what they wrote there**: same login is not the test, deletability is (ADR-0025, amending ADR-0024 ruling 5). A gist under the operator's `gh` login fails, because the token deletes it and its revisions (ADR-0024's verdict stands). A chat incoming webhook passes, because the URL posts and can do nothing else; so does an object store under a put-only credential with a retention lock. "Credentials present on the machine" means every token, key, cookie, and browser login a process running as the operator can use. The anchor passes with no credential at all. The tool automates a head record two ways: the anchor, and the [published head](#published-head).
+
+### Published head
+
+One chain head sent off the machine to a remote that passes the [head record](#head-record) test, by the hook at session end (after the tail commitment, before the anchor) and by the supervisor's keeper on a cadence, once the operator opts in (`install-hook --publish-head URL`). It carries the head, the entry count, the session id, the time, and the event kind, and one readable line repeating them; never a path, a project name, an action line, or chain bytes. The check it enables: every published head must be an entry hash inside its chain, so a regenerated chain fails on the earlier heads and a fake head the writer posts matches nothing. It says a chain of that length with that head existed at that time; it never says what the chain held. In this release the check is the operator's ritual with `verify --expect-head` (ADR-0025).
 
 ### Supervisor
 
@@ -126,7 +130,7 @@ A derived design's generalization of the [file reference](#file-reference): the 
 
 ### Package
 
-The delivered whole of a derived trail design that ships more than a chain: the trail, its post-close artifacts (report), the evidence archive, the [manifest](#manifest), and the [seals](#seal) — crossing a trust boundary to a recipient who verifies it with nothing running and no issuer cooperation. Loxodonta's own deliverable is the degenerate one-artifact case: a receipt log whose "manifest" is its own chain head. Canonical rules: ADR-0007.
+The delivered whole that ships more than a chain, crossing a trust boundary to a [recipient](#recipient) who verifies it with nothing running and no issuer cooperation: the chains, their post-close artifacts, the [manifest](#manifest), and the [seals](#seal). Canonical rules: ADR-0007. Loxodonta's own store ships as one since ADR-0026: `supervisor package` takes a session (by id or entry address, siblings included) or a drawer and writes the chains, their anchor sidecars, the [project record](#project-record), a witness snapshot labelled [testimony](#testimony), a plain-words README, and the transcript only on request; `loxodonta verify-package` judges it layer by layer, the recorder's own verdicts verbatim and the package verdict last (`SELF-CONSISTENT`, `+ ANCHORED` when the manifest is anchored, `+ SIGNED (key: <fingerprint>)`). A package confirms it is unaltered since packaging, when it existed, and which key packed it; never that its contents are true or complete. A bare receipt log remains the degenerate one-artifact case whose "manifest" is its own chain head. Not called a *bundle*: the everyday word for the same thing, avoided so the concept has one name; the raw field-data export's zip is a *raw archive*.
 
 ### Manifest
 
@@ -215,6 +219,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 - Verification verdict is one of: `VALID` (exit 0) | `BROKEN` (exit 1, chain integrity failed at ≥1 entries) | `FILES-DIVERGED` (exit 2, chain intact but a referenced file was modified since logging) | `HEAD-MISMATCH` (exit 3, chain internally valid but its head differs from the operator's head record — the whole-chain-regeneration case) | `TRANSCRIPT-DIVERGED` (exit 5, chain intact but the transcript no longer matches a [transcript commitment](#transcript-commitment) — a committed prefix was rewritten or truncated; ADR-0017). `UNSUPPORTED-VERSION` (exit 4) is a refusal to judge, not a verdict: the log's genesis declares a format this verifier doesn't speak. When verdicts compete, the graver sets the exit: `BROKEN` > `HEAD-MISMATCH` > `TRANSCRIPT-DIVERGED` > `FILES-DIVERGED` — transcript divergence is never innocent; working-tree drift usually is. A *missing* transcript is a note, never a verdict: the harness cleans transcripts on a retention cycle.
 - A log never transitions backward: append is the only legal write; anything else moves the verdict to `BROKEN`.
+- Package verdicts (`verify-package`, ADR-0026) map onto the same exits: `SELF-CONSISTENT` (0, with or without `+ ANCHORED` / `+ SIGNED`), `CHAIN-BROKEN` (1), `ARTIFACT-DIVERGED` (2, the package sibling of `FILES-DIVERGED`), `SEAL-INVALID` / `SEAL-MISSING` / a chain's `ANCHOR-MISMATCH` (3, not what was issued), `UNSUPPORTED-FORMAT` (4, a refusal), `TRANSCRIPT-DIVERGED` (5). Usage errors exit `64` in both tools, so a verdict exit is never an argparse error.
 
 ---
 
@@ -239,9 +244,9 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`, `adrs/0018-session-lifecycle-reading.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`, `adrs/0018-session-lifecycle-reading.md`, `adrs/0024-anchor-at-session-end-opt-in-at-install.md`, `adrs/0025-a-head-record-is-what-the-machine-cannot-unsay.md`, `adrs/0026-the-store-ships-as-a-package-verified-by-one-file.md`
 - Related out-of-scope decisions: none yet.
 
 ---
 
-*Last updated: 2026-08-31*
+*Last updated: 2026-09-08*
