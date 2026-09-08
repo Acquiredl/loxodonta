@@ -10,6 +10,15 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `supervisor package <session-id | entry-address>` (ADR-0026, #176): one session as a package, siblings included: every chain and its anchor sidecar, the drawer's project record, `witness.json` (the completeness row and the scan's verdicts, labelled testimony in the file), a plain-words README, and `manifest.json` written last, format `loxodonta-package/1`, chains listed by head and entry count, every other file by sha256 and byte count, `"seals": []` declared. A zip by default, `--folder` for an unpacked folder. Drawer packages, `--transcript`, `--anchor`, and `--sign` are later slices.
+- `loxodonta verify-package PATH` (ADR-0026): judges a zip or a folder layer by layer, the recorder's own `verify --anchors` output verbatim per chain, each artifact against the manifest, then the package verdict with its stated limit and one line of residual trust. Exits map onto `verify`'s: 0 `SELF-CONSISTENT`, 1 `CHAIN-BROKEN`, 2 `ARTIFACT-DIVERGED`, 4 `UNSUPPORTED-FORMAT` (a refusal); gravest wins. Chains are judged by walking, never by file hash, so a Windows unzip that changes line endings still verifies. `docs/PACKAGE.md` has the format and the ladder.
+
+### Changed
+
+- The field-data export's `--raw` zip is a *raw archive* (ADR-0026 ruling 9): the prompt, the issue template, and the help text say so; *package* is reserved for the sealed deliverable above.
+
 ## [0.2.0] - 2026-09-08
 
 The release after the measurement: what the orientation-cost run (EXPERIMENTS §6) found is fixed or stated, the window between anchors is closed for anyone who opts in at install, and the front door says how the repo is built.

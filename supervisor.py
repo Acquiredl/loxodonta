@@ -15,6 +15,7 @@ here is a head record (GLOSSARY: Supervisor, Baseline).
   python supervisor.py search TEXT [--all]      # the ladder past the digest
   python supervisor.py timeline ADDRESS         # context around one entry
   python supervisor.py mcp [--repo DIR]         # the same recall, as an MCP server
+  python supervisor.py package SESSION|ADDRESS  # one session, sealed by a manifest
   python supervisor.py scan --root DIR --json   # legacy: a folder of repos
   python supervisor.py --version                # tool, format, and commit
 
@@ -2770,7 +2771,7 @@ EXPORT_WORDS = (
     "fields it can contain, named in supervisor.py, and nothing else from "
     "the scan passes through. Read it before you send it. It carries no "
     "paths, no command lines, no repo names, and no file references. If "
-    "you sent a raw bundle as well, that is different: raw chains carry "
+    "you sent a raw archive as well, that is different: raw chains carry "
     "every command line, and you were shown one and asked first.")
 
 
@@ -2814,7 +2815,7 @@ def export_sessions(report):
     rows = []
     store = {"chains": 0, "entries": 0, "bytes": 0}
     actors = set()  # which harnesses recorded: HOOK_ACTORS only
-    newest = None  # the sample line a raw bundle shows first
+    newest = None  # the sample line a raw archive shows first
     for repo in report.get("repos", []):
         label = ordinal.setdefault(repo.get("repo"),
                                    f"repo-{len(ordinal) + 1}")
@@ -2925,21 +2926,23 @@ def build_export(report):
     return data, ordinal, newest
 
 
-def write_raw_bundle(report, ordinal, path):
+def write_raw_archive(report, ordinal, path):
     """Chain bytes and anchor sidecars, drawers renamed to their
     ordinals, no project.json: the one export that carries command
-    lines, written only after the sender said yes."""
+    lines, written only after the sender said yes. A raw archive, not a
+    package: no manifest, no witness, nothing a recipient verifies as a
+    set (ADR-0026 ruling 9 keeps the two names apart)."""
     import zipfile
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         for repo in report.get("repos", []):
             label = ordinal.get(repo.get("repo"), "repo-0")
             for sess in repo.get("sessions", []):
                 for chain in sess.get("chains", []):
                     log = Path(chain["log"])
-                    bundle.write(log, f"{label}/{log.name}")
+                    archive.write(log, f"{label}/{log.name}")
                     sidecar = log.with_name(log.name + ".anchors.jsonl")
                     if sidecar.exists():
-                        bundle.write(sidecar, f"{label}/{sidecar.name}")
+                        archive.write(sidecar, f"{label}/{sidecar.name}")
 
 
 def issue_body(data, gist_url, raw):
@@ -2975,7 +2978,7 @@ def issue_body(data, gist_url, raw):
         "edit it by hand.",
         "- [x] I read the export before sending it and I am fine with it "
         "being public in this issue and in `docs/FIELD-DATA.md`.",
-        f"- [{'x' if raw else ' '}] *(raw bundles only)* I ran "
+        f"- [{'x' if raw else ' '}] *(raw archives only)* I ran "
         "`export --raw`, read the sample action line it showed me, and "
         "answered yes.",
         "",
@@ -2983,8 +2986,8 @@ def issue_body(data, gist_url, raw):
 
 
 def cmd_export(args):
-    """Write the allowlisted export (and, on --raw, the bundle), print
-    it, and on --send hand it to `gh`. The scan underneath is one
+    """Write the allowlisted export (and, on --raw, the raw archive),
+    print it, and on --send hand it to `gh`. The scan underneath is one
     ordinary tick: it remembers its baseline like any other."""
     root = store_receipts()
     report = scan_root(root, witness=Path(args.witness), store=True)
@@ -2993,46 +2996,46 @@ def cmd_export(args):
     out = (Path(args.out) if args.out
            else Path.cwd() / f"loxodonta-export-{stamp}.json")
 
-    bundle = None
+    archive = None
     if args.raw:
         if newest is None:
-            print("nothing to bundle: no hook receipts in the store",
+            print("nothing to archive: no hook receipts in the store",
                   file=sys.stderr)
             return 1
-        print("A raw bundle carries every chain byte-for-byte, which means "
+        print("A raw archive carries every chain byte-for-byte, which means "
               "every command line your agents ran. One of yours, the "
               "newest, reads:", file=sys.stderr)
         print(f"    {newest[1]}", file=sys.stderr)
-        print("Everything in the bundle looks like that. Type yes to write "
+        print("Everything in the archive looks like that. Type yes to write "
               "it, anything else to stop: ", end="", file=sys.stderr,
               flush=True)
         answer = sys.stdin.readline().strip().lower()
         if answer != "yes":
             print("stopped; nothing written", file=sys.stderr)
             return 1
-        bundle = out.with_name(out.stem + "-raw.zip")
+        archive = out.with_name(out.stem + "-raw.zip")
 
     body = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     write_lf(out, body)
     print(body, end="")
     print(f"written: {out.name}", file=sys.stderr)
-    if bundle is not None:
-        write_raw_bundle(report, ordinal, bundle)
-        print(f"written: {bundle.name} (raw chains)", file=sys.stderr)
+    if archive is not None:
+        write_raw_archive(report, ordinal, archive)
+        print(f"written: {archive.name} (raw chains)", file=sys.stderr)
 
     if not args.send:
         return 0
-    return send_export(data, out, bundle)
+    return send_export(data, out, archive)
 
 
-def send_export(data, out, bundle):
+def send_export(data, out, archive):
     """`gh` twice, under the sender's login: a secret gist of the files,
     then the issue. The issue body is written beside the export first,
     so a missing `gh` leaves everything needed to file by hand."""
     issue = out.with_name(out.stem + ".issue.md")
     gh = shutil.which("gh")
     if gh is None:
-        write_lf(issue, issue_body(data, None, bundle is not None))
+        write_lf(issue, issue_body(data, None, archive is not None))
         print("gh is not on PATH, so nothing was sent. The export and an "
               f"issue body ({issue.name}) are beside you: upload the export "
               "as a secret gist and open a field-data issue on "
@@ -3040,7 +3043,7 @@ def send_export(data, out, bundle):
         return 1
     machine = data["machine"]
     stamp = str(data["export"]["written"] or "")[:10]
-    files = [str(out)] + ([str(bundle)] if bundle else [])
+    files = [str(out)] + ([str(archive)] if archive else [])
     # `gh gist create` is secret unless told --public; there is no
     # --secret flag to say it twice, so the test pins the absence.
     gist = subprocess.run([gh, "gist", "create", "--desc",
@@ -3053,7 +3056,7 @@ def send_export(data, out, bundle):
         return 1
     lines = gist.stdout.strip().splitlines()
     gist_url = lines[-1] if lines else "<gist link>"
-    write_lf(issue, issue_body(data, gist_url, bundle is not None))
+    write_lf(issue, issue_body(data, gist_url, archive is not None))
     title = (f"field-data: {machine['os']} / {len(data['sessions'])} "
              f"sessions / {stamp}")
     filed = subprocess.run([gh, "issue", "create", "--repo", FIELD_DATA_REPO,
@@ -3096,12 +3099,13 @@ WITNESS_WORDS = (
 
 def store_sessions():
     """{session: [chains]} over every drawer in the store, siblings
-    included, in drawer then sibling order (ADR-0004: a -002 sibling
-    belongs to the session its name says)."""
+    included, in the census's order: drawer, session, then sibling
+    sequence (ADR-0004: -002 continues the unsuffixed chain, whatever
+    the two names sort like as strings)."""
+    found = [log for log in store_receipts().glob("*/receipts-*.jsonl")
+             if not log.name.endswith(".anchors.jsonl")]
     sessions = {}
-    for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
-        if log.name.endswith(".anchors.jsonl"):
-            continue
+    for log in sorted(found, key=store_identity):
         sessions.setdefault(session_of(log), []).append(log)
     return sessions
 
@@ -3241,10 +3245,12 @@ def write_package(session, chains, report, stage, packed):
     listings = []
     artifacts = []
     for log in chains:
+        # Listed from the drawer's copy, whose sidecar sits beside it;
+        # the snapshot has the same head and lines, byte for byte.
+        listing = chain_listing(log)
+        listings.append(listing)
         shutil.copyfile(log, stage / log.name)
         written.append(log.name)
-        listing = chain_listing(stage / log.name)
-        listings.append(listing)
         if listing["anchors"]:
             shutil.copyfile(log.with_name(listing["anchors"]),
                             stage / listing["anchors"])
@@ -5727,7 +5733,8 @@ def main(argv):
                         help="file to write (default: "
                              "loxodonta-export-<date>.json here)")
     export.add_argument("--raw", action="store_true",
-                        help="also bundle the chains themselves, "
+                        help="also write a raw archive of the chains "
+                             "themselves, "
                              "byte-for-byte; shows a sample line and asks "
                              "first, because chains carry command lines")
     export.add_argument("--send", action="store_true",

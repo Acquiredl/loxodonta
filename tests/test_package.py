@@ -282,5 +282,141 @@ class DemoStorePackageTest(unittest.TestCase):
         self.assertEqual(named, {p.name for p in others})
 
 
+# --- A hook-built store with a sibling chain and an anchor sidecar ----------
+
+TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
+SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000001"
+
+
+def ots_varint(n):
+    out = bytearray()
+    while True:
+        byte = n & 0x7F
+        n >>= 7
+        out.append(byte | 0x80 if n else byte)
+        if not n:
+            return bytes(out)
+
+
+def completed_anchor(head, height=850000):
+    """A minimal but genuine OTS timestamp record (docs/ANCHORING.md §4):
+    one sha256 op, then a Bitcoin attestation, so `verify --anchors`
+    replays it offline and prints ANCHORED. Reimplemented here, like
+    test_anchor.py does, so the test proves the tool matches the format."""
+    import base64
+    payload = ots_varint(height)
+    proof = b"\x08" + b"\x00" + TAG_BITCOIN + ots_varint(len(payload)) + payload
+    return json.dumps({"head": head, "n": 3, "ts": "2026-08-22T09:00:00Z",
+                       "calendar": "https://calendar.example.test",
+                       "proof": base64.b64encode(proof).decode()}) + "\n"
+
+
+class HookStorePackageTest(unittest.TestCase):
+    """A store written through `loxodonta hook`: one session whose
+    recording continued in a -002 sibling, with an anchor sidecar on the
+    first chain, so the package has more than one chain and more than
+    one kind of artifact to carry."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.project = self.root / "project"
+        self.project.mkdir()
+        (self.project / "main.py").write_text("print(1)\n", "utf-8")
+        self.witness = self.root / "no-witness"
+        self.witness.mkdir()
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.env = neutral_env(self.home)
+        for command in ("pytest -q", "git status", "git commit -m x"):
+            self.hook(SESSION, "Bash", {"command": command})
+        self.hook(SESSION + "-002", "Edit", {"file_path": "main.py"})
+        drawers = [p for p in (self.home / ".loxodonta" / "receipts").iterdir()
+                   if p.is_dir()]
+        self.assertEqual(len(drawers), 1)
+        self.chain = drawers[0] / f"receipts-{SESSION}.jsonl"
+        self.sibling = drawers[0] / f"receipts-{SESSION}-002.jsonl"
+        self.sidecar = drawers[0] / f"receipts-{SESSION}.jsonl.anchors.jsonl"
+        head = run(LOXODONTA, "head", "--log", str(self.chain)).stdout.strip()
+        self.sidecar.write_text(completed_anchor(head), encoding="utf-8")
+
+    def hook(self, session, tool, tool_input):
+        payload = json.dumps({"session_id": session,
+                              "hook_event_name": "PostToolUse",
+                              "tool_name": tool, "tool_input": tool_input,
+                              "tool_response": {}})
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook"],
+            input=payload.encode("utf-8"), capture_output=True,
+            env={**self.env, "PYTHONIOENCODING": "utf-8",
+                 "CLAUDE_PROJECT_DIR": str(self.project)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def package(self, *args):
+        return run(SUPERVISOR, "package", "--witness", str(self.witness),
+                   *args, env=self.env, cwd=str(self.work))
+
+    def verify_package(self, path):
+        return run(LOXODONTA, "verify-package", str(path), env=self.env)
+
+    def test_siblings_travel_together_and_anchor_lines_print_verbatim(self):
+        result = self.package(SESSION, "--folder", "--out",
+                              str(self.work / "pkg"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        folder = self.work / "pkg"
+        manifest = json.loads((folder / "manifest.json").read_text("utf-8"))
+        self.assertEqual([c["path"] for c in manifest["chains"]],
+                         [self.chain.name, self.sibling.name])
+        self.assertEqual([c["anchors"] for c in manifest["chains"]],
+                         [self.sidecar.name, None])
+        self.assertEqual([c["entries"] for c in manifest["chains"]], [4, 2])
+        # The sidecar is a post-close artifact, listed by hash (ruling 3).
+        self.assertIn(self.sidecar.name,
+                      [a["path"] for a in manifest["artifacts"]])
+        self.assertEqual((folder / self.sidecar.name).read_bytes(),
+                         self.sidecar.read_bytes())
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        out = judged.stdout
+        self.assertEqual(out.count("\nchain: "), 2, out)
+        # The recorder's own anchor line, under its chain, as detail
+        # (ruling 6): the chain is anchored, the package is not.
+        self.assertIn("ANCHORED: entries 0..3 existed by Bitcoin block 850000",
+                      out)
+        self.assertIn(f"{self.sidecar.name}: matches the manifest", out)
+        lines = out.strip().splitlines()
+        self.assertTrue(lines[-2].startswith("SELF-CONSISTENT"), lines[-2])
+        self.assertNotIn("ANCHORED", lines[-2])
+
+    def test_a_foreign_anchor_outranks_the_diverged_sidecar_exit_3(self):
+        # Gravest wins (ruling 7): rewriting the sidecar diverges it from
+        # the manifest (2), and the head it now names is nowhere in the
+        # chain (3); the package says the graver thing last.
+        self.package(SESSION, "--folder", "--out", str(self.work / "pkg"))
+        folder = self.work / "pkg"
+        (folder / self.sidecar.name).write_text(
+            completed_anchor("ab" * 32), encoding="utf-8")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 3, judged.stdout + judged.stderr)
+        lines = judged.stdout.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("ANCHOR-MISMATCH"), lines[-1])
+        self.assertTrue(any(l.startswith(f"{self.sidecar.name}: DIVERGED")
+                            for l in lines), judged.stdout)
+
+    def test_an_unknown_selector_is_refused_and_writes_nothing(self):
+        for selector in ("nonesuch", "deadbeef"):
+            result = self.package(selector)
+            self.assertNotEqual(result.returncode, 0, selector)
+            self.assertIn(selector, result.stderr)
+            self.assertFalse(list(self.work.iterdir()), selector)
+
+
 if __name__ == "__main__":
     unittest.main()
