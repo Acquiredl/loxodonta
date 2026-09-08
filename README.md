@@ -28,6 +28,8 @@ $ python loxodonta.py verify
 BROKEN at entry 1: entry_hash does not match canonical form
 ```
 
+![The same six commands as a terminal recording: init, two receipts logged, verify says VALID, one word of entry 1 rewritten with sed, verify says BROKEN at entry 1.](docs/images/tamper-demo.gif)
+
 Tamper-evident, not immutable: the change was caught, not stopped. Nothing here keeps an agent from rewriting its log. Everything here makes the rewrite show.
 
 ## Install
