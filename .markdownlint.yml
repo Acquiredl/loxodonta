@@ -6,3 +6,5 @@ MD013: false  # line length: paragraphs are one line each, however long
 MD040: false  # fenced code language: bare fences hold terminal transcripts and receipts, not code
 MD060: false  # table column style: delimiter rows are written |---|---| with no padding
 MD036: false  # emphasis as heading: an italic one-liner (a date stamp, a pointer) stands alone by design
+MD024:                  # duplicate headings: only among siblings. Keep a Changelog repeats Added/Changed/Fixed under every version on purpose
+  siblings_only: true
