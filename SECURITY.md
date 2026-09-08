@@ -29,8 +29,9 @@ These are the design, not vulnerabilities:
 
 - Anyone with write access to the store can rewrite a chain. The log is a
   file, and whoever can write the file can rewrite it; the format states
-  that as a non-goal on purpose, and head records and anchors are how the
-  operator closes it ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
+  that as a non-goal on purpose. Head records and anchors are how loxodonta
+  deals with the write access risk
+  ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
 - A compromised writer lying at write time is chained faithfully. Receipts
   are testimony.
 - A tool call that never fired the hook leaves no break. Completeness is the
