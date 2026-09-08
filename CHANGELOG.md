@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- Usage errors exit `64` (sysexits `EX_USAGE`) in both `loxodonta.py` and `supervisor.py`: an unknown flag, a missing required argument, or a malformed value (`--expect-head`, `--anchor-every`) no longer shares exit `2` with `FILES-DIVERGED`, so a verdict exit is never an argparse error. Argparse's message on stderr is unchanged, and every verdict exit is untouched: the recorder's `0` to `5`, and `scan`'s `0` to `7` (ADR-0026 ruling 7, #175).
+
 ## [0.2.0] - 2026-09-08
 
 The release after the measurement: what the orientation-cost run (EXPERIMENTS §6) found is fixed or stated, the window between anchors is closed for anyone who opts in at install, and the front door says how the repo is built.
