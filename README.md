@@ -1,4 +1,5 @@
-# loxodonta
+<!-- markdownlint-disable-next-line MD041 -->
+![loxodonta](docs/images/wordmark.svg)
 
 *A flight recorder for AI agents.*
 
