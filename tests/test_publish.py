@@ -289,5 +289,92 @@ class PublishAtSessionEndTest(PublishBase):
         self.assertEqual(self.receiver.received, [])
 
 
+class InstallPublishHeadTest(unittest.TestCase):
+    """`install-hook --publish-head URL` writes `--publish URL` onto the
+    wired SessionEnd command, the way `--anchor-at-session-end` writes
+    `--anchor` (ADR-0024 ruling 1, ADR-0025 ruling 3): readable in the
+    settings file, idempotent, removed by `uninstall-hook`."""
+
+    URL = "https://hooks.example.test/services/T000/B000/XXXX"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.home = self.root / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home)}
+
+    def install(self, *args):
+        return run_receipts("install-hook", *args, cwd=self.root,
+                            env=self.env)
+
+    def settings(self):
+        return json.loads((self.home / ".claude" / "settings.json")
+                          .read_text(encoding="utf-8"))
+
+    def commands(self, event):
+        return [h["command"] for b in self.settings()["hooks"][event]
+                for h in b["hooks"]]
+
+    def test_publish_head_rides_on_the_session_end_command(self):
+        result = self.install("--publish-head", self.URL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertTrue(end.endswith(f' --publish "{self.URL}"'), end)
+        # PostToolUse is untouched: no network call in the recording path.
+        self.assertNotIn("--publish", json.dumps(self.commands("PostToolUse")))
+        # The installer states the choice, URL included.
+        self.assertIn(self.URL, result.stdout)
+
+    def test_install_is_idempotent(self):
+        self.install("--publish-head", self.URL)
+        again = self.install("--publish-head", self.URL)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("already installed", again.stdout)
+        self.assertEqual(len(self.commands("SessionEnd")), 1)
+
+    def test_a_rerun_without_the_flag_turns_publishing_off_and_says_so(self):
+        self.install("--publish-head", self.URL)
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("--publish", json.dumps(self.settings()["hooks"]))
+        self.assertNotIn(self.URL, json.dumps(self.settings()["hooks"]))
+        self.assertIn("no longer", result.stdout)
+        self.assertIn("publish", result.stdout)
+
+    def test_both_opt_ins_ride_on_the_one_command(self):
+        result = self.install("--anchor-at-session-end",
+                              "--publish-head", self.URL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertIn(" --anchor", end)
+        self.assertIn(f' --publish "{self.URL}"', end)
+        self.assertIn("anchors", result.stdout)
+        self.assertIn(self.URL, result.stdout)
+
+    def test_uninstall_removes_the_publishing_session_end_hook(self):
+        self.install("--publish-head", self.URL)
+        result = run_receipts("uninstall-hook", cwd=self.root, env=self.env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.home / ".claude" / "settings.json"
+        left = path.read_text(encoding="utf-8") if path.exists() else "{}"
+        self.assertNotIn("loxodonta.py", left)
+        self.assertNotIn(self.URL, left)
+
+    def test_codex_refuses_the_flag_with_a_note(self):
+        # Codex caps a SessionEnd hook at three seconds; whether one POST
+        # fits is measured before Codex gets the flag (ADR-0025 ruling
+        # 3), so the installer refuses, the way it refuses the anchor.
+        (self.home / ".codex").mkdir()
+        result = self.install("--codex", "--publish-head", self.URL)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--publish-head", result.stderr)
+        self.assertIn("Codex", result.stderr)
+        self.assertIn("measured", result.stderr)
+        self.assertFalse((self.home / ".codex" / "hooks.json").exists())
+        self.assertFalse((self.home / ".claude" / "settings.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

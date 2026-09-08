@@ -1804,18 +1804,31 @@ PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 CODEX_SESSION_END_TIMEOUT = 3
 
 
-def recorder_command(actor=None, anchor=False):
+def recorder_command(actor=None, anchor=False, publish=None):
     """The hook command the installers write: this interpreter, this
     file, no shell expansion — the hook resolves the project itself, so
     one command works on every platform. `actor` names the harness the
     receipts will say acted (ADR-0020); `anchor` is the session-end
-    anchor opt-in, carried on the SessionEnd command so the choice is
-    readable in the settings file (ADR-0024)."""
+    anchor opt-in and `publish` the URL the session's head is published
+    to, both carried on the SessionEnd command so the choice is readable
+    in the settings file (ADR-0024, ADR-0025)."""
     python = sys.executable.replace(os.sep, "/")
     self_path = os.path.abspath(__file__).replace(os.sep, "/")
     command = f'"{python}" "{self_path}" hook'
     command += f" --actor {actor}" if actor else ""
-    return command + (" --anchor" if anchor else "")
+    command += " --anchor" if anchor else ""
+    return command + (f' --publish "{publish}"' if publish else "")
+
+
+def session_end_choices(anchor, publish):
+    """What the wired SessionEnd command does beyond the seal, for the
+    installer's notice, so the operator reads their choice back."""
+    choices = []
+    if anchor:
+        choices.append("anchors at session end")
+    if publish:
+        choices.append(f"publishes the head to {publish}")
+    return " and ".join(choices)
 
 
 def supervisor_path():
@@ -1954,6 +1967,15 @@ def cmd_install_hook(args):
                   "short to reach a calendar with margin. Use the "
                   "supervisor's --anchor-every instead.", file=sys.stderr)
             return 1
+        if args.publish_head:
+            # The same cap, a smaller call: whether one POST fits inside
+            # three seconds is measured before Codex gets the flag
+            # (ADR-0025 ruling 3; the measurement is its own slice).
+            print("error: --publish-head is not wired for Codex yet: its "
+                  "SessionEnd hook is capped at three seconds, and whether "
+                  "one POST fits inside that is measured before Codex gets "
+                  "the flag.", file=sys.stderr)
+            return 1
         return install_codex_hooks()
     supervisor = supervisor_path()
     record = recorder_command()
@@ -2008,11 +2030,15 @@ def cmd_install_hook(args):
     # hooks a short shared budget by default, and a large transcript
     # deserves the read.
     end = hooks.setdefault("SessionEnd", [])
-    record_end = recorder_command(anchor=args.anchor_at_session_end)
+    record_end = recorder_command(anchor=args.anchor_at_session_end,
+                                  publish=args.publish_head)
     healed += heal(end, RECORDER_MARKERS, record_end)
-    # The session-end anchor opt-in rides on this command (ADR-0024).
-    # The install command states the choice each time: a re-run
-    # without the flag turns it off, and says so.
+    # The session-end opt-ins ride on this command: the anchor
+    # (ADR-0024) and the published head (ADR-0025). The install command
+    # states the choice each time: a re-run without a flag turns that
+    # step off, and says so.
+    choices = session_end_choices(args.anchor_at_session_end,
+                                  args.publish_head)
     for block in end:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
@@ -2020,17 +2046,16 @@ def cmd_install_hook(args):
                 hook["command"] = record_end
                 installed.append(
                     f"SessionEnd: {record_end}"
-                    + (" (now anchors at session end)"
-                       if args.anchor_at_session_end
-                       else " (no longer anchors at session end)"))
+                    + (f" (now {choices})" if choices
+                       else " (no longer anchors or publishes at "
+                            "session end)"))
     if not any(ours(b) for b in end):
         end.append({
             "hooks": [{"type": "command", "command": record_end,
                        "timeout": 20}],
         })
         installed.append(f"SessionEnd: {record_end}"
-                         + (" (anchors at session end)"
-                            if args.anchor_at_session_end else ""))
+                         + (f" ({choices})" if choices else ""))
 
     if os.path.isfile(supervisor):
         start = hooks.setdefault("SessionStart", [])
@@ -2259,6 +2284,14 @@ def main(argv=None):
              "via OpenTimestamps, quietly and best-effort, and upgrades "
              "pending proofs (ADR-0024). A 32-byte digest leaves the "
              "machine at each session end; nothing else does")
+    install_parser.add_argument(
+        "--publish-head", default=None, metavar="URL",
+        help="opt in: every session end POSTs the chain head (head, n, "
+             "session, ts, event, and one readable line) to this URL, "
+             "before the anchor, quietly and best-effort (ADR-0025). Pick "
+             "a remote the credentials on this machine cannot delete "
+             "from, such as a chat incoming webhook. No path, project "
+             "name, or action line leaves")
     install_parser.set_defaults(func=cmd_install_hook)
     uninstall_parser = sub.add_parser(
         "uninstall-hook",
