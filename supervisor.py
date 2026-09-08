@@ -3322,6 +3322,15 @@ def cmd_package(args):
     session, chains = select_session(args.selector, sessions)
     if session is None:
         return 1
+    drawers = sorted({log.parent for log in chains})
+    if len(drawers) > 1:
+        # The layout is flat, one project record beside the chains; two
+        # drawers under one chain name would mean one silently
+        # overwriting the other. Possible before ADR-0023; refused here.
+        print(f"error: session {session} spans {len(drawers)} drawers "
+              f"({', '.join(d.name for d in drawers)}); packaging a split "
+              "session is not built", file=sys.stderr)
+        return 1
     packed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     default = Path.cwd() / f"loxodonta-package-{session}"
     out = Path(args.out) if args.out else (

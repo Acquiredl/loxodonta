@@ -410,6 +410,23 @@ class HookStorePackageTest(unittest.TestCase):
         self.assertTrue(any(l.startswith(f"{self.sidecar.name}: DIVERGED")
                             for l in lines), judged.stdout)
 
+    def test_a_session_split_across_drawers_is_refused_not_flattened(self):
+        # Before ADR-0023 a session could land in two drawers under the
+        # same chain name. The package lays chains flat beside one
+        # project record, so two drawers would mean one chain silently
+        # overwriting the other: refused, named, nothing written.
+        other = self.chain.parent.parent / "other-00000000"
+        other.mkdir()
+        (other / self.chain.name).write_bytes(self.chain.read_bytes())
+        (other / "project.json").write_text(
+            json.dumps({"path": (self.root / "other").as_posix()}), "utf-8")
+
+        result = self.package(SESSION)
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("drawers", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
     def test_an_unknown_selector_is_refused_and_writes_nothing(self):
         for selector in ("nonesuch", "deadbeef"):
             result = self.package(selector)
