@@ -731,6 +731,49 @@ def upgrade_pending_proofs(folder, remaining, deadline):
             completed.add(key)
 
 
+# --- The published head (ADR-0025) -------------------------------------------
+# A hook wired with --publish URL posts the chain head when the session
+# ends, after the tail commitment and before the anchor, to a remote the
+# credentials on this machine cannot delete from (a chat incoming webhook,
+# a retention-locked bucket): the fingerprint, never the work. Quiet on
+# every failure, like the anchor.
+
+SESSION_END_PUBLISH = 3.0   # seconds for the one POST; the anchor gets the rest
+
+
+def published_head(head, n, session, event="session-end"):
+    """The body of a published head (ADR-0025 ruling 2): the head, the
+    entry count, the session id, the time, the event kind, and one
+    readable line repeating them. The line rides under two keys because
+    chat webhooks disagree on the name: Slack and Teams render `text`,
+    Discord renders `content`; a JSON receiver reads the fields. Nothing
+    else: no path, no project name, no action line, no chain bytes."""
+    ts = now_ts()
+    line = f"loxodonta {event}: head {head} n {n} session {session} ts {ts}"
+    return {"head": head, "n": n, "session": session, "ts": ts,
+            "event": event, "text": line, "content": line}
+
+
+def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
+    """POST `log`'s head to `url`. Never raises, never prints: a slow or
+    unreachable remote costs nothing else, and staleness is the
+    supervisor's to surface."""
+    try:
+        last = tail_entry(read_log(log))
+        if last is None:
+            return
+        body = json.dumps(published_head(last["entry_hash"], last["n"],
+                                         session)).encode("utf-8")
+        request = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "loxodonta"})
+        with urllib.request.urlopen(request, timeout=timeout):
+            pass
+    except Exception:  # noqa: BLE001 - an exit hook that raises is noise
+        return
+
+
 def cmd_anchor(args):
     if args.upgrade:
         return upgrade_anchors(args)
@@ -1625,11 +1668,17 @@ def cmd_hook(args):
         if not os.path.exists(log):
             return 0
         code = seal_session(log, payload.get("transcript_path"))
-        # The commitment first, then the anchor (ADR-0024): the head
-        # that gets anchored is the sealed one, and a slow calendar can
-        # never cost the commitment.
+        # The commitment first, then the published head, then the anchor
+        # (ADR-0024, ADR-0025): the head that leaves the machine is the
+        # sealed one, and a slow calendar can never cost the commitment
+        # nor the one POST, so the anchor takes what is left of the
+        # budget.
+        deadline = time.monotonic() + SESSION_END_BUDGET
+        if args.publish:
+            publish_head(log, args.publish, session)
         if args.anchor:
-            session_end_anchor(log, args.calendar or DEFAULT_CALENDARS)
+            session_end_anchor(log, args.calendar or DEFAULT_CALENDARS,
+                               budget=deadline - time.monotonic())
         return code
 
     if not os.path.isdir(log_dir):
@@ -2183,6 +2232,11 @@ def main(argv=None):
                              metavar="URL",
                              help="calendar for --anchor (repeatable; "
                                   "default: the public pools)")
+    hook_parser.add_argument("--publish", default=None, metavar="URL",
+                             help="at SessionEnd, POST the chain head to "
+                                  "this URL after the tail commitment and "
+                                  "before the anchor, quietly (ADR-0025; "
+                                  "install-hook --publish-head wires this)")
     hook_parser.set_defaults(func=cmd_hook)
     explain_parser = sub.add_parser(
         "explain", parents=[common],
