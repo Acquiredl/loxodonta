@@ -38,7 +38,7 @@ An entry's `actor` names the harness the writer ran under — `claude-code`, `co
 
 ### Head record
 
-An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin. A [supervisor](#supervisor)'s baseline is deliberately **not** a head record — see the distinction there.
+An operator-held copy of the chain head, stored **outside the writer's reach** — another machine, a password-manager note, a message to self. Input to `verify --expect-head`. The tool never stores heads locally on the operator's behalf (a state file the writer can reach is false security). Stage B anchors are head records with the out-of-reach property outsourced to Bitcoin. A [supervisor](#supervisor)'s baseline is deliberately **not** a head record — see the distinction there. Nor is a remote the machine can log in to: a gist or repository under the operator's own account is reachable by an agent running as the operator, token and all, so an automated "head ledger" there would be testimony, not a head record (ADR-0024). On a single machine the tool cannot automate a true head record; the anchor is that automation.
 
 ### Supervisor
 
@@ -198,7 +198,7 @@ A [bookkeeping entry](#bookkeeping-entry) that fingerprints the harness transcri
 
 ### Anchor *(Stage B)*
 
-An external commitment of the chain head to a system the log owner doesn't control — OpenTimestamps onto the Bitcoin blockchain. Closes the whole-chain-regeneration gap named in ADR-0001. Anchor proofs live beside the log, not inside the entry format.
+An external commitment of the chain head to a system the log owner doesn't control — OpenTimestamps onto the Bitcoin blockchain. Closes the whole-chain-regeneration gap named in ADR-0001. Anchor proofs live beside the log, not inside the entry format. The **session-end anchor** (ADR-0024) is the same commitment made by the hook when a session ends, once the operator has opted in at install (`install-hook --anchor-at-session-end`): after the tail commitment, under a fixed budget, quiet on failure, with the leftover budget spent upgrading the drawer's pending proofs. Nothing leaves the machine without that opt-in, and nothing else automated does.
 
 ---
 

@@ -745,6 +745,31 @@ class InstallerTest(RecallBase):
         self.assertIn("startup|clear|compact",
                       json.dumps(settings["hooks"]["SessionStart"]))
 
+    def test_install_can_opt_in_to_session_end_anchoring(self):
+        # ADR-0024: the opt-in lives at install, on the wired SessionEnd
+        # command, readable in the settings file; PostToolUse is untouched.
+        result, home = self.run_installer("install-hook",
+                                          "--anchor-at-session-end")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        settings = self.settings(home)
+        end = settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
+        post = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(end.endswith(" --anchor"), end)
+        self.assertNotIn("--anchor", post)
+        self.assertIn("anchor", result.stdout.lower())
+
+    def test_install_without_the_flag_wires_no_anchor(self):
+        _, home = self.run_installer("install-hook")
+        self.assertNotIn("--anchor", json.dumps(self.settings(home)["hooks"]))
+
+    def test_uninstall_removes_the_anchoring_session_end_hook(self):
+        self.run_installer("install-hook", "--anchor-at-session-end")
+        result, home = self.run_installer("uninstall-hook")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = home / ".claude" / "settings.json"
+        left = path.read_text(encoding="utf-8") if path.exists() else "{}"
+        self.assertNotIn("loxodonta.py", left)
+
     def test_install_is_idempotent(self):
         _, home = self.run_installer("install-hook")
         again, _ = self.run_installer("install-hook")
