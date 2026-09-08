@@ -16,6 +16,11 @@ exclude_loopback = true
 exclude_private = true
 
 exclude = [
+  # The changelog's compare and tag links for a release: they point at the
+  # tag the promotion creates after the pull request that adds them merges
+  # (CONTRIBUTING, "Releases"), so on that pull request they are 404 by
+  # construction. The release workflow is what makes them true.
+  '^https://github\.com/Acquiredl/loxodonta/(compare|releases/tag)/',
   # Reserved example domains: placeholders in worked examples, not real hosts.
   '^https?://([a-z0-9-]+\.)?example\.(com|org|net)',
   '^https?://[^/]+\.invalid',
