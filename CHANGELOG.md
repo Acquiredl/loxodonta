@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-08
+
+The release after the measurement: what the orientation-cost run (EXPERIMENTS §6) found is fixed or stated, the window between anchors is closed for anyone who opts in at install, and the front door says how the repo is built.
+
 ### Changed
 
 - The coverage claim states its edge: what the harness does on a session's behalf outside any tool call (a worktree it merges when a session leaves it) fires no hook and leaves no receipt; HOOK.md, the GLOSSARY, and the README's defends-against table say so, and point at git's reflog for the pointer move (#156).
@@ -48,5 +52,6 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.1.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.2.0...dev
+[0.2.0]: https://github.com/Acquiredl/loxodonta/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Acquiredl/loxodonta/releases/tag/v0.1.0
