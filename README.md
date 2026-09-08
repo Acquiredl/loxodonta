@@ -185,7 +185,7 @@ e2646aab  09:16Z  claude-code  Read: todo.py
 09d87676  09:22Z  claude-code  2x Bash, last: git commit -am "list: count from 1, the way people do"   <- last recorded action
 ```
 
-Every row carries an **entry address**, a short prefix of the entry's own hash, and three commands climb from there:
+Every row carries an **entry address**, a short prefix of the entry's own hash, and four commands climb from there:
 
 ```
 python supervisor.py digest                   # what the hook injects, by hand
@@ -193,6 +193,7 @@ python supervisor.py show 09d87676            # one full entry by address
 python supervisor.py search "unittest"        # the whole repo's chains, not just the window
 python supervisor.py search "unittest" --all  # every repo under your root
 python supervisor.py timeline 09d87676        # what happened around that entry
+python supervisor.py verify 09d87676          # the recorder's verdict on the chain holding that entry
 ```
 
 The same five readings are also an MCP server (`python supervisor.py mcp`), so an agent that can't run the hook (Codex, an Agents SDK program, any MCP client) reads the same memory in the same words. It is read-only by decision: an agent may read its history here, never append to it ([docs/MCP.md](docs/MCP.md)).
