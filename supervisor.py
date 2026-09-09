@@ -444,6 +444,19 @@ def sidecar_heads(sidecar):
             if isinstance(record.get("head"), str)}
 
 
+def ripe_head(entries, now, cadence):
+    """The chain head once it has aged past the cadence, else None: the
+    ripeness test both keepers share. No cadence means no opt-in, and a
+    head with no readable birth time never ripens — the keeper sends
+    nothing it cannot date."""
+    if cadence is None or not entries:
+        return None
+    born = parse_when(entries[-1].get("ts"))
+    if born is None or (now - born).total_seconds() < cadence:
+        return None
+    return entries[-1].get("entry_hash") or None
+
+
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
@@ -468,10 +481,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
             notes.append("upgrade attempted; a calendar did not answer — "
                          "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
-        head = entries[-1].get("entry_hash")
-        born = parse_when(entries[-1].get("ts"))
-        ripe = born is not None and (now - born).total_seconds() >= cadence
-        if head and ripe and head not in sidecar_heads(sidecar):
+        head = ripe_head(entries, now, cadence)
+        if head and head not in sidecar_heads(sidecar):
             command = [sys.executable, str(LOXODONTA), "anchor",
                        f"--log={log}"]
             for calendar in calendars:
@@ -515,15 +526,11 @@ def keep_published(log, last_attempt, now, entries, cadence, url):
     therefore testimony: it stops a repeat and proves nothing; the
     remote's copy is the head record. Off by default: nothing leaves
     the machine without the say-so. Returns (attempted, note, failed)."""
-    if cadence is None or not url or not entries:
-        return False, None, False
-    if not upgrade_due(last_attempt, now):
+    if not url or not upgrade_due(last_attempt, now):
         return False, None, False
     memo = Path(str(log) + ".published.jsonl")
-    head = entries[-1].get("entry_hash")
-    born = parse_when(entries[-1].get("ts"))
-    ripe = born is not None and (now - born).total_seconds() >= cadence
-    if not (head and ripe) or head in sidecar_heads(memo):
+    head = ripe_head(entries, now, cadence)
+    if not head or head in sidecar_heads(memo):
         return False, None, False
     finished = subprocess.run(
         [sys.executable, str(LOXODONTA), "publish", f"--log={log}", url],
