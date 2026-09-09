@@ -3262,10 +3262,20 @@ def send_export(data, out, archive):
 # downloads the one file that already verifies a bare chain.
 
 PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
-# The seals a package can declare (ADR-0007's declared seal set): the
-# anchor is built (--anchor); the signature (--sign) is a later slice.
+# The seals a package can declare (ADR-0007's declared seal set), in the
+# order they are declared and applied: the anchor (--anchor) says when,
+# the issuer signature (--sign) says which key (ADR-0026 ruling 4).
 SEAL_ANCHOR = "anchor"
+SEAL_SIGNATURE = "signature"
 MANIFEST_SIDECAR = "manifest.json.anchors.jsonl"   # the anchor's proof
+MANIFEST_SIGNATURE = "manifest.json.sig"   # ssh-keygen's detached signature
+MANIFEST_PUBLIC_KEY = "manifest.json.pub"  # the key that made it: testimony
+# The ssh-keygen signature namespace, the verifier's and the signer's
+# both, so a signature made for anything else never verifies here.
+SIGNATURE_NAMESPACE = "loxodonta-package"
+# The verifier's allowed-signers principal, twice over: the packer runs
+# the recipient's check on what it ships before anything is written.
+SIGNATURE_PRINCIPAL = "issuer"
 # The completeness row travels with these fields only: no judge command,
 # no transcript path, no home. Paths the recipient cannot follow are
 # noise, and the project record already carries the one that matters.
@@ -3640,14 +3650,103 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     return written
 
 
-def seal_package(stage, seals, calendars):
-    """Apply the declared seals to the manifest's hash, the last step of
-    ADR-0007's write order. The anchor (ADR-0026 ruling 4): the recorder
-    posts the manifest's sha256 to the calendars once and writes the
-    proof beside it as manifest.json.anchors.jsonl; the supervisor never
-    speaks OTS itself. Returns (the seal files written, in order, and
-    the recorder's own words when a seal could not be applied)."""
-    written = []
+def key_fingerprint(public_key):
+    """The SHA256 fingerprint of a public key file, as ssh-keygen prints
+    it (`ssh-keygen -lf`), or None when the file is not a key it reads:
+    the recorder's, twice over, so the fingerprint printed at packaging
+    is the one the verifier prints. The fingerprint is the key's
+    identity (ADR-0008 ruling 6); the comment ssh-keygen prints beside
+    it is a name, and stays unread."""
+    listed = subprocess.run(["ssh-keygen", "-lf", str(public_key)],
+                            capture_output=True, encoding="utf-8",
+                            errors="replace")
+    words = listed.stdout.split()
+    if listed.returncode != 0 or len(words) < 2:
+        return None
+    return words[1]
+
+
+def sign_manifest(stage, keyfile):
+    """The issuer signature (ADR-0026 ruling 4, ADR-0008): ssh-keygen
+    signs the manifest's shipped bytes with KEYFILE and writes
+    manifest.json.sig beside it. This file never opens the private key;
+    only ssh-keygen does, and its own prompts, a passphrase or a
+    hardware touch, reach the terminal because its output is not
+    captured. The public key ships as manifest.json.pub, testimony
+    (ADR-0008 ruling 4): KEYFILE.pub when it exists, else what
+    `ssh-keygen -y` derives from the key, which asks for an encrypted
+    key's passphrase a second time; its two tokens only, type and key,
+    since the comment is a name and the package carries none. Then the
+    recipient's check, twice over: the signature must verify under the
+    key that ships, or a stale KEYFILE.pub beside a regenerated key
+    would send a package that could only ever read SEAL-INVALID.
+    Returns (the shipped key's fingerprint, None), or (None, the
+    problem sentence)."""
+    manifest = stage / "manifest.json"
+    signed = subprocess.run(
+        ["ssh-keygen", "-q", "-Y", "sign", "-n", SIGNATURE_NAMESPACE,
+         "-f", str(keyfile), str(manifest)])
+    if signed.returncode != 0:
+        return None, (f"the manifest was not signed (ssh-keygen exited "
+                      f"{signed.returncode}; its words are above)")
+    beside = keyfile.with_name(keyfile.name + ".pub")
+    if beside.is_file():
+        line = beside.read_text("utf-8", errors="replace")
+    else:
+        derived = subprocess.run(["ssh-keygen", "-y", "-f", str(keyfile)],
+                                 stdout=subprocess.PIPE, encoding="utf-8",
+                                 errors="replace")
+        if derived.returncode != 0:
+            return None, (f"the public key was not derived from {keyfile} "
+                          f"(ssh-keygen exited {derived.returncode}; its "
+                          "words are above)")
+        line = derived.stdout
+    key = " ".join(line.split()[:2])
+    write_lf(stage / MANIFEST_PUBLIC_KEY, key + "\n")
+    with tempfile.TemporaryDirectory() as scratch:
+        allowed = Path(scratch) / "allowed_signers"
+        write_lf(allowed, f"{SIGNATURE_PRINCIPAL} {key}\n")
+        with open(manifest, "rb") as shipped:
+            verified = subprocess.run(
+                ["ssh-keygen", "-Y", "verify", "-f", str(allowed),
+                 "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
+                 "-s", str(stage / MANIFEST_SIGNATURE)],
+                stdin=shipped, capture_output=True, encoding="utf-8",
+                errors="replace")
+    if verified.returncode != 0:
+        reason = "; ".join(verified.stderr.strip().splitlines()) \
+            or "ssh-keygen gave no reason"
+        source = beside if beside.is_file() else keyfile
+        return None, (f"the signature does not verify under the public key "
+                      f"{source} gave ({reason}); a stale .pub beside a "
+                      "regenerated key looks like this: move it aside and "
+                      "the key derives its own")
+    return key_fingerprint(stage / MANIFEST_PUBLIC_KEY), None
+
+
+def seal_package(stage, seals, calendars, keyfile):
+    """Apply the declared seals to the manifest, the last step of
+    ADR-0007's write order: the signature first, then the anchor, since
+    signing can fail on a passphrase or a touch and the anchor is the
+    one step that leaves the machine, so a signing that fails costs no
+    calendar submission. The signature: sign_manifest. The anchor
+    (ADR-0026 ruling 4): the recorder posts the manifest's sha256 to the
+    calendars once and writes the proof beside it as
+    manifest.json.anchors.jsonl; the supervisor never speaks OTS itself.
+    Returns (the seal files written, in order; the signing key's
+    fingerprint, or None; and the problem when a seal could not be
+    applied, the tool's own words already on stderr)."""
+    written, fingerprint = [], None
+    if SEAL_SIGNATURE in seals:
+        try:
+            fingerprint, problem = sign_manifest(stage, keyfile)
+        except (FileNotFoundError, PermissionError):
+            problem = ("the manifest was not signed: ssh-keygen is not on "
+                       "PATH or cannot run here (OpenSSH 8.0 or later "
+                       "carries it)")
+        if problem:
+            return [], None, problem
+        written += [MANIFEST_SIGNATURE, MANIFEST_PUBLIC_KEY]
     if SEAL_ANCHOR in seals:
         command = [sys.executable, str(LOXODONTA), "anchor",
                    f"--manifest={stage / 'manifest.json'}"]
@@ -3657,9 +3756,11 @@ def seal_package(stage, seals, calendars):
             command, capture_output=True, encoding="utf-8",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         if finished.returncode != 0:
-            return [], finished.stderr.strip() or "the recorder gave no reason"
+            print(finished.stderr.strip() or "the recorder gave no reason",
+                  file=sys.stderr)
+            return [], None, "the manifest was not anchored"
         written.append(MANIFEST_SIDECAR)
-    return written, None
+    return written, fingerprint, None
 
 
 def zip_package(stage, written, out):
@@ -3765,7 +3866,16 @@ def cmd_package(args):
     # seal step sends anything, and only with --anchor.
     report = scan_root(store_receipts(), witness=Path(args.witness),
                        store=True, tick=False)
-    seals = [SEAL_ANCHOR] if args.anchor else []
+    # Declared in ADR-0007's ladder order, the anchor before the
+    # signature, which is the order the verifier judges and prints
+    # them; applied the other way round (seal_package), since neither
+    # depends on the other and only the anchor leaves the machine.
+    seals = ([SEAL_ANCHOR] if args.anchor else []) + (
+        [SEAL_SIGNATURE] if args.sign else [])
+    # `~` reaches argv unexpanded from PowerShell and cmd, and
+    # ssh-keygen does not expand it either; the docs' own example
+    # starts with it, so it means home on every shell here.
+    keyfile = Path(args.sign).expanduser() if args.sign else None
     calendars = args.calendar or ()
     transcripts = None
     if args.transcript:
@@ -3794,7 +3904,8 @@ def cmd_package(args):
         if package_too_large(out, written):
             shutil.rmtree(out)
             return 1
-        sealed, problem = seal_package(out, seals, calendars)
+        sealed, fingerprint, problem = seal_package(out, seals, calendars,
+                                                    keyfile)
         if problem:
             # A package declaring a seal it does not carry would verify
             # SEAL-MISSING; better nothing than that.
@@ -3805,13 +3916,12 @@ def cmd_package(args):
                                     Path(staging), packed, seals, transcripts)
             if package_too_large(Path(staging), written):
                 return 1
-            sealed, problem = seal_package(Path(staging), seals, calendars)
+            sealed, fingerprint, problem = seal_package(
+                Path(staging), seals, calendars, keyfile)
             if not problem:
                 zip_package(Path(staging), written + sealed, out)
     if problem:
-        print(problem, file=sys.stderr)
-        print("error: the manifest was not anchored; nothing written",
-              file=sys.stderr)
+        print(f"error: {problem}; nothing written", file=sys.stderr)
         return 1
     written += sealed
     chains = sum(len(logs) for logs in sessions.values())
@@ -3827,6 +3937,14 @@ def cmd_package(args):
               "proof is pending until Bitcoin has it, a few hours")
         print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
               f'--manifest="{(where / "manifest.json").as_posix()}"')
+    if fingerprint:
+        # The issuer's one job past signing (ADR-0008 ruling 4): the
+        # fingerprint is what the recipient compares, so it is printed
+        # here for publishing through a channel the package cannot
+        # rewrite. Never the key's comment: that is a name.
+        print(f"signed: key {fingerprint}; publish this fingerprint through "
+              "a channel the package cannot rewrite, since the recipient "
+              "compares it against one (ADR-0008)")
     return 0
 
 
@@ -6325,6 +6443,17 @@ def main(argv):
                          metavar="URL",
                          help="calendar for --anchor (repeatable; default: "
                               "the public pools)")
+    package.add_argument("--sign", default=None, metavar="KEYFILE",
+                         help="seal the package with the issuer signature: "
+                              "ssh-keygen signs the manifest with this SSH "
+                              "private key (it alone reads the key, and "
+                              "asks for a passphrase or a touch itself) and "
+                              "the signature and public key ship beside it, "
+                              "so verify-package can earn + SIGNED with the "
+                              "key's fingerprint (ADR-0026 ruling 4, "
+                              "ADR-0008). A key any process of this user "
+                              "could use without you is writer-reachable, "
+                              "and its signature is testimony")
     package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)
