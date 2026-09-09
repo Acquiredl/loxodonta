@@ -29,12 +29,16 @@ The sidecar is *evidence, not a chain*: a forged proof fails replay; a deleted p
 ```
 receipts anchor [--log PATH] [--calendar URL]...   # submit the current head
 receipts anchor --upgrade [...]                    # complete pending proofs
+receipts anchor --manifest PATH [--calendar URL]...  # anchor a package manifest's sha256
+receipts anchor --upgrade --manifest PATH          # complete that proof
 receipts verify --anchors [...]                    # judge proofs, offline
 ```
 
 **`anchor`** reads the current head, POSTs the raw 32-byte digest to each calendar (`POST <calendar>/digest`), and appends one sidecar record per calendar that answered. Success is ≥1 record written (exit 0); no calendar reachable is exit 1. Default calendars: `a.pool.opentimestamps.org`, `b.pool.opentimestamps.org`, `a.pool.eternitywall.com`, `ots.btc.catallaxy.com`.
 
 **`anchor --upgrade`** replays each pending proof to its calendar commitment, asks the calendar for the completion (`GET <calendar>/timestamp/<commitment-hex>`), and appends an upgraded record (same `head`, spliced proof ending in a Bitcoin attestation). Still-pending proofs (typically for a few hours after submission) are reported and left alone.
+
+**`anchor --manifest PATH`** anchors a package manifest the same way, its sha256 in place of a chain head (ADR-0026 ruling 4): the proof lands in `PATH.anchors.jsonl` as an ordinary record with no `n`, since a manifest has no entries, and `--upgrade --manifest PATH` completes it. `supervisor package --anchor` drives this and `loxodonta verify-package` judges it (docs/PACKAGE.md §2 and §5).
 
 **`verify --anchors`** — offline, like all of verify. For each sidecar record:
 

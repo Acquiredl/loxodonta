@@ -13,8 +13,8 @@ The GLOSSARY's words apply exactly: *package*, *manifest*, *seal*, *issuer*, *re
 ## 2. Building one
 
 ```
-supervisor package <session-id | entry-address> [--out PATH] [--folder] [--witness DIR]
-supervisor package [--repo PATH]                 [--out PATH] [--folder] [--witness DIR]
+supervisor package <session-id | entry-address> [--out PATH] [--folder] [--witness DIR] [--anchor [--calendar URL]...]
+supervisor package [--repo PATH]                 [--out PATH] [--folder] [--witness DIR] [--anchor [--calendar URL]...]
 ```
 
 Two units, one selector each (ADR-0026 ruling 1); a selector and `--repo` together are a usage error, exit 64.
@@ -27,9 +27,11 @@ By default the package is a zip in the current directory, `loxodonta-package-<se
 
 The scan underneath is one ordinary supervisor tick over the store, as `export`'s is: its completeness row for each session packaged and its verdicts are what `witness.json` carries. `--witness` points it at the harness transcript layout, as for `scan`.
 
-Assembly follows ADR-0007's write order, and `supervisor package` honors it or the package is unverifiable: the chain snapshot and sidecars first, then `project.json`, then `witness.json`, then `README.md`, then `manifest.json`. The zip keeps that member order, so the manifest is the last member too.
+Assembly follows ADR-0007's write order, and `supervisor package` honors it or the package is unverifiable: the chain snapshot and sidecars first, then `project.json`, then `witness.json`, then `README.md`, then `manifest.json`, then the seals. The zip keeps that member order: the manifest comes after everything it lists, and a seal's file, when there is one, follows the manifest.
 
-Not built yet, each its own later slice: `--transcript` (the harness transcript, on request only, because it can hold the very secret a bad day exfiltrated), and the two seals, `--anchor` and `--sign`.
+**The seal.** `--anchor` applies the package's first seal (ADR-0026 ruling 4). Once the manifest is written, the supervisor drives `loxodonta anchor --manifest <manifest>`, which posts the manifest's sha256 to the OpenTimestamps calendars once and writes the proof beside it as `manifest.json.anchors.jsonl`: an ordinary anchor record (docs/ANCHORING.md §2) whose `head` is the manifest's digest and which has no `n`, since a manifest has no entries. The supervisor never speaks OTS itself. The manifest declares `"seals": ["anchor"]` before it is written, so a package stripped of its sidecar is `SEAL-MISSING` (§5), never a quiet downgrade. What leaves the machine is the manifest's 32-byte digest, to the public calendars, from the operator's address, and only with the flag: without it nothing is posted and the manifest declares `[]`. `--calendar URL` names other calendars, repeatable, as it does for `loxodonta anchor` and the hook. A calendar that accepts nothing leaves no package behind, zip or folder, since a package declaring a seal it does not carry could only ever verify `SEAL-MISSING`. The proof is pending until Bitcoin has it, a few hours; `loxodonta anchor --upgrade --manifest <package>/manifest.json` completes it later (for a zip, unpack first), rewriting only the sidecar, so the manifest and its seal stand.
+
+Not built yet, each its own later slice: `--transcript` (the harness transcript, on request only, because it can hold the very secret a bad day exfiltrated), and the second seal, `--sign`.
 
 A session whose chains sit in two drawers (possible before ADR-0023) is refused rather than flattened, whichever unit holds it: the layout puts every chain beside one project record, and two drawers under one chain name would mean one silently overwriting the other. A drawer is checked session by session against the whole store, not only the drawers selected, since half of a split session may sit in a drawer no selector reaches; one split session refuses the whole drawer package, naming the session. A drawer package that looked complete and was not would be worse than the refusal.
 
@@ -45,6 +47,7 @@ Flat, like a drawer, so the recorder's own rules apply to the chains unchanged:
 | `witness.json` | one completeness row per session packaged and the verdict the supervisor's scan gave each chain, labelled testimony in the file (its shape: §4) | sha256 and byte count |
 | `README.md` | plain words: what is inside, how to verify, what each layer shows and does not; prints the chain heads, never the manifest's hash | sha256 and byte count |
 | `manifest.json` | the list of everything above, written last | it is the sealing surface; nothing lists it |
+| `manifest.json.anchors.jsonl` | the manifest's anchor proof, with `--anchor` (§2): one record per calendar that answered, `head` the manifest's sha256, no `n`; the upgraded record joins it later | nothing: a seal is applied after the manifest is written, which declares it (`seals`) and cannot list it |
 
 Never inside: file contents. The tool holds fingerprints of the files the agent touched, not their bytes, and cannot produce the logged version. On the recipient's machine the project record points nowhere, so `verify --files` on a packaged chain says `FILES-UNRESOLVED` (ADR-0012), and `verify-package` says the same thing once, in plain words.
 
@@ -60,7 +63,7 @@ Never inside: file contents. The tool holds fingerprints of the files the agent 
 | `unit` | `{"kind": "session", "session": "<id>", "project": "<drawer name>"}` for a session; `{"kind": "drawer", "project": "<drawer name>", "sessions": N}` for a drawer. Displayed convenience; testimony. The verifier prints whatever the unit holds and judges none of it. |
 | `chains` | one row per chain, in the package: `path`, `head` (the last entry's `entry_hash`), `entries` (line count), `anchors` (the sidecar's file name, or `null`). |
 | `artifacts` | one row per post-close artifact: `path`, `sha256` of its bytes, `bytes`. Sidecars, `project.json`, `witness.json`, `README.md`. |
-| `seals` | the seals the package should carry. `[]` in this format's first slice; `"anchor"` and `"signature"` join when `--anchor` and `--sign` do. A declared seal that is absent is `SEAL-MISSING`, never a silent downgrade (ADR-0007). |
+| `seals` | the seals the package should carry: `[]` unsealed, `["anchor"]` with `--anchor`; `"signature"` joins when `--sign` does. A declared seal that is absent is `SEAL-MISSING`, never a silent downgrade (ADR-0007). |
 
 Why two ways of listing (ADR-0026 ruling 3). A chain's head is already its commitment, and the verifier recomputes it by walking; listing chains by file hash would add a second commitment to the same fact, and a false one on Windows, where `read_log` splits lines tolerantly and an unzip that turns `\n` into `\r\n` changes the bytes without changing the head. The post-close artifacts have no chain to commit them, so the manifest's sha256 is their only commitment: one commitment home per fact.
 
@@ -92,19 +95,22 @@ A zip is unpacked into a temporary folder and judged there; a folder is judged a
 2. **Each chain**, headed `chain: <name> (manifest: head <12 hex>…, N entries)`, followed by the recorder's own `verify --anchors` output verbatim. Anchor lines appear here as detail: `ANCHORED`, `ANCHOR-PENDING`, `NO-ANCHORS`, or a mismatch. Then the walked head and line count are compared with the manifest's row; a difference is reported as `<name>: off the manifest`.
 3. **File references**: `file references: N recorded, not checkable off the machine`, counted across the chains.
 4. **Each artifact** against the manifest: `<name>: matches the manifest (sha256 <12 hex>…, N bytes)`, or `DIVERGED from the manifest` with both digests, or `MISSING`. The `witness.json` line adds `(testimony: the packing machine's reading, unaltered; no verdict is drawn from it)`. Files in the package the manifest does not list print as `unlisted: <name> (not in the manifest, not judged)`.
-5. **Each declared seal**: none in this format's first slice; a kind this verifier does not judge yet is named as declared and not judged.
-6. For `SELF-CONSISTENT`, one line of **residual trust**; then **the package verdict**, the last line, in ADR-0007's words, so a script reads the last line as it does for `verify`.
+5. **Each declared seal.** The anchor is judged offline the way `verify --anchors` judges a chain's (docs/ANCHORING.md §3): every record of `manifest.json.anchors.jsonl` must name this manifest's sha256 and replay. A completed proof prints `seal anchor: ANCHORED: the manifest existed by Bitcoin block H — confirm merkle root R against a block source you trust`; a pending one prints `seal anchor: ANCHOR-PENDING: the manifest was submitted <ts> via <calendar> — run ...` with the upgrade command, and the rung waits; a record for another digest, or one whose proof does not replay, prints `seal anchor: SEAL-INVALID: <why>`; a declared anchor with no sidecar, or an empty one, prints `seal anchor: SEAL-MISSING: ...`. The sidecar is judged here as a seal, never named as unlisted. A kind this verifier does not judge yet is named as declared and not judged.
+6. When the ladder allows it, one line of **residual trust**; then **the package verdict**, the last line, in ADR-0007's words, with its rung when the manifest's anchor completed (`SELF-CONSISTENT + ANCHORED: ..., and the manifest existed by Bitcoin block H`), so a script reads the last line as it does for `verify`.
 
 The verifier reads `witness.json` for its bytes only. Its state, its counts, and the scan's verdicts inside are the supervisor's reading on the packing machine, and they change nothing in the ladder: a package whose witness says `ALARM-SILENT` and a package whose witness says `COMPLETE` verify identically. That is the meaning of *testimony* here, and the output says so where the file is judged.
 
 ### The ladder
 
-Verdicts name the mechanism, never the conclusion (no "authentic", no "verified": GLOSSARY, Anti-terms). Gravest wins: a refusal, then a broken chain, then an anchor that is not this chain's history, then a transcript that no longer holds, then an artifact off its manifest.
+Verdicts name the mechanism, never the conclusion (no "authentic", no "verified": GLOSSARY, Anti-terms). Gravest wins: a refusal, then a broken chain, then a seal or an anchor that is not this history, then a transcript that no longer holds, then an artifact off its manifest.
 
-- `SELF-CONSISTENT`: every chain walks clean and every artifact matches the manifest. Printed with its limit: *indistinguishable from a wholesale regeneration, since no seal is declared*. A regenerated session, packed afresh, produces this same line; only a seal can separate the two, and this slice declares none.
+- `SELF-CONSISTENT`: every chain walks clean and every artifact matches the manifest. Printed with its limit, by what the seals earned: with no seal declared, *indistinguishable from a wholesale regeneration, since no seal is declared*; with an anchor declared and still pending, *indistinguishable from a wholesale regeneration until its manifest anchor completes*. A regenerated session, packed afresh, produces this same line; only a completed seal separates the two.
+- `SELF-CONSISTENT + ANCHORED`: the manifest's anchor replays to a Bitcoin block. The set existed by block H, printed with the merkle root the recipient confirms against a block source they trust (ADR-0003: the verifier never fetches a header). The rung is the manifest's anchor and no other's (ADR-0026 ruling 6): an anchored chain inside prints `ANCHORED` under that chain as detail and earns the package nothing, because it seals a different object.
 - `CHAIN-BROKEN`: a chain does not walk clean. The recorder's `BROKEN at entry N` lines above say where.
 - `ARTIFACT-DIVERGED`: an artifact's bytes differ from the manifest's listing, an artifact or a chain the manifest lists is missing, or a chain walks to a head or a length other than the one listed (the chain is then an artifact off its manifest; a truncated chain walks clean and is caught here).
 - `ANCHOR-MISMATCH`: an anchor packaged with a chain names a head that is nowhere in that chain, or a proof that does not replay; the chain's own `ANCHOR-MISMATCH` or `ANCHOR-INVALID` line above says which. Not the anchored history.
+- `SEAL-MISSING`: the manifest declares an anchor and the package carries no proof for it (no sidecar, or an empty one). A package stripped of its seal fails rather than reading as merely unsealed (ADR-0007's declared seal set).
+- `SEAL-INVALID`: the package carries an anchor record that is not this manifest's: its `head` is another digest, or its proof does not replay. Evidence that does not verify is not evidence.
 - `TRANSCRIPT-DIVERGED`: a chain's transcript commitments contradict each other (`COMMITMENT-SHRANK`). Judging commitments against a packaged transcript is the `--transcript` slice.
 - `UNSUPPORTED-FORMAT`: a refusal, not a verdict. The manifest is missing or unreadable, or its `format` is a tag this verifier does not speak. Nothing else is judged or printed.
 
@@ -114,14 +120,14 @@ Mapped onto `verify`'s own (ADR-0026 ruling 7), so a script that reads those lea
 
 | Exit | Package verdict | `verify`'s twin |
 |---|---|---|
-| 0 | `SELF-CONSISTENT` (with or without `+ ANCHORED` / `+ SIGNED`, when the seal slices land) | `VALID` |
+| 0 | `SELF-CONSISTENT`, with or without `+ ANCHORED` (`+ SIGNED` when the signature slice lands) | `VALID` |
 | 1 | `CHAIN-BROKEN` | `BROKEN` |
 | 2 | `ARTIFACT-DIVERGED` | `FILES-DIVERGED`, its package sibling per ADR-0007 |
-| 3 | `SEAL-INVALID`, `SEAL-MISSING` (seal slices), a chain's `ANCHOR-MISMATCH` (built) | `HEAD-MISMATCH`: not what was issued |
+| 3 | `SEAL-INVALID`, `SEAL-MISSING`, a chain's `ANCHOR-MISMATCH` | `HEAD-MISMATCH`: not what was issued |
 | 4 | `UNSUPPORTED-FORMAT`, a refusal | `UNSUPPORTED-VERSION` |
 | 5 | `TRANSCRIPT-DIVERGED` | `TRANSCRIPT-DIVERGED` |
 
-Usage errors are to exit `64` (sysexits `EX_USAGE`) in both tools, so a verdict exit is never an argparse error; that renumbering is its own slice, and until it lands the README's advice stands: read the verdict line, not the code alone.
+Usage errors exit `64` (sysexits `EX_USAGE`) in both tools (ADR-0026 ruling 7, #175), so a verdict exit is never an argparse error; the README's advice still stands as good advice: read the verdict line, not the code alone.
 
 ## 7. Worked example: the bad-day session
 
@@ -189,10 +195,23 @@ The manifest the verifier judged against:
 
 (Digests shortened here; the file carries all 64 hex characters.) Three edits, and what the ladder says of each: change a word in `witness.json`, and the artifact line reads `DIVERGED from the manifest`, verdict `ARTIFACT-DIVERGED`, exit 2, while the chain still says `VALID`; change a character inside an entry of the chain, and the recorder's `BROKEN at entry 3` appears verbatim, verdict `CHAIN-BROKEN`, exit 1; rewrite the chain with `\r\n` line endings, as a Windows unzip may, and nothing changes, still `SELF-CONSISTENT`, because the head is recomputed by walking.
 
+### The same package, sealed
+
+Packaged with `--anchor`, the summary says `seals: anchor`, the manifest declares `"seals": ["anchor"]`, and `manifest.json.anchors.jsonl` travels after it. Until Bitcoin has the proof, the seal line reads `seal anchor: ANCHOR-PENDING: the manifest was submitted <ts> via <calendar> — run \`loxodonta anchor --upgrade --manifest manifest.json\` after a few hours; the rung is not earned until the proof completes`, and the last two lines say the ceiling holds *until its manifest anchor completes*. Once upgraded (the block and root here are the test suite's fake calendar's; a real proof names a real block):
+
+```
+seal anchor: ANCHORED: the manifest existed by Bitcoin block 850123 — confirm merkle root 143d59af7866… against a block source you trust
+residual trust: this package is unaltered since it was packed, and it existed by Bitcoin block 850123 if the merkle root above is that block's. That the record inside is true and complete rests on the issuer's word alone.
+SELF-CONSISTENT + ANCHORED: every chain walks clean and every artifact matches the manifest, and the manifest existed by Bitcoin block 850123
+```
+
+Delete the sidecar and the last line reads `SEAL-MISSING`, exit 3; put another manifest's proof in its place and it reads `SEAL-INVALID`, exit 3. A chain inside that carries its own session-end anchor prints `ANCHORED: entries 0..N existed by Bitcoin block ...` under that chain in both cases and changes the package verdict in neither.
+
 ## 8. What none of this survives
 
 - **Garbage in.** The package is unaltered since packaging. Whether the recorder was told the truth, and whether every tool call got its receipt, is the harness's and the witness's word (SPEC §8, ADR-0002).
-- **No seals.** `SELF-CONSISTENT` alone is what a wholesale regeneration also produces. The anchor lines under a chain speak for that chain and say when its head existed; the package as a set is on record only from its own seals, which this slice does not yet write.
+- **No seals, or a pending one.** `SELF-CONSISTENT` alone is what a wholesale regeneration also produces. The anchor lines under a chain speak for that chain and say when its head existed; the package as a set is on record only from its own seals, and only once the proof completes.
+- **What the anchor says.** Existence by block H, of the manifest and so of the set it lists; nothing about who packed it (that is `--sign`'s question, ADR-0008) and nothing about whether the record is true. A regenerated set can be re-anchored, but only into a recent block: the recipient reads the height against the history the package claims (docs/ANCHORING.md §1).
 - **The transcript.** Commitments in the chain bind the harness transcript only while it exists, and the transcript is not in this package. `--transcript`, when it lands, is the only thing that keeps it.
 - **File contents.** Paths and fingerprints travel; files do not.
-- **The recipient's own job.** The verifier prints a merkle root under an anchored chain; confirming it against a block source they trust is theirs (ADR-0003), as comparing a key fingerprint out of band will be when `--sign` lands (ADR-0008).
+- **The recipient's own job.** The verifier prints a merkle root under an anchored chain and on the manifest's seal line; confirming each against a block source they trust is theirs (ADR-0003: the verifier never fetches a header), as comparing a key fingerprint out of band will be when `--sign` lands (ADR-0008).

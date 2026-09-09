@@ -3533,7 +3533,8 @@ def seal_package(stage, seals, calendars):
     posts the manifest's sha256 to the calendars once and writes the
     proof beside it as manifest.json.anchors.jsonl; the supervisor never
     speaks OTS itself. Returns (the seal files written, in order, or
-    None when a seal could not be applied, the problem in words)."""
+    None when a seal could not be applied, the recorder's own words on
+    why)."""
     written = []
     if SEAL_ANCHOR in seals:
         command = [sys.executable, str(LOXODONTA), "anchor",
@@ -3544,9 +3545,7 @@ def seal_package(stage, seals, calendars):
             command, capture_output=True, encoding="utf-8",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         if finished.returncode != 0:
-            return None, ("the manifest was not anchored: "
-                          + (finished.stderr.strip() or "the recorder "
-                             "gave no reason"))
+            return None, finished.stderr.strip() or "the recorder gave no reason"
         written.append(MANIFEST_SIDECAR)
     return written, None
 
@@ -3674,7 +3673,9 @@ def cmd_package(args):
             if not problem:
                 zip_package(Path(staging), written + sealed, out)
     if problem:
-        print(f"error: {problem}; nothing written", file=sys.stderr)
+        print(problem, file=sys.stderr)
+        print("error: the manifest was not anchored; nothing written",
+              file=sys.stderr)
         return 1
     written += sealed
     chains = sum(len(logs) for logs in sessions.values())
