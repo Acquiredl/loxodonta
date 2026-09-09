@@ -787,9 +787,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def post_quietly(url, body, timeout):
-    """One POST, every failure swallowed: this runs on the hook's exit
-    path, where a complaint is noise nobody can act on."""
+def post_once(url, body, timeout):
+    """One POST. Returns None when the remote took it, else one line
+    naming what went wrong; never raises. The line never carries the
+    URL: a webhook URL is a credential, and this line reaches stderr."""
     try:
         request = urllib.request.Request(
             url, data=body,
@@ -797,9 +798,30 @@ def post_quietly(url, body, timeout):
                      "User-Agent": "loxodonta"})
         with urllib.request.build_opener(NoRedirect).open(
                 request, timeout=timeout):
-            pass
-    except Exception:  # noqa: BLE001 - an exit hook that raises is noise
-        return
+            return None
+    except urllib.error.HTTPError as e:
+        # A refused redirect lands here too, as its 3xx status.
+        return f"the remote answered {e.code}"
+    except Exception as e:  # noqa: BLE001 - what failed is reported, not raised
+        return str(e) or type(e).__name__
+
+
+def post_bounded(url, body, timeout):
+    """`post_once`, bounded by `timeout` seconds with name lookup
+    included. urlopen's timeout starts once the name has resolved, and a
+    stalled resolver has no timeout of its own, so the POST runs on a
+    helper thread that is left behind when its time is up: the process
+    ends soon after, and a daemon thread ends with the process. Returns
+    what `post_once` returned, or the abandonment when time ran out."""
+    outcome = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(post_once(url, body, timeout)),
+        daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        return f"no answer within {timeout:g} seconds"
+    return outcome[0]
 
 
 def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
@@ -819,14 +841,79 @@ def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
         return
     body = json.dumps(published_head(last["entry_hash"], last["n"],
                                      session)).encode("utf-8")
-    # urlopen's timeout starts once the name has resolved, and a stalled
-    # resolver has no timeout of its own, so the POST runs on a helper
-    # thread that is left behind when its time is up: the hook process
-    # ends soon after, and a daemon thread ends with the process.
-    worker = threading.Thread(target=post_quietly, args=(url, body, timeout),
-                              daemon=True)
-    worker.start()
-    worker.join(timeout)
+    post_bounded(url, body, timeout)  # an exit hook that complains is noise
+
+
+# --- The publish command (ADR-0025 ruling 3, the keeper's half) --------------
+# `loxodonta publish --log LOG URL` is the same one POST as an operator
+# command: the supervisor's keeper drives it on a cadence, the way it
+# drives `anchor`, for always-on machines and for sessions that never
+# reached their end. It speaks, because an operator (or a keeper reading
+# its exit code) can act on the answer; the hook stays quiet.
+
+PUBLISH_TIMEOUT = 15.0   # seconds; a keeper's turn, like one calendar ask
+
+
+def published_path(log):
+    return log + ".published.jsonl"
+
+
+def append_published_record(log, head, n, ts, event):
+    """The publish memo: one line per head that left, beside the chain in
+    the anchor sidecar's pattern. It is writer-reachable and therefore
+    testimony (GLOSSARY): it exists so the keeper never posts the same
+    head twice, never to prove anything. The remote's copy is the head
+    record; this is the note that says one was sent. It holds the head,
+    the entry count, the time, and the event kind, and never the URL: a
+    webhook URL is a credential."""
+    record = {"head": head, "n": n, "ts": ts, "event": event}
+    with open(published_path(log), "a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def chain_session(log):
+    """The session id a chain file's name carries, read the way the
+    supervisor reads it: `receipts-<session>.jsonl`, or a sibling
+    `receipts-<session>-002.jsonl` (ADR-0004). A chain named some other
+    way (`--log receipts.jsonl` by hand) is its own session."""
+    stem = os.path.basename(log)
+    if stem.endswith(".jsonl"):
+        stem = stem[:-len(".jsonl")]
+    if stem.startswith("receipts-"):
+        stem = stem[len("receipts-"):]
+    base, dash, tail = stem.rpartition("-")
+    if dash and len(tail) == 3 and tail.isdigit():
+        return base
+    return stem
+
+
+def cmd_publish(args):
+    try:
+        lines = read_log(args.log)
+    except FileNotFoundError:
+        return missing_log(args.log)
+    if not lines:
+        print(f"error: {args.log} is empty — run `loxodonta init` first",
+              file=sys.stderr)
+        return 1
+    last = tail_entry(lines)
+    if last is None:
+        print(f"error: {args.log} has a damaged final line — run "
+              "`loxodonta verify` before publishing", file=sys.stderr)
+        return 1
+    head, n = last["entry_hash"], last["n"]
+    body = published_head(head, n, chain_session(args.log), event="cadence")
+    failure = post_bounded(args.url, json.dumps(body).encode("utf-8"),
+                           PUBLISH_TIMEOUT)
+    if failure:
+        print(f"error: the head was not published: {failure}",
+              file=sys.stderr)
+        return 1
+    # The memo is written only for a head the remote took: a memo line
+    # for a POST that never landed would stand the keeper down for good.
+    append_published_record(args.log, head, n, body["ts"], body["event"])
+    print(f"published head {head[:12]}… (entry {n})")
+    return 0
 
 
 def cmd_anchor(args):
@@ -2621,6 +2708,15 @@ def main(argv=None):
     anchor_parser.add_argument("--upgrade", action="store_true",
                                help="complete pending proofs once Bitcoin has them")
     anchor_parser.set_defaults(func=cmd_anchor)
+    publish_parser = sub.add_parser(
+        "publish", parents=[common],
+        help="POST the chain head to a remote the credentials on this "
+             "machine cannot delete from (ADR-0025); the supervisor's "
+             "keeper drives this on --publish-every")
+    publish_parser.add_argument("url", metavar="URL", type=publish_url,
+                                help="a plain http or https URL, such as a "
+                                     "chat incoming webhook")
+    publish_parser.set_defaults(func=cmd_publish)
     hook_parser = sub.add_parser(
         "hook",
         help="append one entry from a Claude Code PostToolUse payload on stdin")
