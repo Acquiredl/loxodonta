@@ -772,22 +772,28 @@ def upgrade_pending_proofs(folder, remaining, deadline):
 
 SESSION_END_PUBLISH = 3.0   # seconds for the one POST; the anchor gets the rest
 CODEX_ACTOR = "codex"       # the actor the Codex installer writes
-# Codex caps the whole SessionEnd hook at three seconds
-# (CODEX_SESSION_END_TIMEOUT), so a Codex hook waits half the cap for
-# its POST. Measured (#183, the table in docs/HOOK.md): the seal costs
-# a fifth of a second and the POST's own machinery a twentieth, so the
-# worst failure path lands near 1.8 seconds and leaves over a second of
-# margin, while a real webhook's handshake is under a tenth. The full
-# three-second wait ran past the cap, and a POST cut off early is the
-# keeper's to finish (supervisor --publish-every).
-CODEX_SESSION_END_PUBLISH = 1.5
+# Codex caps the whole SessionEnd hook at three seconds (its docs);
+# asking for more is asking to be killed mid-seal, so the installer
+# wires this as the block's timeout and a Codex hook waits half of it
+# for its POST. Measured (#183, the tables in docs/HOOK.md): the seal
+# costs a fifth of a second on a 2 MB transcript and the POST a
+# twentieth over it, so the worst failure path lands near 1.8 seconds,
+# where the full three-second wait ran to 3.2 and past the cap. A POST
+# cut off early is the keeper's to finish (supervisor --publish-every).
+# Nothing bounds the seal, so a very large transcript eats the margin:
+# half a gigabyte of it leaves half a second.
+CODEX_SESSION_END_TIMEOUT = 3
+CODEX_SESSION_END_PUBLISH = CODEX_SESSION_END_TIMEOUT / 2
 
 
 def publish_budget(actor):
     """The seconds a session-end POST may take, by the harness that
     wired the hook: the harness's own cap on the whole hook is what
-    bounds it, and only Codex's is short enough to matter."""
-    return (CODEX_SESSION_END_PUBLISH if actor == CODEX_ACTOR
+    bounds it, and only Codex's is short enough to matter. The
+    installer writes CODEX_ACTOR exactly; a hand-wired hook is matched
+    case-blind, since what a missed match costs is a killed hook."""
+    return (CODEX_SESSION_END_PUBLISH
+            if (actor or "").casefold() == CODEX_ACTOR
             else SESSION_END_PUBLISH)
 
 
@@ -2605,10 +2611,6 @@ DIGEST_MARKER = "supervisor.py"
 # still wearing this exact string is provably an unmodified install —
 # the fingerprint the widening below keys on.
 PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
-# Codex caps a SessionEnd hook at three seconds (its docs); asking for
-# more is asking to be killed mid-seal.
-CODEX_SESSION_END_TIMEOUT = 3
-
 
 def recorder_command(actor=None, anchor=False, publish=None):
     """The hook command the installers write: this interpreter, this

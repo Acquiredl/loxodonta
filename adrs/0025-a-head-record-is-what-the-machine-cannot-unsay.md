@@ -86,7 +86,12 @@ certainty. Completeness stays the integration's job (SPEC §8).
    reached their end. Publishing every N receipts inside the hook stays
    rejected for ADR-0024 ruling 1's reason: no network call in the
    recording path. Codex caps its SessionEnd hook at three seconds; whether
-   one POST fits is measured before Codex gets the flag.
+   one POST fits is measured before Codex gets the flag. *(Addendum
+   2026-09-09: measured, #183. One POST fits and the full three-second
+   wait does not: an unreachable remote that silently drops the request
+   cost the whole wait and put the hook past the cap. So Codex has the
+   flag with the POST cut off at half the cap, and docs/HOOK.md carries
+   the numbers, the seal's cost by transcript size among them.)*
 4. **The check: every published head is an entry hash inside the chain.**
    A regenerated chain fails on the earlier heads. A fake head the writer
    posts matches nothing and arrives after the real session end, which is

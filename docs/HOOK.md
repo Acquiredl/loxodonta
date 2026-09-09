@@ -99,7 +99,22 @@ Honest differences from the Claude Code wiring:
   | published, connection refused | 2.28s | 2.30s |
   | published, remote silently dropped it | 3.21s | 3.22s |
 
-  The POST costs 0.06s over the seal, and a real remote adds little: the DNS, TCP, and TLS handshake to `hooks.slack.com`, `discord.com`, and `outlook.office.com` measured between 0.01s and 0.07s from here. So the success path fits the cap many times over, and the failure paths are what the full three-second wait could not survive: a remote that silently drops the request costs the whole wait and lands past the cap, and Windows takes a flat two seconds to report a refused connection. Codex therefore gets the flag with the POST cut off at half the cap, 1.5 seconds, which puts the worst failure path near 1.8s and leaves over a second of margin; what a cut-off POST misses, the supervisor's keeper publishes later (`--publish-every`). The session-end anchor stays refused: 1.5 seconds is a POST, not a calendar round trip, and a Codex operator anchors with the supervisor's `--anchor-every`.
+  The POST costs 0.06s over the seal, and a real remote adds little: the DNS, TCP, and TLS handshake to `hooks.slack.com`, `discord.com`, and `outlook.office.com` measured between 0.01s and 0.07s from here, no request sent. So the success path fits the cap many times over, and the failure paths are what the full three-second wait could not survive: a remote that silently drops the request costs the whole wait and lands past the cap. Most of the refused-connection row is the operating system rather than the wait: Windows takes two seconds to report a refused connection, measured on the bare connect, whatever timeout is asked of it.
+
+  Codex therefore gets the flag with the POST cut off at half the cap, 1.5 seconds. Re-measured after the change, the Codex hook's worst case landed between 1.7s and 1.9s against a cap of three, where the same sitting remote still held the default wait to 3.2s. What a cut-off POST misses, the supervisor's keeper publishes later (`--publish-every`).
+
+  What that margin rests on: the seal hashes the whole transcript before the POST begins, so a long session's rollout file is part of the floor, and nothing bounds the seal the way the cutoff bounds the POST.
+
+  | transcript sealed | floor | with the 1.5s cutoff | margin under the cap |
+  |---|---|---|---|
+  | 2 MB | 0.23s | 1.73s | 1.27s |
+  | 53 MB | 0.30s | 1.80s | 1.20s |
+  | 210 MB | 0.83s | 2.33s | 0.67s |
+  | 524 MB | 1.04s | 2.54s | 0.46s |
+
+  Half a gigabyte of transcript still fits, with the margin down to half a second. A transcript far past that is the case these numbers do not cover.
+
+  The session-end anchor stays refused for Codex, and the refusal is the installer's: `install-hook --codex --anchor-at-session-end` exits with a note, because 1.5 seconds is a POST and not a calendar round trip. The hook enforces nothing itself, so a hand-edited `hooks.json` carrying `--anchor` on a Codex SessionEnd command would still try the calendars and Codex would kill it. A Codex operator anchors with the supervisor's `--anchor-every`.
 - **No completeness witness yet.** The supervisor's completeness alarm (exit 6) counts owed receipts by reading Claude Code's transcript layout. Codex's rollout transcript (`$CODEX_HOME/sessions/…/rollout-*.jsonl`) is a different layout that Codex documents as unstable, so Codex sessions get integrity, recall, anchoring, and the baseline tripwire — everything except the alarm that says "this session is live and its receipts stopped". Transcript commitments do work: they hash bytes, not shapes, so the rollout file is committed every 25 entries and sealed at SessionEnd exactly as a Claude Code transcript is.
 - **The digest arrives as developer context.** Codex adds a SessionStart hook's plain-text stdout to the model's context, so the digest lands the same way it does in Claude Code. The same memory is also reachable over MCP for anything Codex runs that wants to ask for more — [docs/MCP.md](MCP.md).
 

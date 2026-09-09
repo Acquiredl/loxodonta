@@ -347,12 +347,16 @@ class PublishAtSessionEndTest(PublishBase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stderr, "")
         # The property #183 measured: the Codex hook comes back inside
-        # Codex's cap, and it is the bound that brought it back, since
-        # the same receiver held the default wait more than a second
-        # longer on the same machine.
+        # Codex's cap, and it is the bound that brought it back.
         self.assertLess(codex_took, 3, "Codex would have killed the hook")
-        self.assertLess(codex_took, default_took - 1)
         self.assertGreater(codex_took, 1, "the POST was never waited on")
+        # The two runs share this machine's floor, so the difference is
+        # the two bounds apart and nothing else: it pins the Codex bound
+        # to a second-wide window around the 1.5 the docs quote, which is
+        # as tight as a timing test can hold on a loaded runner.
+        apart = default_took - codex_took
+        self.assertGreater(apart, 1, apart)
+        self.assertLess(apart, 2, apart)
         last = json.loads(self.chain().read_text(
             encoding="utf-8").splitlines()[-1])
         self.assertTrue(last["action"].startswith("transcript-commitment:"))
@@ -557,6 +561,8 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("--anchor-at-session-end", result.stderr)
         self.assertIn("--anchor-every", result.stderr)
         self.assertFalse((self.home / ".codex" / "hooks.json").exists())
+        # A refusal writes neither harness's file, whichever was asked for.
+        self.assertFalse((self.home / ".claude" / "settings.json").exists())
 
 
 if __name__ == "__main__":
