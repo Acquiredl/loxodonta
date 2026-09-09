@@ -1743,9 +1743,10 @@ def judge_manifest_signature(folder):
     a one-line allowed-signers file under a fixed principal, and
     `ssh-keygen -Y verify` says whether manifest.json.sig is that key's
     signature over this manifest's exact bytes. Returns (findings, the
-    key's fingerprint when the signature holds, else None, and whether
-    the seal was judged at all): a recipient without ssh-keygen is told
-    so, and the rung is neither earned nor failed."""
+    key's fingerprint when the signature holds, else None, and why the
+    seal was not judged, None when it was): a recipient whose ssh-keygen
+    is missing, cannot run, or predates `-Y verify` is told so, and the
+    rung is neither earned nor failed."""
     manifest = os.path.join(folder, "manifest.json")
     signature, public_key = manifest + ".sig", manifest + ".pub"
     absent = [os.path.basename(p) for p in (signature, public_key)
@@ -1754,14 +1755,15 @@ def judge_manifest_signature(folder):
         print(f"seal signature: SEAL-MISSING: {' and '.join(absent)} not in "
               "this package — the manifest declares a signature it does not "
               "carry")
-        return [(3, "SEAL-MISSING")], None, True
+        return [(3, "SEAL-MISSING")], None, None
+    why = None
     try:
         fingerprint = key_fingerprint(public_key)
         if fingerprint is None:
             print("seal signature: SEAL-INVALID: manifest.json.pub is not a "
                   "public key ssh-keygen reads — a signature under no key "
                   "verifies nothing")
-            return [(3, "SEAL-INVALID")], None, True
+            return [(3, "SEAL-INVALID")], None, None
         with tempfile.TemporaryDirectory() as scratch:
             # The allowed-signers line ssh-keygen wants: a principal, then
             # the key's two tokens, type and key. The shipped file's own
@@ -1779,21 +1781,31 @@ def judge_manifest_signature(folder):
                     stdin=shipped, capture_output=True, encoding="utf-8",
                     errors="replace")
     except FileNotFoundError:
-        print("seal signature: not judged: ssh-keygen not on PATH — the rung "
-              "is neither earned nor failed; OpenSSH 8.0 or later carries "
-              "the tool, and this command judges the seal once it is found")
-        return [], None, False
+        why = "ssh-keygen is not on PATH"
+    except PermissionError:
+        why = "ssh-keygen cannot run here (permission denied)"
+    else:
+        if verified.returncode != 0 and "usage: ssh-keygen" in verified.stderr:
+            # An option ssh-keygen does not know draws its usage text:
+            # OpenSSH before 8.0 has no -Y, and a tool that is present is
+            # not the same as a seal that was judged.
+            why = "this ssh-keygen predates `-Y verify` (OpenSSH 8.0)"
+    if why:
+        print(f"seal signature: not judged: {why} — the rung is neither "
+              "earned nor failed; OpenSSH 8.0 or later carries the tool, "
+              "and this command judges the seal once it can run it")
+        return [], None, why
     if verified.returncode != 0:
         reason = "; ".join(verified.stderr.strip().splitlines()) \
             or "ssh-keygen gave no reason"
         print(f"seal signature: SEAL-INVALID: {reason} — the signature is "
               "not the shipped key's over this manifest's bytes")
-        return [(3, "SEAL-INVALID")], None, True
+        return [(3, "SEAL-INVALID")], None, None
     print(f"seal signature: SIGNED (key: {fingerprint}): the manifest, and "
           "transitively every artifact it lists, was issued by the holder "
           "of that key and has not changed since signing — compare the "
           "fingerprint against a channel this package cannot rewrite")
-    return [], fingerprint, True
+    return [], fingerprint, None
 
 
 def judge_seals(folder, manifest):
@@ -1810,12 +1822,13 @@ def judge_seals(folder, manifest):
         if kind == "anchor":
             found, earned["height"] = judge_manifest_anchor(folder)
         elif kind == "signature":
-            found, earned["key"], judged = judge_manifest_signature(folder)
-            if not judged:
-                earned["unjudged"].append("its signature was not judged, "
-                                          "since ssh-keygen is not on PATH")
+            found, earned["key"], why = judge_manifest_signature(folder)
+            if why:
+                earned["unjudged"].append(
+                    f"its signature was not judged, since {why}")
         else:
-            print(f"seal {kind}: declared; this verifier does not judge it")
+            print(f"seal {kind}: declared; this verifier does not know the "
+                  "kind, and does not judge it")
         findings += found
     return findings, earned
 

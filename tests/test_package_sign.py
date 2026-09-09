@@ -51,10 +51,11 @@ class SignedPackageTest(AnchoredStoreCase):
         super().setUp()
         self.keyfile = self.keypair("key", comment=ALIAS)
 
-    def keypair(self, name, comment=""):
-        """An Ed25519 pair under the test root, no passphrase; the private
-        key's path. The comment is empty unless a test needs one."""
-        path = self.root / name
+    def keypair(self, name, comment="", where=None):
+        """An Ed25519 pair under the test root (or `where`), no passphrase;
+        the private key's path. The comment is empty unless a test needs
+        one."""
+        path = (where or self.root) / name
         made = subprocess.run(
             ["ssh-keygen", "-q", "-N", "", "-t", "ed25519", "-C", comment,
              "-f", str(path)], capture_output=True, encoding="utf-8",
@@ -134,8 +135,10 @@ class SignedPackageTest(AnchoredStoreCase):
 
     def test_anchored_and_signed_climbs_the_whole_ladder_in_order(self):
         # Both seals (ADR-0007 ruling 4, ADR-0026 rulings 4 and 6):
-        # declared and applied anchor first, so the zip carries the
-        # sidecar, then the signature, then the key, after the manifest;
+        # declared anchor first, the ladder's order and the order the
+        # seal lines print, and applied signature first, the local step
+        # before the one that leaves the machine, so the zip carries the
+        # signature, then the key, then the sidecar, after the manifest;
         # and once the anchor completes the verdict line reads the ladder
         # in ADR-0007's order, when before which key.
         zipped = self.work / "both.zip"
@@ -145,7 +148,7 @@ class SignedPackageTest(AnchoredStoreCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with zipfile.ZipFile(zipped) as package:
             self.assertEqual(package.namelist()[-4:],
-                             ["manifest.json", SIDECAR, SIGNATURE, PUBLIC_KEY])
+                             ["manifest.json", SIGNATURE, PUBLIC_KEY, SIDECAR])
         self.assertEqual(self.manifest_of(zipped)["seals"],
                          ["anchor", "signature"])
         self.assertIn("anchored:", result.stdout)
@@ -259,7 +262,8 @@ class SignedPackageTest(AnchoredStoreCase):
         out = judged.stdout
         self.assertEqual(judged.returncode, 0, out + judged.stderr)
         lines = out.strip().splitlines()
-        self.assertIn("seal signature: not judged: ssh-keygen not on PATH", out)
+        self.assertIn("seal signature: not judged: ssh-keygen is not on PATH",
+                      out)
         self.assertNotIn("SEAL-", out)
         self.assertIn("seal anchor: ANCHORED", out)
         self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + ANCHORED:"),
@@ -294,8 +298,9 @@ class SignedPackageTest(AnchoredStoreCase):
     def test_a_key_ssh_keygen_cannot_load_leaves_no_package(self):
         # A failed signing leaves nothing written, zip or folder, with
         # ssh-keygen's own words above the supervisor's; with --anchor
-        # too, so an anchor already applied keeps no half-sealed package
-        # alive. Nothing here reads the key: ssh-keygen names the file
+        # too, where the signature is applied first, so a signing that
+        # fails costs no calendar submission for a package that never
+        # ships. Nothing here reads the key: ssh-keygen names the file
         # it could not load.
         missing = self.root / "nokey"
         shapes = (("--folder", "--out", str(self.work / "gone")),
@@ -311,6 +316,126 @@ class SignedPackageTest(AnchoredStoreCase):
             self.assertIn("nothing written", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
             self.assertEqual(list(self.work.iterdir()), [], shape)
+        self.assertEqual(self.server.submitted, [])
+
+    def test_a_stale_public_key_beside_the_private_key_is_refused_at_packaging(self):
+        # KEYFILE.pub is what ships, and a stale one (the key regenerated,
+        # the .pub not) would ship a key the signature never verifies
+        # under: the recipient would read SEAL-INVALID, and the issuer
+        # would have published a fingerprint that means nothing. Recent
+        # ssh-keygen builds refuse to sign under a mismatched .pub; the
+        # supervisor's own check (the next test) is the backstop for the
+        # ones that do not. Either way: refused, nothing written.
+        other = self.keypair("other")
+        shutil.copyfile(public_key_of(other), public_key_of(self.keyfile))
+
+        result = self.package(SESSION, "--out", str(self.work / "stale.zip"),
+                              "--sign", str(self.keyfile))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue("not signed" in result.stderr
+                        or "does not verify under the public key" in result.stderr,
+                        result.stderr)
+        self.assertIn("nothing written", result.stderr)
+        self.assertNotIn("signed:", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def stand_in(self, name, body):
+        """A stand-in ssh-keygen on PATH ahead of the real one: a script
+        that does `body` (with REAL bound to the real tool's path) and
+        hands everything else to the real tool. Returns the environment
+        to run with. POSIX only: a script needs a shebang."""
+        real = shutil.which("ssh-keygen")
+        folder = self.root / name
+        folder.mkdir()
+        script = folder / "ssh-keygen"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            "import os, shutil, subprocess, sys, tempfile\n"
+            f"REAL = {real!r}\n"
+            "args = sys.argv[1:]\n"
+            + body +
+            "os.execv(REAL, [REAL] + args)\n", encoding="utf-8")
+        script.chmod(0o755)
+        return {**self.env,
+                "PATH": str(folder) + os.pathsep + self.env["PATH"]}
+
+    @unittest.skipIf(os.name == "nt", "a stand-in ssh-keygen needs a "
+                     "shebang, which Windows does not run")
+    def test_the_shipped_key_is_checked_against_the_signature_before_writing(self):
+        # The backstop: an ssh-keygen build that signs under a mismatched
+        # KEYFILE.pub (the stand-in signs with a copy of the key that has
+        # no .pub beside it, so the real tool never compares) would let
+        # the stale key ship. The supervisor runs the recipient's check
+        # on what it ships, and refuses in its own words.
+        other = self.keypair("other")
+        shutil.copyfile(public_key_of(other), public_key_of(self.keyfile))
+        env = self.stand_in("lax-bin", (
+            'if "sign" in args:\n'
+            '    at = args.index("-f") + 1\n'
+            '    with tempfile.TemporaryDirectory() as scratch:\n'
+            '        copy = os.path.join(scratch, "key")\n'
+            '        shutil.copyfile(args[at], copy)\n'
+            '        os.chmod(copy, 0o600)\n'
+            '        args[at] = copy\n'
+            '        sys.exit(subprocess.run([REAL] + args).returncode)\n'))
+
+        result = run(SUPERVISOR, "package", SESSION, "--witness",
+                     str(self.witness), "--out", str(self.work / "stale.zip"),
+                     "--sign", str(self.keyfile), env=env, cwd=str(self.work))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("does not verify under the public key", result.stderr)
+        self.assertIn("stale", result.stderr)
+        self.assertIn("nothing written", result.stderr)
+        self.assertNotIn("signed:", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_a_tilde_in_the_key_path_means_home_on_every_shell(self):
+        # PowerShell and cmd hand `~` to the program unexpanded, and
+        # ssh-keygen does not expand it either; the docs' own example
+        # starts with `~/.ssh/`, so the supervisor expands it itself.
+        keyfile = self.keypair("home-key", where=self.home)
+        folder = self.work / "tilde"
+
+        result = self.package(SESSION, "--folder", "--out", str(folder),
+                              "--sign", "~/home-key")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(fingerprint_of(keyfile), result.stdout)
+        judged = self.verify_package(folder)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+
+    @unittest.skipIf(os.name == "nt", "a stand-in ssh-keygen needs a "
+                     "shebang, which Windows does not run")
+    def test_an_ssh_keygen_that_predates_Y_verify_leaves_the_seal_unjudged(self):
+        # OpenSSH before 8.0 has no -Y: the recipient's tool is there and
+        # cannot judge the seal, which is not a seal that fails. The
+        # stand-in answers -Y with the usage text such a build prints.
+        folder = self.signed_folder()
+        env = self.stand_in("old-bin", (
+            'if "-Y" in args:\n'
+            '    print("ssh-keygen: unknown option -- Y", file=sys.stderr)\n'
+            '    print("usage: ssh-keygen [-q] [-b bits] [-t type]",\n'
+            '          file=sys.stderr)\n'
+            '    sys.exit(1)\n'))
+
+        judged = run(LOXODONTA, "verify-package", str(folder), env=env,
+                     cwd=str(self.work))
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        lines = out.strip().splitlines()
+        self.assertIn("seal signature: not judged: this ssh-keygen predates",
+                      out)
+        self.assertNotIn("SEAL-", out)
+        self.assertNotIn("SIGNED", out)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT:"), lines[-1])
+        self.assertIn("predates", lines[-1])
+        self.assertIn("predates", lines[-2])
+        self.assertNotIn("Traceback", judged.stderr)
 
     def test_the_public_key_is_derived_when_none_sits_beside_the_private_key(self):
         # ADR-0026 ruling 4: KEYFILE.pub is the usual source of the
