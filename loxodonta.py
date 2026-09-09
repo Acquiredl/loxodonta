@@ -771,6 +771,30 @@ def upgrade_pending_proofs(folder, remaining, deadline):
 # every failure, like the anchor.
 
 SESSION_END_PUBLISH = 3.0   # seconds for the one POST; the anchor gets the rest
+CODEX_ACTOR = "codex"       # the actor the Codex installer writes
+# Codex caps the whole SessionEnd hook at three seconds (its docs);
+# asking for more is asking to be killed mid-seal, so the installer
+# wires this as the block's timeout and a Codex hook waits half of it
+# for its POST. Measured (#183, the tables in docs/HOOK.md): the seal
+# costs a fifth of a second on a 2 MB transcript and the POST a
+# twentieth over it, so the worst failure path lands near 1.8 seconds,
+# where the full three-second wait ran to 3.2 and past the cap. A POST
+# cut off early is the keeper's to finish (supervisor --publish-every).
+# Nothing bounds the seal, so a very large transcript eats the margin:
+# half a gigabyte of it leaves half a second.
+CODEX_SESSION_END_TIMEOUT = 3
+CODEX_SESSION_END_PUBLISH = CODEX_SESSION_END_TIMEOUT / 2
+
+
+def publish_budget(actor):
+    """The seconds a session-end POST may take, by the harness that
+    wired the hook: the harness's own cap on the whole hook is what
+    bounds it, and only Codex's is short enough to matter. The
+    installer writes CODEX_ACTOR exactly; a hand-wired hook is matched
+    case-blind, since what a missed match costs is a killed hook."""
+    return (CODEX_SESSION_END_PUBLISH
+            if (actor or "").casefold() == CODEX_ACTOR
+            else SESSION_END_PUBLISH)
 
 
 def published_head(head, n, session, event="session-end"):
@@ -2462,7 +2486,8 @@ def cmd_hook(args):
         # budget.
         deadline = time.monotonic() + SESSION_END_BUDGET
         if args.publish:
-            publish_head(log, args.publish, session)
+            publish_head(log, args.publish, session,
+                         timeout=publish_budget(args.actor))
         if args.anchor:
             session_end_anchor(log, args.calendar or DEFAULT_CALENDARS,
                                budget=deadline - time.monotonic())
@@ -2586,10 +2611,6 @@ DIGEST_MARKER = "supervisor.py"
 # still wearing this exact string is provably an unmodified install —
 # the fingerprint the widening below keys on.
 PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
-# Codex caps a SessionEnd hook at three seconds (its docs); asking for
-# more is asking to be killed mid-seal.
-CODEX_SESSION_END_TIMEOUT = 3
-
 
 def recorder_command(actor=None, anchor=False, publish=None):
     """The hook command the installers write: this interpreter, this
@@ -2688,20 +2709,23 @@ def codex_hooks_path():
     return os.path.join(home, "hooks.json")
 
 
-def install_codex_hooks():
+def install_codex_hooks(publish=None):
     """The Codex half of install-hook (ADR-0020): the same PostToolUse,
     SessionEnd, and SessionStart blocks, in Codex's hooks.json, with the
     actor named so recall rows say which harness acted. Codex's matcher
     is a regex, so `.*` is its every-tool-call. Codex adds a hook's
     plain-text stdout to the model's context, so the digest ships
     unchanged — told to take the repo from the payload, since Codex
-    sets no CLAUDE_PROJECT_DIR."""
+    sets no CLAUDE_PROJECT_DIR. `publish` is the published-head opt-in
+    (ADR-0025), riding on the SessionEnd command as it does for Claude
+    Code; the hook cuts its POST off at half Codex's cap (#183)."""
     path = codex_hooks_path()
     settings = load_settings(path)
     if settings is None:
         return 1
     had_backup = backup_settings(path)
-    record = recorder_command("codex")
+    record = recorder_command(CODEX_ACTOR)
+    record_end = recorder_command(CODEX_ACTOR, publish=publish)
     hooks = settings.setdefault("hooks", {})
     installed = []
 
@@ -2713,11 +2737,24 @@ def install_codex_hooks():
                                 "timeout": 30}]})
         installed.append(f"PostToolUse: {record}")
     end = hooks.setdefault("SessionEnd", [])
-    healed += heal_hooks(end, RECORDER_MARKERS, record)
+    healed += heal_hooks(end, RECORDER_MARKERS, record_end)
+    # The published head rides on this command, and the install command
+    # states the choice each time: a re-run without the flag turns it
+    # off and says so (ADR-0025 ruling 3), as on Claude Code.
+    choices = session_end_choices(False, publish)
+    for block in end:
+        for wired in block.get("hooks", []):
+            old = wired.get("command", "")
+            if any(m in old for m in RECORDER_MARKERS) and old != record_end:
+                wired["command"] = record_end
+                installed.append(
+                    f"SessionEnd: {record_end}"
+                    + session_end_notice(old, record_end, choices))
     if not any(block_is_ours(b) for b in end):
-        end.append({"hooks": [{"type": "command", "command": record,
+        end.append({"hooks": [{"type": "command", "command": record_end,
                                "timeout": CODEX_SESSION_END_TIMEOUT}]})
-        installed.append(f"SessionEnd: {record}")
+        installed.append(f"SessionEnd: {record_end}"
+                         + (f" ({choices})" if choices else ""))
     digest = digest_command(payload=True)
     if os.path.isfile(supervisor_path()):
         start = hooks.setdefault("SessionStart", [])
@@ -2767,16 +2804,9 @@ def cmd_install_hook(args):
                   "short to reach a calendar with margin. Use the "
                   "supervisor's --anchor-every instead.", file=sys.stderr)
             return 1
-        if args.publish_head:
-            # The same cap, a smaller call: whether one POST fits inside
-            # three seconds is measured before Codex gets the flag
-            # (ADR-0025 ruling 3; the measurement is its own slice).
-            print("error: --publish-head is not wired for Codex yet: its "
-                  "SessionEnd hook is capped at three seconds, and whether "
-                  "one POST fits inside that is measured before Codex gets "
-                  "the flag.", file=sys.stderr)
-            return 1
-        return install_codex_hooks()
+        # --publish-head is wired: #183 measured one POST inside the same
+        # three seconds, and the hook cuts it off at half the cap.
+        return install_codex_hooks(args.publish_head)
     supervisor = supervisor_path()
     record = recorder_command()
     digest = digest_command()
