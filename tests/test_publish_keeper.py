@@ -11,24 +11,30 @@ ever, and never internals.
 """
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+import urllib.request
 from pathlib import Path
 
 from test_anchor import clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
-from test_supervisor import (chain_head, chains_by_session, keeper_env,
-                             make_chain, run_scan)
+from test_supervisor import (ago, chain_head, chains_by_session, keeper_env,
+                             make_chain, run_scan, write_completed_anchor,
+                             write_pending_anchor)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 PUBLISHED_FIELDS = {"head", "n", "session", "ts", "event", "text", "content"}
+
+# Straight to 127.0.0.1 — never through a proxy someone's shell configured.
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def memo_of(log):
@@ -236,6 +242,115 @@ class PublishKeeperTest(ReceiverFixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.receiver.received, [])
         self.assertEqual(memo_of(log), [])
+
+
+class LeftReadingTest(ReceiverFixture):
+    """The scan report says, per chain, when a head last left the machine
+    and by which door, published or anchored: `left` beside `anchors`, a
+    timestamp the reader ages. Quiet staleness evidence in the keeper's
+    voice: never an alarm, never the exit code."""
+
+    def publish_by_hand(self, log):
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
+             self.receiver.url],
+            capture_output=True, check=True, env=clean_env())
+
+    def test_left_is_the_newest_departure_published_or_anchored(self):
+        both = make_chain(self.root / "alpha" / "receipts", "sess-both")
+        write_pending_anchor(both, chain_head(both), submitted=ago(100000))
+        self.publish_by_hand(both)  # newer than the anchor by a day
+        anchored = make_chain(self.root / "alpha" / "receipts", "sess-anch")
+        write_completed_anchor(anchored, chain_head(anchored))
+        never = make_chain(self.root / "beta" / "receipts", "sess-never")
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (chain,) = sessions[("alpha", "sess-both")]
+        self.assertEqual(chain["left"],
+                         {"ts": memo_of(both)[0]["ts"], "via": "published"})
+        (chain,) = sessions[("alpha", "sess-anch")]
+        self.assertEqual(chain["left"],
+                         {"ts": "2026-08-22T09:00:00Z", "via": "anchored"})
+        (chain,) = sessions[("beta", "sess-never")]
+        self.assertEqual(chain["left"], {"ts": None, "via": None})
+        self.assertEqual(memo_of(never), [])
+
+    def test_a_dead_remote_is_a_note_in_left_and_never_the_exit(self):
+        # The keeper's existing voice for aging heads: the failure is said
+        # in the report, the exit code stays the chains' own, and no memo
+        # is written for a POST that never landed.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-dead")
+
+        result = run_scan(self.root, "--publish-every", "0s",
+                          "--publish-url", "http://127.0.0.1:9/hook",
+                          env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["exit"], 0)
+        (chain,) = chains_by_session(report)[("alpha", "sess-dead")]
+        self.assertTrue(chain["left"]["failed"])
+        self.assertIn("publishing failed", chain["left"]["note"])
+        self.assertIsNone(chain["left"]["ts"])
+        self.assertNotIn("127.0.0.1:9", result.stdout,
+                         "the URL is a credential; the report never holds it")
+        self.assertEqual(memo_of(log), [])
+
+
+class DashboardLeftTest(ReceiverFixture):
+    """`serve` carries the same flags, publishes on its own tick, and the
+    page renders when a head last left as staleness beside the anchor
+    age: the same quiet class the unanchored head wears, never an alarm."""
+
+    def serve(self, *extra):
+        self.proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--root",
+             str(self.root), "--port", "0", *extra],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env=keeper_env())
+        self.addCleanup(self._stop)
+        line = self.proc.stdout.readline()
+        match = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if match is None:
+            self.proc.kill()
+            _, err = self.proc.communicate()
+            self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        return match.group()
+
+    def _stop(self):
+        self.proc.kill()
+        self.proc.communicate()
+
+    def get(self, url, path):
+        with OPENER.open(url + path, timeout=30) as response:
+            return response.read().decode("utf-8")
+
+    def test_serve_publishes_on_its_tick_and_the_page_shows_the_departure(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-face")
+        url = self.serve("--publish-every", "0s",
+                         "--publish-url", self.receiver.url)
+
+        status = json.loads(self.get(url, "/api/status"))
+
+        self.assertEqual(len(self.receiver.received), 1)
+        self.assertEqual(self.body()["event"], "cadence")
+        (chain,) = chains_by_session(status)[("alpha", "sess-face")]
+        self.assertEqual(chain["left"],
+                         {"ts": memo_of(log)[0]["ts"], "via": "published"})
+        self.assertEqual(status["exit"], 0)
+
+        page = self.get(url, "/")
+
+        # The claims the page is built from, held still: the departure is
+        # read from `left`, worded as an age, and painted with the anchor
+        # panel's staleness class rather than a new alarm.
+        self.assertIn("chain.left", page)
+        self.assertIn("last left", page)
+        self.assertIn("has left this machine", page)
 
 
 if __name__ == "__main__":

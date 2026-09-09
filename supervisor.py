@@ -420,10 +420,11 @@ def upgrade_due(last_attempt, now):
     return (now - attempted).total_seconds() >= UPGRADE_EVERY_SECONDS
 
 
-def sidecar_heads(sidecar):
-    """Heads that already have a record, read tolerantly and for
-    scheduling only — judging the proofs stays with verify."""
-    heads = set()
+def sidecar_records(sidecar):
+    """The records of a file beside a chain (the anchor sidecar, the
+    publish memo), read tolerantly and for scheduling or display only —
+    judging the proofs stays with verify. A missing file, a torn line,
+    or a line that is not an object yields nothing."""
     try:
         with open(sidecar, encoding="utf-8", errors="replace") as lines:
             for line in lines:
@@ -431,12 +432,16 @@ def sidecar_heads(sidecar):
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (isinstance(record, dict)
-                        and isinstance(record.get("head"), str)):
-                    heads.add(record["head"])
+                if isinstance(record, dict):
+                    yield record
     except FileNotFoundError:
-        pass
-    return heads
+        return
+
+
+def sidecar_heads(sidecar):
+    """Heads that already have a record, for scheduling only."""
+    return {record["head"] for record in sidecar_records(sidecar)
+            if isinstance(record.get("head"), str)}
 
 
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
@@ -532,6 +537,25 @@ def keep_published(log, last_attempt, now, entries, cadence, url):
                       "head; it stays unpublished and the keeper will try "
                       "again"), True
     return True, None, False
+
+
+def last_departure(log):
+    """When a head of this chain last left the machine, and by which
+    door: the newest `ts` across the publish memo and the anchor
+    sidecar, or {"ts": None, "via": None} when nothing has left. The
+    reading is the panel's staleness evidence, in the anchor keeper's
+    voice: a timestamp the reader ages, never an alarm, never the exit.
+    Both files are writer-reachable, so a fresh reading here proves
+    nothing; a stale one is the reason to look."""
+    left = {"ts": None, "via": None}
+    newest = None
+    for via, suffix in (("published", ".published.jsonl"),
+                        ("anchored", ".anchors.jsonl")):
+        for record in sidecar_records(Path(str(log) + suffix)):
+            when = parse_when(record.get("ts"))
+            if when is not None and (newest is None or when > newest):
+                newest, left = when, {"ts": record["ts"], "via": via}
+    return left
 
 
 def assess_anchors(detail, entries):
@@ -1386,11 +1410,19 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             "superseded": stood_down,
             "detail": detail,
             "anchors": assess_anchors(detail, entries),
+            # When a head last left the machine, published or anchored
+            # (ADR-0025): staleness evidence beside the anchor panel,
+            # aged by the reader, never raising the exit.
+            "left": last_departure(log),
         }
         if keeper_note:
             chain["anchors"]["note"] = keeper_note
         if anchor_failed:
             chain["anchors"]["failed"] = True
+        if publish_note:
+            chain["left"]["note"] = publish_note
+        if publish_failed:
+            chain["left"]["failed"] = True
         repos.setdefault(repo, {}).setdefault(session, []).append(chain)
         if not stood_down:
             # verify's TRANSCRIPT-DIVERGED is exit 5 in its own contract
@@ -4332,7 +4364,9 @@ this page draws them and decides nothing</footer>
           <div id="anchors">
             <p class="testimony">the block height is your half of the
             regeneration defense — confirm it against a Bitcoin block
-            source you trust</p>
+            source you trust; when a head last left this machine,
+            published or anchored, is staleness to read, not a
+            verdict</p>
             <div id="panel"></div>
           </div>
         </div>
@@ -5303,6 +5337,26 @@ function renderAnchors(report) {
           row.appendChild(el("span", "bare" + (old ? " stale" : ""),
             "head (entry " + a.head.n + ") unanchored" +
             (a.head.ts ? " for " + since(a.head.ts) : "")));
+        }
+        // When a head last left the machine, published or anchored
+        // (ADR-0025): the same staleness voice as the unanchored head,
+        // never an alarm. A fresh reading proves nothing (both files
+        // are writer-reachable); a stale one is the reason to look.
+        const left = chain.left;
+        if (left) {
+          if (left.ts) {
+            const old = Date.now() - Date.parse(left.ts) > BARE_STALE;
+            row.appendChild(el("span", "bare" + (old ? " stale" : ""),
+              "a head last left " + since(left.ts) + " ago (" +
+              left.via + ")"));
+          } else {
+            row.appendChild(el("span", "bare",
+                               "no head has left this machine"));
+          }
+          if (left.note) {
+            row.appendChild(el("p", "claim" + (left.failed ? " shout" : ""),
+                               left.note));
+          }
         }
         if (a.note) {
           row.appendChild(el("p", "claim" + (a.failed ? " shout" : ""),
