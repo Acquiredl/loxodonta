@@ -323,6 +323,40 @@ class PublishAtSessionEndTest(PublishBase):
         self.assertEqual(len(self.receiver.received), 1)
         self.assertEqual([d.hex() for d in calendar.submitted], [self.head()])
 
+    def test_a_codex_hook_cuts_the_post_off_inside_codexs_three_seconds(self):
+        # Codex caps the whole SessionEnd hook at three seconds, where
+        # Claude Code gives it twenty, so a Codex hook waits half the cap
+        # for its POST instead of the full three (#183, the numbers in
+        # docs/HOOK.md). A remote that sits on the request is left behind
+        # early enough that Codex never kills the hook; the same remote
+        # costs the default wait twice as long. The seal is on the chain
+        # either way, since the commitment goes first.
+        self.receiver.delay = 6   # longer than either bound waits
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+
+        started = time.monotonic()
+        default = self.session_end("--publish", self.receiver.url)
+        default_took = time.monotonic() - started
+        started = time.monotonic()
+        codex = self.session_end("--publish", self.receiver.url,
+                                 "--actor", "codex")
+        codex_took = time.monotonic() - started
+
+        for result in (default, codex):
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+        # The property #183 measured: the Codex hook comes back inside
+        # Codex's cap, and it is the bound that brought it back, since
+        # the same receiver held the default wait more than a second
+        # longer on the same machine.
+        self.assertLess(codex_took, 3, "Codex would have killed the hook")
+        self.assertLess(codex_took, default_took - 1)
+        self.assertGreater(codex_took, 1, "the POST was never waited on")
+        last = json.loads(self.chain().read_text(
+            encoding="utf-8").splitlines()[-1])
+        self.assertTrue(last["action"].startswith("transcript-commitment:"))
+
     def test_a_redirect_is_a_failure_and_nothing_reaches_the_new_host(self):
         # Left to itself urllib would re-send the POST as a GET with no
         # body to wherever the redirect points; the publisher refuses to
@@ -471,18 +505,58 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("no longer anchors", result.stdout)
         self.assertIn(self.URL, result.stdout)
 
-    def test_codex_refuses_the_flag_with_a_note(self):
-        # Codex caps a SessionEnd hook at three seconds; whether one POST
-        # fits is measured before Codex gets the flag (ADR-0025 ruling
-        # 3), so the installer refuses, the way it refuses the anchor.
+    def codex_hooks(self):
+        return json.loads((self.home / ".codex" / "hooks.json")
+                          .read_text(encoding="utf-8"))["hooks"]
+
+    def test_codex_gets_the_flag_and_the_publish_rides_on_session_end(self):
+        # ADR-0025 ruling 3 held the flag back until one POST inside
+        # Codex's three-second cap was measured; #183 measured it, so the
+        # refusal is lifted and the URL rides on the SessionEnd command
+        # exactly as it does for Claude Code. The block keeps Codex's own
+        # three-second timeout: the hook fits inside it, not the reverse.
         (self.home / ".codex").mkdir()
+
         result = self.install("--codex", "--publish-head", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hooks = self.codex_hooks()
+        [end] = [h for b in hooks["SessionEnd"] for h in b["hooks"]]
+        self.assertTrue(end["command"].endswith(f' --publish "{self.URL}"'),
+                        end["command"])
+        self.assertIn("--actor codex", end["command"])
+        self.assertEqual(end["timeout"], 3)
+        # No network call in the recording path, on any harness.
+        self.assertNotIn("--publish", json.dumps(hooks["PostToolUse"]))
+        self.assertIn(self.URL, result.stdout)
+
+    def test_a_codex_rerun_without_the_flag_turns_publishing_off_and_says_so(self):
+        # The install command states the choice each time, Codex included.
+        (self.home / ".codex").mkdir()
+        self.install("--codex", "--publish-head", self.URL)
+
+        result = self.install("--codex")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        left = json.dumps(self.codex_hooks())
+        self.assertNotIn("--publish", left)
+        self.assertNotIn(self.URL, left)
+        self.assertIn("no longer", result.stdout)
+        self.assertIn("publish", result.stdout)
+        self.assertEqual(len([h for b in self.codex_hooks()["SessionEnd"]
+                              for h in b["hooks"]]), 1)
+
+    def test_codex_still_refuses_the_session_end_anchor(self):
+        # #183 measured a POST, not a calendar round trip: the anchor's
+        # refusal (ADR-0024) stands, and names the supervisor instead.
+        (self.home / ".codex").mkdir()
+
+        result = self.install("--codex", "--anchor-at-session-end")
+
         self.assertEqual(result.returncode, 1)
-        self.assertIn("--publish-head", result.stderr)
-        self.assertIn("Codex", result.stderr)
-        self.assertIn("measured", result.stderr)
+        self.assertIn("--anchor-at-session-end", result.stderr)
+        self.assertIn("--anchor-every", result.stderr)
         self.assertFalse((self.home / ".codex" / "hooks.json").exists())
-        self.assertFalse((self.home / ".claude" / "settings.json").exists())
 
 
 if __name__ == "__main__":
