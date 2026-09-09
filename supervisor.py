@@ -1008,7 +1008,8 @@ def watch_completeness(root, witness, families, everywhere=False,
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
 
-    def add(repo, session, state, tools, receipts, drawers=(), judge=None):
+    def add(repo, session, state, tools, receipts, drawers=(), judge=None,
+            transcript=None):
         entry = {"repo": repo, "session": session, "state": state,
                  "tools": tools, "receipts": receipts,
                  "deficit": max(0, tools - receipts)}
@@ -1018,6 +1019,12 @@ def watch_completeness(root, witness, families, everywhere=False,
             entry["words"] = WATCH_WORDS[state]
         if judge:
             entry["judge"] = judge
+        if transcript is not None:
+            # The pairing itself, on the row: the tail keeper and
+            # `package --transcript` read it here rather than pairing
+            # again. Local by nature; WITNESS_FIELDS keeps it out of a
+            # package.
+            entry["transcript"] = transcript.as_posix()
         watch["sessions"].append(entry)
         return entry
 
@@ -1063,7 +1070,8 @@ def watch_completeness(root, witness, families, everywhere=False,
             add(repo, session, "UNWITNESSED", 0, receipts, spans)
             continue
         if not matchers:
-            add(repo, session, "UNWATCHED", 0, receipts, spans)
+            add(repo, session, "UNWATCHED", 0, receipts, spans,
+                transcript=transcript)
             continue
         try:
             state, tools = watch_session(transcript, receipts,
@@ -1082,7 +1090,8 @@ def watch_completeness(root, witness, families, everywhere=False,
             judge = (f'python "{LOXODONTA.as_posix()}" verify '
                      f'--log "{group["judge_log"]}" '
                      f'--transcript "{transcript.as_posix()}"')
-        row = add(repo, session, state, tools, receipts, spans, judge=judge)
+        row = add(repo, session, state, tools, receipts, spans, judge=judge,
+                  transcript=transcript)
         # The lifecycle facts (ADR-0018), quiet fields on the row.
         tier = lifecycle_tier(group.get("last_grew"), now)
         if tier:
@@ -1100,7 +1109,6 @@ def watch_completeness(root, witness, families, everywhere=False,
             row["uncommitted_tail"] = True
             row["tail_note"] = ("tail uncommitted — no exit commitment "
                                 "recorded")
-            row["transcript"] = transcript.as_posix()
             if group.get("home"):
                 row["home"] = group["home"]
 
@@ -3206,13 +3214,36 @@ def witness_snapshot(report, unit, sessions):
     }
 
 
-def package_readme(unit, packed, sessions, witness, record, notes):
+def transcript_words(session, transcripts):
+    """The README's sentence on one session's transcript: present, or
+    why not. ADR-0026 ruling 2: the transcript ships only on request,
+    and the README says whether it is here."""
+    if transcripts is None:
+        return ("no transcript: not requested (`supervisor package "
+                "--transcript` carries it).")
+    name = transcripts.get(session)
+    if name is None:
+        return ("no transcript: requested, but none for this session was "
+                "on the packing machine. The harness cleans transcripts on "
+                "a retention cycle, and the chain's commitments bind a "
+                "transcript only while it exists.")
+    return (f"`{name}`: the harness transcript of this session, as it stood "
+            "at packaging. The chain's transcript commitments bind its "
+            "committed prefixes; the manifest commits the whole file, tail "
+            "included, as of packaging. What it says is the harness's "
+            "record, testimony like the action lines.")
+
+
+def package_readme(unit, packed, sessions, witness, record, notes,
+                   transcripts=None):
     """The plain-words page a recipient reads first: what is inside, how
     to verify it, what each layer shows and does not. `sessions` is
     {session: [chain listings]} in the package's order; `notes` says, per
-    session that needs it, where it was recorded. The page may print the
-    chain heads, which exist before it is written; it never prints the
-    manifest's hash, which does not exist yet (ADR-0007 ruling 2)."""
+    session that needs it, where it was recorded; `transcripts` is None
+    when none was requested, else {session: the packaged transcript's
+    name, or None when it was gone}. The page may print the chain heads,
+    which exist before it is written; it never prints the manifest's
+    hash, which does not exist yet (ADR-0007 ruling 2)."""
     project = unit["project"]
     count = sum(len(listings) for listings in sessions.values())
     if unit["kind"] == "session":
@@ -3256,6 +3287,7 @@ def package_readme(unit, packed, sessions, witness, record, notes):
                 lines.append(f"{indent}- `{chain['anchors']}`: its anchor "
                              "sidecar, the OpenTimestamps proofs the recorder "
                              "collected for this chain's heads.")
+        lines.append(f"{indent}- {transcript_words(session, transcripts)}")
     if record:
         lines.append(
             "- `project.json`: the project record, the absolute path of the "
@@ -3269,6 +3301,13 @@ def package_readme(unit, packed, sessions, witness, record, notes):
         "Chains are listed by head and entry count, the other files by "
         "sha256 and byte count. Its hash is the only surface a seal "
         "applies to, and this package declares no seals.",
+        "",
+        "The transcript ships only on request (ADR-0026 ruling 2). The "
+        "chain holds `Read: .env` with a fingerprint; the transcript holds "
+        "the contents of `.env`. Packaging it can hand the recipient the "
+        "very secret a session exfiltrated, so it is the operator's "
+        "explicit call, and this page says, per session, whether it is "
+        "here.",
         "",
         "## How to verify",
         "",
@@ -3284,7 +3323,8 @@ def package_readme(unit, packed, sessions, witness, record, notes):
         "each artifact against the manifest, then the package verdict and "
         "one line of residual trust. Exit 0 is `SELF-CONSISTENT`; 1 is "
         "`CHAIN-BROKEN`; 2 is `ARTIFACT-DIVERGED`; 4 is "
-        "`UNSUPPORTED-FORMAT`, a refusal (docs/PACKAGE.md).",
+        "`UNSUPPORTED-FORMAT`, a refusal; 5 is `TRANSCRIPT-DIVERGED` "
+        "(docs/PACKAGE.md).",
         "",
         "## What each layer shows, and what it does not",
         "",
@@ -3296,6 +3336,17 @@ def package_readme(unit, packed, sessions, witness, record, notes):
         "by the Bitcoin block it names; the printed merkle root is yours "
         "to confirm against a block source you trust. An anchor speaks "
         "for its chain, never for this package as a set.",
+    ]
+    if transcripts and any(transcripts.values()):
+        lines.append(
+            "- A transcript here is judged against its chain's transcript "
+            "commitments: `COMMITMENT HOLDS` under the chain means the "
+            "committed prefix is the bytes the recorder hashed at the "
+            "time. The bytes after the last commitment are held by the "
+            "manifest alone, as of packaging; and before its first "
+            "commitment a transcript was the harness's to write "
+            "(ADR-0017).")
+    lines += [
         "- The witness snapshot is testimony: the reader's reading on the "
         "packing machine, carried along unaltered, never checked against "
         "anything here.",
@@ -3311,18 +3362,22 @@ def package_readme(unit, packed, sessions, witness, record, notes):
     return "\n".join(lines)
 
 
-def write_package(unit, sessions, drawer, report, stage, packed):
+def write_package(unit, sessions, drawer, report, stage, packed,
+                  transcripts=None):
     """Assemble one package in `stage`, in ADR-0007's write order: chain
     snapshot and sidecars, then the artifacts, then the README, then the
     manifest last. `sessions` is {session: [chains]} in the package's
-    order; `drawer` is the one whose project record ships. Returns the
-    file names in the order they were written, which is the order the
-    zip keeps."""
+    order; `drawer` is the one whose project record ships; `transcripts`
+    is None when none was requested, else {session: transcript path} for
+    the sessions the scan paired with a transcript still on disk
+    (ADR-0026 ruling 2). Returns the file names in the order they were
+    written, which is the order the zip keeps."""
     record = drawer / "project.json"   # travels only when it exists
     written = []
     listings = {}
     artifacts = []
     notes = {}
+    shipped = None if transcripts is None else {}
     for session, chains in sessions.items():
         listings[session] = []
         for log in chains:
@@ -3338,6 +3393,25 @@ def write_package(unit, sessions, drawer, report, stage, packed):
                                 stage / listing["anchors"])
                 written.append(listing["anchors"])
                 artifacts.append(artifact_listing(stage / listing["anchors"]))
+        if transcripts is not None:
+            # The transcript travels under a bare name that names the
+            # session (the layout is flat), listed by sha256 like any
+            # post-close artifact, and every chain of the session names
+            # it, so the verifier knows which transcript is whose. Gone
+            # between the scan and this copy is gone: the README says so.
+            shipped[session] = None
+            name = f"transcript-{session}.jsonl"
+            if session in transcripts:
+                try:
+                    shutil.copyfile(transcripts[session], stage / name)
+                except OSError:
+                    pass
+                else:
+                    written.append(name)
+                    artifacts.append(artifact_listing(stage / name))
+                    for listing in listings[session]:
+                        listing["transcript"] = name
+                    shipped[session] = name
         if chains[0].parent != drawer:
             # A worktree drawer's session (ADR-0023 part 3): its own
             # project record does not travel, so the README says whose
@@ -3360,7 +3434,7 @@ def write_package(unit, sessions, drawer, report, stage, packed):
     artifacts.append(artifact_listing(stage / "witness.json"))
     write_lf(stage / "README.md",
              package_readme(unit, packed, listings, witness, record.exists(),
-                            notes))
+                            notes, shipped))
     written.append("README.md")
     artifacts.append(artifact_listing(stage / "README.md"))
     manifest = {
@@ -3481,14 +3555,25 @@ def cmd_package(args):
     # off the machine; the baseline still remembers the look.
     report = scan_root(store_receipts(), witness=Path(args.witness),
                        store=True, tick=False)
+    transcripts = None
+    if args.transcript:
+        # The completeness watch's own pairing, session to transcript,
+        # read off the scan's rows rather than paired a second time. A
+        # session the watch found no readable transcript for is packaged
+        # without one, and the README says why.
+        transcripts = {
+            row["session"]: Path(row["transcript"])
+            for row in report.get("completeness", {}).get("sessions", [])
+            if row.get("session") in sessions and row.get("transcript")}
     out.parent.mkdir(parents=True, exist_ok=True)
     if args.folder:
         out.mkdir()
-        written = write_package(unit, sessions, drawer, report, out, packed)
+        written = write_package(unit, sessions, drawer, report, out, packed,
+                                transcripts)
     else:
         with tempfile.TemporaryDirectory() as staging:
             written = write_package(unit, sessions, drawer, report,
-                                    Path(staging), packed)
+                                    Path(staging), packed, transcripts)
             zip_package(Path(staging), written, out)
     chains = sum(len(logs) for logs in sessions.values())
     print(f"written: {out.name} ({label}, {chains} chain(s), "
@@ -5939,6 +6024,11 @@ def main(argv):
     package.add_argument("--witness", default=str(WITNESS_ROOT),
                          help="the harness transcript layout the scan "
                               "underneath reads (same as scan)")
+    package.add_argument("--transcript", action="store_true",
+                         help="also carry each session's harness transcript "
+                              "while it is still on disk; it can hold what "
+                              "the session read, a secret included, so it "
+                              "ships only on request (ADR-0026)")
     package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)

@@ -822,3 +822,237 @@ class HookStorePackageTest(PackageCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- The transcript, on request (ADR-0026 ruling 2; #179) -------------------
+
+TRANSCRIPT_SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000011"
+SECOND_SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000012"
+THIRD_SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000013"
+
+
+class TranscriptPackageTest(PackageCase):
+    """A store written through `loxodonta hook` beside a harness
+    transcript layout, which the scan pairs with each session by file
+    stem exactly as the completeness watch does. A clean SessionEnd
+    through the hook commits the transcript's bytes into the chain
+    (ADR-0017), so every session here has a commitment to judge."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.project = self.root / "project"
+        self.project.mkdir()
+        self.witness = self.root / "witness" / "projects"
+        self.witness.mkdir(parents=True)
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.env = neutral_env(self.home)
+        self.transcript = self.record_session(TRANSCRIPT_SESSION,
+                                              "pytest -q", "git status")
+
+    def hook(self, payload):
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook"],
+            input=json.dumps(payload).encode("utf-8"), capture_output=True,
+            env={**self.env, "PYTHONIOENCODING": "utf-8",
+                 "CLAUDE_PROJECT_DIR": str(self.project)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def write_transcript(self, session, *lines):
+        """A transcript where the harness keeps them: one folder per
+        project, named after the project's path, one <session>.jsonl."""
+        folder = self.witness / "".join(
+            c if c.isalnum() or c == "-" else "-" for c in str(self.project))
+        folder.mkdir(exist_ok=True)
+        path = folder / f"{session}.jsonl"
+        path.write_bytes(b"".join(json.dumps(line).encode("utf-8") + b"\n"
+                                  for line in lines))
+        return path
+
+    def record_session(self, session, *commands):
+        """Tool receipts through the hook, the transcript the harness
+        would have written, then a clean SessionEnd carrying
+        transcript_path, which commits the transcript's bytes into the
+        chain (ADR-0017). Returns the transcript's path."""
+        for command in commands:
+            self.hook({"session_id": session, "hook_event_name": "PostToolUse",
+                       "tool_name": "Bash", "tool_input": {"command": command},
+                       "tool_response": {}})
+        transcript = self.write_transcript(
+            session, *({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": f"tu_{i}", "name": "Bash",
+                 "input": {"command": command}}]}}
+                       for i, command in enumerate(commands)))
+        self.hook({"session_id": session, "hook_event_name": "SessionEnd",
+                   "reason": "exit", "transcript_path": str(transcript)})
+        return transcript
+
+    def folder_package(self, *args):
+        folder = self.work / "package"
+        result = self.package(*args, "--folder", "--out", str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return folder
+
+    def test_a_requested_transcript_travels_listed_and_named_on_the_chain(self):
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+
+        name = f"transcript-{TRANSCRIPT_SESSION}.jsonl"
+        data = self.transcript.read_bytes()
+        self.assertEqual((folder / name).read_bytes(), data,
+                         "the transcript travels byte for byte")
+        manifest = self.manifest_of(folder)
+        listed = {a["path"]: a for a in manifest["artifacts"]}
+        self.assertIn(name, listed, "listed like any post-close artifact")
+        self.assertEqual(listed[name]["sha256"],
+                         hashlib.sha256(data).hexdigest())
+        self.assertEqual(listed[name]["bytes"], len(data))
+        # The chain listing names its transcript, so the verifier knows
+        # which transcript belongs to which chain.
+        for chain in manifest["chains"]:
+            self.assertEqual(chain["transcript"], name)
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn(f"`{name}`", readme)
+        # The path on the packing machine stays on the packing machine:
+        # the witness row travels without it.
+        witness = json.loads((folder / "witness.json").read_text("utf-8"))
+        self.assertNotIn("transcript", witness["completeness"][0])
+
+    def test_the_verifier_judges_the_commitments_and_states_the_tail(self):
+        # The harness appends to an ended transcript (restart, resume):
+        # those bytes sit after the last commitment, held by the manifest
+        # alone, and the recorder says how many there are.
+        appended = b'{"type": "bridge-session", "note": "meta"}\n'
+        with open(self.transcript, "ab") as f:
+            f.write(appended)
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertTrue(any(l.startswith("COMMITMENT HOLDS (entry")
+                            for l in lines), result.stdout)
+        self.assertTrue(any(f"{len(appended)} bytes after the last commitment"
+                            in l for l in lines), result.stdout)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
+
+    def test_a_rewritten_committed_prefix_is_transcript_diverged_exit_5(self):
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+        packaged = folder / f"transcript-{TRANSCRIPT_SESSION}.jsonl"
+        data = bytearray(packaged.read_bytes())
+        # Re-ink one byte inside the committed prefix, length unchanged:
+        # the manifest's sha256 also diverges, and the transcript
+        # verdict outranks the artifact one (never innocent).
+        data[5] = ord("X") if data[5] != ord("X") else ord("Y")
+        packaged.write_bytes(bytes(data))
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertTrue(any(l.startswith("COMMITMENT DIVERGED (entry")
+                            for l in lines), result.stdout)
+        self.assertIn("TRANSCRIPT-DIVERGED: chain intact", result.stdout)
+        self.assertTrue(any(l.startswith(f"{packaged.name}: DIVERGED")
+                            for l in lines), result.stdout)
+        self.assertTrue(lines[-1].startswith("TRANSCRIPT-DIVERGED"), lines[-1])
+
+    def test_a_transcript_gone_from_disk_is_named_as_such(self):
+        # The harness's retention cycle took it; the chain still holds
+        # its commitments, and the README says why nothing is here.
+        self.transcript.unlink()
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+
+        self.assertEqual(sorted(p.name for p in folder.iterdir()
+                                if p.name.startswith("transcript-")), [])
+        manifest = self.manifest_of(folder)
+        self.assertFalse(any(a["path"].startswith("transcript-")
+                             for a in manifest["artifacts"]))
+        for chain in manifest["chains"]:
+            self.assertNotIn("transcript", chain)
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn("no transcript: requested, but none for this session "
+                      "was on the packing machine", readme)
+        self.assertIn("retention cycle", readme)
+
+    def test_without_the_flag_the_readme_says_not_requested_and_the_verifier_notes(self):
+        folder = self.folder_package(TRANSCRIPT_SESSION)
+
+        self.assertEqual(sorted(p.name for p in folder.iterdir()
+                                if p.name.startswith("transcript-")), [])
+        manifest = self.manifest_of(folder)
+        for chain in manifest["chains"]:
+            self.assertNotIn("transcript", chain)
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn("no transcript: not requested", readme)
+        self.assertIn("the very secret a session exfiltrated", readme)
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        # The chain has commitments and nothing to judge them against:
+        # the honest note, under the chain, and no verdict from it.
+        note = [l for l in lines if l.startswith("TRANSCRIPT-UNRESOLVED")]
+        self.assertEqual(len(note), 1, result.stdout)
+        self.assertIn("no transcript in this package", note[0])
+        self.assertIn("chain verdict unaffected", note[0])
+        self.assertNotIn("TRANSCRIPT-DIVERGED", result.stdout)
+        self.assertNotIn("COMMITMENT HOLDS", result.stdout)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
+
+    def test_a_drawer_package_carries_one_transcript_per_session(self):
+        self.record_session(SECOND_SESSION, "ls")
+        # A third session the harness left no transcript for.
+        self.hook({"session_id": THIRD_SESSION, "hook_event_name": "PostToolUse",
+                   "tool_name": "Bash", "tool_input": {"command": "pwd"},
+                   "tool_response": {}})
+        folder = self.folder_package("--repo", str(self.project),
+                                     "--transcript")
+
+        first = f"transcript-{TRANSCRIPT_SESSION}.jsonl"
+        second = f"transcript-{SECOND_SESSION}.jsonl"
+        self.assertEqual(sorted(p.name for p in folder.iterdir()
+                                if p.name.startswith("transcript-")),
+                         [first, second])
+        manifest = self.manifest_of(folder)
+        named = {c["path"]: c.get("transcript") for c in manifest["chains"]}
+        self.assertEqual(named[f"receipts-{TRANSCRIPT_SESSION}.jsonl"], first)
+        self.assertEqual(named[f"receipts-{SECOND_SESSION}.jsonl"], second)
+        self.assertIsNone(named[f"receipts-{THIRD_SESSION}.jsonl"])
+        listed = {a["path"] for a in manifest["artifacts"]}
+        self.assertTrue({first, second} <= listed)
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn(f"`{first}`", readme)
+        self.assertIn(f"`{second}`", readme)
+        self.assertEqual(readme.count("no transcript: requested, but none"), 1)
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("COMMITMENT HOLDS"), 2)
+        # The third chain holds no commitment, so it owes no note.
+        self.assertNotIn("TRANSCRIPT-UNRESOLVED", result.stdout)
+
+    def test_a_chain_naming_an_unlisted_or_unbare_transcript_is_refused(self):
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+        path = folder / "manifest.json"
+        original = path.read_text("utf-8")
+        cases = ((f"../transcript-{TRANSCRIPT_SESSION}.jsonl", "not bare"),
+                 ("elsewhere.jsonl", "not in artifacts"))
+        for named, why in cases:
+            manifest = json.loads(original)
+            manifest["chains"][0]["transcript"] = named
+            path.write_text(json.dumps(manifest, indent=2), "utf-8")
+
+            result = self.verify_package(folder)
+
+            self.assertEqual(result.returncode, 4, why + ": " + result.stdout)
+            lines = result.stdout.splitlines()
+            self.assertTrue(lines[-1].startswith("UNSUPPORTED-FORMAT"), why)
+            self.assertNotIn("chain:", result.stdout,
+                             "refused unread; nothing is judged")
