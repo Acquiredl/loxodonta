@@ -270,23 +270,23 @@ class ExportRawTest(ExportBase):
             self.assertFalse(list(self.work.glob("*.zip")), answer)
         self.assertFalse(list(self.work.glob("loxodonta-export-*.json")))
 
-    def test_raw_bundle_is_the_chains_byte_for_byte_without_project_json(self):
+    def test_raw_archive_is_the_chains_byte_for_byte_without_project_json(self):
         result = self.export("--raw", stdin="yes\n")
         out, err = text(result)
         self.assertEqual(result.returncode, 0, err)
-        bundles = list(self.work.glob("loxodonta-export-*-raw.zip"))
-        self.assertEqual(len(bundles), 1)
-        with zipfile.ZipFile(bundles[0]) as bundle:
-            names = bundle.namelist()
+        archives = list(self.work.glob("loxodonta-export-*-raw.zip"))
+        self.assertEqual(len(archives), 1)
+        with zipfile.ZipFile(archives[0]) as archive:
+            names = archive.namelist()
             self.assertTrue(all(n.startswith("repo-1/") for n in names), names)
             self.assertFalse(any("project.json" in n for n in names))
             self.assertFalse(any(PROJECT_SECRET in n for n in names))
             chain = f"repo-1/{self.log.name}"
             self.assertIn(chain, names)
-            self.assertEqual(bundle.read(chain), self.log.read_bytes())
-        # The redacted export is written too: the bundle rides with it.
+            self.assertEqual(archive.read(chain), self.log.read_bytes())
+        # The redacted export is written too: the archive rides with it.
         self.exported_file()
-        self.assertIn(bundles[0].name, err)
+        self.assertIn(archives[0].name, err)
 
 
 def fake_gh(bin_dir, log):
@@ -339,7 +339,7 @@ class ExportSendTest(ExportBase):
         self.assertIn("https://gist.github.com/fake/abc123", body)
         self.assertIn("allowlist", body.lower())
         self.assertIn("- [x]", body)
-        self.assertIn("- [ ] *(raw bundles only)*", body)
+        self.assertIn("- [ ] *(raw archives only)*", body)
         self.assertIn("**Harness(es) recorded:** claude-code", body)
         for secret in (HOME_SECRET, PROJECT_SECRET, COMMAND_SECRET):
             self.assertNotIn(secret, body)
@@ -357,7 +357,7 @@ class ExportSendTest(ExportBase):
         self.exported_file()
         self.assertTrue(list(self.work.glob("loxodonta-export-*.issue.md")))
 
-    def test_raw_send_ships_the_bundle_and_ticks_the_raw_line(self):
+    def test_raw_send_ships_the_archive_and_ticks_the_raw_line(self):
         fake_gh(self.bin, self.gh_log)
         env = {"PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", "")}
         result = self.export("--raw", "--send", stdin="yes\n", env=env)
@@ -365,7 +365,7 @@ class ExportSendTest(ExportBase):
         gist = self.gh_log.read_text("utf-8").splitlines()[0]
         self.assertIn("-raw.zip", gist)
         body = next(self.work.glob("*.issue.md")).read_text("utf-8")
-        self.assertIn("- [x] *(raw bundles only)*", body)
+        self.assertIn("- [x] *(raw archives only)*", body)
 
 
 if __name__ == "__main__":

@@ -28,5 +28,5 @@ that teaches the most.
 - [x] The export was built by the tool's allowlist; I did not edit it by hand.
 - [x] I read the export before sending it and I am fine with it being public
       in this issue and in `docs/FIELD-DATA.md`.
-- [ ] *(raw bundles only)* I ran `export --raw`, read the sample action line
+- [ ] *(raw archives only)* I ran `export --raw`, read the sample action line
       it showed me, and answered yes.
