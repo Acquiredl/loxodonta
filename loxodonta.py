@@ -604,14 +604,27 @@ def read_anchor_records(log):
 
 
 def append_anchor_record(log, head, n, calendar, proof_bytes):
+    """One anchor record beside `log`. `n` is the anchored entry's
+    number; a package manifest's anchor has none (ADR-0026 ruling 4),
+    and its record then carries no `n` at all rather than a null."""
     record = {
         "head": head,
-        "n": n,
         "ts": now_ts(),
         "calendar": calendar,
         "proof": base64.b64encode(proof_bytes).decode("ascii"),
     }
+    if n is not None:
+        record["n"] = n
     append_sidecar_record(anchors_path(log), record)
+
+
+def record_label(head, n):
+    """How an anchor record is named in messages: a chain head by its
+    entry number; a manifest digest, which has no entry, as the
+    manifest's."""
+    if n is None:
+        return f"manifest {head[:12]}…"
+    return f"head {head[:12]}… (entry {n})"
 
 
 def calendar_request(url, data=None, timeout=15):
@@ -740,7 +753,7 @@ def upgrade_pending_proofs(folder, remaining, deadline):
                     continuation)
             except (OSError, ProofError, ValueError):
                 continue
-            append_anchor_record(chain, record["head"], record["n"], url,
+            append_anchor_record(chain, record["head"], record.get("n"), url,
                                  upgraded)
             completed.add(key)
 
@@ -938,6 +951,17 @@ def cmd_publish(args):
 def cmd_anchor(args):
     if args.upgrade:
         return upgrade_anchors(args)
+    if args.manifest:
+        # A package manifest (ADR-0026 ruling 4): the digest anchored is
+        # the file's sha256, the proof lands beside the manifest, and the
+        # record has no entry number, because a manifest has no entries.
+        try:
+            head = sha256_file(args.manifest)
+        except OSError as e:
+            print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
+            return 1
+        return submit_digest(args.manifest, head, None, args.calendar,
+                             f"--upgrade --manifest {args.manifest}")
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -951,11 +975,19 @@ def cmd_anchor(args):
         print(f"error: {args.log} has a damaged final line — run "
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
-    head, n = last["entry_hash"], last["n"]
-    digest = bytes.fromhex(head)
+    return submit_digest(args.log, last["entry_hash"], last["n"],
+                         args.calendar, "--upgrade")
 
+
+def submit_digest(target, head, n, calendars, upgrade_flags):
+    """POST the digest `head` to each calendar and append one record
+    beside `target` per calendar that answered: a chain (`n` is the
+    entry number) or a package manifest (`n` is None). Success is one
+    record or more; `upgrade_flags` is how the operator completes the
+    proof later."""
+    digest = bytes.fromhex(head)
     written = 0
-    for calendar in (args.calendar or DEFAULT_CALENDARS):
+    for calendar in (calendars or DEFAULT_CALENDARS):
         url = calendar.rstrip("/")
         try:
             proof_bytes = calendar_request(url + "/digest", data=digest)
@@ -963,22 +995,25 @@ def cmd_anchor(args):
         except (OSError, ProofError) as e:
             print(f"warning: calendar {url}: {e}", file=sys.stderr)
             continue
-        append_anchor_record(args.log, head, n, url, proof_bytes)
+        append_anchor_record(target, head, n, url, proof_bytes)
         written += 1
-        print(f"anchored head {head[:12]}… (entry {n}) via {url}")
+        print(f"anchored {record_label(head, n)} via {url}")
     if not written:
-        print("error: no calendar accepted the digest — head not anchored",
+        print("error: no calendar accepted the digest — not anchored",
               file=sys.stderr)
         return 1
-    print("proof is pending — run `loxodonta anchor --upgrade` "
+    print(f"proof is pending — run `loxodonta anchor {upgrade_flags}` "
           "after a few hours to complete it")
     return 0
 
 
 def upgrade_anchors(args):
-    records = read_anchor_records(args.log)
+    # The upgrade reads only the sidecar, so a manifest's anchor goes
+    # the same way as a chain's: `--manifest PATH` names it.
+    target = args.manifest or args.log
+    records = read_anchor_records(target)
     if not records:
-        print(f"error: no anchors found at {anchors_path(args.log)} — "
+        print(f"error: no anchors found at {anchors_path(target)} — "
               "run `loxodonta anchor` first", file=sys.stderr)
         return 1
     # A head+calendar pair that already has a completed record needs nothing.
@@ -1004,11 +1039,12 @@ def upgrade_anchors(args):
         if key in completed:
             continue
         url = record["calendar"].rstrip("/")
+        label = record_label(record["head"], record.get("n"))
         try:
             continuation = calendar_request(f"{url}/timestamp/{commitment_hex}")
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                print(f"still pending at {url} (entry {record['n']}) — "
+                print(f"still pending at {url} ({label}) — "
                       "Bitcoin confirmation takes a few hours")
             else:
                 print(f"warning: calendar {url}: {e}", file=sys.stderr)
@@ -1027,10 +1063,10 @@ def upgrade_anchors(args):
                   file=sys.stderr)
             failures += 1
             continue
-        append_anchor_record(args.log, record["head"], record["n"], url, upgraded)
+        append_anchor_record(target, record["head"], record.get("n"), url,
+                             upgraded)
         completed.add(key)
-        print(f"upgraded: head {record['head'][:12]}… (entry {record['n']}) "
-              f"now has a Bitcoin attestation")
+        print(f"upgraded: {label} now has a Bitcoin attestation")
     return 1 if failures else 0
 
 
@@ -2726,6 +2762,13 @@ def main(argv=None):
                                     "public OpenTimestamps pools)")
     anchor_parser.add_argument("--upgrade", action="store_true",
                                help="complete pending proofs once Bitcoin has them")
+    anchor_parser.add_argument("--manifest", default=None, metavar="PATH",
+                               help="anchor a package manifest's sha256 "
+                                    "instead of a chain head, the proof "
+                                    "beside it in PATH.anchors.jsonl; with "
+                                    "--upgrade, complete that proof "
+                                    "(ADR-0026 ruling 4; `supervisor "
+                                    "package --anchor` drives this)")
     anchor_parser.set_defaults(func=cmd_anchor)
     publish_parser = sub.add_parser(
         "publish", parents=[common],
