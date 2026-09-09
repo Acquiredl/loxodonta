@@ -1905,10 +1905,11 @@ def ceiling_lines(manifest, earned):
         limit = f"; indistinguishable from {alike}{why}"
     for note in earned["unjudged"]:
         limit += f"; {note}"
+    unjudged = "".join(f" {n[0].upper()}{n[1:]}." for n in earned["unjudged"])
+    pause = "," if len(unsaid) > 1 else ""   # "That A, and B, rests"
     trust = ("residual trust: this package is unaltered since it was packed"
-             f"{trusted}. That {series(unsaid)}{',' if len(unsaid) > 1 else ''}"
-             f" rests on the issuer's word alone{why}."
-             + "".join(f" {n[0].upper()}{n[1:]}." for n in earned["unjudged"]))
+             f"{trusted}. That {series(unsaid)}{pause} rests on the issuer's "
+             f"word alone{why}.{unjudged}")
     verdict = (f"SELF-CONSISTENT{rungs}: {PACKAGE_WORDS['SELF-CONSISTENT']}"
                f"{given}{limit}")
     return trust, verdict
@@ -3034,7 +3035,9 @@ def main(argv=None):
         "verify-package",
         help="judge a package written by `supervisor package`, a zip or a "
              "folder, layer by layer: each chain verbatim, each artifact "
-             "against the manifest, the package verdict last (ADR-0026)")
+             "against the manifest, each declared seal (the anchor here, "
+             "the signature through ssh-keygen), the package verdict last "
+             "(ADR-0026)")
     package_parser.add_argument("path", metavar="PATH",
                                 help="the package: a zip, or its unpacked "
                                      "folder")

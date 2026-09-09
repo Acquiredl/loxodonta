@@ -19,7 +19,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from test_package import LOXODONTA, run
+from test_package import LOXODONTA, SUPERVISOR, run
 from test_package_anchor import SESSION, SIDECAR, AnchoredStoreCase
 
 SIGNATURE = "manifest.json.sig"
@@ -211,6 +211,122 @@ class SignedPackageTest(AnchoredStoreCase):
             (folder / PUBLIC_KEY).write_bytes(pristine)
             if words == "edited manifest":
                 folder = self.signed_folder("again")
+
+    def test_a_stripped_signature_or_key_is_seal_missing_exit_3(self):
+        # ADR-0007's declared seal set: the manifest says a signature
+        # exists, so deleting either file the seal needs is a failure,
+        # never a silent downgrade to SELF-CONSISTENT. The chain and the
+        # artifacts are still fine; the seal is not.
+        for stripped in (SIGNATURE, PUBLIC_KEY):
+            folder = self.signed_folder("without-" + stripped)
+            (folder / stripped).unlink()
+
+            judged = self.verify_package(folder)
+
+            self.assertEqual(judged.returncode, 3,
+                             stripped + ": " + judged.stdout + judged.stderr)
+            lines = judged.stdout.strip().splitlines()
+            self.assertTrue(lines[-1].startswith("SEAL-MISSING:"), lines[-1])
+            seal = next((l for l in lines
+                         if l.startswith("seal signature: SEAL-MISSING")), None)
+            self.assertIsNotNone(seal, judged.stdout)
+            self.assertIn(stripped, seal)
+            self.assertIn("VALID", judged.stdout)
+            self.assertNotIn("unlisted:", judged.stdout)
+            self.assertNotIn("residual trust", judged.stdout)
+
+    def bare_path(self):
+        """The environment with PATH holding the interpreter's folder and
+        nothing else, so ssh-keygen is not found; the rest stays."""
+        return {**self.env, "PATH": os.path.dirname(sys.executable)}
+
+    def test_without_ssh_keygen_the_signature_is_not_judged_and_the_rest_is(self):
+        # ADR-0026 ruling 6: a recipient without ssh-keygen is told the
+        # seal was not judged, and the ladder reports the rungs it could
+        # judge: no rung from the signature and no failure either, while
+        # the anchor, which the recorder judges by itself, still earns
+        # its rung. The same package earns + SIGNED where ssh-keygen is.
+        folder = self.signed_folder("both", "--anchor", "--calendar",
+                                    self.server.url)
+        self.server.mode = "complete"
+        upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
+                      str(folder / "manifest.json"), env=self.env)
+        self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
+
+        judged = run(LOXODONTA, "verify-package", str(folder),
+                     env=self.bare_path(), cwd=str(self.work))
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        lines = out.strip().splitlines()
+        self.assertIn("seal signature: not judged: ssh-keygen not on PATH", out)
+        self.assertNotIn("SEAL-", out)
+        self.assertIn("seal anchor: ANCHORED", out)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + ANCHORED:"),
+                        lines[-1])
+        self.assertNotIn("SIGNED", lines[-1])
+        self.assertIn("not judged", lines[-1])
+        self.assertIn("not judged", lines[-2])
+        self.assertNotIn("Traceback", judged.stderr)
+
+        judged = self.verify_package(folder)
+
+        self.assertTrue(judged.stdout.strip().splitlines()[-1].startswith(
+            "SELF-CONSISTENT + ANCHORED + SIGNED (key: "), judged.stdout)
+
+    def test_without_ssh_keygen_the_supervisor_cannot_sign_and_writes_nothing(self):
+        # The supervisor signs nothing itself (ADR-0026 ruling 4): with
+        # ssh-keygen out of reach there is no signature to ship, and a
+        # package declaring a seal it does not carry would only ever
+        # verify SEAL-MISSING.
+        result = run(SUPERVISOR, "package", SESSION, "--witness",
+                     str(self.witness), "--out", str(self.work / "gone.zip"),
+                     "--sign", str(self.keyfile), env=self.bare_path(),
+                     cwd=str(self.work))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("not signed", result.stderr)
+        self.assertIn("ssh-keygen", result.stderr)
+        self.assertIn("nothing written", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_a_key_ssh_keygen_cannot_load_leaves_no_package(self):
+        # A failed signing leaves nothing written, zip or folder, with
+        # ssh-keygen's own words above the supervisor's; with --anchor
+        # too, so an anchor already applied keeps no half-sealed package
+        # alive. Nothing here reads the key: ssh-keygen names the file
+        # it could not load.
+        missing = self.root / "nokey"
+        shapes = (("--folder", "--out", str(self.work / "gone")),
+                  ("--out", str(self.work / "gone.zip")),
+                  ("--out", str(self.work / "gone.zip"), "--anchor",
+                   "--calendar", self.server.url))
+        for shape in shapes:
+            result = self.package(SESSION, *shape, "--sign", str(missing))
+
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("nokey", result.stderr)
+            self.assertIn("not signed", result.stderr)
+            self.assertIn("nothing written", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(list(self.work.iterdir()), [], shape)
+
+    def test_the_public_key_is_derived_when_none_sits_beside_the_private_key(self):
+        # ADR-0026 ruling 4: KEYFILE.pub is the usual source of the
+        # shipped key; without it, ssh-keygen derives the public key from
+        # the private one, and the package verifies the same.
+        expected = public_key_of(self.keyfile).read_text("utf-8").split()[:2]
+        public_key_of(self.keyfile).unlink()
+
+        folder = self.signed_folder("derived")
+
+        self.assertEqual((folder / PUBLIC_KEY).read_text("utf-8").split(),
+                         expected)
+        judged = self.verify_package(folder)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1].startswith(
+            "SELF-CONSISTENT + SIGNED (key: "), judged.stdout)
 
 
 if __name__ == "__main__":
