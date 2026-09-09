@@ -1864,9 +1864,14 @@ def main_repo_of(project):
 
 
 def invoking_repo(args):
-    return main_repo_of(Path(args.repo
-                             or os.environ.get("CLAUDE_PROJECT_DIR")
-                             or Path.cwd()).resolve())
+    """The repository a recall or package command speaks of: --repo, else
+    CLAUDE_PROJECT_DIR, else the current directory, spelled the way the
+    recorder spells it when it slugs a drawer (an absolute path with any
+    link left as typed, ADR-0011), then a worktree resolved to its
+    repository. Resolving links here and not there would hash two names
+    for one drawer."""
+    spoken = args.repo or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()
+    return main_repo_of(Path(os.path.abspath(str(spoken))))
 
 
 def store_home():
@@ -1954,20 +1959,37 @@ def worktree_drawers(repo):
         except (OSError, ValueError, AttributeError):
             continue
         spelled = os.path.normcase(str(recorded)).replace(os.sep, "/")
-        if spelled.startswith(prefix):
+        if spelled.startswith(prefix) and not own_repository(recorded):
             found.append(drawer)
+    return found
+
+
+def own_repository(path):
+    """True when `path` still exists and is a repository of its own: a
+    `.git` folder, where a harness worktree has a `.git` file. Checked
+    out under another repository's .claude/worktrees/, such a folder is
+    not that repository's worktree and its history is not that
+    repository's. A pruned worktree's folder is gone, so it keeps the
+    prefix rule above."""
+    return os.path.isdir(os.path.join(str(path), ".git"))
+
+
+def repo_drawers(repo):
+    """A repository's drawers in the store, in recall's order: its own
+    drawer when it exists, then the drawers of its harness worktrees
+    (ADR-0023). The one resolution `digest --repo`, `search --repo`,
+    `timeline`, and `package --repo` all read a repository through."""
+    drawer = store_receipts() / project_slug(repo)
+    found = [drawer] if drawer.is_dir() else []
+    found += [extra for extra in worktree_drawers(repo) if extra != drawer]
     return found
 
 
 def store_chains(repo):
     """A repository's chains in the store: its own drawer, then the
     drawers of its harness worktrees (ADR-0023), in that order."""
-    drawer = store_receipts() / project_slug(repo)
-    logs = drawer_chains(drawer) if drawer.is_dir() else []
-    for extra in worktree_drawers(repo):
-        if extra != drawer:
-            logs.extend(drawer_chains(extra))
-    return logs
+    return [log for drawer in repo_drawers(repo)
+            for log in drawer_chains(drawer)]
 
 
 def project_chains(repo):
@@ -3095,23 +3117,38 @@ PACKAGE_SEALS = ()   # declared seals; --anchor and --sign are later slices
 WITNESS_FIELDS = ("repo", "session", "state", "tools", "receipts",
                   "deficit", "words")
 WITNESS_WORDS = (
-    "testimony: the supervisor's completeness reading of this session "
-    "and the scan's verdicts at packaging, as the packing machine "
-    "reported them. `loxodonta verify-package` checks that these bytes "
-    "are unchanged since packaging and draws no verdict from them "
+    "testimony: the supervisor's completeness reading of each session "
+    "packaged and the scan's verdicts at packaging, as the packing "
+    "machine reported them. `loxodonta verify-package` checks that these "
+    "bytes are unchanged since packaging and draws no verdict from them "
     "(ADR-0026).")
+
+
+def sessions_of(chains):
+    """{session: [chains]} in the census's order: session, then sibling
+    sequence (ADR-0004: -002 continues the unsuffixed chain, whatever the
+    two names sort like as strings)."""
+    sessions = {}
+    for log in sorted(chains, key=store_identity):
+        sessions.setdefault(session_of(log), []).append(log)
+    return sessions
 
 
 def store_sessions():
     """{session: [chains]} over every drawer in the store, siblings
-    included, in the census's order: drawer, session, then sibling
-    sequence (ADR-0004: -002 continues the unsuffixed chain, whatever
-    the two names sort like as strings)."""
-    found = [log for log in store_receipts().glob("*/receipts-*.jsonl")
-             if not log.name.endswith(".anchors.jsonl")]
+    included, drawer by drawer in the census's order."""
+    return sessions_of(log for log in store_receipts().glob("*/receipts-*.jsonl")
+                       if not log.name.endswith(".anchors.jsonl"))
+
+
+def drawer_sessions(repo):
+    """{session: [chains]} over a repository's drawers, as recall reads
+    them (its own drawer, then its harness worktree drawers, ADR-0023),
+    each drawer in the census's order: session, then sibling sequence."""
     sessions = {}
-    for log in sorted(found, key=store_identity):
-        sessions.setdefault(session_of(log), []).append(log)
+    for drawer in repo_drawers(repo):
+        for session, logs in sessions_of(drawer_chains(drawer)).items():
+            sessions.setdefault(session, []).extend(logs)
     return sessions
 
 
@@ -3142,13 +3179,15 @@ def artifact_listing(path):
             "bytes": len(data)}
 
 
-def witness_snapshot(report, session, chains):
-    """The witness's word on one session, labelled testimony in the
-    file itself: its completeness row and the scan's verdict for each
-    of its chains, as this scan reported them (ADR-0026 ruling 2)."""
-    row = next((s for s in report.get("completeness", {}).get("sessions", [])
-                if s.get("session") == session), None)
-    names = {log.name for log in chains}
+def witness_snapshot(report, unit, sessions):
+    """The witness's word on what is packaged, labelled testimony in the
+    file itself: one completeness row per session, in the package's
+    order, and the scan's verdict for each chain, as this scan reported
+    them (ADR-0026 ruling 2). A session the scan gave no row is named
+    with nothing else said of it."""
+    rows = {row.get("session"): row
+            for row in report.get("completeness", {}).get("sessions", [])}
+    names = {log.name for chains in sessions.values() for log in chains}
     verdicts = [{"log": Path(chain["log"]).name, "verdict": chain["verdict"],
                  "entries": chain["entries"], "anchored": chain["anchored"]}
                 for repo in report.get("repos", [])
@@ -3158,48 +3197,74 @@ def witness_snapshot(report, session, chains):
     return {
         "testimony": WITNESS_WORDS,
         "scanned": report.get("scanned"),
-        "session": session,
-        "completeness": ({k: row[k] for k in WITNESS_FIELDS if k in row}
-                         if row else None),
+        "unit": unit,
+        "completeness": [
+            {k: rows[session][k] for k in WITNESS_FIELDS if k in rows[session]}
+            if session in rows else {"session": session}
+            for session in sessions],
         "scan": {"exit": report.get("exit"), "chains": verdicts},
     }
 
 
-def package_readme(session, project, packed, chains, witness, record):
+def package_readme(unit, packed, sessions, witness, record, notes):
     """The plain-words page a recipient reads first: what is inside, how
-    to verify it, what each layer shows and does not. It may print the
+    to verify it, what each layer shows and does not. `sessions` is
+    {session: [chain listings]} in the package's order; `notes` says, per
+    session that needs it, where it was recorded. The page may print the
     chain heads, which exist before it is written; it never prints the
     manifest's hash, which does not exist yet (ADR-0007 ruling 2)."""
-    state = (witness.get("completeness") or {}).get("state", "none")
+    project = unit["project"]
+    count = sum(len(listings) for listings in sessions.values())
+    if unit["kind"] == "session":
+        title = f"session {unit['session']}"
+        what = ("This is the receipt log of one AI agent session: one line "
+                "per completed tool call, hash-chained, as the recorder "
+                "wrote it on the machine where the session ran "
+                "(docs/SPEC.md).")
+        state = witness["completeness"][0].get("state", "none")
+        reading = ("the supervisor's completeness reading of this session "
+                   f"at packaging (state: {state})")
+    else:
+        title = f"drawer {project}"
+        what = ("These are the receipt logs of one project's drawer, every "
+                f"session recorded for it: {len(sessions)} session"
+                f"{'' if len(sessions) == 1 else 's'} in {count} chain"
+                f"{'' if count == 1 else 's'}, one line per completed tool "
+                "call, hash-chained, as the recorder wrote them on the "
+                "machine where the sessions ran (docs/SPEC.md).")
+        reading = ("the supervisor's completeness reading of each session "
+                   "at packaging, one row per session")
     lines = [
-        f"# loxodonta package: session {session}",
+        f"# loxodonta package: {title}",
         "",
         f"Project `{project}`, packed {packed} by loxodonta supervisor "
-        f"{TOOL_VERSION}, format `{PACKAGE_FORMAT}`. This is the receipt "
-        "log of one AI agent session: one line per completed tool call, "
-        "hash-chained, as the recorder wrote it on the machine where the "
-        "session ran (docs/SPEC.md).",
+        f"{TOOL_VERSION}, format `{PACKAGE_FORMAT}`. {what}",
         "",
         "## What is inside",
         "",
     ]
-    for chain in chains:
-        lines.append(f"- `{chain['path']}`: a chain of {chain['entries']} "
-                     f"entries, head `{chain['head']}`.")
-        if chain["anchors"]:
-            lines.append(f"- `{chain['anchors']}`: its anchor sidecar, the "
-                         "OpenTimestamps proofs the recorder collected for "
-                         "this chain's heads.")
+    for session, listings in sessions.items():
+        indent = ""
+        if unit["kind"] == "drawer":
+            note = f" ({notes[session]})" if session in notes else ""
+            lines.append(f"- session `{session}`{note}:")
+            indent = "  "
+        for chain in listings:
+            lines.append(f"{indent}- `{chain['path']}`: a chain of "
+                         f"{chain['entries']} entries, head `{chain['head']}`.")
+            if chain["anchors"]:
+                lines.append(f"{indent}- `{chain['anchors']}`: its anchor "
+                             "sidecar, the OpenTimestamps proofs the recorder "
+                             "collected for this chain's heads.")
     if record:
         lines.append(
             "- `project.json`: the project record, the absolute path of the "
             "project on the machine that recorded it. Off that machine it "
             "points nowhere, which the verifier says in so many words.")
     lines += [
-        "- `witness.json`: the supervisor's completeness reading of this "
-        f"session at packaging (state: {state}) and the verdict its scan "
-        "gave each chain. Labelled testimony in the file: the verifier "
-        "confirms these bytes are unchanged and draws no verdict from them.",
+        f"- `witness.json`: {reading}, and the verdict its scan gave each "
+        "chain. Labelled testimony in the file: the verifier confirms "
+        "these bytes are unchanged and draws no verdict from them.",
         "- `manifest.json`: the list of everything above, written last. "
         "Chains are listed by head and entry count, the other files by "
         "sha256 and byte count. Its hash is the only surface a seal "
@@ -3246,49 +3311,65 @@ def package_readme(session, project, packed, chains, witness, record):
     return "\n".join(lines)
 
 
-def write_package(session, chains, report, stage, packed):
+def write_package(unit, sessions, drawer, report, stage, packed):
     """Assemble one package in `stage`, in ADR-0007's write order: chain
     snapshot and sidecars, then the artifacts, then the README, then the
-    manifest last. Returns the file names in the order they were written,
-    which is the order the zip keeps."""
-    drawer = chains[0].parent
+    manifest last. `sessions` is {session: [chains]} in the package's
+    order; `drawer` is the one whose project record ships. Returns the
+    file names in the order they were written, which is the order the
+    zip keeps."""
+    record = drawer / "project.json"   # travels only when it exists
     written = []
-    listings = []
+    listings = {}
     artifacts = []
-    for log in chains:
-        # Listed from the chain in its drawer, whose sidecar sits beside
-        # it; the snapshot has the same head and lines, byte for byte.
-        listing = chain_listing(log)
-        listings.append(listing)
-        shutil.copyfile(log, stage / log.name)
-        written.append(log.name)
-        if listing["anchors"]:
-            shutil.copyfile(log.with_name(listing["anchors"]),
-                            stage / listing["anchors"])
-            written.append(listing["anchors"])
-            artifacts.append(artifact_listing(stage / listing["anchors"]))
-    record = drawer / "project.json"
+    notes = {}
+    for session, chains in sessions.items():
+        listings[session] = []
+        for log in chains:
+            # Listed from the chain in its drawer, whose sidecar sits
+            # beside it; the snapshot has the same head and lines, byte
+            # for byte.
+            listing = chain_listing(log)
+            listings[session].append(listing)
+            shutil.copyfile(log, stage / log.name)
+            written.append(log.name)
+            if listing["anchors"]:
+                shutil.copyfile(log.with_name(listing["anchors"]),
+                                stage / listing["anchors"])
+                written.append(listing["anchors"])
+                artifacts.append(artifact_listing(stage / listing["anchors"]))
+        if chains[0].parent != drawer:
+            # A worktree drawer's session (ADR-0023 part 3): its own
+            # project record does not travel, so the README says whose
+            # path its file references are relative to.
+            notes[session] = (
+                "recorded in the drawer of the harness worktree "
+                f"`{drawer_name(chains[0].parent)}`, read as this "
+                "repository's history (ADR-0023); its file references are "
+                "relative to that worktree"
+                + (", not to the path in `project.json`"
+                   if record.exists() else ""))
     if record.exists():
         shutil.copyfile(record, stage / "project.json")
         written.append("project.json")
         artifacts.append(artifact_listing(stage / "project.json"))
-    witness = witness_snapshot(report, session, chains)
+    witness = witness_snapshot(report, unit, sessions)
     write_lf(stage / "witness.json",
              json.dumps(witness, indent=2, ensure_ascii=False) + "\n")
     written.append("witness.json")
     artifacts.append(artifact_listing(stage / "witness.json"))
-    project = drawer_name(drawer)
     write_lf(stage / "README.md",
-             package_readme(session, project, packed, listings, witness,
-                            record.exists()))
+             package_readme(unit, packed, listings, witness, record.exists(),
+                            notes))
     written.append("README.md")
     artifacts.append(artifact_listing(stage / "README.md"))
     manifest = {
         "format": PACKAGE_FORMAT,
         "packed": packed,
         "tool": f"loxodonta supervisor {TOOL_VERSION}",
-        "unit": {"kind": "session", "session": session, "project": project},
-        "chains": listings,
+        "unit": unit,
+        "chains": [listing for per_session in listings.values()
+                   for listing in per_session],
         "artifacts": artifacts,
         "seals": list(PACKAGE_SEALS),
     }
@@ -3327,26 +3408,68 @@ def select_session(selector, sessions):
     return None, None
 
 
-def cmd_package(args):
-    """Build one package of a session (ADR-0026 ruling 1: by id or by an
-    entry address inside it, siblings included). The scan underneath is
-    one ordinary tick, as export's is: its completeness row and verdicts
-    are the witness snapshot."""
-    sessions = store_sessions()
-    session, chains = select_session(args.selector, sessions)
-    if session is None:
-        return 1
+def split_refusal(session, chains):
+    """True, the error printed, when a session's chains sit in more than
+    one drawer (possible before ADR-0023). The layout is flat, one
+    project record beside the chains; two drawers under one chain name
+    would mean one silently overwriting the other. Refused whether the
+    unit is the session or a drawer holding part of it: a drawer package
+    that looked complete and was not would be worse than the refusal."""
     drawers = sorted({log.parent for log in chains})
-    if len(drawers) > 1:
-        # The layout is flat, one project record beside the chains; two
-        # drawers under one chain name would mean one silently
-        # overwriting the other. Possible before ADR-0023; refused here.
-        print(f"error: session {session} spans {len(drawers)} drawers "
-              f"({', '.join(d.name for d in drawers)}); packaging a split "
-              "session is not built", file=sys.stderr)
-        return 1
+    if len(drawers) < 2:
+        return False
+    print(f"error: session {session} spans {len(drawers)} drawers "
+          f"({', '.join(d.name for d in drawers)}); packaging a split "
+          "session is not built", file=sys.stderr)
+    return True
+
+
+def cmd_package(args):
+    """Build one package (ADR-0026 ruling 1): of a session, selected by
+    id or by an entry address inside it, siblings included; or, with
+    --repo or no selector at all, of the repository's whole drawer,
+    resolved as `digest --repo` resolves it (CLAUDE_PROJECT_DIR, else the
+    current directory), its harness worktree drawers included
+    (ADR-0023). The scan underneath is one ordinary tick, as export's
+    is: its completeness rows and verdicts are the witness snapshot."""
+    everywhere = store_sessions()
+    if args.selector is not None:
+        session, chains = select_session(args.selector, everywhere)
+        if session is None:
+            return 1
+        drawer = chains[0].parent
+        sessions = {session: chains}
+        unit = {"kind": "session", "session": session,
+                "project": drawer_name(drawer)}
+        stem, label = session, f"session {session}"
+    else:
+        repo = invoking_repo(args)
+        drawer = store_receipts() / project_slug(repo)
+        sessions = drawer_sessions(repo)
+        if not sessions:
+            if repo_drawers(repo):
+                print(f"error: the drawer for {repo} holds no chain; nothing "
+                      "to package", file=sys.stderr)
+            else:
+                print(f"error: the store holds no drawer for {repo}; nothing "
+                      "to package (a legacy receipts/ layout moves into the "
+                      "store with `supervisor adopt`)", file=sys.stderr)
+            return 1
+        project = drawer_name(drawer) if drawer.is_dir() else repo.name
+        unit = {"kind": "drawer", "project": project,
+                "sessions": len(sessions)}
+        # The file is named for the drawer folder, the slug: safe on every
+        # filesystem and hash-suffixed, so two projects of one name never
+        # collide (ADR-0011). The README keeps the display name.
+        slug = drawer.name if drawer.is_dir() else project_slug(repo)
+        stem, label = slug, f"drawer {slug}, {len(sessions)} session(s)"
+    for session in sessions:
+        # Checked against the whole store, not the selection: half of a
+        # split session may sit in a drawer no selector reaches.
+        if split_refusal(session, everywhere.get(session, sessions[session])):
+            return 1
     packed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    default = Path.cwd() / f"loxodonta-package-{session}"
+    default = Path.cwd() / f"loxodonta-package-{stem}"
     out = Path(args.out) if args.out else (
         default if args.folder else default.with_name(default.name + ".zip"))
     if out.exists():
@@ -3361,13 +3484,14 @@ def cmd_package(args):
     out.parent.mkdir(parents=True, exist_ok=True)
     if args.folder:
         out.mkdir()
-        written = write_package(session, chains, report, out, packed)
+        written = write_package(unit, sessions, drawer, report, out, packed)
     else:
         with tempfile.TemporaryDirectory() as staging:
-            written = write_package(session, chains, report, Path(staging),
-                                    packed)
+            written = write_package(unit, sessions, drawer, report,
+                                    Path(staging), packed)
             zip_package(Path(staging), written, out)
-    print(f"written: {out.name} (session {session}, {len(chains)} chain(s), "
+    chains = sum(len(logs) for logs in sessions.values())
+    print(f"written: {out.name} ({label}, {chains} chain(s), "
           f"{len(written)} files)")
     print(f'verify: python "{LOXODONTA.as_posix()}" verify-package '
           f'"{out.as_posix()}"')
@@ -5790,13 +5914,22 @@ def main(argv):
     export.set_defaults(func=cmd_export)
     package = sub.add_parser(
         "package",
-        help="one session as a package: its chains and anchor sidecars, "
-             "the project record, a witness snapshot labelled testimony, "
-             "a README, and a manifest written last; verified by "
-             "`loxodonta verify-package` alone (ADR-0026)")
-    package.add_argument("selector", metavar="SESSION|ADDRESS",
-                         help="a session id, or any entry address inside "
-                              "the session (siblings included either way)")
+        help="a session or a drawer as a package: its chains and anchor "
+             "sidecars, the project record, a witness snapshot labelled "
+             "testimony, a README, and a manifest written last; verified "
+             "by `loxodonta verify-package` alone (ADR-0026)")
+    # One unit or the other: argparse refuses both with a usage error.
+    unit = package.add_mutually_exclusive_group()
+    unit.add_argument("selector", nargs="?", default=None,
+                      metavar="SESSION|ADDRESS",
+                      help="a session id, or any entry address inside the "
+                           "session (siblings included either way)")
+    unit.add_argument("--repo", default=None, metavar="PATH",
+                      help="the whole drawer of this repository instead, "
+                           "every session and sibling, its harness worktree "
+                           "drawers included, as `digest --repo` reads it "
+                           "(default when no selector is given: "
+                           "CLAUDE_PROJECT_DIR, else the current directory)")
     package.add_argument("--out", default=None,
                          help="file (or, with --folder, folder) to write "
                               "(default: loxodonta-package-<session>.zip "
