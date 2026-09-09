@@ -70,6 +70,21 @@ class PackageCase(unittest.TestCase):
         with zipfile.ZipFile(package) as zipped:
             return json.loads(zipped.read("manifest.json"))
 
+    def folder_package(self, *args):
+        """One unpacked package in the working folder, built from the
+        given selector and flags; the folder, for tests that edit it."""
+        folder = self.work / "package"
+        result = self.package(*args, "--folder", "--out", str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((folder / "manifest.json").is_file())
+        return folder
+
+    def rewrite_manifest(self, folder, change):
+        path = folder / "manifest.json"
+        manifest = json.loads(path.read_text("utf-8"))
+        change(manifest)
+        path.write_text(json.dumps(manifest, indent=2), "utf-8")
+
 
 class DemoStorePackageTest(PackageCase):
     """One demo store, built once; every test packages from it into its
@@ -274,12 +289,7 @@ class DemoStorePackageTest(PackageCase):
         self.assertEqual(self.verify_package(by_address).returncode, 0)
 
     def folder_package(self):
-        folder = self.work / "package"
-        result = self.package(BAD_DAY_SESSION, "--folder", "--out",
-                              str(folder))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue((folder / "manifest.json").is_file())
-        return folder
+        return super().folder_package(BAD_DAY_SESSION)
 
     def test_an_edited_witness_is_artifact_diverged_exit_2(self):
         folder = self.folder_package()
@@ -345,12 +355,6 @@ class DemoStorePackageTest(PackageCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lines = result.stdout.strip().splitlines()
         self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
-
-    def rewrite_manifest(self, folder, change):
-        path = folder / "manifest.json"
-        manifest = json.loads(path.read_text("utf-8"))
-        change(manifest)
-        path.write_text(json.dumps(manifest, indent=2), "utf-8")
 
     def test_a_manifest_path_that_leaves_the_package_is_refused(self):
         # The layout is flat: a listed path is a bare file name or the
@@ -891,12 +895,6 @@ class TranscriptPackageTest(PackageCase):
                    "reason": "exit", "transcript_path": str(transcript)})
         return transcript
 
-    def folder_package(self, *args):
-        folder = self.work / "package"
-        result = self.package(*args, "--folder", "--out", str(folder))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return folder
-
     def test_a_requested_transcript_travels_listed_and_named_on_the_chain(self):
         folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
 
@@ -1040,14 +1038,11 @@ class TranscriptPackageTest(PackageCase):
 
     def test_a_chain_naming_an_unlisted_or_unbare_transcript_is_refused(self):
         folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
-        path = folder / "manifest.json"
-        original = path.read_text("utf-8")
         cases = ((f"../transcript-{TRANSCRIPT_SESSION}.jsonl", "not bare"),
                  ("elsewhere.jsonl", "not in artifacts"))
         for named, why in cases:
-            manifest = json.loads(original)
-            manifest["chains"][0]["transcript"] = named
-            path.write_text(json.dumps(manifest, indent=2), "utf-8")
+            self.rewrite_manifest(folder, lambda m, named=named: m["chains"][0]
+                                  .update(transcript=named))
 
             result = self.verify_package(folder)
 

@@ -4,7 +4,7 @@
 
 ## 1. What a package is
 
-The evidence lives in the store on the machine that wrote it. To show it to someone who was never on that machine, the operator sends a **package**: the chains of one session, or of a repository's whole drawer, with their anchor sidecars, the drawer's project record, a witness snapshot labelled testimony, a plain-words README, and last of all a **manifest** listing everything before it. The recipient downloads `loxodonta.py`, the same file that verifies a bare chain, and runs one command on the zip. It answers layer by layer, the recorder's own verdicts verbatim, and ends with the package verdict and one line of residual trust.
+The evidence lives in the store on the machine that wrote it. To show it to someone who was never on that machine, the operator sends a **package**: the chains of one session, or of a repository's whole drawer, with their anchor sidecars, the drawer's project record, a witness snapshot labelled testimony, a plain-words README, the harness transcript on request, and last of all a **manifest** listing everything before it. The recipient downloads `loxodonta.py`, the same file that verifies a bare chain, and runs one command on the zip. It answers layer by layer, the recorder's own verdicts verbatim, and ends with the package verdict and one line of residual trust.
 
 A package confirms that it is unaltered since packaging. It never confirms that the record inside is true or complete: a harness that lied at write time ships faithfully packaged lies (ADR-0002, ADR-0026). Without a seal it cannot say when the set existed either, and its ceiling verdict says so in as many words.
 
@@ -13,8 +13,8 @@ The GLOSSARY's words apply exactly: *package*, *manifest*, *seal*, *issuer*, *re
 ## 2. Building one
 
 ```
-supervisor package <session-id | entry-address> [--out PATH] [--folder] [--witness DIR]
-supervisor package [--repo PATH]                 [--out PATH] [--folder] [--witness DIR]
+supervisor package <session-id | entry-address> [--out PATH] [--folder] [--witness DIR] [--transcript]
+supervisor package [--repo PATH]                 [--out PATH] [--folder] [--witness DIR] [--transcript]
 ```
 
 Two units, one selector each (ADR-0026 ruling 1); a selector and `--repo` together are a usage error, exit 64.
@@ -27,9 +27,11 @@ By default the package is a zip in the current directory, `loxodonta-package-<se
 
 The scan underneath is one ordinary supervisor tick over the store, as `export`'s is: its completeness row for each session packaged and its verdicts are what `witness.json` carries. `--witness` points it at the harness transcript layout, as for `scan`.
 
-Assembly follows ADR-0007's write order, and `supervisor package` honors it or the package is unverifiable: the chain snapshot and sidecars first, then `project.json`, then `witness.json`, then `README.md`, then `manifest.json`. The zip keeps that member order, so the manifest is the last member too.
+`--transcript` carries each packaged session's harness transcript, whichever unit is packaged: the file the scan's completeness watch paired with the session (by the transcript's file stem, the session id, under the witness layout), copied while it is still on disk. It is opt-in for the reason §3 gives, and it is the only thing that keeps a transcript past the harness's retention cycle (§8). A session whose transcript is gone is packaged without one, and the README says so; without the flag the only difference in what is written is the README's sentence that the transcript was not requested.
 
-Not built yet, each its own later slice: `--transcript` (the harness transcript, on request only, because it can hold the very secret a bad day exfiltrated), and the two seals, `--anchor` and `--sign`.
+Assembly follows ADR-0007's write order, and `supervisor package` honors it or the package is unverifiable: the chain snapshot and sidecars first, each session's transcript beside its chains, then `project.json`, then `witness.json`, then `README.md`, then `manifest.json`. The zip keeps that member order, so the manifest is the last member too.
+
+Not built yet, each its own later slice: the two seals, `--anchor` and `--sign`.
 
 A session whose chains sit in two drawers (possible before ADR-0023) is refused rather than flattened, whichever unit holds it: the layout puts every chain beside one project record, and two drawers under one chain name would mean one silently overwriting the other. A drawer is checked session by session against the whole store, not only the drawers selected, since half of a split session may sit in a drawer no selector reaches; one split session refuses the whole drawer package, naming the session. A drawer package that looked complete and was not would be worse than the refusal.
 
@@ -43,8 +45,11 @@ Flat, like a drawer, so the recorder's own rules apply to the chains unchanged:
 | `receipts-<session>.jsonl.anchors.jsonl` | a chain's anchor sidecar, when the drawer has one (docs/ANCHORING.md §2) | sha256 and byte count |
 | `project.json` | the drawer's project record: the project's absolute path on the recording machine (ADR-0012). For a drawer package, the repository's own; a worktree drawer's record does not travel, and the README says which sessions were recorded in one | sha256 and byte count |
 | `witness.json` | one completeness row per session packaged and the verdict the supervisor's scan gave each chain, labelled testimony in the file (its shape: §4) | sha256 and byte count |
-| `README.md` | plain words: what is inside, how to verify, what each layer shows and does not; prints the chain heads, never the manifest's hash | sha256 and byte count |
+| `transcript-<session>.jsonl` | one session's harness transcript, byte for byte as it stood at packaging; only with `--transcript`, and only while it was still on disk. Every chain of the session names it in the manifest, siblings included | sha256 and byte count |
+| `README.md` | plain words: what is inside, how to verify, what each layer shows and does not; says, per session, whether the transcript is here and if not why; prints the chain heads, never the manifest's hash | sha256 and byte count |
 | `manifest.json` | the list of everything above, written last | it is the sealing surface; nothing lists it |
+
+On request only, the transcript (ADR-0026 ruling 2). The transcript is the rich record the chain's commitments point at, and it can carry the very secret a bad session exfiltrated: the bad day's chain holds `Read: .env` with a fingerprint, and the transcript holds the contents of `.env`. Packaging it can hand the recipient the very secret the session exfiltrated, so it is the operator's explicit call, `--transcript`, never the default, and the README says whether it is present. A session's transcript is the one the completeness watch pairs with it; a package carries one per session that still has one.
 
 Never inside: file contents. The tool holds fingerprints of the files the agent touched, not their bytes, and cannot produce the logged version. On the recipient's machine the project record points nowhere, so `verify --files` on a packaged chain says `FILES-UNRESOLVED` (ADR-0012), and `verify-package` says the same thing once, in plain words.
 
@@ -58,11 +63,11 @@ Never inside: file contents. The tool holds fingerprints of the files the agent 
 | `packed` | when the package was assembled, UTC. Testimony. |
 | `tool` | which supervisor packed it, e.g. `"loxodonta supervisor 0.2.0"`. Testimony. |
 | `unit` | `{"kind": "session", "session": "<id>", "project": "<drawer name>"}` for a session; `{"kind": "drawer", "project": "<drawer name>", "sessions": N}` for a drawer. Displayed convenience; testimony. The verifier prints whatever the unit holds and judges none of it. |
-| `chains` | one row per chain, in the package: `path`, `head` (the last entry's `entry_hash`), `entries` (line count), `anchors` (the sidecar's file name, or `null`). |
-| `artifacts` | one row per post-close artifact: `path`, `sha256` of its bytes, `bytes`. Sidecars, `project.json`, `witness.json`, `README.md`. |
+| `chains` | one row per chain, in the package: `path`, `head` (the last entry's `entry_hash`), `entries` (line count), `anchors` (the sidecar's file name, or `null`), and `transcript` (the packaged transcript's file name) only when one travels with the chain's session, every chain of that session naming the same file. The verifier refuses a `transcript` that is not a bare file name or that `artifacts` does not list. |
+| `artifacts` | one row per post-close artifact: `path`, `sha256` of its bytes, `bytes`. Sidecars, transcripts, `project.json`, `witness.json`, `README.md`. |
 | `seals` | the seals the package should carry. `[]` in this format's first slice; `"anchor"` and `"signature"` join when `--anchor` and `--sign` do. A declared seal that is absent is `SEAL-MISSING`, never a silent downgrade (ADR-0007). |
 
-Why two ways of listing (ADR-0026 ruling 3). A chain's head is already its commitment, and the verifier recomputes it by walking; listing chains by file hash would add a second commitment to the same fact, and a false one on Windows, where `read_log` splits lines tolerantly and an unzip that turns `\n` into `\r\n` changes the bytes without changing the head. The post-close artifacts have no chain to commit them, so the manifest's sha256 is their only commitment: one commitment home per fact.
+Why two ways of listing (ADR-0026 ruling 3). A chain's head is already its commitment, and the verifier recomputes it by walking; listing chains by file hash would add a second commitment to the same fact, and a false one on Windows, where `read_log` splits lines tolerantly and an unzip that turns `\n` into `\r\n` changes the bytes without changing the head. The post-close artifacts have no chain to commit them, so the manifest's sha256 is their only commitment: one commitment home per fact. The transcript is the case with two facts and two homes: its committed prefixes live in the chain, as transcript commitments (ADR-0017), and the manifest adds one new fact, the whole file as it stood at packaging, tail included.
 
 Why the README never prints the manifest's hash (ADR-0007 ruling 2). The manifest lists the README, so the README is written first, and nothing may point at what is sealed last; a README that carried the hash would be a cycle. The README may print the chain heads and the session id, which exist before it does.
 
@@ -86,12 +91,12 @@ Why a list, and the same list for a session package: the scan's own report lists
 loxodonta verify-package PATH        # a zip, or an unpacked folder
 ```
 
-A zip is unpacked into a temporary folder and judged there; a folder is judged as it stands. The manifest sits at the top of either. Before anything is judged, the package can be refused: a zip that declares more than a gigabyte unpacked, or that is damaged past what its end record shows, is refused unopened; a manifest whose shape is off is refused unread, and every path it lists must be a bare file name, since the layout is flat and a path that could leave the package is never followed. The output, in this order (ADR-0026 ruling 5):
+A zip is unpacked into a temporary folder and judged there; a folder is judged as it stands. The manifest sits at the top of either. Before anything is judged, the package can be refused: a zip that declares more than a gigabyte unpacked, or that is damaged past what its end record shows, is refused unopened; a manifest whose shape is off is refused unread, and every path it lists must be a bare file name, since the layout is flat and a path that could leave the package is never followed; a chain row naming a transcript that is not a bare file name, or that the artifacts do not list, is refused the same way. The output, in this order (ADR-0026 ruling 5):
 
 1. **The manifest's summary**: `package`, `format`, `packed ... (testimony)`, `unit`, `contents`, and which seals are declared.
-2. **Each chain**, headed `chain: <name> (manifest: head <12 hex>…, N entries)`, followed by the recorder's own `verify --anchors` output verbatim. Anchor lines appear here as detail: `ANCHORED`, `ANCHOR-PENDING`, `NO-ANCHORS`, or a mismatch. Then the walked head and line count are compared with the manifest's row; a difference is reported as `<name>: off the manifest`.
+2. **Each chain**, headed `chain: <name> (manifest: head <12 hex>…, N entries)`, followed by the recorder's own `verify --anchors` output verbatim. Anchor lines appear here as detail: `ANCHORED`, `ANCHOR-PENDING`, `NO-ANCHORS`, or a mismatch. When the manifest names a transcript on the chain, the recorder judges it the way `verify --transcript PATH` does, and those lines are part of the same output: `COMMITMENT HOLDS (entry N: first B bytes)` or `COMMITMENT DIVERGED (entry N)` per commitment, oldest first; then `transcript tail: B bytes after the last commitment (entry N), uncommitted by the chain`, the bytes only the manifest vouches for; and `TRANSCRIPT-DIVERGED` when a committed prefix differs or the transcript is shorter than a commitment. A chain that holds commitments when no transcript travelled gets `TRANSCRIPT-UNRESOLVED: N transcript commitment(s) in this chain, no transcript in this package — commitments unjudgeable; chain verdict unaffected`, a note and never a verdict (ADR-0017). Then the walked head and line count are compared with the manifest's row; a difference is reported as `<name>: off the manifest`.
 3. **File references**: `file references: N recorded, not checkable off the machine`, counted across the chains.
-4. **Each artifact** against the manifest: `<name>: matches the manifest (sha256 <12 hex>…, N bytes)`, or `DIVERGED from the manifest` with both digests, or `MISSING`. The `witness.json` line adds `(testimony: the packing machine's reading, unaltered; no verdict is drawn from it)`. Files in the package the manifest does not list print as `unlisted: <name> (not in the manifest, not judged)`.
+4. **Each artifact** against the manifest: `<name>: matches the manifest (sha256 <12 hex>…, N bytes)`, or `DIVERGED from the manifest` with both digests, or `MISSING`. A packaged transcript is judged here as bytes too, the whole file as of packaging. The `witness.json` line adds `(testimony: the packing machine's reading, unaltered; no verdict is drawn from it)`. Files in the package the manifest does not list print as `unlisted: <name> (not in the manifest, not judged)`.
 5. **Each declared seal**: none in this format's first slice; a kind this verifier does not judge yet is named as declared and not judged.
 6. For `SELF-CONSISTENT`, one line of **residual trust**; then **the package verdict**, the last line, in ADR-0007's words, so a script reads the last line as it does for `verify`.
 
@@ -105,7 +110,7 @@ Verdicts name the mechanism, never the conclusion (no "authentic", no "verified"
 - `CHAIN-BROKEN`: a chain does not walk clean. The recorder's `BROKEN at entry N` lines above say where.
 - `ARTIFACT-DIVERGED`: an artifact's bytes differ from the manifest's listing, an artifact or a chain the manifest lists is missing, or a chain walks to a head or a length other than the one listed (the chain is then an artifact off its manifest; a truncated chain walks clean and is caught here).
 - `ANCHOR-MISMATCH`: an anchor packaged with a chain names a head that is nowhere in that chain, or a proof that does not replay; the chain's own `ANCHOR-MISMATCH` or `ANCHOR-INVALID` line above says which. Not the anchored history.
-- `TRANSCRIPT-DIVERGED`: a chain's transcript commitments contradict each other (`COMMITMENT-SHRANK`). Judging commitments against a packaged transcript is the `--transcript` slice.
+- `TRANSCRIPT-DIVERGED`: a committed prefix of the packaged transcript no longer matches its commitment, or the transcript is shorter than a commitment says, or the commitments contradict each other (`COMMITMENT-SHRANK`). The recorder's `COMMITMENT DIVERGED (entry N)` line above localizes it to the span between two commitments. A rewritten transcript also diverges from the manifest's sha256; the graver word is the verdict, since a rewritten transcript is never innocent (ADR-0017).
 - `UNSUPPORTED-FORMAT`: a refusal, not a verdict. The manifest is missing or unreadable, or its `format` is a tag this verifier does not speak. Nothing else is judged or printed.
 
 ## 6. Exit codes
@@ -193,6 +198,6 @@ The manifest the verifier judged against:
 
 - **Garbage in.** The package is unaltered since packaging. Whether the recorder was told the truth, and whether every tool call got its receipt, is the harness's and the witness's word (SPEC §8, ADR-0002).
 - **No seals.** `SELF-CONSISTENT` alone is what a wholesale regeneration also produces. The anchor lines under a chain speak for that chain and say when its head existed; the package as a set is on record only from its own seals, which this slice does not yet write.
-- **The transcript.** Commitments in the chain bind the harness transcript only while it exists, and the transcript is not in this package. `--transcript`, when it lands, is the only thing that keeps it.
+- **The transcript after retention.** Commitments in the chain bind the harness transcript only while it exists. `--transcript` at packaging is the only thing that keeps it; hashing more often does not. A package without it carries the commitments and nothing to judge them against, and the verifier says so under the chain. A package with it carries the bytes as they stood at packaging: what the transcript says is the harness's record, and before its first commitment it was the writer's to rewrite (ADR-0017), packaged faithfully either way.
 - **File contents.** Paths and fingerprints travel; files do not.
 - **The recipient's own job.** The verifier prints a merkle root under an anchored chain; confirming it against a block source they trust is theirs (ADR-0003), as comparing a key fingerprint out of band will be when `--sign` lands (ADR-0008).
