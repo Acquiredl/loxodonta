@@ -148,5 +148,95 @@ class PublishCommandTest(ReceiverFixture):
         self.assertEqual(memo_of(log), [])
 
 
+class PublishKeeperTest(ReceiverFixture):
+    """`scan --publish-every AGE --publish-url URL`: on each tick, every
+    chain whose head has aged past the cadence and is not in its memo is
+    published once, through `loxodonta publish`, throttled like the
+    anchor keeper. Off by default."""
+
+    def scan(self, *extra, **knobs):
+        return run_scan(self.root, *extra, env=keeper_env(**knobs))
+
+    def publishing(self, *extra, **knobs):
+        return self.scan("--publish-every", "0s",
+                         "--publish-url", self.receiver.url, *extra, **knobs)
+
+    def test_an_aged_head_with_no_memo_is_published_once(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-keep1")
+        head = chain_head(log)
+
+        result = self.publishing()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(self.receiver.received), 1)
+        body = self.body()
+        self.assertEqual(set(body), PUBLISHED_FIELDS)
+        self.assertEqual(body["head"], head)
+        self.assertEqual(body["n"], 2)
+        self.assertEqual(body["session"], "sess-keep1")
+        self.assertEqual(body["event"], "cadence")
+        self.assertEqual([m["head"] for m in memo_of(log)], [head])
+
+        again = self.publishing(SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(len(self.receiver.received), 1,
+                         "a head already in the memo is never re-posted")
+        self.assertEqual(len(memo_of(log)), 1)
+
+    def test_a_chain_that_grew_has_its_new_head_published_and_the_old_memo_kept(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-grow")
+        first = chain_head(log)
+        self.publishing()
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "step 2"],
+            capture_output=True, check=True)
+        second = chain_head(log)
+
+        result = self.publishing(SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([self.body(i)["head"] for i in range(2)],
+                         [first, second])
+        self.assertEqual([(m["head"], m["n"]) for m in memo_of(log)],
+                         [(first, 2), (second, 3)],
+                         "the memo is appended to, never rewritten")
+
+    def test_default_is_off_and_nothing_is_posted_without_the_flags(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-off")
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.receiver.received, [])
+        self.assertEqual(memo_of(log), [])
+        self.assertFalse(Path(str(log) + ".published.jsonl").exists())
+
+    def test_one_flag_without_the_other_is_a_usage_error(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-half")
+        for half in (("--publish-every", "0s"),
+                     ("--publish-url", self.receiver.url)):
+            result = self.scan(*half)
+            self.assertEqual(result.returncode, 64, result.stderr)
+            self.assertIn("--publish-every", result.stderr)
+            self.assertIn("--publish-url", result.stderr)
+        bad = self.scan("--publish-every", "0s",
+                        "--publish-url", "hooks.example.test/no-scheme")
+        self.assertEqual(bad.returncode, 64, bad.stderr)
+        self.assertEqual(self.receiver.received, [])
+
+    def test_a_young_head_waits_for_its_cadence(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-young")
+
+        result = self.scan("--publish-every", "1d",
+                           "--publish-url", self.receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.receiver.received, [])
+        self.assertEqual(memo_of(log), [])
+
+
 if __name__ == "__main__":
     unittest.main()

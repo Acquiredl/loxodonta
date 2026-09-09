@@ -74,19 +74,26 @@ FORMAT_VERSION = "0.1"
 
 # --- Census -------------------------------------------------------------------
 
+# What sits beside a chain and is not one: the anchor sidecar (proofs
+# about the chain) and the publish memo (which heads left, ADR-0025).
+# Both end in .jsonl and share the chain's name, so every census that
+# globs for chains must set them aside by suffix.
+SIDECAR_SUFFIXES = (".anchors.jsonl", ".published.jsonl")
+
+
 def find_chains(root):
     """Every receipt log under a legacy --root. Three shapes, because
     pre-store history has three shapes: the root itself being a repo,
     each sibling repo's receipts/, and chains stranded in worktrees by
     sessions that ran before the hook learned to log to the main repo.
     The default census is not this one: it is a single glob over the
-    store's drawers, inline in scan_root (ADR-0011). Anchor sidecars
-    are proofs about a chain, not chains."""
+    store's drawers, inline in scan_root (ADR-0011). Sidecars are files
+    about a chain, not chains."""
     patterns = ("receipts/*.jsonl",
                 "*/receipts/*.jsonl",
                 "*/.claude/worktrees/*/receipts/*.jsonl")
     return sorted(p for pattern in patterns for p in root.glob(pattern)
-                  if not p.name.endswith(".anchors.jsonl"))
+                  if not p.name.endswith(SIDECAR_SUFFIXES))
 
 
 def split_seq(stem):
@@ -393,7 +400,7 @@ PENDING_LINE = re.compile(
 
 def parse_cadence(text):
     """A duration the operator can say out loud: 30s, 15m, 6h, 1d, or
-    bare seconds. Used by --anchor-every."""
+    bare seconds. Used by --anchor-every and --publish-every."""
     match = re.fullmatch(r"(\d+)([smhd]?)", text.strip())
     if not match:
         raise argparse.ArgumentTypeError(
@@ -473,6 +480,58 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
                              "this head; it stays unanchored and the "
                              "keeper will try again")
     return attempted, "; ".join(notes) or None, failed
+
+
+# --- Publish keeper -----------------------------------------------------------
+# The keeper's half of the published head (ADR-0025 ruling 3), for
+# always-on machines and for sessions that never reached their end: the
+# bad day is a stripped hook, so no session end ever fired and nothing
+# was published or anchored. Same throttle, same ripeness test, same
+# posture as the anchor keeper: off by default, staleness quiet.
+
+def publish_url(value):
+    """argparse validator for --publish-url: a plain http or https URL.
+    The recorder's `publish` refuses anything else on its own command
+    line; refusing here too makes a bad URL a usage error (exit 64)
+    before the first tick, instead of a failure note on every tick."""
+    parts = urlparse(value)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not an http or https URL")
+    return value
+
+
+def keep_published(log, last_attempt, now, entries, cadence, url):
+    """One chain's turn with the publish keeper, on the anchor keeper's
+    throttle: only when the operator opted in with a cadence and a URL,
+    a head that has aged past the cadence and is not yet in the chain's
+    publish memo is posted once, through `loxodonta publish`. The memo
+    is the recorder's (`<log>.published.jsonl`), writer-reachable and
+    therefore testimony: it stops a repeat and proves nothing; the
+    remote's copy is the head record. Off by default: nothing leaves
+    the machine without the say-so. Returns (attempted, note, failed)."""
+    if cadence is None or not url or not entries:
+        return False, None, False
+    if not upgrade_due(last_attempt, now):
+        return False, None, False
+    memo = Path(str(log) + ".published.jsonl")
+    head = entries[-1].get("entry_hash")
+    born = parse_when(entries[-1].get("ts"))
+    ripe = born is not None and (now - born).total_seconds() >= cadence
+    if not (head and ripe) or head in sidecar_heads(memo):
+        return False, None, False
+    finished = subprocess.run(
+        [sys.executable, str(LOXODONTA), "publish", f"--log={log}", url],
+        capture_output=True, encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    if finished.returncode != 0:
+        # The recorder's stderr names the failure and never the URL, but
+        # it is not repeated here: the note is the panel's, and one
+        # sentence the operator can act on beats a transport error.
+        return True, ("publishing failed — the remote did not take this "
+                      "head; it stays unpublished and the keeper will try "
+                      "again"), True
+    return True, None, False
 
 
 def assess_anchors(detail, entries):
@@ -1252,7 +1311,7 @@ def watch_consumption(families, now):
 # --- Scan ---------------------------------------------------------------------
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
-              store=False, tick=True):
+              publish_every=None, publish_url=None, store=False, tick=True):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
@@ -1284,7 +1343,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # so the grouping below is plain insertion, no re-sorting.
     if store:
         found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                        if not p.name.endswith(".anchors.jsonl"))
+                        if not p.name.endswith(SIDECAR_SUFFIXES))
                  if root.is_dir() else [])
         census = sorted((store_identity(log), log) for log in found)
     else:
@@ -1303,7 +1362,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             keep_anchors(log, keeper.get(relpath), now, entries,
                          anchor_every, calendars)
             if tick else (False, None, False))
-        if attempted:
+        posted, publish_note, publish_failed = (
+            keep_published(log, keeper.get(relpath), now, entries,
+                           publish_every, publish_url)
+            if tick else (False, None, False))
+        if attempted or posted:
             keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         verdict, exit_code, detail = verify(log)
         stood_down = exit_code != 0 and superseded(log, detail)
@@ -1592,6 +1655,8 @@ def cmd_scan(args):
                        witness=Path(args.witness),
                        anchor_every=args.anchor_every,
                        calendars=args.calendar or (),
+                       publish_every=args.publish_every,
+                       publish_url=args.publish_url,
                        store=store)
     print(json.dumps(report, indent=None if args.json else 2))
     return report["exit"]
@@ -1630,7 +1695,7 @@ def universe(root, store):
     explicit --root (ADR-0011/0013)."""
     if store:
         found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                        if not p.name.endswith(".anchors.jsonl"))
+                        if not p.name.endswith(SIDECAR_SUFFIXES))
                  if root.is_dir() else [])
         return [(*store_identity(log), log) for log in found]
     return [(*chain_identity(root, log), log) for log in find_chains(root)]
@@ -1735,7 +1800,7 @@ def resolve_chain(root, asked):
     except (ValueError, OSError):
         return None
     if (not path.name.endswith(".jsonl")
-            or path.name.endswith(".anchors.jsonl")
+            or path.name.endswith(SIDECAR_SUFFIXES)
             or not path.is_file()):
         return None
     return path
@@ -1817,7 +1882,7 @@ def repo_chains(repo):
     patterns = ("receipts/*.jsonl", ".claude/worktrees/*/receipts/*.jsonl")
     return sorted(p.resolve() for pattern in patterns
                   for p in repo.glob(pattern)
-                  if not p.name.endswith(".anchors.jsonl"))
+                  if not p.name.endswith(SIDECAR_SUFFIXES))
 
 
 def session_of(log):
@@ -1896,7 +1961,7 @@ def store_receipts():
 
 def drawer_chains(drawer):
     return sorted(p for p in drawer.glob("receipts-*.jsonl")
-                  if not p.name.endswith(".anchors.jsonl"))
+                  if not p.name.endswith(SIDECAR_SUFFIXES))
 
 
 def drawer_name(drawer):
@@ -1994,7 +2059,7 @@ def recall_scope(args):
         if getattr(args, "all", False):
             known = set(logs)
             for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
-                if log.name.endswith(".anchors.jsonl") or log in known:
+                if log.name.endswith(SIDECAR_SUFFIXES) or log in known:
                     continue
                 if (log.parent / UNLISTED_NAME).exists() \
                         and log.parent != drawer:
@@ -3108,7 +3173,7 @@ def store_sessions():
     sequence (ADR-0004: -002 continues the unsuffixed chain, whatever
     the two names sort like as strings)."""
     found = [log for log in store_receipts().glob("*/receipts-*.jsonl")
-             if not log.name.endswith(".anchors.jsonl")]
+             if not log.name.endswith(SIDECAR_SUFFIXES)]
     sessions = {}
     for log in sorted(found, key=store_identity):
         sessions.setdefault(session_of(log), []).append(log)
@@ -3524,6 +3589,8 @@ class Watchtower(ThreadingHTTPServer):
                 report = scan_root(self.root, witness=self.witness,
                                    anchor_every=self.anchor_every,
                                    calendars=self.calendars,
+                                   publish_every=self.publish_every,
+                                   publish_url=self.publish_url,
                                    store=self.store)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
@@ -3638,6 +3705,8 @@ def cmd_serve(args):
     server.witness = Path(args.witness)
     server.anchor_every = args.anchor_every
     server.calendars = args.calendar or ()
+    server.publish_every = args.publish_every
+    server.publish_url = args.publish_url
     server.scan_lock = threading.Lock()
     server.scan_body = None
     server.scan_at = 0.0
@@ -5658,6 +5727,19 @@ def main(argv):
                           metavar="URL",
                           help="calendar for auto-anchoring (repeatable; "
                                "default: receipts' public pools)")
+    watching.add_argument("--publish-every", type=parse_cadence,
+                          default=None, metavar="AGE",
+                          help="opt in: publish a head once it is this old "
+                               "and has not left yet (e.g. 6h, 1d), to "
+                               "--publish-url, through `loxodonta publish` "
+                               "(ADR-0025). Off by default — nothing leaves "
+                               "the machine without it")
+    watching.add_argument("--publish-url", type=publish_url, default=None,
+                          metavar="URL",
+                          help="where --publish-every posts: a plain http "
+                               "or https URL the credentials on this "
+                               "machine cannot delete from, such as a chat "
+                               "incoming webhook")
     scan = sub.add_parser(
         "scan", parents=[watching],
         help="one tick: census + verdicts, JSON out, exit code")
@@ -5809,6 +5891,11 @@ def main(argv):
     package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)
+    # The cadence says when and the URL says where; one without the
+    # other is a command spoken wrong, refused before any tick runs.
+    if ((getattr(args, "publish_every", None) is None)
+            != (getattr(args, "publish_url", None) is None)):
+        parser.error("--publish-every and --publish-url go together")
     return args.func(args)
 
 
