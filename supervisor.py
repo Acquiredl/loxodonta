@@ -68,7 +68,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # supervisor is running and is tagged together with loxodonta.py — the
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
-TOOL_VERSION = "0.2.0"
+TOOL_VERSION = "0.3.0"
 FORMAT_VERSION = "0.1"
 
 

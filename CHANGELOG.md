@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-09
+
+The release that makes the evidence portable: a session or a drawer packs into one file, and one command on a machine that has never seen yours judges it layer by layer and says what each layer does not settle. Chain heads can leave the machine as a session ends, to a remote the credentials here cannot delete from.
+
 ### Added
 
 - `supervisor package <session-id | entry-address>` (ADR-0026, #176): one session as a package, siblings included: every chain and its anchor sidecar, the drawer's project record, `witness.json` (the completeness row and the scan's verdicts, labelled testimony in the file), a plain-words README, and `manifest.json` written last, format `loxodonta-package/1`, chains listed by head and entry count, every other file by sha256 and byte count, `"seals": []` declared. A zip by default, `--folder` for an unpacked folder. `--anchor` and `--sign` are later slices.
@@ -69,6 +73,7 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.2.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.3.0...dev
+[0.3.0]: https://github.com/Acquiredl/loxodonta/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Acquiredl/loxodonta/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Acquiredl/loxodonta/releases/tag/v0.1.0
