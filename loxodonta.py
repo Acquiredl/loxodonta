@@ -13,9 +13,11 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import unicodedata
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -664,13 +666,12 @@ def anchor_and_upgrade(log, calendars, budget):
         return min(SESSION_END_CALL, deadline - time.monotonic())
 
     try:
-        lines = read_log(log)
-        last = json.loads(lines[-1]) if lines else None
-    except (OSError, ValueError):
+        last = tail_entry(read_log(log))
+    except OSError:
         return
-    if not isinstance(last, dict) or "entry_hash" not in last:
-        return
-    head, n = last["entry_hash"], last.get("n")
+    if last is None:
+        return  # a damaged tail cannot be anchored
+    head, n = last["entry_hash"], last["n"]
     anchored = {r["head"] for r in (read_anchor_records(log) or [])
                 if isinstance(r, dict) and "head" in r}
     if head not in anchored:
@@ -731,6 +732,102 @@ def upgrade_pending_proofs(folder, remaining, deadline):
             completed.add(key)
 
 
+# --- The published head (ADR-0025) -------------------------------------------
+# A hook wired with --publish URL posts the chain head when the session
+# ends, after the tail commitment and before the anchor, to a remote the
+# credentials on this machine cannot delete from (a chat incoming webhook,
+# a retention-locked bucket): the fingerprint, never the work. Quiet on
+# every failure, like the anchor.
+
+SESSION_END_PUBLISH = 3.0   # seconds for the one POST; the anchor gets the rest
+
+
+def published_head(head, n, session, event="session-end"):
+    """The body of a published head (ADR-0025 ruling 2): the head, the
+    entry count, the session id, the time, the event kind, and one
+    readable line repeating them. Nothing else: no path, no project
+    name, no action line, no chain bytes."""
+    ts = now_ts()
+    line = f"loxodonta {event}: head {head} n {n} session {session} ts {ts}"
+    # The line rides under two keys because chat webhooks disagree on the
+    # name: Slack and Teams render `text`, Discord renders `content`.
+    return {"head": head, "n": n, "session": session, "ts": ts,
+            "event": event, "text": line, "content": line}
+
+
+PUBLISH_SCHEMES = ("http", "https")
+SHELL_HAZARDS = "\"'`$\\"   # a quote, a backtick, a dollar sign, a backslash
+
+
+def publish_url(value):
+    """argparse validator for `install-hook --publish-head`: a plain http
+    or https URL. The installer writes it onto the wired SessionEnd
+    command, which the harness runs through a shell at every session end,
+    so anything a shell could expand or unquote is refused here rather
+    than escaped: a quote, a backtick, a dollar sign, a backslash, or
+    whitespace."""
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme not in PUBLISH_SCHEMES or not parts.netloc:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not an http or https URL")
+    if any(c in SHELL_HAZARDS or c.isspace() for c in value):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} holds a character a shell could act on (a quote, "
+            "a backtick, a dollar sign, a backslash, or whitespace)")
+    return value
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is a failure: the head goes to the URL the operator
+    wrote, or nowhere. Left to itself, urllib re-sends a redirected POST
+    as a GET with no body, to a host the operator never named."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def post_quietly(url, body, timeout):
+    """One POST, every failure swallowed: this runs on the hook's exit
+    path, where a complaint is noise nobody can act on."""
+    try:
+        request = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "loxodonta"})
+        with urllib.request.build_opener(NoRedirect).open(
+                request, timeout=timeout):
+            pass
+    except Exception:  # noqa: BLE001 - an exit hook that raises is noise
+        return
+
+
+def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
+    """POST `log`'s head to `url`, waiting at most `timeout` seconds,
+    name lookup included. Never raises, never prints: a slow or
+    unreachable remote costs nothing else, and staleness is the
+    supervisor's to surface."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        # The installer refuses these; a hand-edited settings file gets
+        # a quiet skip rather than a local file opened by urllib.
+        return
+    try:
+        last = tail_entry(read_log(log))
+    except OSError:
+        return
+    if last is None:
+        return
+    body = json.dumps(published_head(last["entry_hash"], last["n"],
+                                     session)).encode("utf-8")
+    # urlopen's timeout starts once the name has resolved, and a stalled
+    # resolver has no timeout of its own, so the POST runs on a helper
+    # thread that is left behind when its time is up: the hook process
+    # ends soon after, and a daemon thread ends with the process.
+    worker = threading.Thread(target=post_quietly, args=(url, body, timeout),
+                              daemon=True)
+    worker.start()
+    worker.join(timeout)
+
+
 def cmd_anchor(args):
     if args.upgrade:
         return upgrade_anchors(args)
@@ -742,11 +839,8 @@ def cmd_anchor(args):
         print(f"error: {args.log} is empty — run `loxodonta init` first",
               file=sys.stderr)
         return 1
-    try:
-        last = json.loads(lines[-1])
-    except json.JSONDecodeError:
-        last = None
-    if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+    last = tail_entry(lines)
+    if last is None:
         print(f"error: {args.log} has a damaged final line — run "
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
@@ -1625,11 +1719,17 @@ def cmd_hook(args):
         if not os.path.exists(log):
             return 0
         code = seal_session(log, payload.get("transcript_path"))
-        # The commitment first, then the anchor (ADR-0024): the head
-        # that gets anchored is the sealed one, and a slow calendar can
-        # never cost the commitment.
+        # The commitment first, then the published head, then the anchor
+        # (ADR-0024, ADR-0025): the head that leaves the machine is the
+        # sealed one, and a slow calendar can never cost the commitment
+        # nor the one POST, so the anchor takes what is left of the
+        # budget.
+        deadline = time.monotonic() + SESSION_END_BUDGET
+        if args.publish:
+            publish_head(log, args.publish, session)
         if args.anchor:
-            session_end_anchor(log, args.calendar or DEFAULT_CALENDARS)
+            session_end_anchor(log, args.calendar or DEFAULT_CALENDARS,
+                               budget=deadline - time.monotonic())
         return code
 
     if not os.path.isdir(log_dir):
@@ -1755,18 +1855,44 @@ PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 CODEX_SESSION_END_TIMEOUT = 3
 
 
-def recorder_command(actor=None, anchor=False):
+def recorder_command(actor=None, anchor=False, publish=None):
     """The hook command the installers write: this interpreter, this
     file, no shell expansion — the hook resolves the project itself, so
     one command works on every platform. `actor` names the harness the
     receipts will say acted (ADR-0020); `anchor` is the session-end
-    anchor opt-in, carried on the SessionEnd command so the choice is
-    readable in the settings file (ADR-0024)."""
+    anchor opt-in and `publish` the URL the session's head is published
+    to, both carried on the SessionEnd command so the choice is readable
+    in the settings file (ADR-0024, ADR-0025)."""
     python = sys.executable.replace(os.sep, "/")
     self_path = os.path.abspath(__file__).replace(os.sep, "/")
     command = f'"{python}" "{self_path}" hook'
     command += f" --actor {actor}" if actor else ""
-    return command + (" --anchor" if anchor else "")
+    command += " --anchor" if anchor else ""
+    return command + (f' --publish "{publish}"' if publish else "")
+
+
+def session_end_choices(anchor, publish):
+    """What the wired SessionEnd command does beyond the seal, for the
+    installer's notice, so the operator reads their choice back."""
+    choices = []
+    if anchor:
+        choices.append("anchors at session end")
+    if publish:
+        choices.append(f"publishes the head to {publish}")
+    return " and ".join(choices)
+
+
+def session_end_notice(old, new, choices):
+    """The parenthesis after a rewired SessionEnd command: what it now
+    does beyond the seal, and which step this re-run turned off, so a
+    flag left out of the install command never goes quiet (ADR-0024,
+    ADR-0025: the install command states the choice each time)."""
+    dropped = [name for flag, name in ((" --anchor", "anchors at session end"),
+                                       (" --publish ", "publishes the head"))
+               if flag in old and flag not in new]
+    parts = ([f"now {choices}"] if choices else []) + \
+            (["no longer " + " or ".join(dropped)] if dropped else [])
+    return f" ({'; '.join(parts)})" if parts else ""
 
 
 def supervisor_path():
@@ -1905,6 +2031,15 @@ def cmd_install_hook(args):
                   "short to reach a calendar with margin. Use the "
                   "supervisor's --anchor-every instead.", file=sys.stderr)
             return 1
+        if args.publish_head:
+            # The same cap, a smaller call: whether one POST fits inside
+            # three seconds is measured before Codex gets the flag
+            # (ADR-0025 ruling 3; the measurement is its own slice).
+            print("error: --publish-head is not wired for Codex yet: its "
+                  "SessionEnd hook is capped at three seconds, and whether "
+                  "one POST fits inside that is measured before Codex gets "
+                  "the flag.", file=sys.stderr)
+            return 1
         return install_codex_hooks()
     supervisor = supervisor_path()
     record = recorder_command()
@@ -1959,29 +2094,29 @@ def cmd_install_hook(args):
     # hooks a short shared budget by default, and a large transcript
     # deserves the read.
     end = hooks.setdefault("SessionEnd", [])
-    record_end = recorder_command(anchor=args.anchor_at_session_end)
+    record_end = recorder_command(anchor=args.anchor_at_session_end,
+                                  publish=args.publish_head)
     healed += heal(end, RECORDER_MARKERS, record_end)
-    # The session-end anchor opt-in rides on this command (ADR-0024).
-    # The install command states the choice each time: a re-run
-    # without the flag turns it off, and says so.
+    # The session-end opt-ins ride on this command: the anchor
+    # (ADR-0024) and the published head (ADR-0025). The install command
+    # states the choice each time: a re-run without a flag turns that
+    # step off, and says so.
+    choices = session_end_choices(args.anchor_at_session_end,
+                                  args.publish_head)
     for block in end:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
             if any(m in old for m in RECORDER_MARKERS) and old != record_end:
                 hook["command"] = record_end
-                installed.append(
-                    f"SessionEnd: {record_end}"
-                    + (" (now anchors at session end)"
-                       if args.anchor_at_session_end
-                       else " (no longer anchors at session end)"))
+                installed.append(f"SessionEnd: {record_end}"
+                                 + session_end_notice(old, record_end, choices))
     if not any(ours(b) for b in end):
         end.append({
             "hooks": [{"type": "command", "command": record_end,
                        "timeout": 20}],
         })
         installed.append(f"SessionEnd: {record_end}"
-                         + (" (anchors at session end)"
-                            if args.anchor_at_session_end else ""))
+                         + (f" ({choices})" if choices else ""))
 
     if os.path.isfile(supervisor):
         start = hooks.setdefault("SessionStart", [])
@@ -2201,6 +2336,11 @@ def main(argv=None):
                              metavar="URL",
                              help="calendar for --anchor (repeatable; "
                                   "default: the public pools)")
+    hook_parser.add_argument("--publish", default=None, metavar="URL",
+                             help="at SessionEnd, POST the chain head to "
+                                  "this URL after the tail commitment and "
+                                  "before the anchor, quietly (ADR-0025; "
+                                  "install-hook --publish-head wires this)")
     hook_parser.set_defaults(func=cmd_hook)
     explain_parser = sub.add_parser(
         "explain", parents=[common],
@@ -2223,6 +2363,14 @@ def main(argv=None):
              "via OpenTimestamps, quietly and best-effort, and upgrades "
              "pending proofs (ADR-0024). A 32-byte digest leaves the "
              "machine at each session end; nothing else does")
+    install_parser.add_argument(
+        "--publish-head", default=None, metavar="URL", type=publish_url,
+        help="opt in: every session end POSTs the chain head (head, n, "
+             "session, ts, event, and one readable line) to this URL, "
+             "before the anchor, quietly and best-effort (ADR-0025). Pick "
+             "a remote the credentials on this machine cannot delete "
+             "from, such as a chat incoming webhook. No path, project "
+             "name, or action line leaves")
     install_parser.set_defaults(func=cmd_install_hook)
     uninstall_parser = sub.add_parser(
         "uninstall-hook",
