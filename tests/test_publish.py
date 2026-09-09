@@ -42,6 +42,13 @@ class FakeReceiver(FakeCalendar):
 
 
 class FakeReceiverHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # urllib re-sends a followed redirect as a GET; recording one here
+        # is how a test would see the publisher follow, which it must not.
+        self.server.received.append({"method": "GET", "path": self.path})
+        self.send_response(200)
+        self.end_headers()
+
     def log_message(self, *args):
         pass  # keep test output clean
 
@@ -66,6 +73,19 @@ class FakeReceiverHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "2")
         self.end_headers()
         self.wfile.write(b"ok")
+
+
+class RedirectingHandler(BaseHTTPRequestHandler):
+    """A remote that answers every POST with a redirect to the receiver."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.send_response(302)
+        self.send_header("Location", self.server.target)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
 
 
 class OrderedCalendarHandler(FakeCalendarHandler):
@@ -262,7 +282,7 @@ class PublishAtSessionEndTest(PublishBase):
         # is left behind on the hook's own clock, and the calendar is
         # still asked.
         calendar = self.calendar()
-        self.receiver.delay = 5  # seconds; longer than the hook will wait
+        self.receiver.delay = 4  # seconds; just past the three the hook waits
         self.transcript.write_bytes(b"page one\n")
         self.tool_call()
 
@@ -276,6 +296,41 @@ class PublishAtSessionEndTest(PublishBase):
         self.assertLess(elapsed, self.receiver.delay)
         self.assertEqual(len(self.receiver.received), 1)
         self.assertEqual([d.hex() for d in calendar.submitted], [self.head()])
+
+    def test_a_redirect_is_a_failure_and_nothing_reaches_the_new_host(self):
+        # Left to itself urllib would re-send the POST as a GET with no
+        # body to wherever the redirect points; the publisher refuses to
+        # follow, quietly, and the seal is on the chain regardless.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        redirector = self.serve(FakeReceiver, RedirectingHandler)
+        redirector.target = self.receiver.url
+        moved = f"http://127.0.0.1:{redirector.server_address[1]}/moved"
+
+        result = self.session_end("--publish", moved)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.receiver.received, [])
+        last = json.loads(self.chain().read_text(
+            encoding="utf-8").splitlines()[-1])
+        self.assertTrue(last["action"].startswith("transcript-commitment:"))
+
+    def test_a_non_http_url_publishes_nothing_and_still_seals(self):
+        # The installer refuses these; a hand-edited settings file gets a
+        # quiet skip, and urllib never opens a local file for a file: URL.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        target = self.root / "never-opened.txt"
+
+        result = self.session_end("--publish", f"file:///{target.as_posix()}")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(target.exists())
+        last = json.loads(self.chain().read_text(
+            encoding="utf-8").splitlines()[-1])
+        self.assertTrue(last["action"].startswith("transcript-commitment:"))
 
     def test_a_session_without_receipts_publishes_nothing(self):
         # SessionEnd never manufactures a chain for a chat-only session,
@@ -361,6 +416,34 @@ class InstallPublishHeadTest(unittest.TestCase):
         left = path.read_text(encoding="utf-8") if path.exists() else "{}"
         self.assertNotIn("loxodonta.py", left)
         self.assertNotIn(self.URL, left)
+
+    def test_the_installer_refuses_a_url_a_shell_could_act_on(self):
+        # The wired command runs through a shell at every session end, so
+        # the URL is refused rather than escaped: http or https only, and
+        # nothing a shell could expand or unquote.
+        for bad in ("file:///tmp/heads.jsonl", "ftp://h.example.test/x",
+                    "hooks.example.test/no-scheme",
+                    "https://h.example.test/$(id)",
+                    'https://h.example.test/a"b',
+                    "https://h.example.test/a b"):
+            result = self.install("--publish-head", bad)
+            self.assertEqual(result.returncode, 64, bad + ": " + result.stderr)
+            self.assertIn("--publish-head", result.stderr)
+            self.assertFalse((self.home / ".claude" / "settings.json").exists(),
+                             bad)
+
+    def test_a_rerun_that_keeps_one_flag_says_which_step_stopped(self):
+        # The install command states the choice each time: a flag left out
+        # turns that step off, and the notice names the step, even when
+        # the other step stays on.
+        self.install("--anchor-at-session-end")
+        result = self.install("--publish-head", self.URL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertNotIn(" --anchor", end)
+        self.assertIn(f' --publish "{self.URL}"', end)
+        self.assertIn("no longer anchors", result.stdout)
+        self.assertIn(self.URL, result.stdout)
 
     def test_codex_refuses_the_flag_with_a_note(self):
         # Codex caps a SessionEnd hook at three seconds; whether one POST

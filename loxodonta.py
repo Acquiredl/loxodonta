@@ -13,9 +13,11 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import unicodedata
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -743,34 +745,87 @@ SESSION_END_PUBLISH = 3.0   # seconds for the one POST; the anchor gets the rest
 def published_head(head, n, session, event="session-end"):
     """The body of a published head (ADR-0025 ruling 2): the head, the
     entry count, the session id, the time, the event kind, and one
-    readable line repeating them. The line rides under two keys because
-    chat webhooks disagree on the name: Slack and Teams render `text`,
-    Discord renders `content`; a JSON receiver reads the fields. Nothing
-    else: no path, no project name, no action line, no chain bytes."""
+    readable line repeating them. Nothing else: no path, no project
+    name, no action line, no chain bytes."""
     ts = now_ts()
     line = f"loxodonta {event}: head {head} n {n} session {session} ts {ts}"
+    # The line rides under two keys because chat webhooks disagree on the
+    # name: Slack and Teams render `text`, Discord renders `content`.
     return {"head": head, "n": n, "session": session, "ts": ts,
             "event": event, "text": line, "content": line}
 
 
-def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
-    """POST `log`'s head to `url`. Never raises, never prints: a slow or
-    unreachable remote costs nothing else, and staleness is the
-    supervisor's to surface."""
+PUBLISH_SCHEMES = ("http", "https")
+SHELL_HAZARDS = "\"'`$\\"   # a quote, a backtick, a dollar sign, a backslash
+
+
+def publish_url(value):
+    """argparse validator for `install-hook --publish-head`: a plain http
+    or https URL. The installer writes it onto the wired SessionEnd
+    command, which the harness runs through a shell at every session end,
+    so anything a shell could expand or unquote is refused here rather
+    than escaped: a quote, a backtick, a dollar sign, a backslash, or
+    whitespace."""
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme not in PUBLISH_SCHEMES or not parts.netloc:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not an http or https URL")
+    if any(c in SHELL_HAZARDS or c.isspace() for c in value):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} holds a character a shell could act on (a quote, "
+            "a backtick, a dollar sign, a backslash, or whitespace)")
+    return value
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is a failure: the head goes to the URL the operator
+    wrote, or nowhere. Left to itself, urllib re-sends a redirected POST
+    as a GET with no body, to a host the operator never named."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def post_quietly(url, body, timeout):
+    """One POST, every failure swallowed: this runs on the hook's exit
+    path, where a complaint is noise nobody can act on."""
     try:
-        last = tail_entry(read_log(log))
-        if last is None:
-            return
-        body = json.dumps(published_head(last["entry_hash"], last["n"],
-                                         session)).encode("utf-8")
         request = urllib.request.Request(
             url, data=body,
             headers={"Content-Type": "application/json",
                      "User-Agent": "loxodonta"})
-        with urllib.request.urlopen(request, timeout=timeout):
+        with urllib.request.build_opener(NoRedirect).open(
+                request, timeout=timeout):
             pass
     except Exception:  # noqa: BLE001 - an exit hook that raises is noise
         return
+
+
+def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
+    """POST `log`'s head to `url`, waiting at most `timeout` seconds,
+    name lookup included. Never raises, never prints: a slow or
+    unreachable remote costs nothing else, and staleness is the
+    supervisor's to surface."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        # The installer refuses these; a hand-edited settings file gets
+        # a quiet skip rather than a local file opened by urllib.
+        return
+    try:
+        last = tail_entry(read_log(log))
+    except OSError:
+        return
+    if last is None:
+        return
+    body = json.dumps(published_head(last["entry_hash"], last["n"],
+                                     session)).encode("utf-8")
+    # urlopen's timeout starts once the name has resolved, and a stalled
+    # resolver has no timeout of its own, so the POST runs on a helper
+    # thread that is left behind when its time is up: the hook process
+    # ends soon after, and a daemon thread ends with the process.
+    worker = threading.Thread(target=post_quietly, args=(url, body, timeout),
+                              daemon=True)
+    worker.start()
+    worker.join(timeout)
 
 
 def cmd_anchor(args):
@@ -784,11 +839,8 @@ def cmd_anchor(args):
         print(f"error: {args.log} is empty — run `loxodonta init` first",
               file=sys.stderr)
         return 1
-    try:
-        last = json.loads(lines[-1])
-    except json.JSONDecodeError:
-        last = None
-    if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+    last = tail_entry(lines)
+    if last is None:
         print(f"error: {args.log} has a damaged final line — run "
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
@@ -1830,6 +1882,19 @@ def session_end_choices(anchor, publish):
     return " and ".join(choices)
 
 
+def session_end_notice(old, new, choices):
+    """The parenthesis after a rewired SessionEnd command: what it now
+    does beyond the seal, and which step this re-run turned off, so a
+    flag left out of the install command never goes quiet (ADR-0024,
+    ADR-0025: the install command states the choice each time)."""
+    dropped = [name for flag, name in ((" --anchor", "anchors at session end"),
+                                       (" --publish ", "publishes the head"))
+               if flag in old and flag not in new]
+    parts = ([f"now {choices}"] if choices else []) + \
+            (["no longer " + " or ".join(dropped)] if dropped else [])
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
 def supervisor_path():
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, "supervisor.py")
@@ -2043,11 +2108,8 @@ def cmd_install_hook(args):
             old = hook.get("command", "")
             if any(m in old for m in RECORDER_MARKERS) and old != record_end:
                 hook["command"] = record_end
-                installed.append(
-                    f"SessionEnd: {record_end}"
-                    + (f" (now {choices})" if choices
-                       else " (no longer anchors or publishes at "
-                            "session end)"))
+                installed.append(f"SessionEnd: {record_end}"
+                                 + session_end_notice(old, record_end, choices))
     if not any(ours(b) for b in end):
         end.append({
             "hooks": [{"type": "command", "command": record_end,
@@ -2302,7 +2364,7 @@ def main(argv=None):
              "pending proofs (ADR-0024). A 32-byte digest leaves the "
              "machine at each session end; nothing else does")
     install_parser.add_argument(
-        "--publish-head", default=None, metavar="URL",
+        "--publish-head", default=None, metavar="URL", type=publish_url,
         help="opt in: every session end POSTs the chain head (head, n, "
              "session, ts, event, and one readable line) to this URL, "
              "before the anchor, quietly and best-effort (ADR-0025). Pick "
