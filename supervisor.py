@@ -1250,7 +1250,7 @@ def watch_completeness(root, witness, families, everywhere=False,
             continue  # unreadable and chainless: nothing to say about it
         name = (folder if everywhere
                 else folder[len(ours):].strip("-") or root.name)
-        add(name, stem, state, tools, 0)
+        add(name, stem, state, tools, 0, transcript=transcript)
 
     return watch
 
@@ -3325,10 +3325,39 @@ def chain_listing(log):
 
 def artifact_listing(path):
     """How the manifest lists a post-close artifact: sha256 of its bytes
-    and their count, because nothing else commits it (ADR-0026 ruling 3)."""
-    data = path.read_bytes()
-    return {"path": path.name, "sha256": hashlib.sha256(data).hexdigest(),
-            "bytes": len(data)}
+    and their count, because nothing else commits it (ADR-0026 ruling 3).
+    Read in chunks: a transcript can run to hundreds of MB."""
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return {"path": path.name, "sha256": digest.hexdigest(), "bytes": size}
+
+
+PACKAGE_MAX_BYTES = 1 << 30   # the verifier's cap, twice over
+
+
+def bare_file_name(value):
+    """The verifier's rule for a packaged name, twice over: a bare file
+    name, nothing a path could be, since the layout is flat."""
+    return (isinstance(value, str) and value not in ("", ".", "..")
+            and "/" not in value and "\\" not in value
+            and value == os.path.basename(value))
+
+
+def package_too_large(stage, written):
+    """True, the error printed, when the files would exceed the cap the
+    verifier applies before unpacking a zip: writing such a package would
+    ship one nothing can judge."""
+    total = sum((stage / name).stat().st_size for name in written)
+    if total <= PACKAGE_MAX_BYTES:
+        return False
+    print(f"error: the package would be {total} bytes unpacked, more than a "
+          f"verifier will unpack ({PACKAGE_MAX_BYTES}); leave the transcript "
+          "out, or package one session", file=sys.stderr)
+    return True
 
 
 def witness_snapshot(report, unit, sessions):
@@ -3368,9 +3397,15 @@ def transcript_words(session, transcripts):
     name = transcripts.get(session)
     if name is None:
         return ("no transcript: requested, but none for this session was "
-                "on the packing machine. The harness cleans transcripts on "
-                "a retention cycle, and the chain's commitments bind a "
-                "transcript only while it exists.")
+                "paired on the packing machine: the harness keeps a "
+                "transcript for a retention cycle, so an old session's may "
+                "be gone, and a session the witness never covered has none "
+                "to pair. The chain's commitments bind a transcript only "
+                "while it exists.")
+    if name is False:
+        return ("no transcript: requested, and the scan named one, but it "
+                "could not be read at packaging (moved, held open, or gone "
+                "between the scan and the copy).")
     return (f"`{name}`: the harness transcript of this session, as it stood "
             "at packaging. The chain's transcript commitments bind its "
             "committed prefixes; the manifest commits the whole file, tail "
@@ -3466,7 +3501,7 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "each chain, the file references it cannot check off the machine, "
         "each artifact against the manifest, then the package verdict and "
         "one line of residual trust. Exit 0 is `SELF-CONSISTENT`; 1 is "
-        "`CHAIN-BROKEN`; 2 is `ARTIFACT-DIVERGED`; 4 is "
+        "`CHAIN-BROKEN`; 2 is `ARTIFACT-DIVERGED`; 3 is `ANCHOR-MISMATCH`; 4 is "
         "`UNSUPPORTED-FORMAT`, a refusal; 5 is `TRANSCRIPT-DIVERGED` "
         "(docs/PACKAGE.md).",
         "",
@@ -3549,7 +3584,10 @@ def write_package(unit, sessions, drawer, report, stage, packed,
                 try:
                     shutil.copyfile(transcripts[session], stage / name)
                 except OSError:
-                    pass
+                    # Named by the scan, unreadable now; nothing partial
+                    # stays behind, and the README says which it was.
+                    (stage / name).unlink(missing_ok=True)
+                    shipped[session] = False
                 else:
                     written.append(name)
                     artifacts.append(artifact_listing(stage / name))
@@ -3709,15 +3747,29 @@ def cmd_package(args):
             row["session"]: Path(row["transcript"])
             for row in report.get("completeness", {}).get("sessions", [])
             if row.get("session") in sessions and row.get("transcript")}
+    if transcripts is not None:
+        for session in sessions:
+            if not bare_file_name(f"transcript-{session}.jsonl"):
+                # The verifier refuses a manifest naming anything but a
+                # bare file name, so such a package would never verify.
+                print(f"error: session {session!r} cannot carry a transcript: "
+                      "its name is not a bare file name, and the package "
+                      "layout is flat", file=sys.stderr)
+                return 1
     out.parent.mkdir(parents=True, exist_ok=True)
     if args.folder:
         out.mkdir()
         written = write_package(unit, sessions, drawer, report, out, packed,
                                 transcripts)
+        if package_too_large(out, written):
+            shutil.rmtree(out)
+            return 1
     else:
         with tempfile.TemporaryDirectory() as staging:
             written = write_package(unit, sessions, drawer, report,
                                     Path(staging), packed, transcripts)
+            if package_too_large(Path(staging), written):
+                return 1
             zip_package(Path(staging), written, out)
     chains = sum(len(logs) for logs in sessions.values())
     print(f"written: {out.name} ({label}, {chains} chain(s), "

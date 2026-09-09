@@ -230,8 +230,13 @@ def cmd_init(args):
 
 
 def sha256_file(path):
+    """sha256 of a file's bytes, read in chunks: a packaged transcript can
+    run to hundreds of MB, and nothing here needs it in memory at once."""
+    digest = hashlib.sha256()
     with open(path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def files_base(log):
@@ -1410,8 +1415,10 @@ PACKAGE_WORDS = {
                     "above say where)",
     "ANCHOR-MISMATCH": "an anchor packaged with a chain is not evidence for "
                        "that chain (its lines above say which)",
-    "TRANSCRIPT-DIVERGED": "a chain's transcript commitments contradict each "
-                           "other (its lines above say where)",
+    "TRANSCRIPT-DIVERGED": "a chain's transcript commitments do not hold: they "
+                           "contradict each other, or the packaged transcript "
+                           "differs from what they committed (its lines above "
+                           "say which)",
     "ARTIFACT-DIVERGED": "something in this package is not what the manifest "
                          "lists (the lines above say what)",
     "SELF-CONSISTENT": "every chain walks clean and every artifact matches "
@@ -1556,12 +1563,18 @@ def judge_chain(folder, listing):
     # the recorder's lines verbatim (ADR-0026 ruling 5, ADR-0017).
     named = listing.get("transcript")
     transcript = os.path.join(folder, named) if named else None
+    if transcript is not None and not os.path.isfile(transcript):
+        # The artifact judge reports the missing file; here only its
+        # bare name, never a path of this machine.
+        print(f"{named}: MISSING (named on this chain, not in the package); "
+              "its commitments go unjudged")
+        transcript = None
     code = cmd_verify(argparse.Namespace(log=log, files=False,
                                          expect_head=None,
                                          transcript=transcript, anchors=True))
     findings = [(code, CHAIN_WORDS[code])] if code in CHAIN_WORDS else []
     walked, count, references, commitments = walked_listing(log)
-    if transcript is None and commitments:
+    if transcript is None and commitments and code != 5:
         # The chain committed a transcript this package does not carry:
         # the recorder's note for an absent transcript, and no verdict
         # from it (ADR-0017: absence is a note, never a verdict).

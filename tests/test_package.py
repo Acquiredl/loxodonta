@@ -974,7 +974,7 @@ class TranscriptPackageTest(PackageCase):
             self.assertNotIn("transcript", chain)
         readme = (folder / "README.md").read_text("utf-8")
         self.assertIn("no transcript: requested, but none for this session "
-                      "was on the packing machine", readme)
+                      "was paired on the packing machine", readme)
         self.assertIn("retention cycle", readme)
 
     def test_without_the_flag_the_readme_says_not_requested_and_the_verifier_notes(self):

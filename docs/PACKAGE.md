@@ -126,7 +126,7 @@ Mapped onto `verify`'s own (ADR-0026 ruling 7), so a script that reads those lea
 | 4 | `UNSUPPORTED-FORMAT`, a refusal | `UNSUPPORTED-VERSION` |
 | 5 | `TRANSCRIPT-DIVERGED` | `TRANSCRIPT-DIVERGED` |
 
-Usage errors are to exit `64` (sysexits `EX_USAGE`) in both tools, so a verdict exit is never an argparse error; that renumbering is its own slice, and until it lands the README's advice stands: read the verdict line, not the code alone.
+Usage errors exit `64` (sysexits `EX_USAGE`) in both tools (ADR-0026 ruling 7), so a verdict exit is never an argparse error; the README's advice to read the verdict line stands as good practice.
 
 ## 7. Worked example: the bad-day session
 
@@ -199,5 +199,6 @@ The manifest the verifier judged against:
 - **Garbage in.** The package is unaltered since packaging. Whether the recorder was told the truth, and whether every tool call got its receipt, is the harness's and the witness's word (SPEC §8, ADR-0002).
 - **No seals.** `SELF-CONSISTENT` alone is what a wholesale regeneration also produces. The anchor lines under a chain speak for that chain and say when its head existed; the package as a set is on record only from its own seals, which this slice does not yet write.
 - **The transcript after retention.** Commitments in the chain bind the harness transcript only while it exists. `--transcript` at packaging is the only thing that keeps it; hashing more often does not. A package without it carries the commitments and nothing to judge them against, and the verifier says so under the chain. A package with it carries the bytes as they stood at packaging: what the transcript says is the harness's record, and before its first commitment it was the writer's to rewrite (ADR-0017), packaged faithfully either way.
+- **A transcript's owner.** A transcript is tied to a chain by that chain's commitments. A chain with none cannot tell its transcript from another's: the manifest's word is all there is, and the verifier says nothing was judged.
 - **File contents.** Paths and fingerprints travel; files do not.
 - **The recipient's own job.** The verifier prints a merkle root under an anchored chain; confirming it against a block source they trust is theirs (ADR-0003), as comparing a key fingerprint out of band will be when `--sign` lands (ADR-0008).
