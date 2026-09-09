@@ -951,6 +951,10 @@ def cmd_publish(args):
 def cmd_anchor(args):
     if args.upgrade:
         return upgrade_anchors(args)
+    if args.manifest and args.log != DEFAULT_LOG:
+        print("error: --manifest anchors a file's digest and --log a chain's "
+              "head; give one of them", file=sys.stderr)
+        return EX_USAGE
     if args.manifest:
         # A package manifest (ADR-0026 ruling 4): the digest anchored is
         # the file's sha256, the proof lands beside the manifest, and the
@@ -961,7 +965,7 @@ def cmd_anchor(args):
             print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
             return 1
         return submit_digest(args.manifest, head, None, args.calendar,
-                             f"--upgrade --manifest {args.manifest}")
+                             f"--upgrade --manifest={args.manifest}")
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -1474,7 +1478,8 @@ RESIDUAL_TRUST = {
                "alone until its manifest anchor completes.",
     "anchored": "residual trust: this package is unaltered since it was "
                 "packed, and it existed by Bitcoin block {height} if the "
-                "merkle root above is that block's. That the record inside "
+                "merkle root printed beside that block is the block's. That "
+                "the record inside "
                 "is true and complete rests on the issuer's word alone.",
 }
 
@@ -1641,9 +1646,9 @@ def judge_manifest_anchor(folder):
     digest = sha256_file(manifest)
     records = read_anchor_records(manifest)
     if not records:
+        what = "is not in this package" if records is None else "holds no record"
         print(f"seal anchor: SEAL-MISSING: {anchors_path('manifest.json')} "
-              "is not in this package — the manifest declares an anchor it "
-              "does not carry")
+              f"{what} — the manifest declares an anchor it does not carry")
         return [(3, "SEAL-MISSING")], None
     findings = []
     height = None
@@ -1651,7 +1656,7 @@ def judge_manifest_anchor(folder):
     pending = []
     for record in records:
         head = record.get("head") if record else None
-        if head is None:
+        if not isinstance(head, str) or not isinstance(record.get("proof"), str):
             reason = "sidecar line is not an anchor record"
         elif head != digest:
             reason = (f"the proof is for digest {head[:12]}…, and this "
@@ -1679,9 +1684,10 @@ def judge_manifest_anchor(folder):
         if record.get("calendar") in completed:
             continue  # superseded by the upgraded record from that calendar
         print(f"seal anchor: ANCHOR-PENDING: the manifest was submitted "
-              f"{record.get('ts')} via {record.get('calendar')} — run "
-              "`loxodonta anchor --upgrade --manifest manifest.json` after "
-              "a few hours; the rung is not earned until the proof completes")
+              f"{record.get('ts')} via {record.get('calendar')} — unpack the "
+              "package and run `loxodonta anchor --upgrade --manifest=<its "
+              "manifest.json>` after a few hours; the rung is not earned "
+              "until the proof completes")
     return findings, height
 
 

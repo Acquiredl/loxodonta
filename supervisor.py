@@ -3532,9 +3532,8 @@ def seal_package(stage, seals, calendars):
     ADR-0007's write order. The anchor (ADR-0026 ruling 4): the recorder
     posts the manifest's sha256 to the calendars once and writes the
     proof beside it as manifest.json.anchors.jsonl; the supervisor never
-    speaks OTS itself. Returns (the seal files written, in order, or
-    None when a seal could not be applied, the recorder's own words on
-    why)."""
+    speaks OTS itself. Returns (the seal files written, in order, and
+    the recorder's own words when a seal could not be applied)."""
     written = []
     if SEAL_ANCHOR in seals:
         command = [sys.executable, str(LOXODONTA), "anchor",
@@ -3545,7 +3544,7 @@ def seal_package(stage, seals, calendars):
             command, capture_output=True, encoding="utf-8",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         if finished.returncode != 0:
-            return None, finished.stderr.strip() or "the recorder gave no reason"
+            return [], finished.stderr.strip() or "the recorder gave no reason"
         written.append(MANIFEST_SIDECAR)
     return written, None
 
@@ -3690,7 +3689,7 @@ def cmd_package(args):
         print("anchored: the manifest's sha256 went to the calendars; the "
               "proof is pending until Bitcoin has it, a few hours")
         print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
-              f'--manifest "{(where / "manifest.json").as_posix()}"')
+              f'--manifest="{(where / "manifest.json").as_posix()}"')
     return 0
 
 

@@ -29,7 +29,7 @@ The sidecar is *evidence, not a chain*: a forged proof fails replay; a deleted p
 ```
 receipts anchor [--log PATH] [--calendar URL]...   # submit the current head
 receipts anchor --upgrade [...]                    # complete pending proofs
-receipts anchor --manifest PATH [--calendar URL]...  # anchor a package manifest's sha256
+receipts anchor --manifest PATH [--calendar URL]...  # anchor a package manifest's sha256 The door is general: `--manifest PATH` anchors the sha256 of any file's bytes; the package manifest is the case it exists for, and an anchored file's proof lives beside it as `PATH.anchors.jsonl`.
 receipts anchor --upgrade --manifest PATH          # complete that proof
 receipts verify --anchors [...]                    # judge proofs, offline
 ```
