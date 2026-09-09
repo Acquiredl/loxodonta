@@ -170,7 +170,7 @@ class PublishBase(unittest.TestCase):
         """The session's one chain, wherever the store filed it."""
         found = [p for p in (self.store / "receipts").rglob(
                      f"receipts-{self.SESSION}*.jsonl")
-                 if not p.name.endswith(".anchors.jsonl")]
+                 if not p.name.endswith((".anchors.jsonl", ".published.jsonl"))]
         self.assertEqual(len(found), 1, found)
         return found[0]
 
@@ -198,6 +198,32 @@ class PublishAtSessionEndTest(PublishBase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(len(self.receiver.received), 1)
         self.assertEqual(self.body()["head"], self.head())
+
+    def test_the_hook_leaves_the_memo_the_keeper_reads(self):
+        # The same note `loxodonta publish` leaves (ADR-0025 ruling 3), so
+        # a head the hook sent is never posted again by the keeper.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+
+        result = self.session_end("--publish", self.receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        memo = self.chain().with_name(self.chain().name + ".published.jsonl")
+        self.assertTrue(memo.exists(), list(self.chain().parent.iterdir()))
+        (record,) = [json.loads(l) for l in memo.read_text("utf-8").splitlines()]
+        self.assertEqual(record["head"], self.body()["head"])
+        self.assertEqual(record["event"], "session-end")
+        self.assertNotIn(self.receiver.url, memo.read_text("utf-8"))
+
+    def test_a_failed_publish_leaves_no_memo(self):
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+
+        result = self.session_end("--publish", "http://127.0.0.1:9/hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        memo = self.chain().with_name(self.chain().name + ".published.jsonl")
+        self.assertFalse(memo.exists())
 
     def test_the_body_is_the_fingerprint_and_never_the_work(self):
         # ADR-0025 ruling 2: head, n, session, ts, event, and one readable
