@@ -102,12 +102,13 @@ inclusion proof, which is our sidecar.
 5. **Verification, in the recorder.** `loxodonta verify-package PATH`,
    a zip or an unpacked folder, prints in this order: the manifest's
    summary; per chain, the recorder's own `verify --anchors` output
-   verbatim, as `supervisor verify ADDRESS` prints it today; the transcript
+   verbatim; the transcript
    commitments judged against the packaged transcript when present; file
    references counted and stated as not checkable off the machine; each
-   artifact against the manifest; each declared seal; then the package
-   verdict on the last line in ADR-0007's words, then one line of residual
-   trust. The recipient downloads one checksummed file, the same one that
+   artifact against the manifest; each declared seal; one line of residual
+   trust when the ladder allows it; then the package verdict, the last
+   line, in ADR-0007's words, so a script reads the last line as it does
+   for `verify`. The recipient downloads one checksummed file, the same one that
    verifies a bare chain. There is no third file.
 6. **Rungs and words.** `+ ANCHORED` means the **manifest** is anchored.
    Chain anchors from session end print as detail under each chain: they

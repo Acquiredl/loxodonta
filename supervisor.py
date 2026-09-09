@@ -1252,7 +1252,7 @@ def watch_consumption(families, now):
 # --- Scan ---------------------------------------------------------------------
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
-              store=False):
+              store=False, tick=True):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
@@ -1296,9 +1296,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     for (repo, session, _), log in census:
         relpath = log.relative_to(root).as_posix()
         entries = read_entries(log)
-        attempted, keeper_note, anchor_failed = keep_anchors(
-            log, keeper.get(relpath), now, entries,
-            anchor_every, calendars)
+        # `tick=False` is a reading: both keepers stay quiet, so a reader
+        # that copies a chain (package) appends nothing to it and sends
+        # nothing off the machine.
+        attempted, keeper_note, anchor_failed = (
+            keep_anchors(log, keeper.get(relpath), now, entries,
+                         anchor_every, calendars)
+            if tick else (False, None, False))
         if attempted:
             keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         verdict, exit_code, detail = verify(log)
@@ -1456,7 +1460,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # The keeper closes what the annotation reports — after the rows
     # are judged, so this scan says the truth it saw and the next scan
     # sees the tails committed.
-    kept = keep_tails(completeness["sessions"]) if TAIL_KEEPER else 0
+    kept = keep_tails(completeness["sessions"]) if tick and TAIL_KEEPER else 0
     # The consumption watch never touches `worst`: a hot session is a
     # reason to look, and the brake is the operator's (issue #67).
     consumption = watch_consumption(families, now)
@@ -2309,7 +2313,8 @@ def resolve_address(args):
     return match_address(prefix, logs, where)
 
 
-def match_address(prefix, logs, where):
+def match_address(prefix, logs, where,
+                  hint="widen with --all, or search instead"):
     """The one entry among `logs` whose hash starts with `prefix`, or
     the refusal: none (named by `where`), or ambiguous with the
     candidates listed. Shared by the recall commands and by `package`,
@@ -2319,8 +2324,8 @@ def match_address(prefix, logs, where):
                if isinstance(entry.get("entry_hash"), str)
                and entry["entry_hash"].startswith(prefix)]
     if not matches:
-        print(f"no entry under {where} matches {prefix} - "
-              "widen with --all, or search instead", file=sys.stderr)
+        print(f"no entry under {where} matches {prefix} - {hint}",
+              file=sys.stderr)
         return None, 1
     if len(matches) > 1:
         print(f"ambiguous: {prefix} names {len(matches)} entries - "
@@ -3115,11 +3120,15 @@ def chain_listing(log):
     entry count, never by file hash. The head is the commitment, and
     the verifier recomputes it by walking, so a Windows unzip that
     changes line endings changes nothing the manifest says."""
-    head = None
-    for entry in read_entries(log):
-        if isinstance(entry.get("entry_hash"), str):
-            head = entry["entry_hash"]
     lines = log.read_text(encoding="utf-8").splitlines()
+    head = None
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("entry_hash"), str):
+            head = entry["entry_hash"]
     sidecar = log.with_name(log.name + ".anchors.jsonl")
     return {"path": log.name, "head": head, "entries": len(lines),
             "anchors": sidecar.name if sidecar.exists() else None}
@@ -3156,7 +3165,7 @@ def witness_snapshot(report, session, chains):
     }
 
 
-def package_readme(session, project, packed, chains, witness):
+def package_readme(session, project, packed, chains, witness, record):
     """The plain-words page a recipient reads first: what is inside, how
     to verify it, what each layer shows and does not. It may print the
     chain heads, which exist before it is written; it never prints the
@@ -3181,10 +3190,12 @@ def package_readme(session, project, packed, chains, witness):
             lines.append(f"- `{chain['anchors']}`: its anchor sidecar, the "
                          "OpenTimestamps proofs the recorder collected for "
                          "this chain's heads.")
+    if record:
+        lines.append(
+            "- `project.json`: the project record, the absolute path of the "
+            "project on the machine that recorded it. Off that machine it "
+            "points nowhere, which the verifier says in so many words.")
     lines += [
-        "- `project.json`: the project record, the absolute path of the "
-        "project on the machine that recorded it. Off that machine it "
-        "points nowhere, which the verifier says in so many words.",
         "- `witness.json`: the supervisor's completeness reading of this "
         f"session at packaging (state: {state}) and the verdict its scan "
         "gave each chain. Labelled testimony in the file: the verifier "
@@ -3268,7 +3279,8 @@ def write_package(session, chains, report, stage, packed):
     artifacts.append(artifact_listing(stage / "witness.json"))
     project = drawer_name(drawer)
     write_lf(stage / "README.md",
-             package_readme(session, project, packed, listings, witness))
+             package_readme(session, project, packed, listings, witness,
+                            record.exists()))
     written.append("README.md")
     artifacts.append(artifact_listing(stage / "README.md"))
     manifest = {
@@ -3303,7 +3315,9 @@ def select_session(selector, sessions):
         return selector, sessions[selector]
     if ADDRESS_RE.match(selector.lower()):
         logs = [log for chains in sessions.values() for log in chains]
-        match, _ = match_address(selector.lower(), logs, "the store")
+        match, _ = match_address(selector.lower(), logs, "the store",
+                                 hint="check the session id, or lengthen "
+                                      "the address")
         if match is None:
             return None, None
         session = session_of(match[0])
@@ -3339,10 +3353,14 @@ def cmd_package(args):
         print(f"error: {out} already exists; choose another --out",
               file=sys.stderr)
         return 1
+    # A reading, not a tick (tick=False): the keepers stay quiet, so
+    # packaging appends nothing to the chain it copies and sends nothing
+    # off the machine; the baseline still remembers the look.
     report = scan_root(store_receipts(), witness=Path(args.witness),
-                       store=True)
+                       store=True, tick=False)
+    out.parent.mkdir(parents=True, exist_ok=True)
     if args.folder:
-        out.mkdir(parents=True)
+        out.mkdir()
         written = write_package(session, chains, report, out, packed)
     else:
         with tempfile.TemporaryDirectory() as staging:

@@ -65,13 +65,14 @@ Why the README never prints the manifest's hash (ADR-0007 ruling 2). The manifes
 loxodonta verify-package PATH        # a zip, or an unpacked folder
 ```
 
-A zip is unpacked into a temporary folder and judged there. A folder is judged as it stands; if the recipient re-zipped the folder rather than its contents, the single subfolder holding the manifest is found. The output, in this order (ADR-0026 ruling 5):
+A zip is unpacked into a temporary folder and judged there; a folder is judged as it stands. The manifest sits at the top of either. Before anything is judged, the package can be refused: a zip that declares more than a gigabyte unpacked, or that is damaged past what its end record shows, is refused unopened; a manifest whose shape is off is refused unread, and every path it lists must be a bare file name, since the layout is flat and a path that could leave the package is never followed. The output, in this order (ADR-0026 ruling 5):
 
 1. **The manifest's summary**: `package`, `format`, `packed ... (testimony)`, `unit`, `contents`, and which seals are declared.
-2. **Each chain**, headed `chain: <name> (manifest: head <12 hex>…, N entries)`, followed by the recorder's own `verify --anchors` output verbatim, the same lines `supervisor verify ADDRESS` prints on the machine. Anchor lines appear here as detail: `ANCHORED`, `ANCHOR-PENDING`, `NO-ANCHORS`, or a mismatch. Then the walked head and line count are compared with the manifest's row; a difference is reported as `<name>: off the manifest`.
+2. **Each chain**, headed `chain: <name> (manifest: head <12 hex>…, N entries)`, followed by the recorder's own `verify --anchors` output verbatim. Anchor lines appear here as detail: `ANCHORED`, `ANCHOR-PENDING`, `NO-ANCHORS`, or a mismatch. Then the walked head and line count are compared with the manifest's row; a difference is reported as `<name>: off the manifest`.
 3. **File references**: `file references: N recorded, not checkable off the machine`, counted across the chains.
 4. **Each artifact** against the manifest: `<name>: matches the manifest (sha256 <12 hex>…, N bytes)`, or `DIVERGED from the manifest` with both digests, or `MISSING`. The `witness.json` line adds `(testimony: the packing machine's reading, unaltered; no verdict is drawn from it)`. Files in the package the manifest does not list print as `unlisted: <name> (not in the manifest, not judged)`.
-5. **The package verdict**, in ADR-0007's words, and for `SELF-CONSISTENT` one closing line of **residual trust**.
+5. **Each declared seal**: none in this format's first slice; a kind this verifier does not judge yet is named as declared and not judged.
+6. For `SELF-CONSISTENT`, one line of **residual trust**; then **the package verdict**, the last line, in ADR-0007's words, so a script reads the last line as it does for `verify`.
 
 The verifier reads `witness.json` for its bytes only. Its state, its counts, and the scan's verdicts inside are the supervisor's reading on the packing machine, and they change nothing in the ladder: a package whose witness says `ALARM-SILENT` and a package whose witness says `COMPLETE` verify identically. That is the meaning of *testimony* here, and the output says so where the file is judged.
 
@@ -114,7 +115,7 @@ $ python loxodonta.py verify-package loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8
 package: loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907
 format: loxodonta-package/1
 packed: 2026-09-08T22:19:08Z by loxodonta supervisor 0.2.0 (testimony)
-unit: session b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907, project todo
+unit: kind session, session b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907, project todo
 contents: 1 chain(s), 3 artifact(s), seals: none declared
 chain: receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl (manifest: head 751d054dfeff…, 6 entries)
 NO-ANCHORS: loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907/receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl.anchors.jsonl not found — anchoring is optional; run `loxodonta anchor` to add one
@@ -123,8 +124,8 @@ file references: 1 recorded, not checkable off the machine
 project.json: matches the manifest (sha256 1bcb3a94da77…, 152 bytes)
 witness.json: matches the manifest (sha256 86d42238052e…, 900 bytes) (testimony: the packing machine's reading, unaltered; no verdict is drawn from it)
 README.md: matches the manifest (sha256 78fa5f2c4c92…, 2928 bytes)
-SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest; indistinguishable from a wholesale regeneration, since no seal is declared
 residual trust: this package is unaltered since it was packed. That the record inside is true and complete, and that it existed before today, rests on the issuer's word alone, since no seal is declared.
+SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest; indistinguishable from a wholesale regeneration, since no seal is declared
 ```
 
 Exit 0. Read it as a recipient would. The chain walks clean: the six entries, `Read: .env` and the `curl` that posted it included, are the ones the recorder wrote, in order, unedited since. The one file reference is the fingerprint of `.env` as the agent saw it; the file is not here and cannot be checked. The witness says `UNWITNESSED` in this build, because the demo store has no transcript layout; on the operator's machine it would say what the completeness alarm said, and either way the verifier repeats it without judging it. And the last two lines state what remains: nothing here changed since it was packed, and nothing here says the set existed before today, because no seal was declared.

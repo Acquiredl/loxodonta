@@ -48,7 +48,21 @@ def neutral_env(home):
     return env
 
 
-class DemoStorePackageTest(unittest.TestCase):
+class PackageCase(unittest.TestCase):
+    """The two fixtures share how they drive the two commands: a pinned
+    witness so the scan never reads the developer's transcripts, a
+    neutral home, and a working folder for what gets written."""
+
+    def package(self, *args):
+        return run(SUPERVISOR, "package", "--witness", str(self.witness),
+                   *args, env=self.env, cwd=str(self.work))
+
+    def verify_package(self, path):
+        return run(LOXODONTA, "verify-package", str(path), env=self.env,
+                   cwd=str(self.work))
+
+
+class DemoStorePackageTest(PackageCase):
     """One demo store, built once; every test packages from it into its
     own working folder, so packages never see each other."""
 
@@ -73,14 +87,6 @@ class DemoStorePackageTest(unittest.TestCase):
         self._work = tempfile.TemporaryDirectory()
         self.addCleanup(self._work.cleanup)
         self.work = Path(self._work.name).resolve()
-
-    def package(self, *args):
-        return run(SUPERVISOR, "package", "--witness", str(self.witness),
-                   *args, env=self.env, cwd=str(self.work))
-
-    def verify_package(self, path):
-        return run(LOXODONTA, "verify-package", str(path), env=self.env,
-                   cwd=str(self.work))
 
     def bad_day_chain(self):
         found = (self.home / ".loxodonta" / "receipts").glob(
@@ -135,8 +141,8 @@ class DemoStorePackageTest(unittest.TestCase):
             "project.json",
             "witness.json",
             "README.md",
-            "SELF-CONSISTENT",
             "residual trust",
+            "SELF-CONSISTENT",
         ]
         cursor = 0
         for needle in order:
@@ -144,11 +150,11 @@ class DemoStorePackageTest(unittest.TestCase):
             self.assertTrue(hits, f"{needle!r} missing after line {cursor}:"
                                   f"\n{out}")
             cursor = hits[0] + 1
-        verdict = lines[-2]
+        verdict = lines[-1]
         self.assertTrue(verdict.startswith("SELF-CONSISTENT"), verdict)
         self.assertIn("indistinguishable from a wholesale regeneration",
                       verdict)
-        self.assertTrue(lines[-1].startswith("residual trust"), lines[-1])
+        self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
         # witness.json is testimony, and the verifier says so where it
         # judges the file's bytes.
         witness_line = next(l for l in lines if l.startswith("witness.json"))
@@ -258,7 +264,102 @@ class DemoStorePackageTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lines = result.stdout.strip().splitlines()
-        self.assertTrue(lines[-2].startswith("SELF-CONSISTENT"), lines[-2])
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
+
+    def rewrite_manifest(self, folder, change):
+        path = folder / "manifest.json"
+        manifest = json.loads(path.read_text("utf-8"))
+        change(manifest)
+        path.write_text(json.dumps(manifest, indent=2), "utf-8")
+
+    def test_a_manifest_path_that_leaves_the_package_is_refused(self):
+        # The layout is flat: a listed path is a bare file name or the
+        # package is refused unopened, so a stranger's manifest can never
+        # make the verifier read, hash, or hang on a file outside it.
+        folder = self.folder_package()
+        outside = folder.parent / "outside-secret.txt"
+        outside.write_text("not yours to hash\n", "utf-8")
+        for bad in ("../outside-secret.txt", str(outside), "a/b.jsonl",
+                    "a\\b.jsonl", "..", ""):
+            self.rewrite_manifest(
+                folder, lambda m, bad=bad: m["artifacts"].__setitem__(
+                    0, {**m["artifacts"][0], "path": bad}))
+            result = self.verify_package(folder)
+            self.assertEqual(result.returncode, 4, bad + ": " + result.stdout)
+            lines = result.stdout.strip().splitlines()
+            self.assertTrue(lines[-1].startswith("UNSUPPORTED-FORMAT"), lines)
+            self.assertNotIn("outside-secret", result.stdout)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_malformed_manifest_is_refused_not_a_traceback(self):
+        folder = self.folder_package()
+        shapes = {
+            "unit a string": lambda m: m.__setitem__("unit", "x"),
+            "a chain a string": lambda m: m.__setitem__("chains", ["x"]),
+            "an artifact a number": lambda m: m.__setitem__("artifacts", [42]),
+            "seals a number": lambda m: m.__setitem__("seals", 42),
+            "no seals key": lambda m: m.pop("seals"),
+            "no chains": lambda m: m.__setitem__("chains", []),
+            "an entry count a string": lambda m: m["chains"][0].__setitem__(
+                "entries", "6"),
+        }
+        for words, change in shapes.items():
+            self.rewrite_manifest(folder, change)
+            result = self.verify_package(folder)
+            self.assertEqual(result.returncode, 4, words + ": " + result.stdout)
+            self.assertTrue(result.stdout.strip().splitlines()[-1]
+                            .startswith("UNSUPPORTED-FORMAT"), words)
+            self.assertNotIn("Traceback", result.stderr, words)
+            # the same package, undamaged, verifies again
+            self.package(BAD_DAY_SESSION, "--folder", "--out",
+                         str(self.work / f"again-{len(words)}"))
+            folder = self.work / f"again-{len(words)}"
+
+    def test_a_damaged_zip_is_refused_unopened(self):
+        # is_zipfile reads only the end record; damage in a member's
+        # header surfaces when unpacking, and is a refusal, never a
+        # traceback.
+        result = self.package(BAD_DAY_SESSION)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        zipped = next(self.work.glob("*.zip"))
+        raw = bytearray(zipped.read_bytes())
+        for i in range(40, 60):
+            raw[i] ^= 0xFF
+        zipped.write_bytes(bytes(raw))
+
+        judged = self.verify_package(zipped)
+
+        self.assertEqual(judged.returncode, 4, judged.stdout + judged.stderr)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("UNSUPPORTED-FORMAT"), judged.stdout)
+        self.assertNotIn("Traceback", judged.stderr)
+
+    def test_a_chain_of_another_format_is_a_refusal_on_the_last_line(self):
+        # A packaged chain whose genesis claims a format this verifier
+        # does not speak: the recorder refuses it, and the package verdict
+        # says so on the last line instead of failing to find a word.
+        folder = self.folder_package()
+        chain = next(p for p in folder.iterdir()
+                     if p.name.startswith("receipts-")
+                     and not p.name.endswith(".anchors.jsonl"))
+        lines = chain.read_text("utf-8").splitlines()
+        genesis = json.loads(lines[0])
+        genesis["v"] = "9.9"
+        lines[0] = json.dumps(genesis, sort_keys=True, separators=(",", ":"))
+        chain.write_text("\n".join(lines) + "\n", "utf-8")
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        last = result.stdout.strip().splitlines()[-1]
+        self.assertTrue(last.startswith("UNSUPPORTED-FORMAT"), last)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_out_into_a_missing_folder_is_created(self):
+        result = self.package(BAD_DAY_SESSION, "--out",
+                              str(self.work / "no" / "such" / "pkg.zip"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.work / "no" / "such" / "pkg.zip").exists())
 
     def test_readme_never_holds_the_manifest_hash_and_manifest_is_last(self):
         folder = self.folder_package()
@@ -311,7 +412,7 @@ def completed_anchor(head, height=850000):
                        "proof": base64.b64encode(proof).decode()}) + "\n"
 
 
-class HookStorePackageTest(unittest.TestCase):
+class HookStorePackageTest(PackageCase):
     """A store written through `loxodonta hook`: one session whose
     recording continued in a -002 sibling, with an anchor sidecar on the
     first chain, so the package has more than one chain and more than
@@ -355,13 +456,6 @@ class HookStorePackageTest(unittest.TestCase):
                  "CLAUDE_PROJECT_DIR": str(self.project)})
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def package(self, *args):
-        return run(SUPERVISOR, "package", "--witness", str(self.witness),
-                   *args, env=self.env, cwd=str(self.work))
-
-    def verify_package(self, path):
-        return run(LOXODONTA, "verify-package", str(path), env=self.env)
-
     def test_siblings_travel_together_and_anchor_lines_print_verbatim(self):
         result = self.package(SESSION, "--folder", "--out",
                               str(self.work / "pkg"))
@@ -390,8 +484,8 @@ class HookStorePackageTest(unittest.TestCase):
                       out)
         self.assertIn(f"{self.sidecar.name}: matches the manifest", out)
         lines = out.strip().splitlines()
-        self.assertTrue(lines[-2].startswith("SELF-CONSISTENT"), lines[-2])
-        self.assertNotIn("ANCHORED", lines[-2])
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
+        self.assertNotIn("ANCHORED", lines[-1])
 
     def test_a_foreign_anchor_outranks_the_diverged_sidecar_exit_3(self):
         # Gravest wins (ruling 7): rewriting the sidecar diverges it from
