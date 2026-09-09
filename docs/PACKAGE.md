@@ -1,10 +1,10 @@
-# The package: one session, sealed by a manifest, verified by one file
+# The package: a session or a drawer, sealed by a manifest, verified by one file
 
 **Status:** accepted 2026-09-08 (ADR-0026, applying ADR-0007 and ADR-0008 to loxodonta's own store). This page specifies the package format `loxodonta-package/1` and the verifier's ladder. The receipt format of `docs/SPEC.md` (v0.1) is untouched: a chain inside a package is a chain, judged by the same walk.
 
 ## 1. What a package is
 
-The evidence lives in the store on the machine that wrote it. To show it to someone who was never on that machine, the operator sends a **package**: the chains of one session with their anchor sidecars, the drawer's project record, a witness snapshot labelled testimony, a plain-words README, and last of all a **manifest** listing everything before it. The recipient downloads `loxodonta.py`, the same file that verifies a bare chain, and runs one command on the zip. It answers layer by layer, the recorder's own verdicts verbatim, and ends with the package verdict and one line of residual trust.
+The evidence lives in the store on the machine that wrote it. To show it to someone who was never on that machine, the operator sends a **package**: the chains of one session, or of a repository's whole drawer, with their anchor sidecars, the drawer's project record, a witness snapshot labelled testimony, a plain-words README, and last of all a **manifest** listing everything before it. The recipient downloads `loxodonta.py`, the same file that verifies a bare chain, and runs one command on the zip. It answers layer by layer, the recorder's own verdicts verbatim, and ends with the package verdict and one line of residual trust.
 
 A package confirms that it is unaltered since packaging. It never confirms that the record inside is true or complete: a harness that lied at write time ships faithfully packaged lies (ADR-0002, ADR-0026). Without a seal it cannot say when the set existed either, and its ceiling verdict says so in as many words.
 
@@ -14,17 +14,24 @@ The GLOSSARY's words apply exactly: *package*, *manifest*, *seal*, *issuer*, *re
 
 ```
 supervisor package <session-id | entry-address> [--out PATH] [--folder] [--witness DIR]
+supervisor package [--repo PATH]                 [--out PATH] [--folder] [--witness DIR]
 ```
 
-The selector is a session id, or any entry address inside the session, resolved with the same rules `show` and `verify ADDRESS` use (any unambiguous prefix; an ambiguous one lists the candidates). Either way the whole session is packaged, sibling chains included, so the two selectors write the same package. The store is searched as a whole; the current directory does not matter.
+Two units, one selector each (ADR-0026 ruling 1); a selector and `--repo` together are a usage error, exit 64.
 
-By default the package is a zip in the current directory, `loxodonta-package-<session>.zip`; `--out` names another file, and `--folder` writes an unpacked folder instead (with `--out`, that folder). An existing path is never overwritten.
+**A session.** The selector is a session id, or any entry address inside the session, resolved with the same rules `show` and `verify ADDRESS` use (any unambiguous prefix; an ambiguous one lists the candidates). Either way the whole session is packaged, sibling chains included, so the two selectors write the same package. The store is searched as a whole; the current directory does not matter.
 
-The scan underneath is one ordinary supervisor tick over the store, as `export`'s is: its completeness row for the session and its verdicts are what `witness.json` carries. `--witness` points it at the harness transcript layout, as for `scan`.
+**A drawer.** `--repo PATH` selects a repository's whole drawer: every session recorded for it and every sibling, resolved the way `digest --repo` resolves a repository (a git worktree names its main checkout), and including the drawers of the repository's own harness worktrees (`<repo>/.claude/worktrees/*`), which recall has read as the repository's history since 0.2.0 (ADR-0023 part 3); a sub-project elsewhere in the tree is its own memory and is not swept in. With no selector at all the unit is the current repository's drawer, as `digest` behaves: `CLAUDE_PROJECT_DIR`, else the current directory. A repository with no drawer in the store is refused with nothing written (a legacy `receipts/` layout moves into the store with `supervisor adopt` first). Store-wide packaging is not built: that is `export --raw`'s job, and it stays there.
+
+By default the package is a zip in the current directory, `loxodonta-package-<session>.zip` for a session and `loxodonta-package-<project>.zip` for a drawer (the drawer's display name, the project folder's basename); `--out` names another file, and `--folder` writes an unpacked folder instead (with `--out`, that folder). An existing path is never overwritten.
+
+The scan underneath is one ordinary supervisor tick over the store, as `export`'s is: its completeness row for each session packaged and its verdicts are what `witness.json` carries. `--witness` points it at the harness transcript layout, as for `scan`.
 
 Assembly follows ADR-0007's write order, and `supervisor package` honors it or the package is unverifiable: the chain snapshot and sidecars first, then `project.json`, then `witness.json`, then `README.md`, then `manifest.json`. The zip keeps that member order, so the manifest is the last member too.
 
-Not built in this slice, each its own later slice: a drawer as the unit (`digest --repo`'s selection), `--transcript` (the harness transcript, on request only, because it can hold the very secret a bad day exfiltrated), and the two seals, `--anchor` and `--sign`. A session whose chains sit in two drawers (possible before ADR-0023) is refused rather than flattened: the layout puts every chain beside one project record.
+Not built yet, each its own later slice: `--transcript` (the harness transcript, on request only, because it can hold the very secret a bad day exfiltrated), and the two seals, `--anchor` and `--sign`.
+
+A session whose chains sit in two drawers (possible before ADR-0023) is refused rather than flattened, whichever unit holds it: the layout puts every chain beside one project record, and two drawers under one chain name would mean one silently overwriting the other. A drawer is checked session by session against the whole store, not only the drawers selected, since half of a split session may sit in a drawer no selector reaches; one split session refuses the whole drawer package, naming the session. A drawer package that looked complete and was not would be worse than the refusal.
 
 ## 3. What is inside
 
@@ -32,10 +39,10 @@ Flat, like a drawer, so the recorder's own rules apply to the chains unchanged:
 
 | File | What it is | Listed in the manifest by |
 |---|---|---|
-| `receipts-<session>.jsonl`, `receipts-<session>-002.jsonl`, ... | the session's chains, byte for byte, siblings in sequence order (ADR-0004) | head and entry count |
+| `receipts-<session>.jsonl`, `receipts-<session>-002.jsonl`, ... | the chains, byte for byte: one session's, or every session's of the drawer; siblings in sequence order (ADR-0004), sessions in census order, the repository's drawer before its worktree drawers | head and entry count |
 | `receipts-<session>.jsonl.anchors.jsonl` | a chain's anchor sidecar, when the drawer has one (docs/ANCHORING.md §2) | sha256 and byte count |
-| `project.json` | the drawer's project record: the project's absolute path on the recording machine (ADR-0012) | sha256 and byte count |
-| `witness.json` | the supervisor's completeness row for the session and the verdict its scan gave each chain, labelled testimony in the file | sha256 and byte count |
+| `project.json` | the drawer's project record: the project's absolute path on the recording machine (ADR-0012). For a drawer package, the repository's own; a worktree drawer's record does not travel, and the README says which sessions were recorded in one | sha256 and byte count |
+| `witness.json` | one completeness row per session packaged and the verdict the supervisor's scan gave each chain, labelled testimony in the file (its shape: §4) | sha256 and byte count |
 | `README.md` | plain words: what is inside, how to verify, what each layer shows and does not; prints the chain heads, never the manifest's hash | sha256 and byte count |
 | `manifest.json` | the list of everything above, written last | it is the sealing surface; nothing lists it |
 
@@ -50,7 +57,7 @@ Never inside: file contents. The tool holds fingerprints of the files the agent 
 | `format` | `"loxodonta-package/1"`. The verifier refuses any other tag (`UNSUPPORTED-FORMAT`). The receipt format inside stays `0.1`. |
 | `packed` | when the package was assembled, UTC. Testimony. |
 | `tool` | which supervisor packed it, e.g. `"loxodonta supervisor 0.2.0"`. Testimony. |
-| `unit` | `{"kind": "session", "session": "<id>", "project": "<drawer name>"}`. Displayed convenience; testimony. |
+| `unit` | `{"kind": "session", "session": "<id>", "project": "<drawer name>"}` for a session; `{"kind": "drawer", "project": "<drawer name>", "sessions": N}` for a drawer. Displayed convenience; testimony. The verifier prints whatever the unit holds and judges none of it. |
 | `chains` | one row per chain, in the package: `path`, `head` (the last entry's `entry_hash`), `entries` (line count), `anchors` (the sidecar's file name, or `null`). |
 | `artifacts` | one row per post-close artifact: `path`, `sha256` of its bytes, `bytes`. Sidecars, `project.json`, `witness.json`, `README.md`. |
 | `seals` | the seals the package should carry. `[]` in this format's first slice; `"anchor"` and `"signature"` join when `--anchor` and `--sign` do. A declared seal that is absent is `SEAL-MISSING`, never a silent downgrade (ADR-0007). |
@@ -58,6 +65,20 @@ Never inside: file contents. The tool holds fingerprints of the files the agent 
 Why two ways of listing (ADR-0026 ruling 3). A chain's head is already its commitment, and the verifier recomputes it by walking; listing chains by file hash would add a second commitment to the same fact, and a false one on Windows, where `read_log` splits lines tolerantly and an unzip that turns `\n` into `\r\n` changes the bytes without changing the head. The post-close artifacts have no chain to commit them, so the manifest's sha256 is their only commitment: one commitment home per fact.
 
 Why the README never prints the manifest's hash (ADR-0007 ruling 2). The manifest lists the README, so the README is written first, and nothing may point at what is sealed last; a README that carried the hash would be a cycle. The README may print the chain heads and the session id, which exist before it does.
+
+### The witness snapshot
+
+`witness.json`, one JSON object, testimony (grade 0), listed by sha256 like any post-close artifact. Its fields:
+
+| Field | Meaning |
+|---|---|
+| `testimony` | one sentence saying what the file is and that the verifier draws no verdict from it |
+| `scanned` | when the packing scan ran, UTC |
+| `unit` | the manifest's `unit`, repeated |
+| `completeness` | a list, one row per session in the package's order, whatever the unit: the supervisor's completeness row (`repo`, `session`, `state`, `tools`, `receipts`, `deficit`, `words`). A session the scan gave no row is `{"session": "<id>"}` and nothing more. |
+| `scan` | `exit`, the scan's exit code, and `chains`: one row per packaged chain, `log`, `verdict`, `entries`, `anchored` |
+
+Why a list, and the same list for a session package: the scan's own report lists completeness rows the same way; the order is the package's, which a map keyed by session would carry only by convention; and a session package is then the one-row case of one shape rather than a second shape a reader must branch on.
 
 ## 5. Verifying
 
