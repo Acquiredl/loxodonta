@@ -31,10 +31,11 @@ SESSION = "d0d0d0d0-aaaa-bbbb-cccc-000000000001"
 SIDECAR = "manifest.json.anchors.jsonl"
 
 
-class SealedPackageTest(PackageCase):
-    """One session, recorded through the hook, its chain head anchored
-    (a completed proof in the chain's sidecar); a fake calendar that
-    answers pending and can complete on request."""
+class AnchoredStoreCase(PackageCase):
+    """The fixture the seal tests share (this file's and the signature's):
+    one session, recorded through the hook, its chain head anchored (a
+    completed proof in the chain's sidecar); a fake calendar that answers
+    pending and can complete on request. No tests of its own."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -102,6 +103,10 @@ class SealedPackageTest(PackageCase):
     def sidecar_records(folder):
         return [json.loads(line) for line in
                 (folder / SIDECAR).read_text("utf-8").splitlines()]
+
+
+class SealedPackageTest(AnchoredStoreCase):
+    """The anchor seal, built and judged."""
 
     def test_anchor_posts_the_manifest_digest_and_declares_the_seal(self):
         # ADR-0026 ruling 4: the manifest's sha256 goes to the calendars

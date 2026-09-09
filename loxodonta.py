@@ -1445,9 +1445,9 @@ PACKAGE_MAX_BYTES = 1 << 30   # a zip declaring more unpacked is refused unopene
 # order: a refusal, a broken chain, a seal or an anchor that is not this
 # history, a transcript that no longer holds, an artifact off its manifest.
 # Every finding names its mechanism, and the verdict line is the gravest
-# finding's word (ADR-0007 ruling 5); the seal rungs (`+ ANCHORED`, and
-# `+ SIGNED` when the signature slice lands) join the ceiling by adding
-# words, and never by hiding a finding.
+# finding's word (ADR-0007 ruling 5); the seal rungs (`+ ANCHORED`, then
+# `+ SIGNED (key: ...)`) join the ceiling by adding words, and never by
+# hiding a finding.
 PACKAGE_GRAVITY = (4, 1, 3, 5, 2)
 PACKAGE_WORDS = {
     "UNSUPPORTED-FORMAT": "a chain in this package is a format this verifier "
@@ -1471,32 +1471,15 @@ PACKAGE_WORDS = {
 }
 CHAIN_WORDS = {1: "CHAIN-BROKEN", 3: "ANCHOR-MISMATCH",
                4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED"}
-# The ceiling verdict is printed with its limit (ADR-0007 ruling 5), and
-# the residual-trust line says what still rests on the issuer's word. Both
-# depend on what the declared seals earned: nothing, an anchor still
-# pending, or an anchor that reached a block.
-CEILING_LIMIT = {
-    "unsealed": "; indistinguishable from a wholesale regeneration, since "
-                "no seal is declared",
-    "pending": "; indistinguishable from a wholesale regeneration until "
-               "its manifest anchor completes",
-    "anchored": ", and the manifest existed by Bitcoin block {height}",
-}
-RESIDUAL_TRUST = {
-    "unsealed": "residual trust: this package is unaltered since it was "
-                "packed. That the record inside is true and complete, and "
-                "that it existed before today, rests on the issuer's word "
-                "alone, since no seal is declared.",
-    "pending": "residual trust: this package is unaltered since it was "
-               "packed. That the record inside is true and complete, and "
-               "that it existed before today, rests on the issuer's word "
-               "alone until its manifest anchor completes.",
-    "anchored": "residual trust: this package is unaltered since it was "
-                "packed, and it existed by Bitcoin block {height} if the "
-                "merkle root printed beside that block is the block's. That "
-                "the record inside "
-                "is true and complete rests on the issuer's word alone.",
-}
+# The issuer signature (ADR-0008, ADR-0026 ruling 4) is made and judged
+# by ssh-keygen, never by this file: the stdlib has no Ed25519, and the
+# tool is on every machine since OpenSSH 8.0. The namespace is the
+# supervisor's too, so a signature made for anything else never verifies
+# here; the principal labels the one-line allowed-signers file the
+# verifier writes for ssh-keygen and is never printed, since the verifier
+# names a key by its fingerprint and nothing else (ADR-0008 ruling 4).
+SIGNATURE_NAMESPACE = "loxodonta-package"
+SIGNATURE_PRINCIPAL = "issuer"
 
 
 def bare_name(value):
@@ -1740,21 +1723,101 @@ def judge_manifest_anchor(folder):
     return findings, height
 
 
+def key_fingerprint(public_key):
+    """The SHA256 fingerprint of a public key file, as ssh-keygen prints
+    it (`ssh-keygen -lf`), or None when the file is not a key it reads.
+    The fingerprint is the key's identity (ADR-0008 ruling 6); the
+    comment ssh-keygen prints beside it is a name, and stays unread."""
+    listed = subprocess.run(["ssh-keygen", "-lf", public_key],
+                            capture_output=True, encoding="utf-8",
+                            errors="replace")
+    words = listed.stdout.split()
+    if listed.returncode != 0 or len(words) < 2:
+        return None
+    return words[1]
+
+
+def judge_manifest_signature(folder):
+    """The issuer signature (ADR-0008; ADR-0026 rulings 4 and 6), judged
+    by ssh-keygen and never by this file: the shipped public key becomes
+    a one-line allowed-signers file under a fixed principal, and
+    `ssh-keygen -Y verify` says whether manifest.json.sig is that key's
+    signature over this manifest's exact bytes. Returns (findings, the
+    key's fingerprint when the signature holds, else None, and whether
+    the seal was judged at all): a recipient without ssh-keygen is told
+    so, and the rung is neither earned nor failed."""
+    manifest = os.path.join(folder, "manifest.json")
+    signature, public_key = manifest + ".sig", manifest + ".pub"
+    absent = [os.path.basename(p) for p in (signature, public_key)
+              if not os.path.isfile(p)]
+    if absent:
+        print(f"seal signature: SEAL-MISSING: {' and '.join(absent)} not in "
+              "this package — the manifest declares a signature it does not "
+              "carry")
+        return [(3, "SEAL-MISSING")], None, True
+    try:
+        fingerprint = key_fingerprint(public_key)
+        if fingerprint is None:
+            print("seal signature: SEAL-INVALID: manifest.json.pub is not a "
+                  "public key ssh-keygen reads — a signature under no key "
+                  "verifies nothing")
+            return [(3, "SEAL-INVALID")], None, True
+        with tempfile.TemporaryDirectory() as scratch:
+            # The allowed-signers line ssh-keygen wants: a principal, then
+            # the key's two tokens, type and key. The shipped file's own
+            # tokens and nothing else, so what verifies is what shipped.
+            allowed = os.path.join(scratch, "allowed_signers")
+            with open(public_key, encoding="utf-8", errors="replace") as f:
+                key = " ".join(f.readline().split()[:2])
+            with open(allowed, "w", encoding="utf-8", newline="\n") as f:
+                f.write(f"{SIGNATURE_PRINCIPAL} {key}\n")
+            with open(manifest, "rb") as shipped:
+                verified = subprocess.run(
+                    ["ssh-keygen", "-Y", "verify", "-f", allowed,
+                     "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
+                     "-s", signature],
+                    stdin=shipped, capture_output=True, encoding="utf-8",
+                    errors="replace")
+    except FileNotFoundError:
+        print("seal signature: not judged: ssh-keygen not on PATH — the rung "
+              "is neither earned nor failed; OpenSSH 8.0 or later carries "
+              "the tool, and this command judges the seal once it is found")
+        return [], None, False
+    if verified.returncode != 0:
+        reason = "; ".join(verified.stderr.strip().splitlines()) \
+            or "ssh-keygen gave no reason"
+        print(f"seal signature: SEAL-INVALID: {reason} — the signature is "
+              "not the shipped key's over this manifest's bytes")
+        return [(3, "SEAL-INVALID")], None, True
+    print(f"seal signature: SIGNED (key: {fingerprint}): the manifest, and "
+          "transitively every artifact it lists, was issued by the holder "
+          "of that key and has not changed since signing — compare the "
+          "fingerprint against a channel this package cannot rewrite")
+    return [], fingerprint, True
+
+
 def judge_seals(folder, manifest):
-    """Each declared seal against what the package carries: the anchor is
-    judged; a kind this verifier does not judge yet is named as such and
-    adds nothing to the verdict, so the recipient is never told a seal
-    was checked when it was not. Returns (findings, the block height the
-    manifest anchor reached, or None)."""
+    """Each declared seal against what the package carries, in the
+    declared order: the anchor and the signature are judged; a kind this
+    verifier does not know is named as such and adds nothing to the
+    verdict, so the recipient is never told a seal was checked when it
+    was not. Returns (findings, earned): what the seals earned toward
+    the rungs, as ceiling_lines reads it."""
     findings = []
-    height = None
+    earned = {"height": None, "key": None, "unjudged": []}
     for kind in manifest["seals"]:
+        found = []
         if kind == "anchor":
-            found, height = judge_manifest_anchor(folder)
-            findings += found
+            found, earned["height"] = judge_manifest_anchor(folder)
+        elif kind == "signature":
+            found, earned["key"], judged = judge_manifest_signature(folder)
+            if not judged:
+                earned["unjudged"].append("its signature was not judged, "
+                                          "since ssh-keygen is not on PATH")
         else:
-            print(f"seal {kind}: declared; this verifier does not judge it yet")
-    return findings, height
+            print(f"seal {kind}: declared; this verifier does not judge it")
+        findings += found
+    return findings, earned
 
 
 def seal_files(manifest):
@@ -1763,6 +1826,8 @@ def seal_files(manifest):
     files = set()
     if "anchor" in manifest["seals"]:
         files.add(anchors_path("manifest.json"))
+    if "signature" in manifest["seals"]:
+        files.update(("manifest.json.sig", "manifest.json.pub"))
     return files
 
 
@@ -1786,6 +1851,67 @@ def gravest(findings):
             if found == code:
                 return code, word
     return 0, "SELF-CONSISTENT"
+
+
+def series(items):
+    """"A", "A, and B", "A, B, and C": one sentence's list."""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+def ceiling_lines(manifest, earned):
+    """The two closing lines of a package with no finding, the residual
+    trust and then the verdict, built from what the declared seals
+    earned: `height`, the block the manifest anchor reached; `key`, the
+    fingerprint the signature verified under; `unjudged`, the seals this
+    machine could not judge. Each rung adds its words in ADR-0007's
+    order, the anchor (when) before the signature (which key), the
+    signature's in ADR-0008's caged sentence and no other; what no seal
+    earned is named as resting on the issuer's word (ADR-0026 ruling 6).
+    The ceiling verdict carries its limit: what a regeneration would
+    also produce, and why the rung is unearned."""
+    height, key, seals = earned["height"], earned["key"], manifest["seals"]
+    rungs, given, trusted = "", "", ""
+    unsaid = ["the record inside is true and complete"]
+    if height is not None:
+        rungs += " + ANCHORED"
+        given += f", and the manifest existed by Bitcoin block {height}"
+        trusted += (f", and it existed by Bitcoin block {height} if the "
+                    "merkle root printed beside that block is the block's")
+    else:
+        unsaid.append("that it existed before today")
+    if key is not None:
+        rungs += f" + SIGNED (key: {key})"
+        given += (", and the manifest, and transitively every artifact it "
+                  f"lists, was issued by the holder of key {key} and has not "
+                  "changed since signing")
+        trusted += (f", and it was issued by the holder of key {key} and has "
+                    "not changed since signing, if that fingerprint matches "
+                    "one the issuer published through a channel this "
+                    "package cannot rewrite")
+    else:
+        unsaid.append("which key packed it")
+    why = limit = ""
+    if height is None:
+        if not seals:
+            why = ", since no seal is declared"
+        elif "anchor" in seals:
+            why = " until its manifest anchor completes"
+        else:
+            why = ", since no anchor is declared"
+        alike = ("a regeneration re-signed with that key" if key
+                 else "a wholesale regeneration")
+        limit = f"; indistinguishable from {alike}{why}"
+    for note in earned["unjudged"]:
+        limit += f"; {note}"
+    trust = ("residual trust: this package is unaltered since it was packed"
+             f"{trusted}. That {series(unsaid)}{',' if len(unsaid) > 1 else ''}"
+             f" rests on the issuer's word alone{why}."
+             + "".join(f" {n[0].upper()}{n[1:]}." for n in earned["unjudged"]))
+    verdict = (f"SELF-CONSISTENT{rungs}: {PACKAGE_WORDS['SELF-CONSISTENT']}"
+               f"{given}{limit}")
+    return trust, verdict
 
 
 def judge_package(shown, folder):
@@ -1812,7 +1938,7 @@ def judge_package(shown, folder):
           "machine")
     if any([judge_artifact(folder, a) for a in manifest["artifacts"]]):
         findings.append((2, "ARTIFACT-DIVERGED"))
-    found, height = judge_seals(folder, manifest)
+    found, earned = judge_seals(folder, manifest)
     findings += found
     print_unlisted(folder, manifest)
     code, word = gravest(findings)
@@ -1821,16 +1947,11 @@ def judge_package(shown, folder):
         return code
     # The ceiling, with its limit and the residual trust, by what the
     # seals earned: `+ ANCHORED` is the manifest's anchor and no other's
-    # (ADR-0026 ruling 6).
-    if height is not None:
-        earned, rung = "anchored", " + ANCHORED"
-    elif "anchor" in manifest["seals"]:
-        earned, rung = "pending", ""
-    else:
-        earned, rung = "unsealed", ""
-    print(RESIDUAL_TRUST[earned].format(height=height))
-    print(f"{word}{rung}: {PACKAGE_WORDS[word]}"
-          f"{CEILING_LIMIT[earned].format(height=height)}")
+    # (ADR-0026 ruling 6), `+ SIGNED` names a fingerprint and never a
+    # name (ADR-0008 ruling 4).
+    trust, verdict = ceiling_lines(manifest, earned)
+    print(trust)
+    print(verdict)
     return 0
 
 
