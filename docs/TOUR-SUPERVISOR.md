@@ -112,7 +112,7 @@ and by which door, published or anchored, aged by the reader and painted
 in the anchor row with the unanchored head's own stale class. Never an
 alarm, never the exit code: a dead remote is a note in `left`, and the
 keeper tries again next turn. Off by default, like everything that
-leaves.
+leaves. A head reported unpublished may still land late, since the wait is bounded; the memo records confirmed departures only, so such a head is posted again, and a repeat in the channel is the honest cost of never standing the keeper down on a POST that may not have arrived.
 
 **The completeness witness** is the flagship claim (issue #22): pair
 what the harness transcript saw with what the chain received, per

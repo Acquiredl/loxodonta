@@ -278,6 +278,25 @@ class LeftReadingTest(ReceiverFixture):
         self.assertEqual(chain["left"], {"ts": None, "via": None})
         self.assertEqual(memo_of(never), [])
 
+    def test_an_anchored_heads_departure_is_its_first_record(self):
+        # An upgrade appends a second record for the same head, stamped
+        # when the proof completed; the head left when it was first
+        # submitted, and an idle chain must not read fresh because a
+        # calendar answered a poll.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-upgraded")
+        head = chain_head(log)
+        write_pending_anchor(log, head, submitted=ago(200000))
+        write_pending_anchor(log, head, submitted=ago(10))
+        sidecar = Path(str(log) + ".anchors.jsonl")
+        first = json.loads(sidecar.read_text("utf-8").splitlines()[0])["ts"]
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-upgraded")]
+        self.assertEqual(chain["left"], {"ts": first, "via": "anchored"})
+
     def test_a_dead_remote_is_a_note_in_left_and_never_the_exit(self):
         # The keeper's existing voice for aging heads: the failure is said
         # in the report, the exit code stays the chains' own, and no memo

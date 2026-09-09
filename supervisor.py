@@ -506,15 +506,25 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
 # posture as the anchor keeper: off by default, staleness quiet.
 
 def publish_url(value):
-    """argparse validator for --publish-url: a plain http or https URL.
-    The recorder's `publish` refuses anything else on its own command
-    line; refusing here too makes a bad URL a usage error (exit 64)
-    before the first tick, instead of a failure note on every tick."""
+    """argparse validator for --publish-url: the recorder's rule, twice
+    over, since the two files never import each other. A plain http or
+    https URL with nothing a shell could act on (a quote, a backtick, a
+    dollar sign, a backslash, whitespace): the recorder's `publish`
+    refuses anything else, so refusing here too makes a bad URL a usage
+    error (exit 64) before the first tick, never a failure note on
+    every tick."""
     parts = urlparse(value)
     if parts.scheme not in ("http", "https") or not parts.netloc:
         raise argparse.ArgumentTypeError(
             f"{value!r} is not an http or https URL")
+    if any(c in "\"'`$\\" or c.isspace() for c in value):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} holds a character a shell could act on (a quote, "
+            "a backtick, a dollar sign, a backslash, or whitespace)")
     return value
+
+
+PUBLISH_BACKSTOP = 60   # seconds; well past the recorder's own bound
 
 
 def keep_published(log, last_attempt, now, entries, cadence, url):
@@ -532,10 +542,22 @@ def keep_published(log, last_attempt, now, entries, cadence, url):
     head = ripe_head(entries, now, cadence)
     if not head or head in sidecar_heads(memo):
         return False, None, False
-    finished = subprocess.run(
-        [sys.executable, str(LOXODONTA), "publish", f"--log={log}", url],
-        capture_output=True, encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    try:
+        finished = subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", f"--log={log}", url],
+            capture_output=True, encoding="utf-8", timeout=PUBLISH_BACKSTOP,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    except subprocess.TimeoutExpired:
+        # The recorder bounds its own POST; this is the backstop above
+        # it, so one stuck publish can never hold a tick.
+        return True, ("publishing did not finish in time; the head stays "
+                      "unpublished and the keeper will try again"), True
+    if finished.returncode == 64:
+        # A usage exit is the URL refused, not the remote: retrying
+        # would never help, and the note must say so.
+        return True, ("publishing refused: the recorder would not take "
+                      "--publish-url as given; fix the URL (see "
+                      "`loxodonta publish --help`)"), True
     if finished.returncode != 0:
         # The recorder's stderr names the failure and never the URL, but
         # it is not repeated here: the note is the panel's, and one
@@ -554,15 +576,27 @@ def last_departure(log):
     voice: a timestamp the reader ages, never an alarm, never the exit.
     Both files are writer-reachable, so a fresh reading here proves
     nothing; a stale one is the reason to look."""
-    left = {"ts": None, "via": None}
-    newest = None
-    for via, suffix in (("published", ".published.jsonl"),
-                        ("anchored", ".anchors.jsonl")):
-        for record in sidecar_records(Path(str(log) + suffix)):
-            when = parse_when(record.get("ts"))
-            if when is not None and (newest is None or when > newest):
-                newest, left = when, {"ts": record["ts"], "via": via}
-    return left
+    departures = []   # (when, ts, via)
+    for record in sidecar_records(Path(str(log) + ".published.jsonl")):
+        when = parse_when(record.get("ts"))
+        if when is not None:
+            departures.append((when, record["ts"], "published"))
+    # An upgrade appends a second record for the same head, stamped
+    # when the proof completed, so a head's departure is its first
+    # record: the newest record would make an idle chain read fresh
+    # every time a calendar answered a poll.
+    first = {}
+    for record in sidecar_records(Path(str(log) + ".anchors.jsonl")):
+        when = parse_when(record.get("ts"))
+        head = record.get("head")
+        if when is not None and head is not None \
+                and (head not in first or when < first[head][0]):
+            first[head] = (when, record["ts"])
+    departures += [(when, ts, "anchored") for when, ts in first.values()]
+    if not departures:
+        return {"ts": None, "via": None}
+    _, ts, via = max(departures, key=lambda d: d[0])
+    return {"ts": ts, "via": via}
 
 
 def assess_anchors(detail, entries):
@@ -1394,11 +1428,15 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                          anchor_every, calendars)
             if tick else (False, None, False))
         posted, publish_note, publish_failed = (
-            keep_published(log, keeper.get(relpath), now, entries,
+            keep_published(log, keeper.get("publish:" + relpath), now, entries,
                            publish_every, publish_url)
             if tick else (False, None, False))
-        if attempted or posted:
+        # One throttle per keeper: an anchor attempt never delays the
+        # publish keeper's turn, nor the other way round.
+        if attempted:
             keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if posted:
+            keeper["publish:" + relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         verdict, exit_code, detail = verify(log)
         stood_down = exit_code != 0 and superseded(log, detail)
         chain = {
@@ -1660,10 +1698,12 @@ def cmd_adopt(args):
             record.write_text(json.dumps(
                 {"path": str(project.resolve()).replace(os.sep, "/")})
                 + "\n", encoding="utf-8")
-        sidecar = log.parent / (log.name + ".anchors.jsonl")
         marker = log.parent / UNLISTED_NAME
         shutil.move(str(log), str(drawer / log.name))
-        if sidecar.exists():
+        for suffix in SIDECAR_SUFFIXES:
+            sidecar = log.parent / (log.name + suffix)
+            if not sidecar.exists():
+                continue
             if (drawer / sidecar.name).exists():
                 # Proofs left behind are still proofs; say so — silence
                 # here would read as "everything travelled".

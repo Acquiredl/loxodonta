@@ -567,8 +567,21 @@ def judge_proof(head_hex, proof_bytes):
     raise ProofError("proof contains no attestation this verifier can judge")
 
 
+def sidecar_path(log, suffix):
+    """A file beside a chain that is not a chain: the anchor sidecar,
+    the publish memo. Named after the chain so the two travel together."""
+    return log + suffix
+
+
 def anchors_path(log):
-    return log + ".anchors.jsonl"
+    return sidecar_path(log, ".anchors.jsonl")
+
+
+def append_sidecar_record(path, record):
+    """One JSON line appended to a sidecar, compact and sorted, the same
+    shape every sidecar record has."""
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 
 
 def read_anchor_records(log):
@@ -598,8 +611,7 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
         "calendar": calendar,
         "proof": base64.b64encode(proof_bytes).decode("ascii"),
     }
-    with open(anchors_path(log), "a", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    append_sidecar_record(anchors_path(log), record)
 
 
 def calendar_request(url, data=None, timeout=15):
@@ -839,9 +851,17 @@ def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
         return
     if last is None:
         return
-    body = json.dumps(published_head(last["entry_hash"], last["n"],
-                                     session)).encode("utf-8")
-    post_bounded(url, body, timeout)  # an exit hook that complains is noise
+    body = published_head(last["entry_hash"], last["n"], session)
+    failure = post_bounded(url, json.dumps(body).encode("utf-8"), timeout)
+    if failure is not None:
+        return  # an exit hook that complains is noise
+    # The memo says one was sent, the same note the publish command
+    # leaves, so the keeper never posts this head again.
+    try:
+        append_published_record(log, body["head"], body["n"], body["ts"],
+                                body["event"])
+    except OSError:
+        return
 
 
 # --- The publish command (ADR-0025 ruling 3, the keeper's half) --------------
@@ -855,7 +875,7 @@ PUBLISH_TIMEOUT = 15.0   # seconds; a keeper's turn, like one calendar ask
 
 
 def published_path(log):
-    return log + ".published.jsonl"
+    return sidecar_path(log, ".published.jsonl")
 
 
 def append_published_record(log, head, n, ts, event):
@@ -866,9 +886,8 @@ def append_published_record(log, head, n, ts, event):
     record; this is the note that says one was sent. It holds the head,
     the entry count, the time, and the event kind, and never the URL: a
     webhook URL is a credential."""
-    record = {"head": head, "n": n, "ts": ts, "event": event}
-    with open(published_path(log), "a", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    append_sidecar_record(published_path(log),
+                          {"head": head, "n": n, "ts": ts, "event": event})
 
 
 def chain_session(log):
