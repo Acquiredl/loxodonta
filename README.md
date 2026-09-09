@@ -138,7 +138,7 @@ python loxodonta.py explain           # LLM narration of the log (testimony, not
 
 One honest note on timing: an anchor hardens history **up to the anchored head**; entries written since your last anchor are protected by detection only until the next one. So anchor at meaningful moments (end of a session, end of a pipeline run), or let the hook do it: `python loxodonta.py install-hook --anchor-at-session-end` anchors every session's head when it ends, quietly, and a 32-byte digest is the only thing that leaves the machine. Either way, copy the sidecar proof file somewhere the agent can't reach. A proof in your hands is evidence no rewrite on the machine can touch.
 
-**Exit codes**, since scripts and cron will read them: `0` valid, `1` chain broken, `2` a logged file changed since its receipt (`verify --files`), `3` this is not the recorded history (head or anchor mismatch, the gravest tier). Argparse usage errors also exit `2`, so scripts should trust the stdout verdict line, never the exit code alone.
+**Exit codes**, since scripts and cron will read them: `0` valid, `1` chain broken, `2` a logged file changed since its receipt (`verify --files`), `3` this is not the recorded history (head or anchor mismatch, the gravest tier). Usage errors (a wrong flag, a malformed value) exit `64`, a number no verdict uses. Read the stdout verdict line anyway: the code says how grave, the line says why.
 
 It's one Python file, no dependencies, six core commands, and you can read the whole thing top to bottom in a sitting. That's a design constraint, not an accident: a tool whose job is auditing agents should itself be auditable in an afternoon.
 

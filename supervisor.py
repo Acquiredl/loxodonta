@@ -152,7 +152,7 @@ def verify(log):
     # supervisor that missed its one job.
     result = subprocess.run(
         [sys.executable, str(LOXODONTA), "verify", "--anchors",
-         "--log", str(log)],
+         f"--log={log}"],
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     lines = result.stdout.strip().splitlines()
@@ -449,7 +449,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     if sidecar.exists():
         finished = subprocess.run(
             [sys.executable, str(LOXODONTA), "anchor", "--upgrade",
-             "--log", str(log)],
+             f"--log={log}"],
             capture_output=True, encoding="utf-8", env=env)
         attempted = True
         if finished.returncode != 0:
@@ -461,7 +461,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
         ripe = born is not None and (now - born).total_seconds() >= cadence
         if head and ripe and head not in sidecar_heads(sidecar):
             command = [sys.executable, str(LOXODONTA), "anchor",
-                       "--log", str(log)]
+                       f"--log={log}"]
             for calendar in calendars:
                 command += ["--calendar", calendar]
             finished = subprocess.run(command, capture_output=True,
@@ -946,7 +946,7 @@ def keep_tails(sessions):
         try:
             done = subprocess.run(
                 [sys.executable, str(LOXODONTA), "hook",
-                 "--log-dir", row["home"]],
+                 f"--log-dir={row['home']}"],
                 input=payload, capture_output=True, timeout=60)
         except (OSError, subprocess.SubprocessError):
             continue
@@ -2284,7 +2284,7 @@ def cmd_verify(args):
         return code
     log = match[0]
     judged = subprocess.run(
-        [sys.executable, str(LOXODONTA), "verify", "--log", str(log)],
+        [sys.executable, str(LOXODONTA), "verify", f"--log={log}"],
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     print(f"chain: {log.as_posix()}")
@@ -5601,13 +5601,32 @@ class VersionAction(argparse.Action):
         parser.exit()
 
 
+EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
+
+
+class UsageParser(argparse.ArgumentParser):
+    """argparse, with usage errors on an exit of their own, the recorder's
+    class twice over. A wrong flag, a missing argument, or a malformed
+    value exits 64 instead of argparse's stock 2, so scan's 5, 6, 7 and
+    verify's 0..5 are never an argparse error (ADR-0026 ruling 7). The
+    message is argparse's, unchanged, on stderr. Subparsers inherit this
+    class, so every command speaks the same number."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def main(argv):
-    parser = argparse.ArgumentParser(prog="supervisor",
-                                     description=__doc__.splitlines()[0])
+    parser = UsageParser(prog="supervisor",
+                         description=__doc__.splitlines()[0])
     parser.add_argument("--version", action=VersionAction,
                         help="print tool version, format version, and "
                              "the checkout's commit, then exit")
     sub = parser.add_subparsers(dest="command", required=True)
+    # Parents only donate arguments; the parser that errors is the
+    # subparser's, and add_subparsers gives every subparser `parser`'s
+    # class, so the helpers below stay plain.
     watching = argparse.ArgumentParser(add_help=False)
     watching.add_argument("--witness", default=str(WITNESS_ROOT),
                           help="the harness transcript layout (the "

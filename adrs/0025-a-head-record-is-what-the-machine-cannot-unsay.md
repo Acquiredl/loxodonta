@@ -78,7 +78,8 @@ certainty. Completeness stays the integration's job (SPEC §8).
    (ADR-0024 ruling 1). The order inside the session-end budget becomes
    commitment, publish, anchor: ADR-0024 put the commitment first so a slow
    calendar could never cost it, and the same rule says a slow calendar
-   must never cost the one POST that takes half a second. Quiet and
+   must never cost the one POST, which usually answers within a second
+   and is cut off at three. Quiet and
    best-effort like the anchor; staleness is the supervisor's to surface.
    The supervisor's keeper publishes on `--publish-every`, beside
    `--anchor-every`, for always-on machines and for sessions that never
