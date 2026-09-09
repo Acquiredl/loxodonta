@@ -201,6 +201,22 @@ class TranscriptVerifyTest(ReceiptsCliTest):
         return run_receipts("verify", "--transcript", str(self.transcript),
                             *extra, cwd=self.workdir)
 
+    def test_the_tail_after_the_furthest_commitment_is_stated(self):
+        # The bytes past the furthest commitment are the window the chain
+        # never vouched for; the verifier says how many, so a reader knows
+        # what a package's manifest alone commits.
+        page_one = b"page one\n"
+        both = b"page one\npage two\n"
+        self.transcript.write_bytes(both)
+        self.build("step 1", self.commitment(page_one))
+
+        result = self.judge()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"transcript tail: {len(both) - len(page_one)} bytes",
+                      result.stdout)
+        self.assertIn("(entry 2)", result.stdout)
+
     def test_every_commitment_is_judged_and_holds(self):
         page_one = b"page one\n"
         both = b"page one\npage two\n"

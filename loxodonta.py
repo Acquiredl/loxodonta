@@ -230,8 +230,13 @@ def cmd_init(args):
 
 
 def sha256_file(path):
+    """sha256 of a file's bytes, read in chunks: a packaged transcript can
+    run to hundreds of MB, and nothing here needs it in memory at once."""
+    digest = hashlib.sha256()
     with open(path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def files_base(log):
@@ -1275,6 +1280,14 @@ def judge_prefixes(marks, transcript_path):
                 print(f"COMMITMENT DIVERGED (entry {n}): the first "
                       f"{count} bytes no longer match the committed hash")
                 diverged = True
+        if pos >= count:
+            # The bytes past the last commitment are the honest window:
+            # committed by nothing in this chain, stated so the reader
+            # knows how much of the transcript the chain never vouched
+            # for (a package's manifest commits them as of packaging).
+            rest = handle.seek(0, os.SEEK_END) - pos
+            print(f"transcript tail: {rest} bytes after the last commitment "
+                  f"(entry {n}), uncommitted by the chain")
     return diverged
 
 
@@ -1447,8 +1460,10 @@ PACKAGE_WORDS = {
                     "manifest (the seal line above says why)",
     "SEAL-MISSING": "a seal the manifest declares is not in this package "
                     "(the seal line above says which)",
-    "TRANSCRIPT-DIVERGED": "a chain's transcript commitments contradict each "
-                           "other (its lines above say where)",
+    "TRANSCRIPT-DIVERGED": "a chain's transcript commitments do not hold: they "
+                           "contradict each other, or the packaged transcript "
+                           "differs from what they committed (its lines above "
+                           "say which)",
     "ARTIFACT-DIVERGED": "something in this package is not what the manifest "
                          "lists (the lines above say what)",
     "SELF-CONSISTENT": "every chain walks clean and every artifact matches "
@@ -1514,6 +1529,12 @@ def manifest_refusal(manifest):
                 and isinstance(listing.get("entries"), int)):
             return ("manifest.json lists a chain without a bare file name, "
                     "a head, and an entry count")
+        # A transcript named on a chain (--transcript, ADR-0026 ruling 2)
+        # is a file of this package like any other: a bare name only.
+        if listing.get("transcript") is not None \
+                and not bare_name(listing["transcript"]):
+            return ("manifest.json names a transcript on a chain that is "
+                    "not a bare file name")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
         return "manifest.json has no artifacts list"
@@ -1523,6 +1544,15 @@ def manifest_refusal(manifest):
                 and isinstance(listing.get("bytes"), int)):
             return ("manifest.json lists an artifact without a bare file "
                     "name, a sha256, and a byte count")
+    # The transcript's bytes are committed by the artifacts list and
+    # nowhere else (one commitment home per fact), so a chain naming a
+    # transcript the artifacts do not list names a file nothing vouches for.
+    listed = {listing["path"] for listing in artifacts}
+    for listing in chains:
+        named = listing.get("transcript")
+        if named is not None and named not in listed:
+            return (f"manifest.json names transcript {named} on a chain, "
+                    "and its artifacts do not list it")
     seals = manifest.get("seals")
     if not isinstance(seals, list) or not all(isinstance(k, str) for k in seals):
         return ("manifest.json declares no seal set; a stripped seal is "
@@ -1565,9 +1595,9 @@ def print_manifest_summary(path, manifest):
 
 def walked_listing(log):
     """What the walk says about a packaged chain: its head, its line
-    count, and how many file references its entries carry. The same
-    walk verify uses; a chain is judged by walking, never by file hash
-    (ADR-0026 ruling 3)."""
+    count, how many file references its entries carry, and how many
+    transcript commitments it holds. The same walk verify uses; a chain
+    is judged by walking, never by file hash (ADR-0026 ruling 3)."""
     lines = read_log(log)
     entries, _, _ = walk(lines)
     head = None
@@ -1578,7 +1608,8 @@ def walked_listing(log):
         if isinstance(entry.get("entry_hash"), str):
             head = entry["entry_hash"]
         references += len(entry.get("files") or [])
-    return head, len(lines), references
+    commitments = len(transcript_commitments(entries)[0])
+    return head, len(lines), references, commitments
 
 
 def judge_chain(folder, listing):
@@ -1593,11 +1624,29 @@ def judge_chain(folder, listing):
     if not os.path.isfile(log):
         print(f"{name}: MISSING (listed in the manifest, not in the package)")
         return [(2, "ARTIFACT-DIVERGED")], 0
+    # The packaged transcript the listing names, judged the way `verify
+    # --transcript PATH` judges one: every commitment against its prefix,
+    # the recorder's lines verbatim (ADR-0026 ruling 5, ADR-0017).
+    named = listing.get("transcript")
+    transcript = os.path.join(folder, named) if named else None
+    if transcript is not None and not os.path.isfile(transcript):
+        # The artifact judge reports the missing file; here only its
+        # bare name, never a path of this machine.
+        print(f"{named}: MISSING (named on this chain, not in the package); "
+              "its commitments go unjudged")
+        transcript = None
     code = cmd_verify(argparse.Namespace(log=log, files=False,
-                                         expect_head=None, transcript=None,
-                                         anchors=True))
+                                         expect_head=None,
+                                         transcript=transcript, anchors=True))
     findings = [(code, CHAIN_WORDS[code])] if code in CHAIN_WORDS else []
-    walked, count, references = walked_listing(log)
+    walked, count, references, commitments = walked_listing(log)
+    if transcript is None and commitments and code != 5:
+        # The chain committed a transcript this package does not carry:
+        # the recorder's note for an absent transcript, and no verdict
+        # from it (ADR-0017: absence is a note, never a verdict).
+        print(f"TRANSCRIPT-UNRESOLVED: {commitments} transcript "
+              "commitment(s) in this chain, no transcript in this package "
+              "— commitments unjudgeable; chain verdict unaffected")
     if walked != head or count != listing["entries"]:
         print(f"{name}: off the manifest: walks to head "
               f"{(walked or 'none')[:12]}… with {count} lines, listed as "
