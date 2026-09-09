@@ -648,6 +648,70 @@ class HookStorePackageTest(PackageCase):
         self.assertIn("no drawer", result.stderr)
         self.assertFalse(list(self.work.iterdir()))
 
+    def test_a_repository_of_its_own_under_worktrees_is_not_packaged(self):
+        # A full repository checked out under <repo>/.claude/worktrees/ is
+        # not this repository's harness worktree: its .git is a folder,
+        # not a worktree's .git file, and its history is its own.
+        mystery = self.project / ".claude" / "worktrees" / "mystery"
+        (mystery / ".git").mkdir(parents=True)
+        self.hook(SUB_SESSION, "Bash", {"command": "someone else's work"},
+                  project=mystery)
+        folder = self.work / "pkg"
+
+        result = self.package("--repo", str(self.project), "--folder",
+                              "--out", str(folder))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = self.manifest_of(folder)
+        self.assertEqual([c["path"] for c in manifest["chains"]],
+                         [self.chain.name, self.sibling.name])
+        self.assertNotIn(SUB_SESSION, (folder / "README.md").read_text("utf-8"))
+
+    def test_the_drawer_package_is_named_for_the_drawer_folder(self):
+        # The slug is safe on every filesystem and hash-suffixed; the
+        # display name stays in the README.
+        result = self.package("--repo", str(self.project))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        slug = self.chain.parent.name
+        self.assertTrue((self.work / f"loxodonta-package-{slug}.zip").exists(),
+                        list(self.work.iterdir()))
+        self.assertIn(slug, result.stdout)
+
+    def test_an_empty_selector_is_refused_not_read_as_the_drawer(self):
+        result = self.package("")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("neither a session", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_a_drawer_that_holds_no_chain_says_so(self):
+        for log in (self.chain, self.sibling, self.sidecar):
+            log.unlink()
+
+        result = self.package("--repo", str(self.project))
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("holds no chain", result.stderr)
+        self.assertNotIn("adopt", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_the_worktree_note_names_project_json_only_when_it_travels(self):
+        (self.chain.parent / "project.json").unlink()
+        self.worktree_drawer()
+        folder = self.work / "pkg"
+
+        result = self.package("--repo", str(self.project), "--folder",
+                              "--out", str(folder))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((folder / "project.json").exists())
+        readme = (folder / "README.md").read_text("utf-8")
+        note = next(l for l in readme.splitlines()
+                    if f"session `{WORKTREE_SESSION}`" in l)
+        self.assertIn("relative to that worktree", note)
+        self.assertNotIn("project.json", note)
+
     def test_siblings_travel_together_and_anchor_lines_print_verbatim(self):
         result = self.package(SESSION, "--folder", "--out",
                               str(self.work / "pkg"))

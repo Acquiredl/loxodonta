@@ -128,23 +128,18 @@ Usage errors are to exit `64` (sysexits `EX_USAGE`) in both tools, so a verdict 
 The demo store (`python tools/demo_store.py --home <dir>`) holds a session that reads an injected page, reads `.env`, posts it off the machine, and switches the recorder off (`docs/demo/bad-day-session.jsonl`). Packaged and verified on a machine that is not the one that recorded it:
 
 ```
-$ python supervisor.py package b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907 --folder
-written: loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907 (session b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907, 1 chain(s), 5 files)
-verify: python "loxodonta.py" verify-package "loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907"
-
-$ python loxodonta.py verify-package loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907
 package: loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907
 format: loxodonta-package/1
-packed: 2026-09-08T22:19:08Z by loxodonta supervisor 0.2.0 (testimony)
+packed: 2026-09-09T04:11:33Z by loxodonta supervisor 0.2.0 (testimony)
 unit: kind session, session b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907, project todo
 contents: 1 chain(s), 3 artifact(s), seals: none declared
 chain: receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl (manifest: head 751d054dfeff…, 6 entries)
 NO-ANCHORS: loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907/receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl.anchors.jsonl not found — anchoring is optional; run `loxodonta anchor` to add one
 VALID
 file references: 1 recorded, not checkable off the machine
-project.json: matches the manifest (sha256 1bcb3a94da77…, 152 bytes)
-witness.json: matches the manifest (sha256 86d42238052e…, 900 bytes) (testimony: the packing machine's reading, unaltered; no verdict is drawn from it)
-README.md: matches the manifest (sha256 78fa5f2c4c92…, 2928 bytes)
+project.json: matches the manifest (sha256 3076b53b4813…, 148 bytes)
+witness.json: matches the manifest (sha256 07f2525caddd…, 999 bytes) (testimony: the packing machine's reading, unaltered; no verdict is drawn from it)
+README.md: matches the manifest (sha256 656c8efc9c08…, 2929 bytes)
 residual trust: this package is unaltered since it was packed. That the record inside is true and complete, and that it existed before today, rests on the issuer's word alone, since no seal is declared.
 SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest; indistinguishable from a wholesale regeneration, since no seal is declared
 ```
@@ -156,18 +151,37 @@ The manifest the verifier judged against:
 ```json
 {
   "format": "loxodonta-package/1",
-  "packed": "2026-09-08T22:19:08Z",
+  "packed": "2026-09-09T04:11:33Z",
   "tool": "loxodonta supervisor 0.2.0",
-  "unit": {"kind": "session", "session": "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907", "project": "todo"},
+  "unit": {
+    "kind": "session",
+    "session": "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907",
+    "project": "todo"
+  },
   "chains": [
-    {"path": "receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl",
-     "head": "751d054dfefff992437ec1e9ff7f326b0cc5d745cd60097a98c3421a7cc0555e",
-     "entries": 6, "anchors": null}
+    {
+      "path": "receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl",
+      "head": "751d054dfefff992437ec1e9ff7f326b0cc5d745cd60097a98c3421a7cc0555e",
+      "entries": 6,
+      "anchors": null
+    }
   ],
   "artifacts": [
-    {"path": "project.json", "sha256": "1bcb3a94da77…", "bytes": 152},
-    {"path": "witness.json", "sha256": "86d42238052e…", "bytes": 900},
-    {"path": "README.md", "sha256": "78fa5f2c4c92…", "bytes": 2928}
+    {
+      "path": "project.json",
+      "sha256": "3076b53b4813572928b66f8f0e196e4b1cd77257dfe2127aeba045b9f3b340fb",
+      "bytes": 148
+    },
+    {
+      "path": "witness.json",
+      "sha256": "07f2525caddd65331c147ceceaa402eede1925d0570246132ec84cfa003d1cd3",
+      "bytes": 999
+    },
+    {
+      "path": "README.md",
+      "sha256": "656c8efc9c089c224c0d31264020a8a5c17054146a3c465714e64cf6cd1df4de",
+      "bytes": 2929
+    }
   ],
   "seals": []
 }

@@ -1864,9 +1864,14 @@ def main_repo_of(project):
 
 
 def invoking_repo(args):
-    return main_repo_of(Path(args.repo
-                             or os.environ.get("CLAUDE_PROJECT_DIR")
-                             or Path.cwd()).resolve())
+    """The repository a recall or package command speaks of: --repo, else
+    CLAUDE_PROJECT_DIR, else the current directory, spelled the way the
+    recorder spells it when it slugs a drawer (an absolute path with any
+    link left as typed, ADR-0011), then a worktree resolved to its
+    repository. Resolving links here and not there would hash two names
+    for one drawer."""
+    spoken = args.repo or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()
+    return main_repo_of(Path(os.path.abspath(str(spoken))))
 
 
 def store_home():
@@ -1954,9 +1959,19 @@ def worktree_drawers(repo):
         except (OSError, ValueError, AttributeError):
             continue
         spelled = os.path.normcase(str(recorded)).replace(os.sep, "/")
-        if spelled.startswith(prefix):
+        if spelled.startswith(prefix) and not own_repository(recorded):
             found.append(drawer)
     return found
+
+
+def own_repository(path):
+    """True when `path` still exists and is a repository of its own: a
+    `.git` folder, where a harness worktree has a `.git` file. Checked
+    out under another repository's .claude/worktrees/, such a folder is
+    not that repository's worktree and its history is not that
+    repository's. A pruned worktree's folder is gone, so it keeps the
+    prefix rule above."""
+    return os.path.isdir(os.path.join(str(path), ".git"))
 
 
 def repo_drawers(repo):
@@ -3109,17 +3124,21 @@ WITNESS_WORDS = (
     "(ADR-0026).")
 
 
-def store_sessions():
-    """{session: [chains]} over every drawer in the store, siblings
-    included, in the census's order: drawer, session, then sibling
-    sequence (ADR-0004: -002 continues the unsuffixed chain, whatever
-    the two names sort like as strings)."""
-    found = [log for log in store_receipts().glob("*/receipts-*.jsonl")
-             if not log.name.endswith(".anchors.jsonl")]
+def sessions_of(chains):
+    """{session: [chains]} in the census's order: session, then sibling
+    sequence (ADR-0004: -002 continues the unsuffixed chain, whatever the
+    two names sort like as strings)."""
     sessions = {}
-    for log in sorted(found, key=store_identity):
+    for log in sorted(chains, key=store_identity):
         sessions.setdefault(session_of(log), []).append(log)
     return sessions
+
+
+def store_sessions():
+    """{session: [chains]} over every drawer in the store, siblings
+    included, drawer by drawer in the census's order."""
+    return sessions_of(log for log in store_receipts().glob("*/receipts-*.jsonl")
+                       if not log.name.endswith(".anchors.jsonl"))
 
 
 def drawer_sessions(repo):
@@ -3128,8 +3147,8 @@ def drawer_sessions(repo):
     each drawer in the census's order: session, then sibling sequence."""
     sessions = {}
     for drawer in repo_drawers(repo):
-        for log in sorted(drawer_chains(drawer), key=store_identity):
-            sessions.setdefault(session_of(log), []).append(log)
+        for session, logs in sessions_of(drawer_chains(drawer)).items():
+            sessions.setdefault(session, []).extend(logs)
     return sessions
 
 
@@ -3299,6 +3318,7 @@ def write_package(unit, sessions, drawer, report, stage, packed):
     order; `drawer` is the one whose project record ships. Returns the
     file names in the order they were written, which is the order the
     zip keeps."""
+    record = drawer / "project.json"   # travels only when it exists
     written = []
     listings = {}
     artifacts = []
@@ -3326,9 +3346,9 @@ def write_package(unit, sessions, drawer, report, stage, packed):
                 "recorded in the drawer of the harness worktree "
                 f"`{drawer_name(chains[0].parent)}`, read as this "
                 "repository's history (ADR-0023); its file references are "
-                "relative to that worktree, not to the path in "
-                "`project.json`")
-    record = drawer / "project.json"
+                "relative to that worktree"
+                + (", not to the path in `project.json`"
+                   if record.exists() else ""))
     if record.exists():
         shutil.copyfile(record, stage / "project.json")
         written.append("project.json")
@@ -3413,7 +3433,7 @@ def cmd_package(args):
     (ADR-0023). The scan underneath is one ordinary tick, as export's
     is: its completeness rows and verdicts are the witness snapshot."""
     everywhere = store_sessions()
-    if args.selector:
+    if args.selector is not None:
         session, chains = select_session(args.selector, everywhere)
         if session is None:
             return 1
@@ -3427,14 +3447,22 @@ def cmd_package(args):
         drawer = store_receipts() / project_slug(repo)
         sessions = drawer_sessions(repo)
         if not sessions:
-            print(f"error: the store holds no drawer for {repo}; nothing to "
-                  "package (a legacy receipts/ layout moves into the store "
-                  "with `supervisor adopt`)", file=sys.stderr)
+            if repo_drawers(repo):
+                print(f"error: the drawer for {repo} holds no chain; nothing "
+                      "to package", file=sys.stderr)
+            else:
+                print(f"error: the store holds no drawer for {repo}; nothing "
+                      "to package (a legacy receipts/ layout moves into the "
+                      "store with `supervisor adopt`)", file=sys.stderr)
             return 1
         project = drawer_name(drawer) if drawer.is_dir() else repo.name
         unit = {"kind": "drawer", "project": project,
                 "sessions": len(sessions)}
-        stem, label = project, f"drawer {project}, {len(sessions)} session(s)"
+        # The file is named for the drawer folder, the slug: safe on every
+        # filesystem and hash-suffixed, so two projects of one name never
+        # collide (ADR-0011). The README keeps the display name.
+        slug = drawer.name if drawer.is_dir() else project_slug(repo)
+        stem, label = slug, f"drawer {slug}, {len(sessions)} session(s)"
     for session in sessions:
         # Checked against the whole store, not the selection: half of a
         # split session may sit in a drawer no selector reaches.
