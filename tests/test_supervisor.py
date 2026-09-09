@@ -2245,3 +2245,70 @@ class ConsumptionTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["consumption"]["sessions"], [])
         self.assertEqual(report["consumption"]["norm"]["sessions_counted"], 0)
+
+
+class DashLeadingStoreTest(unittest.TestCase):
+    """Every path the supervisor hands the recorder travels as one
+    `--flag=value` token, so a store path that begins with a dash (a
+    relative LOXODONTA_HOME such as `-home`, run from its parent folder)
+    never reads as a flag to the recorder's parser, and scan's exit stays
+    inside its own ladder instead of carrying the recorder's usage exit."""
+
+    def test_a_dash_leading_store_path_scans_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            drawer = root / "-dashhome" / "receipts" / "alpha-11111111"
+            drawer.mkdir(parents=True)
+            (drawer / "project.json").write_text(
+                json.dumps({"path": str(root)}), encoding="utf-8")
+            make_chain(drawer, "sess-aaaa", entries=2)
+            witness = root / "no-witness"
+            witness.mkdir()
+
+            result = subprocess.run(
+                [sys.executable, str(SUPERVISOR), "scan", "--json",
+                 "--witness", str(witness)],
+                cwd=str(root), capture_output=True, encoding="utf-8",
+                env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                     "LOXODONTA_HOME": "-dashhome"})
+
+            self.assertEqual(result.returncode, 0,
+                             result.stdout + result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["exit"], 0)
+            (chain,) = chains_by_session(report)[(root.name, "sess-aaaa")]
+            self.assertEqual(chain["verdict"], "VALID")
+
+
+def run_supervisor(*args):
+    """Invoke the supervisor as an operator would, with nothing prepared:
+    a usage error is decided before any store is read."""
+    return subprocess.run(
+        [sys.executable, str(SUPERVISOR), *args],
+        capture_output=True, encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+
+class UsageExitTest(unittest.TestCase):
+    """Usage errors exit 64 (sysexits EX_USAGE) here as in the recorder, so
+    scan's 5/6/7 and verify's 0..5 are never an argparse error (ADR-0026
+    ruling 7). Argparse's message stays on stderr; stdout stays empty."""
+
+    def test_unknown_flag_exits_64_with_argparse_message(self):
+        result = run_supervisor("scan", "--no-such-flag")
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("unrecognized arguments", result.stderr)
+        self.assertIn("usage:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_malformed_cadence_exits_64_not_a_verdict_number(self):
+        # parse_cadence raises ArgumentTypeError inside the scan subparser;
+        # the subparser must speak 64 too, or scan's own exits collide.
+        result = run_supervisor("scan", "--anchor-every", "soon")
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("anchor-every", result.stderr)
+        self.assertIn("not a cadence", result.stderr)
+        self.assertEqual(result.stdout, "")

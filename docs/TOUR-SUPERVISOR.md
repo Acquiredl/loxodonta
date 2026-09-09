@@ -96,6 +96,24 @@ where the last writer wins. Staleness is quiet evidence, never an exit
 shout — a siren that never stops sounding trains the operator to ignore
 the band.
 
+**The publish keeper** is the anchor keeper's twin for the published
+head (ADR-0025 ruling 3). `--publish-every AGE --publish-url URL`, the
+two together, and on each tick a chain whose head has aged past the
+cadence and is not in its publish memo is posted once, through
+`loxodonta publish --log LOG URL`, on the same throttle and with the same
+ripeness test. It exists for the bad day the session-end publish cannot
+cover: the hook was stripped, so no session end ever fired and nothing
+left the machine. The memo beside the chain (`<log>.published.jsonl`:
+head, entry count, time, event kind — never the URL, which is a
+credential) is writer-reachable and therefore testimony: it stops a
+repeat and proves nothing; the remote's copy is the head record. What
+the report adds is `left`, per chain: when a head last left this machine
+and by which door, published or anchored, aged by the reader and painted
+in the anchor row with the unanchored head's own stale class. Never an
+alarm, never the exit code: a dead remote is a note in `left`, and the
+keeper tries again next turn. Off by default, like everything that
+leaves. A head reported unpublished may still land late, since the wait is bounded; the memo records confirmed departures only, so such a head is posted again, and a repeat in the channel is the honest cost of never standing the keeper down on a POST that may not have arrived.
+
 **The completeness witness** is the flagship claim (issue #22): pair
 what the harness transcript saw with what the chain received, per
 session, and shout while the session is still live. Honest scope,

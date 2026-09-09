@@ -1,0 +1,1053 @@
+"""Behavioral tests for the package (ADR-0026, applying ADR-0007; #176):
+`supervisor package` builds one package of a session, `loxodonta
+verify-package` judges it layer by layer, the recorder's own verdicts
+verbatim and the package verdict last.
+
+The store under test is the demo store (tools/demo_store.py) built under
+a neutral home through the public CLI; the bad-day session is the worked
+example. Every test drives the two commands as a recipient or an issuer
+would and reads what they wrote and printed. No internals are imported.
+"""
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LOXODONTA = REPO_ROOT / "loxodonta.py"
+SUPERVISOR = REPO_ROOT / "supervisor.py"
+DEMO_STORE = REPO_ROOT / "tools" / "demo_store.py"
+
+BAD_DAY_SESSION = "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907"
+PACKAGE_FILES = {"project.json", "witness.json", "README.md",
+                 "manifest.json"}
+
+
+def run(script, *args, env=None, cwd=None):
+    """`env`, when given, is the whole environment (see neutral_env), so
+    what it leaves out stays out."""
+    return subprocess.run(
+        [sys.executable, str(script), *args], cwd=cwd,
+        capture_output=True, encoding="utf-8", errors="replace",
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8"})
+
+
+def neutral_env(home):
+    """The environment the packing machine runs under: the neutral home
+    is home, the store is its .loxodonta, and nothing of the test
+    process's own project leaks in."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDE_PROJECT_DIR", "LOXODONTA_HOME",
+                        "SOURCE_DATE_EPOCH")}
+    env.update({"LOXODONTA_HOME": str(home / ".loxodonta"),
+                "HOME": str(home), "USERPROFILE": str(home)})
+    return env
+
+
+class PackageCase(unittest.TestCase):
+    """The two fixtures share how they drive the two commands: a pinned
+    witness so the scan never reads the developer's transcripts, a
+    neutral home, and a working folder for what gets written."""
+
+    def package(self, *args):
+        return run(SUPERVISOR, "package", "--witness", str(self.witness),
+                   *args, env=self.env, cwd=str(self.work))
+
+    def verify_package(self, path):
+        return run(LOXODONTA, "verify-package", str(path), env=self.env,
+                   cwd=str(self.work))
+
+    def manifest_of(self, package):
+        if package.is_dir():
+            return json.loads((package / "manifest.json").read_text("utf-8"))
+        with zipfile.ZipFile(package) as zipped:
+            return json.loads(zipped.read("manifest.json"))
+
+    def folder_package(self, *args):
+        """One unpacked package in the working folder, built from the
+        given selector and flags; the folder, for tests that edit it."""
+        folder = self.work / "package"
+        result = self.package(*args, "--folder", "--out", str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((folder / "manifest.json").is_file())
+        return folder
+
+    def rewrite_manifest(self, folder, change):
+        path = folder / "manifest.json"
+        manifest = json.loads(path.read_text("utf-8"))
+        change(manifest)
+        path.write_text(json.dumps(manifest, indent=2), "utf-8")
+
+
+class DemoStorePackageTest(PackageCase):
+    """One demo store, built once; every test packages from it into its
+    own working folder, so packages never see each other."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.home = Path(cls._tmp.name).resolve() / "home"
+        cls.home.mkdir()
+        built = run(DEMO_STORE, "--home", str(cls.home))
+        assert built.returncode == 0, built.stderr
+        cls.env = neutral_env(cls.home)
+        cls.project = cls.home / "projects" / "todo"
+        # No transcript layout: the witness is absent on purpose, so the
+        # completeness row says UNWITNESSED and reads no real session.
+        cls.witness = cls.home / "no-witness"
+        cls.witness.mkdir()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def setUp(self):
+        self._work = tempfile.TemporaryDirectory()
+        self.addCleanup(self._work.cleanup)
+        self.work = Path(self._work.name).resolve()
+
+    def bad_day_chain(self):
+        found = (self.home / ".loxodonta" / "receipts").glob(
+            f"*/receipts-{BAD_DAY_SESSION}.jsonl")
+        chain = next(found, None)
+        self.assertIsNotNone(chain, "the bad-day session is missing")
+        return chain
+
+    def drawer_chains(self):
+        """The chain names the demo project's drawer holds, sorted."""
+        return sorted(p.name for p in self.bad_day_chain().parent.glob(
+            "receipts-*.jsonl") if not p.name.endswith(".anchors.jsonl"))
+
+    def test_repo_packages_every_session_of_the_drawer(self):
+        # The second selector (ADR-0026 ruling 1): a repository path
+        # selects its whole drawer, every session and every sibling, the
+        # way `digest --repo` selects one.
+        folder = self.work / "drawer"
+        result = self.package("--repo", str(self.project), "--folder",
+                              "--out", str(folder))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chains = self.drawer_chains()
+        self.assertGreater(len(chains), 1, "the demo store has one session?")
+        manifest = json.loads((folder / "manifest.json").read_text("utf-8"))
+        self.assertEqual(manifest["format"], "loxodonta-package/1")
+        self.assertEqual(manifest["unit"], {"kind": "drawer",
+                                            "project": "todo",
+                                            "sessions": len(chains)})
+        self.assertEqual(sorted(c["path"] for c in manifest["chains"]),
+                         chains)
+        for name in chains:
+            self.assertEqual((folder / name).read_bytes(),
+                             (self.bad_day_chain().parent / name).read_bytes())
+        # One completeness row per session, and the README says how many
+        # sessions and chains travel.
+        witness = json.loads((folder / "witness.json").read_text("utf-8"))
+        self.assertEqual(
+            sorted(row["session"] for row in witness["completeness"]),
+            sorted(name[len("receipts-"):-len(".jsonl")] for name in chains))
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn(f"{len(chains)} sessions", readme)
+        self.assertIn(f"{len(chains)} chains", readme)
+        self.assertIn(f"{len(chains)} session(s)", result.stdout)
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        lines = judged.stdout.strip().splitlines()
+        self.assertIn(f"unit: kind drawer, project todo, sessions {len(chains)}",
+                      lines)
+        self.assertEqual(sum(l.startswith("chain: ") for l in lines),
+                         len(chains), judged.stdout)
+        self.assertEqual(sum(l == "VALID" for l in lines), len(chains))
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
+
+    def test_no_selector_packages_the_current_repository_drawer(self):
+        # As `digest` behaves: CLAUDE_PROJECT_DIR names the repository,
+        # else the current directory does. Either way it is the drawer
+        # `--repo` would select, and the same chains travel.
+        by_repo = self.work / "by-repo"
+        self.package("--repo", str(self.project), "--folder", "--out",
+                     str(by_repo))
+        by_env = self.work / "by-env"
+        by_cwd = self.work / "by-cwd"
+        env_case = run(SUPERVISOR, "package", "--witness", str(self.witness),
+                       "--folder", "--out", str(by_env), cwd=str(self.work),
+                       env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
+        cwd_case = run(SUPERVISOR, "package", "--witness", str(self.witness),
+                       "--folder", "--out", str(by_cwd), cwd=str(self.project),
+                       env=self.env)
+
+        for result in (env_case, cwd_case):
+            self.assertEqual(result.returncode, 0,
+                             result.stdout + result.stderr)
+            self.assertIn("drawer todo", result.stdout)
+        expected = self.manifest_of(by_repo)
+        for folder in (by_env, by_cwd):
+            manifest = self.manifest_of(folder)
+            self.assertEqual(manifest["unit"], expected["unit"])
+            self.assertEqual(manifest["chains"], expected["chains"])
+        # Nothing was written where the test process stood.
+        self.assertFalse(list(self.project.glob("loxodonta-package-*")))
+
+    def test_package_by_session_id_writes_a_zip_named_for_the_session(self):
+        result = self.package(BAD_DAY_SESSION)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        zips = list(self.work.glob("*.zip"))
+        self.assertEqual(len(zips), 1, zips)
+        self.assertIn(BAD_DAY_SESSION, zips[0].name)
+        self.assertIn(zips[0].name, result.stdout + result.stderr)
+        with zipfile.ZipFile(zips[0]) as package:
+            names = package.namelist()
+            chain = f"receipts-{BAD_DAY_SESSION}.jsonl"
+            self.assertEqual(set(names), PACKAGE_FILES | {chain}, names)
+            # The chain travels byte for byte, and the manifest is the
+            # last thing written (ADR-0007: written last, sealing surface).
+            self.assertEqual(package.read(chain),
+                             self.bad_day_chain().read_bytes())
+            self.assertEqual(names[-1], "manifest.json")
+            manifest = json.loads(package.read("manifest.json"))
+        self.assertEqual(manifest["format"], "loxodonta-package/1")
+        self.assertEqual(manifest["seals"], [])
+        self.assertEqual(manifest["unit"]["session"], BAD_DAY_SESSION)
+
+    def test_the_bad_day_package_verifies_self_consistent(self):
+        self.package(BAD_DAY_SESSION)
+        package = next(self.work.glob("*.zip"))
+
+        result = self.verify_package(package)
+
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        lines = out.strip().splitlines()
+        # The order ADR-0026 ruling 5 fixes: the manifest's summary, the
+        # recorder's own verify output per chain (anchor lines included),
+        # file references counted and stated as not checkable, each
+        # artifact against the manifest, the package verdict, then one
+        # line of residual trust.
+        chain = f"receipts-{BAD_DAY_SESSION}.jsonl"
+        order = [
+            "format: loxodonta-package/1",
+            f"chain: {chain}",
+            "NO-ANCHORS",
+            "VALID",
+            "file references: 1 recorded, not checkable off the machine",
+            "project.json",
+            "witness.json",
+            "README.md",
+            "residual trust",
+            "SELF-CONSISTENT",
+        ]
+        cursor = 0
+        for needle in order:
+            hits = [i for i in range(cursor, len(lines)) if needle in lines[i]]
+            self.assertTrue(hits, f"{needle!r} missing after line {cursor}:"
+                                  f"\n{out}")
+            cursor = hits[0] + 1
+        verdict = lines[-1]
+        self.assertTrue(verdict.startswith("SELF-CONSISTENT"), verdict)
+        self.assertIn("indistinguishable from a wholesale regeneration",
+                      verdict)
+        self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
+        # witness.json is testimony, and the verifier says so where it
+        # judges the file's bytes.
+        witness_line = next(l for l in lines if l.startswith("witness.json"))
+        self.assertIn("testimony", witness_line)
+
+    def test_session_by_id_and_by_address_write_the_same_package(self):
+        # Any entry address inside the session selects it, the way `show`
+        # and `verify ADDRESS` select (ADR-0026 ruling 1); the middle
+        # entry's address, so the match is not the head by accident.
+        entries = [json.loads(line) for line in
+                   self.bad_day_chain().read_text("utf-8").splitlines()]
+        address = entries[3]["entry_hash"][:8]
+        by_id = self.work / "by-id.zip"
+        by_address = self.work / "by-address.zip"
+
+        first = self.package(BAD_DAY_SESSION, "--out", str(by_id))
+        second = self.package(address, "--out", str(by_address))
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        one, two = self.manifest_of(by_id), self.manifest_of(by_address)
+        self.assertEqual(one["unit"], two["unit"])
+        self.assertEqual(one["chains"], two["chains"])
+        self.assertEqual([a["path"] for a in one["artifacts"]],
+                         [a["path"] for a in two["artifacts"]])
+        with zipfile.ZipFile(by_id) as a, zipfile.ZipFile(by_address) as b:
+            self.assertEqual(a.namelist(), b.namelist())
+            for name in a.namelist():
+                if name not in ("witness.json", "README.md", "manifest.json"):
+                    self.assertEqual(a.read(name), b.read(name), name)
+        self.assertEqual(self.verify_package(by_address).returncode, 0)
+
+    def folder_package(self):
+        return super().folder_package(BAD_DAY_SESSION)
+
+    def test_an_edited_witness_is_artifact_diverged_exit_2(self):
+        folder = self.folder_package()
+        witness = folder / "witness.json"
+        data = json.loads(witness.read_text("utf-8"))
+        data["completeness"][0]["state"] = "COMPLETE"
+        witness.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("ARTIFACT-DIVERGED"), lines[-1])
+        self.assertTrue(any(l.startswith("witness.json: DIVERGED")
+                            for l in lines), result.stdout)
+        # The chain itself still walks clean: the finding is the artifact's.
+        self.assertIn("VALID", result.stdout)
+
+    def test_an_edited_chain_is_chain_broken_exit_1(self):
+        folder = self.folder_package()
+        chain = folder / f"receipts-{BAD_DAY_SESSION}.jsonl"
+        raw = chain.read_bytes()
+        self.assertIn(b"Read: .env", raw)
+        chain.write_bytes(raw.replace(b"Read: .env", b"Read: .envx"))
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("CHAIN-BROKEN"), lines[-1])
+        # The recorder's own words, verbatim, name the entry.
+        self.assertIn("BROKEN at entry 3", result.stdout)
+
+    def test_an_unknown_format_tag_is_unsupported_format_exit_4(self):
+        folder = self.folder_package()
+        manifest = folder / "manifest.json"
+        data = json.loads(manifest.read_text("utf-8"))
+        data["format"] = "loxodonta-package/9"
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        # A refusal, not a verdict: nothing else is judged or printed.
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"), lines[0])
+        self.assertIn("loxodonta-package/9", lines[0])
+        self.assertIn("loxodonta-package/1", lines[0])
+
+    def test_a_chain_rewritten_with_crlf_still_verifies(self):
+        # A Windows unzip can change a chain's line endings without
+        # changing its head; chains are listed by head and judged by
+        # walking, never by file hash (ADR-0026 ruling 3).
+        folder = self.folder_package()
+        chain = folder / f"receipts-{BAD_DAY_SESSION}.jsonl"
+        raw = chain.read_bytes()
+        self.assertNotIn(b"\r\n", raw)
+        chain.write_bytes(raw.replace(b"\n", b"\r\n"))
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
+
+    def test_a_manifest_path_that_leaves_the_package_is_refused(self):
+        # The layout is flat: a listed path is a bare file name or the
+        # package is refused unopened, so a stranger's manifest can never
+        # make the verifier read, hash, or hang on a file outside it.
+        folder = self.folder_package()
+        outside = folder.parent / "outside-secret.txt"
+        outside.write_text("not yours to hash\n", "utf-8")
+        for bad in ("../outside-secret.txt", str(outside), "a/b.jsonl",
+                    "a\\b.jsonl", "..", ""):
+            self.rewrite_manifest(
+                folder, lambda m, bad=bad: m["artifacts"].__setitem__(
+                    0, {**m["artifacts"][0], "path": bad}))
+            result = self.verify_package(folder)
+            self.assertEqual(result.returncode, 4, bad + ": " + result.stdout)
+            lines = result.stdout.strip().splitlines()
+            self.assertTrue(lines[-1].startswith("UNSUPPORTED-FORMAT"), lines)
+            self.assertNotIn("outside-secret", result.stdout)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_malformed_manifest_is_refused_not_a_traceback(self):
+        folder = self.folder_package()
+        shapes = {
+            "unit a string": lambda m: m.__setitem__("unit", "x"),
+            "a chain a string": lambda m: m.__setitem__("chains", ["x"]),
+            "an artifact a number": lambda m: m.__setitem__("artifacts", [42]),
+            "seals a number": lambda m: m.__setitem__("seals", 42),
+            "no seals key": lambda m: m.pop("seals"),
+            "no chains": lambda m: m.__setitem__("chains", []),
+            "an entry count a string": lambda m: m["chains"][0].__setitem__(
+                "entries", "6"),
+        }
+        for words, change in shapes.items():
+            self.rewrite_manifest(folder, change)
+            result = self.verify_package(folder)
+            self.assertEqual(result.returncode, 4, words + ": " + result.stdout)
+            self.assertTrue(result.stdout.strip().splitlines()[-1]
+                            .startswith("UNSUPPORTED-FORMAT"), words)
+            self.assertNotIn("Traceback", result.stderr, words)
+            # the same package, undamaged, verifies again
+            self.package(BAD_DAY_SESSION, "--folder", "--out",
+                         str(self.work / f"again-{len(words)}"))
+            folder = self.work / f"again-{len(words)}"
+
+    def test_a_damaged_zip_is_refused_unopened(self):
+        # is_zipfile reads only the end record; damage in a member's
+        # header surfaces when unpacking, and is a refusal, never a
+        # traceback.
+        result = self.package(BAD_DAY_SESSION)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        zipped = next(self.work.glob("*.zip"))
+        raw = bytearray(zipped.read_bytes())
+        for i in range(40, 60):
+            raw[i] ^= 0xFF
+        zipped.write_bytes(bytes(raw))
+
+        judged = self.verify_package(zipped)
+
+        self.assertEqual(judged.returncode, 4, judged.stdout + judged.stderr)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("UNSUPPORTED-FORMAT"), judged.stdout)
+        self.assertNotIn("Traceback", judged.stderr)
+
+    def test_a_chain_of_another_format_is_a_refusal_on_the_last_line(self):
+        # A packaged chain whose genesis claims a format this verifier
+        # does not speak: the recorder refuses it, and the package verdict
+        # says so on the last line instead of failing to find a word.
+        folder = self.folder_package()
+        chain = next(p for p in folder.iterdir()
+                     if p.name.startswith("receipts-")
+                     and not p.name.endswith(".anchors.jsonl"))
+        lines = chain.read_text("utf-8").splitlines()
+        genesis = json.loads(lines[0])
+        genesis["v"] = "9.9"
+        lines[0] = json.dumps(genesis, sort_keys=True, separators=(",", ":"))
+        chain.write_text("\n".join(lines) + "\n", "utf-8")
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        last = result.stdout.strip().splitlines()[-1]
+        self.assertTrue(last.startswith("UNSUPPORTED-FORMAT"), last)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_out_into_a_missing_folder_is_created(self):
+        result = self.package(BAD_DAY_SESSION, "--out",
+                              str(self.work / "no" / "such" / "pkg.zip"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.work / "no" / "such" / "pkg.zip").exists())
+
+    def test_readme_never_holds_the_manifest_hash_and_manifest_is_last(self):
+        folder = self.folder_package()
+        manifest = folder / "manifest.json"
+        readme = (folder / "README.md").read_text("utf-8")
+        digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        self.assertNotIn(digest, readme)
+        self.assertNotIn(digest[:12], readme)
+        # The README may print the chain heads, which exist before it.
+        listed = json.loads(manifest.read_text("utf-8"))
+        for chain in listed["chains"]:
+            self.assertIn(chain["head"], readme)
+        # Written last: nothing in the package is newer than the manifest,
+        # and the manifest lists every other file.
+        others = [p for p in folder.iterdir() if p.name != "manifest.json"]
+        for other in others:
+            self.assertLessEqual(other.stat().st_mtime,
+                                 manifest.stat().st_mtime, other.name)
+        named = ({c["path"] for c in listed["chains"]}
+                 | {a["path"] for a in listed["artifacts"]})
+        self.assertEqual(named, {p.name for p in others})
+
+
+# --- A hook-built store with a sibling chain and an anchor sidecar ----------
+
+TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
+SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000001"
+WORKTREE_SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000002"
+SUB_SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000003"
+
+
+def ots_varint(n):
+    out = bytearray()
+    while True:
+        byte = n & 0x7F
+        n >>= 7
+        out.append(byte | 0x80 if n else byte)
+        if not n:
+            return bytes(out)
+
+
+def completed_anchor(head, height=850000):
+    """A minimal but genuine OTS timestamp record (docs/ANCHORING.md §4):
+    one sha256 op, then a Bitcoin attestation, so `verify --anchors`
+    replays it offline and prints ANCHORED. Reimplemented here, like
+    test_anchor.py does, so the test proves the tool matches the format."""
+    import base64
+    payload = ots_varint(height)
+    proof = b"\x08" + b"\x00" + TAG_BITCOIN + ots_varint(len(payload)) + payload
+    return json.dumps({"head": head, "n": 3, "ts": "2026-08-22T09:00:00Z",
+                       "calendar": "https://calendar.example.test",
+                       "proof": base64.b64encode(proof).decode()}) + "\n"
+
+
+class HookStorePackageTest(PackageCase):
+    """A store written through `loxodonta hook`: one session whose
+    recording continued in a -002 sibling, with an anchor sidecar on the
+    first chain, so the package has more than one chain and more than
+    one kind of artifact to carry."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.project = self.root / "project"
+        self.project.mkdir()
+        (self.project / "main.py").write_text("print(1)\n", "utf-8")
+        self.witness = self.root / "no-witness"
+        self.witness.mkdir()
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.env = neutral_env(self.home)
+        for command in ("pytest -q", "git status", "git commit -m x"):
+            self.hook(SESSION, "Bash", {"command": command})
+        self.hook(SESSION + "-002", "Edit", {"file_path": "main.py"})
+        drawers = [p for p in (self.home / ".loxodonta" / "receipts").iterdir()
+                   if p.is_dir()]
+        self.assertEqual(len(drawers), 1)
+        self.chain = drawers[0] / f"receipts-{SESSION}.jsonl"
+        self.sibling = drawers[0] / f"receipts-{SESSION}-002.jsonl"
+        self.sidecar = drawers[0] / f"receipts-{SESSION}.jsonl.anchors.jsonl"
+        head = run(LOXODONTA, "head", "--log", str(self.chain)).stdout.strip()
+        self.sidecar.write_text(completed_anchor(head), encoding="utf-8")
+
+    def hook(self, session, tool, tool_input, project=None):
+        payload = json.dumps({"session_id": session,
+                              "hook_event_name": "PostToolUse",
+                              "tool_name": tool, "tool_input": tool_input,
+                              "tool_response": {}})
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook"],
+            input=payload.encode("utf-8"), capture_output=True,
+            env={**self.env, "PYTHONIOENCODING": "utf-8",
+                 "CLAUDE_PROJECT_DIR": str(project or self.project)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def worktree_drawer(self, name="feature"):
+        """A session recorded from <repo>/.claude/worktrees/<name>, laid
+        out the way a fallback lays it out: a plain folder, no .git file,
+        so it resolves to itself and opens its own drawer (ADR-0023).
+        Returns that drawer."""
+        worktree = self.project / ".claude" / "worktrees" / name
+        worktree.mkdir(parents=True)
+        before = set((self.home / ".loxodonta" / "receipts").iterdir())
+        self.hook(WORKTREE_SESSION, "Bash", {"command": "worktree tail"},
+                  project=worktree)
+        (drawer,) = set((self.home / ".loxodonta" / "receipts").iterdir()) \
+            - before
+        return drawer
+
+    def test_worktree_drawers_of_the_repository_travel_with_it(self):
+        # A drawer recorded under <repo>/.claude/worktrees/ is the
+        # repository's history, read as recall reads it (ADR-0023 part 3);
+        # a sub-project elsewhere in the tree is its own memory.
+        self.worktree_drawer()
+        sub = self.project / "packages" / "sub"
+        sub.mkdir(parents=True)
+        self.hook(SUB_SESSION, "Bash", {"command": "sub-project work"},
+                  project=sub)
+        folder = self.work / "pkg"
+
+        result = self.package("--repo", str(self.project), "--folder",
+                              "--out", str(folder))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = self.manifest_of(folder)
+        self.assertEqual(manifest["unit"]["sessions"], 2)
+        # The repository's drawer first, then its worktree drawer.
+        self.assertEqual([c["path"] for c in manifest["chains"]],
+                         [self.chain.name, self.sibling.name,
+                          f"receipts-{WORKTREE_SESSION}.jsonl"])
+        # The repository's own project record travels; the README says
+        # where the worktree session was recorded, and the witness's row
+        # for it names that drawer.
+        record = json.loads((folder / "project.json").read_text("utf-8"))
+        self.assertEqual(Path(record["path"]).resolve(), self.project)
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn(f"- session `{WORKTREE_SESSION}` (recorded in the "
+                      "drawer of the harness worktree `feature`", readme)
+        self.assertIn(f"- session `{SESSION}`:", readme)
+        self.assertNotIn(SUB_SESSION, readme)
+        witness = json.loads((folder / "witness.json").read_text("utf-8"))
+        self.assertEqual([row["session"] for row in witness["completeness"]],
+                         [SESSION, WORKTREE_SESSION])
+        self.assertEqual(witness["completeness"][1]["repo"], "feature")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(judged.stdout.count("\nchain: "), 3, judged.stdout)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("SELF-CONSISTENT"))
+
+    def test_a_drawer_holding_half_a_split_session_is_refused_naming_it(self):
+        # Half of the session also sits in a drawer no selector reaches
+        # (a pre-ADR-0023 split). A drawer package that looked complete
+        # and was not would be worse than the refusal: refused, the
+        # session named, nothing written.
+        other = self.chain.parent.parent / "other-00000000"
+        other.mkdir()
+        (other / self.chain.name).write_bytes(self.chain.read_bytes())
+        (other / "project.json").write_text(
+            json.dumps({"path": (self.root / "other").as_posix()}), "utf-8")
+
+        result = self.package("--repo", str(self.project))
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(SESSION, result.stderr)
+        self.assertIn("drawers", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_a_worktree_drawer_continuing_a_session_is_refused_too(self):
+        # Both drawers are the repository's (ADR-0023 part 3), and both
+        # hold a chain of one name; the flat layout cannot carry two, so
+        # the drawer is refused rather than shipping either half quietly.
+        drawer = self.worktree_drawer()
+        (drawer / self.chain.name).write_bytes(self.chain.read_bytes())
+
+        result = self.package("--repo", str(self.project))
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(SESSION, result.stderr)
+        self.assertIn("drawers", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_a_selector_and_repo_together_are_a_usage_error(self):
+        # Two units at once is the command spoken wrong: argparse's
+        # message, exit 64, before any store is read (ADR-0026 ruling 7).
+        result = self.package(SESSION, "--repo", str(self.project))
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("not allowed with", result.stderr)
+        self.assertIn("usage:", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_a_repository_with_no_drawer_is_refused_and_writes_nothing(self):
+        stranger = self.root / "stranger"
+        stranger.mkdir()
+
+        result = self.package("--repo", str(stranger))
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("no drawer", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_a_repository_of_its_own_under_worktrees_is_not_packaged(self):
+        # A full repository checked out under <repo>/.claude/worktrees/ is
+        # not this repository's harness worktree: its .git is a folder,
+        # not a worktree's .git file, and its history is its own.
+        mystery = self.project / ".claude" / "worktrees" / "mystery"
+        (mystery / ".git").mkdir(parents=True)
+        self.hook(SUB_SESSION, "Bash", {"command": "someone else's work"},
+                  project=mystery)
+        folder = self.work / "pkg"
+
+        result = self.package("--repo", str(self.project), "--folder",
+                              "--out", str(folder))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = self.manifest_of(folder)
+        self.assertEqual([c["path"] for c in manifest["chains"]],
+                         [self.chain.name, self.sibling.name])
+        self.assertNotIn(SUB_SESSION, (folder / "README.md").read_text("utf-8"))
+
+    def test_the_drawer_package_is_named_for_the_drawer_folder(self):
+        # The slug is safe on every filesystem and hash-suffixed; the
+        # display name stays in the README.
+        result = self.package("--repo", str(self.project))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        slug = self.chain.parent.name
+        self.assertTrue((self.work / f"loxodonta-package-{slug}.zip").exists(),
+                        list(self.work.iterdir()))
+        self.assertIn(slug, result.stdout)
+
+    def test_an_empty_selector_is_refused_not_read_as_the_drawer(self):
+        result = self.package("")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("neither a session", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_a_drawer_that_holds_no_chain_says_so(self):
+        for log in (self.chain, self.sibling, self.sidecar):
+            log.unlink()
+
+        result = self.package("--repo", str(self.project))
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("holds no chain", result.stderr)
+        self.assertNotIn("adopt", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_the_worktree_note_names_project_json_only_when_it_travels(self):
+        (self.chain.parent / "project.json").unlink()
+        self.worktree_drawer()
+        folder = self.work / "pkg"
+
+        result = self.package("--repo", str(self.project), "--folder",
+                              "--out", str(folder))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((folder / "project.json").exists())
+        readme = (folder / "README.md").read_text("utf-8")
+        note = next(l for l in readme.splitlines()
+                    if f"session `{WORKTREE_SESSION}`" in l)
+        self.assertIn("relative to that worktree", note)
+        self.assertNotIn("project.json", note)
+
+    def test_siblings_travel_together_and_anchor_lines_print_verbatim(self):
+        result = self.package(SESSION, "--folder", "--out",
+                              str(self.work / "pkg"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        folder = self.work / "pkg"
+        manifest = json.loads((folder / "manifest.json").read_text("utf-8"))
+        self.assertEqual([c["path"] for c in manifest["chains"]],
+                         [self.chain.name, self.sibling.name])
+        self.assertEqual([c["anchors"] for c in manifest["chains"]],
+                         [self.sidecar.name, None])
+        self.assertEqual([c["entries"] for c in manifest["chains"]], [4, 2])
+        # The sidecar is a post-close artifact, listed by hash (ruling 3).
+        self.assertIn(self.sidecar.name,
+                      [a["path"] for a in manifest["artifacts"]])
+        self.assertEqual((folder / self.sidecar.name).read_bytes(),
+                         self.sidecar.read_bytes())
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        out = judged.stdout
+        self.assertEqual(out.count("\nchain: "), 2, out)
+        # The recorder's own anchor line, under its chain, as detail
+        # (ruling 6): the chain is anchored, the package is not.
+        self.assertIn("ANCHORED: entries 0..3 existed by Bitcoin block 850000",
+                      out)
+        self.assertIn(f"{self.sidecar.name}: matches the manifest", out)
+        lines = out.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
+        self.assertNotIn("ANCHORED", lines[-1])
+
+    def test_a_foreign_anchor_outranks_the_diverged_sidecar_exit_3(self):
+        # Gravest wins (ruling 7): rewriting the sidecar diverges it from
+        # the manifest (2), and the head it now names is nowhere in the
+        # chain (3); the package says the graver thing last.
+        self.package(SESSION, "--folder", "--out", str(self.work / "pkg"))
+        folder = self.work / "pkg"
+        (folder / self.sidecar.name).write_text(
+            completed_anchor("ab" * 32), encoding="utf-8")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 3, judged.stdout + judged.stderr)
+        lines = judged.stdout.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("ANCHOR-MISMATCH"), lines[-1])
+        self.assertTrue(any(l.startswith(f"{self.sidecar.name}: DIVERGED")
+                            for l in lines), judged.stdout)
+
+    def test_a_drawer_with_a_broken_sibling_is_chain_broken_exit_1(self):
+        # The drawer is packaged as it stands, the broken sibling with it:
+        # the verifier walks every chain the manifest lists and says so in
+        # the recorder's own words, and the witness carries the scan's
+        # verdict on that chain as testimony. Nothing new for the ladder.
+        lines = self.sibling.read_text("utf-8").splitlines()
+        entry = json.loads(lines[1])
+        entry["action"] = "rewritten after the fact"
+        lines[1] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        self.sibling.write_text("\n".join(lines) + "\n", "utf-8")
+        folder = self.work / "pkg"
+        result = self.package("--repo", str(self.project), "--folder",
+                              "--out", str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 session(s), 2 chain(s)", result.stdout)
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 1, judged.stdout + judged.stderr)
+        out = judged.stdout.strip().splitlines()
+        self.assertTrue(out[-1].startswith("CHAIN-BROKEN"), out[-1])
+        heading = next(i for i, line in enumerate(out)
+                       if line.startswith(f"chain: {self.sibling.name}"))
+        self.assertTrue(any(line.startswith("BROKEN at entry 1")
+                            for line in out[heading:]), judged.stdout)
+        # The first chain still walks clean, and the anchor under it
+        # still prints: the finding is the sibling's alone.
+        self.assertIn("VALID", judged.stdout)
+        self.assertIn("ANCHORED: entries 0..3 existed by Bitcoin block 850000",
+                      judged.stdout)
+        witness = json.loads((folder / "witness.json").read_text("utf-8"))
+        verdicts = {c["log"]: c["verdict"] for c in witness["scan"]["chains"]}
+        self.assertEqual(verdicts[self.sibling.name], "BROKEN")
+        self.assertEqual(verdicts[self.chain.name], "VALID")
+
+    def test_a_session_split_across_drawers_is_refused_not_flattened(self):
+        # Before ADR-0023 a session could land in two drawers under the
+        # same chain name. The package lays chains flat beside one
+        # project record, so two drawers would mean one chain silently
+        # overwriting the other: refused, named, nothing written.
+        other = self.chain.parent.parent / "other-00000000"
+        other.mkdir()
+        (other / self.chain.name).write_bytes(self.chain.read_bytes())
+        (other / "project.json").write_text(
+            json.dumps({"path": (self.root / "other").as_posix()}), "utf-8")
+
+        result = self.package(SESSION)
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("drawers", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_an_unknown_selector_is_refused_and_writes_nothing(self):
+        for selector in ("nonesuch", "deadbeef"):
+            result = self.package(selector)
+            self.assertNotEqual(result.returncode, 0, selector)
+            self.assertIn(selector, result.stderr)
+            self.assertFalse(list(self.work.iterdir()), selector)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+# --- The transcript, on request (ADR-0026 ruling 2; #179) -------------------
+
+TRANSCRIPT_SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000011"
+SECOND_SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000012"
+THIRD_SESSION = "c0c0c0c0-aaaa-bbbb-cccc-000000000013"
+
+
+class TranscriptPackageTest(PackageCase):
+    """A store written through `loxodonta hook` beside a harness
+    transcript layout, which the scan pairs with each session by file
+    stem exactly as the completeness watch does. A clean SessionEnd
+    through the hook commits the transcript's bytes into the chain
+    (ADR-0017), so every session here has a commitment to judge."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.project = self.root / "project"
+        self.project.mkdir()
+        self.witness = self.root / "witness" / "projects"
+        self.witness.mkdir(parents=True)
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.env = neutral_env(self.home)
+        self.transcript = self.record_session(TRANSCRIPT_SESSION,
+                                              "pytest -q", "git status")
+
+    def hook(self, payload):
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook"],
+            input=json.dumps(payload).encode("utf-8"), capture_output=True,
+            env={**self.env, "PYTHONIOENCODING": "utf-8",
+                 "CLAUDE_PROJECT_DIR": str(self.project)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def write_transcript(self, session, *lines):
+        """A transcript where the harness keeps them: one folder per
+        project, named after the project's path, one <session>.jsonl."""
+        folder = self.witness / "".join(
+            c if c.isalnum() or c == "-" else "-" for c in str(self.project))
+        folder.mkdir(exist_ok=True)
+        path = folder / f"{session}.jsonl"
+        path.write_bytes(b"".join(json.dumps(line).encode("utf-8") + b"\n"
+                                  for line in lines))
+        return path
+
+    def record_session(self, session, *commands):
+        """Tool receipts through the hook, the transcript the harness
+        would have written, then a clean SessionEnd carrying
+        transcript_path, which commits the transcript's bytes into the
+        chain (ADR-0017). Returns the transcript's path."""
+        for command in commands:
+            self.hook({"session_id": session, "hook_event_name": "PostToolUse",
+                       "tool_name": "Bash", "tool_input": {"command": command},
+                       "tool_response": {}})
+        transcript = self.write_transcript(
+            session, *({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": f"tu_{i}", "name": "Bash",
+                 "input": {"command": command}}]}}
+                       for i, command in enumerate(commands)))
+        self.hook({"session_id": session, "hook_event_name": "SessionEnd",
+                   "reason": "exit", "transcript_path": str(transcript)})
+        return transcript
+
+    def test_a_requested_transcript_travels_listed_and_named_on_the_chain(self):
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+
+        name = f"transcript-{TRANSCRIPT_SESSION}.jsonl"
+        data = self.transcript.read_bytes()
+        self.assertEqual((folder / name).read_bytes(), data,
+                         "the transcript travels byte for byte")
+        manifest = self.manifest_of(folder)
+        listed = {a["path"]: a for a in manifest["artifacts"]}
+        self.assertIn(name, listed, "listed like any post-close artifact")
+        self.assertEqual(listed[name]["sha256"],
+                         hashlib.sha256(data).hexdigest())
+        self.assertEqual(listed[name]["bytes"], len(data))
+        # The chain listing names its transcript, so the verifier knows
+        # which transcript belongs to which chain.
+        for chain in manifest["chains"]:
+            self.assertEqual(chain["transcript"], name)
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn(f"`{name}`", readme)
+        # The path on the packing machine stays on the packing machine:
+        # the witness row travels without it.
+        witness = json.loads((folder / "witness.json").read_text("utf-8"))
+        self.assertNotIn("transcript", witness["completeness"][0])
+
+    def test_the_verifier_judges_the_commitments_and_states_the_tail(self):
+        # The harness appends to an ended transcript (restart, resume):
+        # those bytes sit after the last commitment, held by the manifest
+        # alone, and the recorder says how many there are.
+        appended = b'{"type": "bridge-session", "note": "meta"}\n'
+        with open(self.transcript, "ab") as f:
+            f.write(appended)
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertTrue(any(l.startswith("COMMITMENT HOLDS (entry")
+                            for l in lines), result.stdout)
+        self.assertTrue(any(f"{len(appended)} bytes after the last commitment"
+                            in l for l in lines), result.stdout)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
+
+    def test_a_rewritten_committed_prefix_is_transcript_diverged_exit_5(self):
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+        packaged = folder / f"transcript-{TRANSCRIPT_SESSION}.jsonl"
+        data = bytearray(packaged.read_bytes())
+        # Re-ink one byte inside the committed prefix, length unchanged:
+        # the manifest's sha256 also diverges, and the transcript
+        # verdict outranks the artifact one (never innocent).
+        data[5] = ord("X") if data[5] != ord("X") else ord("Y")
+        packaged.write_bytes(bytes(data))
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertTrue(any(l.startswith("COMMITMENT DIVERGED (entry")
+                            for l in lines), result.stdout)
+        self.assertIn("TRANSCRIPT-DIVERGED: chain intact", result.stdout)
+        self.assertTrue(any(l.startswith(f"{packaged.name}: DIVERGED")
+                            for l in lines), result.stdout)
+        self.assertTrue(lines[-1].startswith("TRANSCRIPT-DIVERGED"), lines[-1])
+
+    def test_a_transcript_gone_from_disk_is_named_as_such(self):
+        # The harness's retention cycle took it; the chain still holds
+        # its commitments, and the README says why nothing is here.
+        self.transcript.unlink()
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+
+        self.assertEqual(sorted(p.name for p in folder.iterdir()
+                                if p.name.startswith("transcript-")), [])
+        manifest = self.manifest_of(folder)
+        self.assertFalse(any(a["path"].startswith("transcript-")
+                             for a in manifest["artifacts"]))
+        for chain in manifest["chains"]:
+            self.assertNotIn("transcript", chain)
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn("no transcript: requested, but none for this session "
+                      "was paired on the packing machine", readme)
+        self.assertIn("retention cycle", readme)
+
+    def test_without_the_flag_the_readme_says_not_requested_and_the_verifier_notes(self):
+        folder = self.folder_package(TRANSCRIPT_SESSION)
+
+        self.assertEqual(sorted(p.name for p in folder.iterdir()
+                                if p.name.startswith("transcript-")), [])
+        manifest = self.manifest_of(folder)
+        for chain in manifest["chains"]:
+            self.assertNotIn("transcript", chain)
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn("no transcript: not requested", readme)
+        self.assertIn("the very secret a session exfiltrated", readme)
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        # The chain has commitments and nothing to judge them against:
+        # the honest note, under the chain, and no verdict from it.
+        note = [l for l in lines if l.startswith("TRANSCRIPT-UNRESOLVED")]
+        self.assertEqual(len(note), 1, result.stdout)
+        self.assertIn("no transcript in this package", note[0])
+        self.assertIn("chain verdict unaffected", note[0])
+        self.assertNotIn("TRANSCRIPT-DIVERGED", result.stdout)
+        self.assertNotIn("COMMITMENT HOLDS", result.stdout)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT"), lines[-1])
+
+    def test_a_drawer_package_carries_one_transcript_per_session(self):
+        self.record_session(SECOND_SESSION, "ls")
+        # A third session the harness left no transcript for.
+        self.hook({"session_id": THIRD_SESSION, "hook_event_name": "PostToolUse",
+                   "tool_name": "Bash", "tool_input": {"command": "pwd"},
+                   "tool_response": {}})
+        folder = self.folder_package("--repo", str(self.project),
+                                     "--transcript")
+
+        first = f"transcript-{TRANSCRIPT_SESSION}.jsonl"
+        second = f"transcript-{SECOND_SESSION}.jsonl"
+        self.assertEqual(sorted(p.name for p in folder.iterdir()
+                                if p.name.startswith("transcript-")),
+                         [first, second])
+        manifest = self.manifest_of(folder)
+        named = {c["path"]: c.get("transcript") for c in manifest["chains"]}
+        self.assertEqual(named[f"receipts-{TRANSCRIPT_SESSION}.jsonl"], first)
+        self.assertEqual(named[f"receipts-{SECOND_SESSION}.jsonl"], second)
+        self.assertIsNone(named[f"receipts-{THIRD_SESSION}.jsonl"])
+        listed = {a["path"] for a in manifest["artifacts"]}
+        self.assertTrue({first, second} <= listed)
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn(f"`{first}`", readme)
+        self.assertIn(f"`{second}`", readme)
+        self.assertEqual(readme.count("no transcript: requested, but none"), 1)
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("COMMITMENT HOLDS"), 2)
+        # The third chain holds no commitment, so it owes no note.
+        self.assertNotIn("TRANSCRIPT-UNRESOLVED", result.stdout)
+
+    def test_a_chain_naming_an_unlisted_or_unbare_transcript_is_refused(self):
+        folder = self.folder_package(TRANSCRIPT_SESSION, "--transcript")
+        cases = ((f"../transcript-{TRANSCRIPT_SESSION}.jsonl", "not bare"),
+                 ("elsewhere.jsonl", "not in artifacts"))
+        for named, why in cases:
+            self.rewrite_manifest(folder, lambda m, named=named: m["chains"][0]
+                                  .update(transcript=named))
+
+            result = self.verify_package(folder)
+
+            self.assertEqual(result.returncode, 4, why + ": " + result.stdout)
+            lines = result.stdout.splitlines()
+            self.assertTrue(lines[-1].startswith("UNSUPPORTED-FORMAT"), why)
+            self.assertNotIn("chain:", result.stdout,
+                             "refused unread; nothing is judged")

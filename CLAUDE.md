@@ -14,8 +14,8 @@
 
 ## Where things live
 
-- `loxodonta.py` — the recorder: `init` / `log` / `run` / `head` / `verify` / `report` / `anchor` / `hook` / `explain` / `install-hook` / `uninstall-hook`.
-- `supervisor.py` — the reader: `scan` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `mcp` / `export`.
+- `loxodonta.py` — the recorder: `init` / `log` / `run` / `head` / `verify` / `verify-package` / `report` / `anchor` / `publish` / `hook` / `explain` / `install-hook` / `uninstall-hook`.
+- `supervisor.py` — the reader: `scan` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `verify` / `mcp` / `export` / `package`.
 - `adapters/` — per-harness recorder adapters (ADR-0020).
 - `tools/` — repo tooling; `house_check.py` enforces the vocabulary.
 - `tests/` — the suite, through the public CLI: `python -m unittest discover -s tests`.

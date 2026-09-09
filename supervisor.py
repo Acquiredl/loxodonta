@@ -15,6 +15,7 @@ here is a head record (GLOSSARY: Supervisor, Baseline).
   python supervisor.py search TEXT [--all]      # the ladder past the digest
   python supervisor.py timeline ADDRESS         # context around one entry
   python supervisor.py mcp [--repo DIR]         # the same recall, as an MCP server
+  python supervisor.py package SESSION|ADDRESS  # one session, sealed by a manifest
   python supervisor.py scan --root DIR --json   # legacy: a folder of repos
   python supervisor.py --version                # tool, format, and commit
 
@@ -51,6 +52,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -66,11 +68,18 @@ LOXODONTA = HERE / "loxodonta.py"
 # supervisor is running and is tagged together with loxodonta.py — the
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
-TOOL_VERSION = "0.2.0"
+TOOL_VERSION = "0.3.0"
 FORMAT_VERSION = "0.1"
 
 
 # --- Census -------------------------------------------------------------------
+
+# What sits beside a chain and is not one: the anchor sidecar (proofs
+# about the chain) and the publish memo (which heads left, ADR-0025).
+# Both end in .jsonl and share the chain's name, so every census that
+# globs for chains must set them aside by suffix.
+SIDECAR_SUFFIXES = (".anchors.jsonl", ".published.jsonl")
+
 
 def find_chains(root):
     """Every receipt log under a legacy --root. Three shapes, because
@@ -78,13 +87,13 @@ def find_chains(root):
     each sibling repo's receipts/, and chains stranded in worktrees by
     sessions that ran before the hook learned to log to the main repo.
     The default census is not this one: it is a single glob over the
-    store's drawers, inline in scan_root (ADR-0011). Anchor sidecars
-    are proofs about a chain, not chains."""
+    store's drawers, inline in scan_root (ADR-0011). Sidecars are files
+    about a chain, not chains."""
     patterns = ("receipts/*.jsonl",
                 "*/receipts/*.jsonl",
                 "*/.claude/worktrees/*/receipts/*.jsonl")
     return sorted(p for pattern in patterns for p in root.glob(pattern)
-                  if not p.name.endswith(".anchors.jsonl"))
+                  if not p.name.endswith(SIDECAR_SUFFIXES))
 
 
 def split_seq(stem):
@@ -150,7 +159,7 @@ def verify(log):
     # supervisor that missed its one job.
     result = subprocess.run(
         [sys.executable, str(LOXODONTA), "verify", "--anchors",
-         "--log", str(log)],
+         f"--log={log}"],
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     lines = result.stdout.strip().splitlines()
@@ -391,7 +400,7 @@ PENDING_LINE = re.compile(
 
 def parse_cadence(text):
     """A duration the operator can say out loud: 30s, 15m, 6h, 1d, or
-    bare seconds. Used by --anchor-every."""
+    bare seconds. Used by --anchor-every and --publish-every."""
     match = re.fullmatch(r"(\d+)([smhd]?)", text.strip())
     if not match:
         raise argparse.ArgumentTypeError(
@@ -411,10 +420,11 @@ def upgrade_due(last_attempt, now):
     return (now - attempted).total_seconds() >= UPGRADE_EVERY_SECONDS
 
 
-def sidecar_heads(sidecar):
-    """Heads that already have a record, read tolerantly and for
-    scheduling only — judging the proofs stays with verify."""
-    heads = set()
+def sidecar_records(sidecar):
+    """The records of a file beside a chain (the anchor sidecar, the
+    publish memo), read tolerantly and for scheduling or display only —
+    judging the proofs stays with verify. A missing file, a torn line,
+    or a line that is not an object yields nothing."""
     try:
         with open(sidecar, encoding="utf-8", errors="replace") as lines:
             for line in lines:
@@ -422,12 +432,29 @@ def sidecar_heads(sidecar):
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (isinstance(record, dict)
-                        and isinstance(record.get("head"), str)):
-                    heads.add(record["head"])
+                if isinstance(record, dict):
+                    yield record
     except FileNotFoundError:
-        pass
-    return heads
+        return
+
+
+def sidecar_heads(sidecar):
+    """Heads that already have a record, for scheduling only."""
+    return {record["head"] for record in sidecar_records(sidecar)
+            if isinstance(record.get("head"), str)}
+
+
+def ripe_head(entries, now, cadence):
+    """The chain head once it has aged past the cadence, else None: the
+    ripeness test both keepers share. No cadence means no opt-in, and a
+    head with no readable birth time never ripens — the keeper sends
+    nothing it cannot date."""
+    if cadence is None or not entries:
+        return None
+    born = parse_when(entries[-1].get("ts"))
+    if born is None or (now - born).total_seconds() < cadence:
+        return None
+    return entries[-1].get("entry_hash") or None
 
 
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
@@ -447,19 +474,17 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
     if sidecar.exists():
         finished = subprocess.run(
             [sys.executable, str(LOXODONTA), "anchor", "--upgrade",
-             "--log", str(log)],
+             f"--log={log}"],
             capture_output=True, encoding="utf-8", env=env)
         attempted = True
         if finished.returncode != 0:
             notes.append("upgrade attempted; a calendar did not answer — "
                          "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
-        head = entries[-1].get("entry_hash")
-        born = parse_when(entries[-1].get("ts"))
-        ripe = born is not None and (now - born).total_seconds() >= cadence
-        if head and ripe and head not in sidecar_heads(sidecar):
+        head = ripe_head(entries, now, cadence)
+        if head and head not in sidecar_heads(sidecar):
             command = [sys.executable, str(LOXODONTA), "anchor",
-                       "--log", str(log)]
+                       f"--log={log}"]
             for calendar in calendars:
                 command += ["--calendar", calendar]
             finished = subprocess.run(command, capture_output=True,
@@ -471,6 +496,107 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
                              "this head; it stays unanchored and the "
                              "keeper will try again")
     return attempted, "; ".join(notes) or None, failed
+
+
+# --- Publish keeper -----------------------------------------------------------
+# The keeper's half of the published head (ADR-0025 ruling 3), for
+# always-on machines and for sessions that never reached their end: the
+# bad day is a stripped hook, so no session end ever fired and nothing
+# was published or anchored. Same throttle, same ripeness test, same
+# posture as the anchor keeper: off by default, staleness quiet.
+
+def publish_url(value):
+    """argparse validator for --publish-url: the recorder's rule, twice
+    over, since the two files never import each other. A plain http or
+    https URL with nothing a shell could act on (a quote, a backtick, a
+    dollar sign, a backslash, whitespace): the recorder's `publish`
+    refuses anything else, so refusing here too makes a bad URL a usage
+    error (exit 64) before the first tick, never a failure note on
+    every tick."""
+    parts = urlparse(value)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not an http or https URL")
+    if any(c in "\"'`$\\" or c.isspace() for c in value):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} holds a character a shell could act on (a quote, "
+            "a backtick, a dollar sign, a backslash, or whitespace)")
+    return value
+
+
+PUBLISH_BACKSTOP = 60   # seconds; well past the recorder's own bound
+
+
+def keep_published(log, last_attempt, now, entries, cadence, url):
+    """One chain's turn with the publish keeper, on the anchor keeper's
+    throttle: only when the operator opted in with a cadence and a URL,
+    a head that has aged past the cadence and is not yet in the chain's
+    publish memo is posted once, through `loxodonta publish`. The memo
+    is the recorder's (`<log>.published.jsonl`), writer-reachable and
+    therefore testimony: it stops a repeat and proves nothing; the
+    remote's copy is the head record. Off by default: nothing leaves
+    the machine without the say-so. Returns (attempted, note, failed)."""
+    if not url or not upgrade_due(last_attempt, now):
+        return False, None, False
+    memo = Path(str(log) + ".published.jsonl")
+    head = ripe_head(entries, now, cadence)
+    if not head or head in sidecar_heads(memo):
+        return False, None, False
+    try:
+        finished = subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", f"--log={log}", url],
+            capture_output=True, encoding="utf-8", timeout=PUBLISH_BACKSTOP,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    except subprocess.TimeoutExpired:
+        # The recorder bounds its own POST; this is the backstop above
+        # it, so one stuck publish can never hold a tick.
+        return True, ("publishing did not finish in time; the head stays "
+                      "unpublished and the keeper will try again"), True
+    if finished.returncode == 64:
+        # A usage exit is the URL refused, not the remote: retrying
+        # would never help, and the note must say so.
+        return True, ("publishing refused: the recorder would not take "
+                      "--publish-url as given; fix the URL (see "
+                      "`loxodonta publish --help`)"), True
+    if finished.returncode != 0:
+        # The recorder's stderr names the failure and never the URL, but
+        # it is not repeated here: the note is the panel's, and one
+        # sentence the operator can act on beats a transport error.
+        return True, ("publishing failed — the remote did not take this "
+                      "head; it stays unpublished and the keeper will try "
+                      "again"), True
+    return True, None, False
+
+
+def last_departure(log):
+    """When a head of this chain last left the machine, and by which
+    door: the newest `ts` across the publish memo and the anchor
+    sidecar, or {"ts": None, "via": None} when nothing has left. The
+    reading is the panel's staleness evidence, in the anchor keeper's
+    voice: a timestamp the reader ages, never an alarm, never the exit.
+    Both files are writer-reachable, so a fresh reading here proves
+    nothing; a stale one is the reason to look."""
+    departures = []   # (when, ts, via)
+    for record in sidecar_records(Path(str(log) + ".published.jsonl")):
+        when = parse_when(record.get("ts"))
+        if when is not None:
+            departures.append((when, record["ts"], "published"))
+    # An upgrade appends a second record for the same head, stamped
+    # when the proof completed, so a head's departure is its first
+    # record: the newest record would make an idle chain read fresh
+    # every time a calendar answered a poll.
+    first = {}
+    for record in sidecar_records(Path(str(log) + ".anchors.jsonl")):
+        when = parse_when(record.get("ts"))
+        head = record.get("head")
+        if when is not None and head is not None \
+                and (head not in first or when < first[head][0]):
+            first[head] = (when, record["ts"])
+    departures += [(when, ts, "anchored") for when, ts in first.values()]
+    if not departures:
+        return {"ts": None, "via": None}
+    _, ts, via = max(departures, key=lambda d: d[0])
+    return {"ts": ts, "via": via}
 
 
 def assess_anchors(detail, entries):
@@ -944,7 +1070,7 @@ def keep_tails(sessions):
         try:
             done = subprocess.run(
                 [sys.executable, str(LOXODONTA), "hook",
-                 "--log-dir", row["home"]],
+                 f"--log-dir={row['home']}"],
                 input=payload, capture_output=True, timeout=60)
         except (OSError, subprocess.SubprocessError):
             continue
@@ -1006,7 +1132,8 @@ def watch_completeness(root, witness, families, everywhere=False,
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
 
-    def add(repo, session, state, tools, receipts, drawers=(), judge=None):
+    def add(repo, session, state, tools, receipts, drawers=(), judge=None,
+            transcript=None):
         entry = {"repo": repo, "session": session, "state": state,
                  "tools": tools, "receipts": receipts,
                  "deficit": max(0, tools - receipts)}
@@ -1016,6 +1143,12 @@ def watch_completeness(root, witness, families, everywhere=False,
             entry["words"] = WATCH_WORDS[state]
         if judge:
             entry["judge"] = judge
+        if transcript is not None:
+            # The pairing itself, on the row: the tail keeper and
+            # `package --transcript` read it here rather than pairing
+            # again. Local by nature; WITNESS_FIELDS keeps it out of a
+            # package.
+            entry["transcript"] = transcript.as_posix()
         watch["sessions"].append(entry)
         return entry
 
@@ -1061,7 +1194,8 @@ def watch_completeness(root, witness, families, everywhere=False,
             add(repo, session, "UNWITNESSED", 0, receipts, spans)
             continue
         if not matchers:
-            add(repo, session, "UNWATCHED", 0, receipts, spans)
+            add(repo, session, "UNWATCHED", 0, receipts, spans,
+                transcript=transcript)
             continue
         try:
             state, tools = watch_session(transcript, receipts,
@@ -1080,7 +1214,8 @@ def watch_completeness(root, witness, families, everywhere=False,
             judge = (f'python "{LOXODONTA.as_posix()}" verify '
                      f'--log "{group["judge_log"]}" '
                      f'--transcript "{transcript.as_posix()}"')
-        row = add(repo, session, state, tools, receipts, spans, judge=judge)
+        row = add(repo, session, state, tools, receipts, spans, judge=judge,
+                  transcript=transcript)
         # The lifecycle facts (ADR-0018), quiet fields on the row.
         tier = lifecycle_tier(group.get("last_grew"), now)
         if tier:
@@ -1098,7 +1233,6 @@ def watch_completeness(root, witness, families, everywhere=False,
             row["uncommitted_tail"] = True
             row["tail_note"] = ("tail uncommitted — no exit commitment "
                                 "recorded")
-            row["transcript"] = transcript.as_posix()
             if group.get("home"):
                 row["home"] = group["home"]
 
@@ -1116,7 +1250,7 @@ def watch_completeness(root, witness, families, everywhere=False,
             continue  # unreadable and chainless: nothing to say about it
         name = (folder if everywhere
                 else folder[len(ours):].strip("-") or root.name)
-        add(name, stem, state, tools, 0)
+        add(name, stem, state, tools, 0, transcript=transcript)
 
     return watch
 
@@ -1250,7 +1384,7 @@ def watch_consumption(families, now):
 # --- Scan ---------------------------------------------------------------------
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
-              store=False):
+              publish_every=None, publish_url=None, store=False, tick=True):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
@@ -1282,7 +1416,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # so the grouping below is plain insertion, no re-sorting.
     if store:
         found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                        if not p.name.endswith(".anchors.jsonl"))
+                        if not p.name.endswith(SIDECAR_SUFFIXES))
                  if root.is_dir() else [])
         census = sorted((store_identity(log), log) for log in found)
     else:
@@ -1294,11 +1428,23 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     for (repo, session, _), log in census:
         relpath = log.relative_to(root).as_posix()
         entries = read_entries(log)
-        attempted, keeper_note, anchor_failed = keep_anchors(
-            log, keeper.get(relpath), now, entries,
-            anchor_every, calendars)
+        # `tick=False` is a reading: both keepers stay quiet, so a reader
+        # that copies a chain (package) appends nothing to it and sends
+        # nothing off the machine.
+        attempted, keeper_note, anchor_failed = (
+            keep_anchors(log, keeper.get(relpath), now, entries,
+                         anchor_every, calendars)
+            if tick else (False, None, False))
+        posted, publish_note, publish_failed = (
+            keep_published(log, keeper.get("publish:" + relpath), now, entries,
+                           publish_every, publish_url)
+            if tick else (False, None, False))
+        # One throttle per keeper: an anchor attempt never delays the
+        # publish keeper's turn, nor the other way round.
         if attempted:
             keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if posted:
+            keeper["publish:" + relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         verdict, exit_code, detail = verify(log)
         stood_down = exit_code != 0 and superseded(log, detail)
         chain = {
@@ -1317,11 +1463,19 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             "superseded": stood_down,
             "detail": detail,
             "anchors": assess_anchors(detail, entries),
+            # When a head last left the machine, published or anchored
+            # (ADR-0025): staleness evidence beside the anchor panel,
+            # aged by the reader, never raising the exit.
+            "left": last_departure(log),
         }
         if keeper_note:
             chain["anchors"]["note"] = keeper_note
         if anchor_failed:
             chain["anchors"]["failed"] = True
+        if publish_note:
+            chain["left"]["note"] = publish_note
+        if publish_failed:
+            chain["left"]["failed"] = True
         repos.setdefault(repo, {}).setdefault(session, []).append(chain)
         if not stood_down:
             # verify's TRANSCRIPT-DIVERGED is exit 5 in its own contract
@@ -1454,7 +1608,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # The keeper closes what the annotation reports — after the rows
     # are judged, so this scan says the truth it saw and the next scan
     # sees the tails committed.
-    kept = keep_tails(completeness["sessions"]) if TAIL_KEEPER else 0
+    kept = keep_tails(completeness["sessions"]) if tick and TAIL_KEEPER else 0
     # The consumption watch never touches `worst`: a hot session is a
     # reason to look, and the brake is the operator's (issue #67).
     consumption = watch_consumption(families, now)
@@ -1552,10 +1706,12 @@ def cmd_adopt(args):
             record.write_text(json.dumps(
                 {"path": str(project.resolve()).replace(os.sep, "/")})
                 + "\n", encoding="utf-8")
-        sidecar = log.parent / (log.name + ".anchors.jsonl")
         marker = log.parent / UNLISTED_NAME
         shutil.move(str(log), str(drawer / log.name))
-        if sidecar.exists():
+        for suffix in SIDECAR_SUFFIXES:
+            sidecar = log.parent / (log.name + suffix)
+            if not sidecar.exists():
+                continue
             if (drawer / sidecar.name).exists():
                 # Proofs left behind are still proofs; say so — silence
                 # here would read as "everything travelled".
@@ -1586,6 +1742,8 @@ def cmd_scan(args):
                        witness=Path(args.witness),
                        anchor_every=args.anchor_every,
                        calendars=args.calendar or (),
+                       publish_every=args.publish_every,
+                       publish_url=args.publish_url,
                        store=store)
     print(json.dumps(report, indent=None if args.json else 2))
     return report["exit"]
@@ -1624,7 +1782,7 @@ def universe(root, store):
     explicit --root (ADR-0011/0013)."""
     if store:
         found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                        if not p.name.endswith(".anchors.jsonl"))
+                        if not p.name.endswith(SIDECAR_SUFFIXES))
                  if root.is_dir() else [])
         return [(*store_identity(log), log) for log in found]
     return [(*chain_identity(root, log), log) for log in find_chains(root)]
@@ -1729,7 +1887,7 @@ def resolve_chain(root, asked):
     except (ValueError, OSError):
         return None
     if (not path.name.endswith(".jsonl")
-            or path.name.endswith(".anchors.jsonl")
+            or path.name.endswith(SIDECAR_SUFFIXES)
             or not path.is_file()):
         return None
     return path
@@ -1811,7 +1969,7 @@ def repo_chains(repo):
     patterns = ("receipts/*.jsonl", ".claude/worktrees/*/receipts/*.jsonl")
     return sorted(p.resolve() for pattern in patterns
                   for p in repo.glob(pattern)
-                  if not p.name.endswith(".anchors.jsonl"))
+                  if not p.name.endswith(SIDECAR_SUFFIXES))
 
 
 def session_of(log):
@@ -1858,9 +2016,14 @@ def main_repo_of(project):
 
 
 def invoking_repo(args):
-    return main_repo_of(Path(args.repo
-                             or os.environ.get("CLAUDE_PROJECT_DIR")
-                             or Path.cwd()).resolve())
+    """The repository a recall or package command speaks of: --repo, else
+    CLAUDE_PROJECT_DIR, else the current directory, spelled the way the
+    recorder spells it when it slugs a drawer (an absolute path with any
+    link left as typed, ADR-0011), then a worktree resolved to its
+    repository. Resolving links here and not there would hash two names
+    for one drawer."""
+    spoken = args.repo or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()
+    return main_repo_of(Path(os.path.abspath(str(spoken))))
 
 
 def store_home():
@@ -1890,7 +2053,7 @@ def store_receipts():
 
 def drawer_chains(drawer):
     return sorted(p for p in drawer.glob("receipts-*.jsonl")
-                  if not p.name.endswith(".anchors.jsonl"))
+                  if not p.name.endswith(SIDECAR_SUFFIXES))
 
 
 def drawer_name(drawer):
@@ -1948,20 +2111,37 @@ def worktree_drawers(repo):
         except (OSError, ValueError, AttributeError):
             continue
         spelled = os.path.normcase(str(recorded)).replace(os.sep, "/")
-        if spelled.startswith(prefix):
+        if spelled.startswith(prefix) and not own_repository(recorded):
             found.append(drawer)
+    return found
+
+
+def own_repository(path):
+    """True when `path` still exists and is a repository of its own: a
+    `.git` folder, where a harness worktree has a `.git` file. Checked
+    out under another repository's .claude/worktrees/, such a folder is
+    not that repository's worktree and its history is not that
+    repository's. A pruned worktree's folder is gone, so it keeps the
+    prefix rule above."""
+    return os.path.isdir(os.path.join(str(path), ".git"))
+
+
+def repo_drawers(repo):
+    """A repository's drawers in the store, in recall's order: its own
+    drawer when it exists, then the drawers of its harness worktrees
+    (ADR-0023). The one resolution `digest --repo`, `search --repo`,
+    `timeline`, and `package --repo` all read a repository through."""
+    drawer = store_receipts() / project_slug(repo)
+    found = [drawer] if drawer.is_dir() else []
+    found += [extra for extra in worktree_drawers(repo) if extra != drawer]
     return found
 
 
 def store_chains(repo):
     """A repository's chains in the store: its own drawer, then the
     drawers of its harness worktrees (ADR-0023), in that order."""
-    drawer = store_receipts() / project_slug(repo)
-    logs = drawer_chains(drawer) if drawer.is_dir() else []
-    for extra in worktree_drawers(repo):
-        if extra != drawer:
-            logs.extend(drawer_chains(extra))
-    return logs
+    return [log for drawer in repo_drawers(repo)
+            for log in drawer_chains(drawer)]
 
 
 def project_chains(repo):
@@ -1988,7 +2168,7 @@ def recall_scope(args):
         if getattr(args, "all", False):
             known = set(logs)
             for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
-                if log.name.endswith(".anchors.jsonl") or log in known:
+                if log.name.endswith(SIDECAR_SUFFIXES) or log in known:
                     continue
                 if (log.parent / UNLISTED_NAME).exists() \
                         and log.parent != drawer:
@@ -2282,7 +2462,7 @@ def cmd_verify(args):
         return code
     log = match[0]
     judged = subprocess.run(
-        [sys.executable, str(LOXODONTA), "verify", "--log", str(log)],
+        [sys.executable, str(LOXODONTA), "verify", f"--log={log}"],
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     print(f"chain: {log.as_posix()}")
@@ -2303,15 +2483,23 @@ def resolve_address(args):
               file=sys.stderr)
         return None, 1
     repo, logs = recall_scope(args)
+    where = "the root" if getattr(args, "all", False) else repo.as_posix()
+    return match_address(prefix, logs, where)
+
+
+def match_address(prefix, logs, where,
+                  hint="widen with --all, or search instead"):
+    """The one entry among `logs` whose hash starts with `prefix`, or
+    the refusal: none (named by `where`), or ambiguous with the
+    candidates listed. Shared by the recall commands and by `package`,
+    which searches the whole store (ADR-0026 ruling 1)."""
     matches = [(log, entry) for log in logs
                for entry in read_entries(log)
                if isinstance(entry.get("entry_hash"), str)
                and entry["entry_hash"].startswith(prefix)]
     if not matches:
-        where = "the root" if getattr(args, "all", False) \
-            else repo.as_posix()
-        print(f"no entry under {where} matches {prefix} - "
-              "widen with --all, or search instead", file=sys.stderr)
+        print(f"no entry under {where} matches {prefix} - {hint}",
+              file=sys.stderr)
         return None, 1
     if len(matches) > 1:
         print(f"ambiguous: {prefix} names {len(matches)} entries - "
@@ -2762,7 +2950,7 @@ EXPORT_WORDS = (
     "fields it can contain, named in supervisor.py, and nothing else from "
     "the scan passes through. Read it before you send it. It carries no "
     "paths, no command lines, no repo names, and no file references. If "
-    "you sent a raw bundle as well, that is different: raw chains carry "
+    "you sent a raw archive as well, that is different: raw chains carry "
     "every command line, and you were shown one and asked first.")
 
 
@@ -2806,7 +2994,7 @@ def export_sessions(report):
     rows = []
     store = {"chains": 0, "entries": 0, "bytes": 0}
     actors = set()  # which harnesses recorded: HOOK_ACTORS only
-    newest = None  # the sample line a raw bundle shows first
+    newest = None  # the sample line a raw archive shows first
     for repo in report.get("repos", []):
         label = ordinal.setdefault(repo.get("repo"),
                                    f"repo-{len(ordinal) + 1}")
@@ -2917,21 +3105,23 @@ def build_export(report):
     return data, ordinal, newest
 
 
-def write_raw_bundle(report, ordinal, path):
+def write_raw_archive(report, ordinal, path):
     """Chain bytes and anchor sidecars, drawers renamed to their
     ordinals, no project.json: the one export that carries command
-    lines, written only after the sender said yes."""
+    lines, written only after the sender said yes. A raw archive, not a
+    package: no manifest, no witness, nothing a recipient verifies as a
+    set (ADR-0026 ruling 9 keeps the two names apart)."""
     import zipfile
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         for repo in report.get("repos", []):
             label = ordinal.get(repo.get("repo"), "repo-0")
             for sess in repo.get("sessions", []):
                 for chain in sess.get("chains", []):
                     log = Path(chain["log"])
-                    bundle.write(log, f"{label}/{log.name}")
+                    archive.write(log, f"{label}/{log.name}")
                     sidecar = log.with_name(log.name + ".anchors.jsonl")
                     if sidecar.exists():
-                        bundle.write(sidecar, f"{label}/{sidecar.name}")
+                        archive.write(sidecar, f"{label}/{sidecar.name}")
 
 
 def issue_body(data, gist_url, raw):
@@ -2967,7 +3157,7 @@ def issue_body(data, gist_url, raw):
         "edit it by hand.",
         "- [x] I read the export before sending it and I am fine with it "
         "being public in this issue and in `docs/FIELD-DATA.md`.",
-        f"- [{'x' if raw else ' '}] *(raw bundles only)* I ran "
+        f"- [{'x' if raw else ' '}] *(raw archives only)* I ran "
         "`export --raw`, read the sample action line it showed me, and "
         "answered yes.",
         "",
@@ -2975,8 +3165,8 @@ def issue_body(data, gist_url, raw):
 
 
 def cmd_export(args):
-    """Write the allowlisted export (and, on --raw, the bundle), print
-    it, and on --send hand it to `gh`. The scan underneath is one
+    """Write the allowlisted export (and, on --raw, the raw archive),
+    print it, and on --send hand it to `gh`. The scan underneath is one
     ordinary tick: it remembers its baseline like any other."""
     root = store_receipts()
     report = scan_root(root, witness=Path(args.witness), store=True)
@@ -2985,46 +3175,46 @@ def cmd_export(args):
     out = (Path(args.out) if args.out
            else Path.cwd() / f"loxodonta-export-{stamp}.json")
 
-    bundle = None
+    archive = None
     if args.raw:
         if newest is None:
-            print("nothing to bundle: no hook receipts in the store",
+            print("nothing to archive: no hook receipts in the store",
                   file=sys.stderr)
             return 1
-        print("A raw bundle carries every chain byte-for-byte, which means "
+        print("A raw archive carries every chain byte-for-byte, which means "
               "every command line your agents ran. One of yours, the "
               "newest, reads:", file=sys.stderr)
         print(f"    {newest[1]}", file=sys.stderr)
-        print("Everything in the bundle looks like that. Type yes to write "
+        print("Everything in the archive looks like that. Type yes to write "
               "it, anything else to stop: ", end="", file=sys.stderr,
               flush=True)
         answer = sys.stdin.readline().strip().lower()
         if answer != "yes":
             print("stopped; nothing written", file=sys.stderr)
             return 1
-        bundle = out.with_name(out.stem + "-raw.zip")
+        archive = out.with_name(out.stem + "-raw.zip")
 
     body = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     write_lf(out, body)
     print(body, end="")
     print(f"written: {out.name}", file=sys.stderr)
-    if bundle is not None:
-        write_raw_bundle(report, ordinal, bundle)
-        print(f"written: {bundle.name} (raw chains)", file=sys.stderr)
+    if archive is not None:
+        write_raw_archive(report, ordinal, archive)
+        print(f"written: {archive.name} (raw chains)", file=sys.stderr)
 
     if not args.send:
         return 0
-    return send_export(data, out, bundle)
+    return send_export(data, out, archive)
 
 
-def send_export(data, out, bundle):
+def send_export(data, out, archive):
     """`gh` twice, under the sender's login: a secret gist of the files,
     then the issue. The issue body is written beside the export first,
     so a missing `gh` leaves everything needed to file by hand."""
     issue = out.with_name(out.stem + ".issue.md")
     gh = shutil.which("gh")
     if gh is None:
-        write_lf(issue, issue_body(data, None, bundle is not None))
+        write_lf(issue, issue_body(data, None, archive is not None))
         print("gh is not on PATH, so nothing was sent. The export and an "
               f"issue body ({issue.name}) are beside you: upload the export "
               "as a secret gist and open a field-data issue on "
@@ -3032,7 +3222,7 @@ def send_export(data, out, bundle):
         return 1
     machine = data["machine"]
     stamp = str(data["export"]["written"] or "")[:10]
-    files = [str(out)] + ([str(bundle)] if bundle else [])
+    files = [str(out)] + ([str(archive)] if archive else [])
     # `gh gist create` is secret unless told --public; there is no
     # --secret flag to say it twice, so the test pins the absence.
     gist = subprocess.run([gh, "gist", "create", "--desc",
@@ -3045,7 +3235,7 @@ def send_export(data, out, bundle):
         return 1
     lines = gist.stdout.strip().splitlines()
     gist_url = lines[-1] if lines else "<gist link>"
-    write_lf(issue, issue_body(data, gist_url, bundle is not None))
+    write_lf(issue, issue_body(data, gist_url, archive is not None))
     title = (f"field-data: {machine['os']} / {len(data['sessions'])} "
              f"sessions / {stamp}")
     filed = subprocess.run([gh, "issue", "create", "--repo", FIELD_DATA_REPO,
@@ -3060,6 +3250,701 @@ def send_export(data, out, bundle):
         return 1
     print(f"sent: {gist_url}", file=sys.stderr)
     print(f"filed: {filed.stdout.strip()}", file=sys.stderr)
+    return 0
+
+
+# --- Package (ADR-0026, applying ADR-0007) ------------------------------------
+# One session's chains with their anchor sidecars, the project record, a
+# witness snapshot labelled testimony, and a plain-words README, listed by
+# a manifest written last: the package a stranger can verify on a clean
+# machine with `loxodonta verify-package` and nothing else. The supervisor
+# builds and the recorder judges (ADR-0005, ADR-0009), so the recipient
+# downloads the one file that already verifies a bare chain.
+
+PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
+# The seals a package can declare (ADR-0007's declared seal set), in the
+# order they are declared and applied: the anchor (--anchor) says when,
+# the issuer signature (--sign) says which key (ADR-0026 ruling 4).
+SEAL_ANCHOR = "anchor"
+SEAL_SIGNATURE = "signature"
+MANIFEST_SIDECAR = "manifest.json.anchors.jsonl"   # the anchor's proof
+MANIFEST_SIGNATURE = "manifest.json.sig"   # ssh-keygen's detached signature
+MANIFEST_PUBLIC_KEY = "manifest.json.pub"  # the key that made it: testimony
+# The ssh-keygen signature namespace, the verifier's and the signer's
+# both, so a signature made for anything else never verifies here.
+SIGNATURE_NAMESPACE = "loxodonta-package"
+# The verifier's allowed-signers principal, twice over: the packer runs
+# the recipient's check on what it ships before anything is written.
+SIGNATURE_PRINCIPAL = "issuer"
+# The completeness row travels with these fields only: no judge command,
+# no transcript path, no home. Paths the recipient cannot follow are
+# noise, and the project record already carries the one that matters.
+WITNESS_FIELDS = ("repo", "session", "state", "tools", "receipts",
+                  "deficit", "words")
+WITNESS_WORDS = (
+    "testimony: the supervisor's completeness reading of each session "
+    "packaged and the scan's verdicts at packaging, as the packing "
+    "machine reported them. `loxodonta verify-package` checks that these "
+    "bytes are unchanged since packaging and draws no verdict from them "
+    "(ADR-0026).")
+
+
+def sessions_of(chains):
+    """{session: [chains]} in the census's order: session, then sibling
+    sequence (ADR-0004: -002 continues the unsuffixed chain, whatever the
+    two names sort like as strings)."""
+    sessions = {}
+    for log in sorted(chains, key=store_identity):
+        sessions.setdefault(session_of(log), []).append(log)
+    return sessions
+
+
+def store_sessions():
+    """{session: [chains]} over every drawer in the store, siblings
+    included, drawer by drawer in the census's order."""
+    return sessions_of(log for log in store_receipts().glob("*/receipts-*.jsonl")
+                       if not log.name.endswith(SIDECAR_SUFFIXES))
+
+
+def drawer_sessions(repo):
+    """{session: [chains]} over a repository's drawers, as recall reads
+    them (its own drawer, then its harness worktree drawers, ADR-0023),
+    each drawer in the census's order: session, then sibling sequence."""
+    sessions = {}
+    for drawer in repo_drawers(repo):
+        for session, logs in sessions_of(drawer_chains(drawer)).items():
+            sessions.setdefault(session, []).extend(logs)
+    return sessions
+
+
+def chain_listing(log):
+    """How the manifest lists a chain (ADR-0026 ruling 3): by head and
+    entry count, never by file hash. The head is the commitment, and
+    the verifier recomputes it by walking, so a Windows unzip that
+    changes line endings changes nothing the manifest says."""
+    lines = log.read_text(encoding="utf-8").splitlines()
+    head = None
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("entry_hash"), str):
+            head = entry["entry_hash"]
+    sidecar = log.with_name(log.name + ".anchors.jsonl")
+    return {"path": log.name, "head": head, "entries": len(lines),
+            "anchors": sidecar.name if sidecar.exists() else None}
+
+
+def artifact_listing(path):
+    """How the manifest lists a post-close artifact: sha256 of its bytes
+    and their count, because nothing else commits it (ADR-0026 ruling 3).
+    Read in chunks: a transcript can run to hundreds of MB."""
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return {"path": path.name, "sha256": digest.hexdigest(), "bytes": size}
+
+
+PACKAGE_MAX_BYTES = 1 << 30   # the verifier's cap, twice over
+
+
+def bare_file_name(value):
+    """The verifier's rule for a packaged name, twice over: a bare file
+    name, nothing a path could be, since the layout is flat."""
+    return (isinstance(value, str) and value not in ("", ".", "..")
+            and "/" not in value and "\\" not in value
+            and value == os.path.basename(value))
+
+
+def package_too_large(stage, written):
+    """True, the error printed, when the files would exceed the cap the
+    verifier applies before unpacking a zip: writing such a package would
+    ship one nothing can judge."""
+    total = sum((stage / name).stat().st_size for name in written)
+    if total <= PACKAGE_MAX_BYTES:
+        return False
+    print(f"error: the package would be {total} bytes unpacked, more than a "
+          f"verifier will unpack ({PACKAGE_MAX_BYTES}); leave the transcript "
+          "out, or package one session", file=sys.stderr)
+    return True
+
+
+def witness_snapshot(report, unit, sessions):
+    """The witness's word on what is packaged, labelled testimony in the
+    file itself: one completeness row per session, in the package's
+    order, and the scan's verdict for each chain, as this scan reported
+    them (ADR-0026 ruling 2). A session the scan gave no row is named
+    with nothing else said of it."""
+    rows = {row.get("session"): row
+            for row in report.get("completeness", {}).get("sessions", [])}
+    names = {log.name for chains in sessions.values() for log in chains}
+    verdicts = [{"log": Path(chain["log"]).name, "verdict": chain["verdict"],
+                 "entries": chain["entries"], "anchored": chain["anchored"]}
+                for repo in report.get("repos", [])
+                for sess in repo.get("sessions", [])
+                for chain in sess.get("chains", [])
+                if Path(chain["log"]).name in names]
+    return {
+        "testimony": WITNESS_WORDS,
+        "scanned": report.get("scanned"),
+        "unit": unit,
+        "completeness": [
+            {k: rows[session][k] for k in WITNESS_FIELDS if k in rows[session]}
+            if session in rows else {"session": session}
+            for session in sessions],
+        "scan": {"exit": report.get("exit"), "chains": verdicts},
+    }
+
+
+def transcript_words(session, transcripts):
+    """The README's sentence on one session's transcript: present, or
+    why not. ADR-0026 ruling 2: the transcript ships only on request,
+    and the README says whether it is here."""
+    if transcripts is None:
+        return ("no transcript: not requested (`supervisor package "
+                "--transcript` carries it).")
+    name = transcripts.get(session)
+    if name is None:
+        return ("no transcript: requested, but none for this session was "
+                "paired on the packing machine: the harness keeps a "
+                "transcript for a retention cycle, so an old session's may "
+                "be gone, and a session the witness never covered has none "
+                "to pair. The chain's commitments bind a transcript only "
+                "while it exists.")
+    if name is False:
+        return ("no transcript: requested, and the scan named one, but it "
+                "could not be read at packaging (moved, held open, or gone "
+                "between the scan and the copy).")
+    return (f"`{name}`: the harness transcript of this session, as it stood "
+            "at packaging. The chain's transcript commitments bind its "
+            "committed prefixes; the manifest commits the whole file, tail "
+            "included, as of packaging. What it says is the harness's "
+            "record, testimony like the action lines.")
+
+
+def package_readme(unit, packed, sessions, witness, record, notes,
+                   transcripts=None):
+    """The plain-words page a recipient reads first: what is inside, how
+    to verify it, what each layer shows and does not. `sessions` is
+    {session: [chain listings]} in the package's order; `notes` says, per
+    session that needs it, where it was recorded; `transcripts` is None
+    when none was requested, else {session: the packaged transcript's
+    name, or None when it was gone}. The page may print the chain heads,
+    which exist before it is written; it never prints the manifest's
+    hash, which does not exist yet (ADR-0007 ruling 2)."""
+    project = unit["project"]
+    count = sum(len(listings) for listings in sessions.values())
+    if unit["kind"] == "session":
+        title = f"session {unit['session']}"
+        what = ("This is the receipt log of one AI agent session: one line "
+                "per completed tool call, hash-chained, as the recorder "
+                "wrote it on the machine where the session ran "
+                "(docs/SPEC.md).")
+        state = witness["completeness"][0].get("state", "none")
+        reading = ("the supervisor's completeness reading of this session "
+                   f"at packaging (state: {state})")
+    else:
+        title = f"drawer {project}"
+        what = ("These are the receipt logs of one project's drawer, every "
+                f"session recorded for it: {len(sessions)} session"
+                f"{'' if len(sessions) == 1 else 's'} in {count} chain"
+                f"{'' if count == 1 else 's'}, one line per completed tool "
+                "call, hash-chained, as the recorder wrote them on the "
+                "machine where the sessions ran (docs/SPEC.md).")
+        reading = ("the supervisor's completeness reading of each session "
+                   "at packaging, one row per session")
+    lines = [
+        f"# loxodonta package: {title}",
+        "",
+        f"Project `{project}`, packed {packed} by loxodonta supervisor "
+        f"{TOOL_VERSION}, format `{PACKAGE_FORMAT}`. {what}",
+        "",
+        "## What is inside",
+        "",
+    ]
+    for session, listings in sessions.items():
+        indent = ""
+        if unit["kind"] == "drawer":
+            note = f" ({notes[session]})" if session in notes else ""
+            lines.append(f"- session `{session}`{note}:")
+            indent = "  "
+        for chain in listings:
+            lines.append(f"{indent}- `{chain['path']}`: a chain of "
+                         f"{chain['entries']} entries, head `{chain['head']}`.")
+            if chain["anchors"]:
+                lines.append(f"{indent}- `{chain['anchors']}`: its anchor "
+                             "sidecar, the OpenTimestamps proofs the recorder "
+                             "collected for this chain's heads.")
+        lines.append(f"{indent}- {transcript_words(session, transcripts)}")
+    if record:
+        lines.append(
+            "- `project.json`: the project record, the absolute path of the "
+            "project on the machine that recorded it. Off that machine it "
+            "points nowhere, which the verifier says in so many words.")
+    lines += [
+        f"- `witness.json`: {reading}, and the verdict its scan gave each "
+        "chain. Labelled testimony in the file: the verifier confirms "
+        "these bytes are unchanged and draws no verdict from them.",
+        "- `manifest.json`: the list of everything above, written last. "
+        "Chains are listed by head and entry count, the other files by "
+        "sha256 and byte count. Its hash is the only surface a seal "
+        "applies to, and this package declares no seals.",
+        "",
+        "The transcript ships only on request (ADR-0026 ruling 2). The "
+        "chain holds `Read: .env` with a fingerprint; the transcript holds "
+        "the contents of `.env`. Packaging it can hand the recipient the "
+        "very secret a session exfiltrated, so it is the operator's "
+        "explicit call, and this page says, per session, whether it is "
+        "here.",
+        "",
+        "## How to verify",
+        "",
+        "Get `loxodonta.py` from a release you trust "
+        "(https://github.com/Acquiredl/loxodonta/releases; check it "
+        "against the release's `SHA256SUMS`). Python 3.9 or newer, no "
+        "dependencies. Then, on the zip or on the unpacked folder:",
+        "",
+        "    python loxodonta.py verify-package <this package>",
+        "",
+        "It prints the manifest's summary, the recorder's own verdict for "
+        "each chain, the file references it cannot check off the machine, "
+        "each artifact against the manifest, then the package verdict and "
+        "one line of residual trust. Exit 0 is `SELF-CONSISTENT`; 1 is "
+        "`CHAIN-BROKEN`; 2 is `ARTIFACT-DIVERGED`; 3 is `ANCHOR-MISMATCH`; 4 is "
+        "`UNSUPPORTED-FORMAT`, a refusal; 5 is `TRANSCRIPT-DIVERGED` "
+        "(docs/PACKAGE.md).",
+        "",
+        "## What each layer shows, and what it does not",
+        "",
+        "- The chain walk shows that no entry was edited, removed, or "
+        "reordered since the chain was written. It does not show that "
+        "the recorder was told the truth: the agent's harness supplied "
+        "every action line, and the timestamps are its word.",
+        "- An anchor line under a chain shows that chain's head existed "
+        "by the Bitcoin block it names; the printed merkle root is yours "
+        "to confirm against a block source you trust. An anchor speaks "
+        "for its chain, never for this package as a set.",
+    ]
+    if transcripts and any(transcripts.values()):
+        lines.append(
+            "- A transcript here is judged against its chain's transcript "
+            "commitments: `COMMITMENT HOLDS` under the chain means the "
+            "committed prefix is the bytes the recorder hashed at the "
+            "time. The bytes after the last commitment are held by the "
+            "manifest alone, as of packaging; and before its first "
+            "commitment a transcript was the harness's to write "
+            "(ADR-0017).")
+    lines += [
+        "- The witness snapshot is testimony: the reader's reading on the "
+        "packing machine, carried along unaltered, never checked against "
+        "anything here.",
+        "- The manifest shows that every file here is the one that was "
+        "packed. With no seal declared, the whole package could have "
+        "been regenerated wholesale and then packed, and nothing inside "
+        "it could tell you: `SELF-CONSISTENT` states that limit.",
+        "- File contents are not here. Each entry carries the path and "
+        "the sha256 of the file the agent touched, as it stood then; the "
+        "files themselves travel separately or not at all.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_package(unit, sessions, drawer, report, stage, packed, seals,
+                  transcripts=None):
+    """Assemble one package in `stage`, in ADR-0007's write order: chain
+    snapshot and sidecars, each session's transcript beside its chains,
+    then the artifacts, then the README, then the manifest last,
+    declaring `seals` before any of them exists so a stripped seal is
+    caught (seal_package applies them). `sessions` is {session:
+    [chains]} in the package's order; `drawer` is the one whose project
+    record ships; `transcripts` is None when none was requested, else
+    {session: transcript path} for the sessions the scan paired with a
+    transcript still on disk (ADR-0026 ruling 2). Returns the file names
+    in the order they were written, which is the order the zip keeps."""
+    record = drawer / "project.json"   # travels only when it exists
+    written = []
+    listings = {}
+    artifacts = []
+    notes = {}
+    shipped = None if transcripts is None else {}
+    for session, chains in sessions.items():
+        listings[session] = []
+        for log in chains:
+            # Listed from the chain in its drawer, whose sidecar sits
+            # beside it; the snapshot has the same head and lines, byte
+            # for byte.
+            listing = chain_listing(log)
+            listings[session].append(listing)
+            shutil.copyfile(log, stage / log.name)
+            written.append(log.name)
+            if listing["anchors"]:
+                shutil.copyfile(log.with_name(listing["anchors"]),
+                                stage / listing["anchors"])
+                written.append(listing["anchors"])
+                artifacts.append(artifact_listing(stage / listing["anchors"]))
+        if transcripts is not None:
+            # The transcript travels under a bare name that names the
+            # session (the layout is flat), listed by sha256 like any
+            # post-close artifact, and every chain of the session names
+            # it, so the verifier knows which transcript is whose. Gone
+            # between the scan and this copy is gone: the README says so.
+            shipped[session] = None
+            name = f"transcript-{session}.jsonl"
+            if session in transcripts:
+                try:
+                    shutil.copyfile(transcripts[session], stage / name)
+                except OSError:
+                    # Named by the scan, unreadable now; nothing partial
+                    # stays behind, and the README says which it was.
+                    (stage / name).unlink(missing_ok=True)
+                    shipped[session] = False
+                else:
+                    written.append(name)
+                    artifacts.append(artifact_listing(stage / name))
+                    for listing in listings[session]:
+                        listing["transcript"] = name
+                    shipped[session] = name
+        if chains[0].parent != drawer:
+            # A worktree drawer's session (ADR-0023 part 3): its own
+            # project record does not travel, so the README says whose
+            # path its file references are relative to.
+            notes[session] = (
+                "recorded in the drawer of the harness worktree "
+                f"`{drawer_name(chains[0].parent)}`, read as this "
+                "repository's history (ADR-0023); its file references are "
+                "relative to that worktree"
+                + (", not to the path in `project.json`"
+                   if record.exists() else ""))
+    if record.exists():
+        shutil.copyfile(record, stage / "project.json")
+        written.append("project.json")
+        artifacts.append(artifact_listing(stage / "project.json"))
+    witness = witness_snapshot(report, unit, sessions)
+    write_lf(stage / "witness.json",
+             json.dumps(witness, indent=2, ensure_ascii=False) + "\n")
+    written.append("witness.json")
+    artifacts.append(artifact_listing(stage / "witness.json"))
+    write_lf(stage / "README.md",
+             package_readme(unit, packed, listings, witness, record.exists(),
+                            notes, shipped))
+    written.append("README.md")
+    artifacts.append(artifact_listing(stage / "README.md"))
+    manifest = {
+        "format": PACKAGE_FORMAT,
+        "packed": packed,
+        "tool": f"loxodonta supervisor {TOOL_VERSION}",
+        "unit": unit,
+        "chains": [listing for per_session in listings.values()
+                   for listing in per_session],
+        "artifacts": artifacts,
+        "seals": list(seals),
+    }
+    write_lf(stage / "manifest.json",
+             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+    written.append("manifest.json")
+    return written
+
+
+def key_fingerprint(public_key):
+    """The SHA256 fingerprint of a public key file, as ssh-keygen prints
+    it (`ssh-keygen -lf`), or None when the file is not a key it reads:
+    the recorder's, twice over, so the fingerprint printed at packaging
+    is the one the verifier prints. The fingerprint is the key's
+    identity (ADR-0008 ruling 6); the comment ssh-keygen prints beside
+    it is a name, and stays unread."""
+    listed = subprocess.run(["ssh-keygen", "-lf", str(public_key)],
+                            capture_output=True, encoding="utf-8",
+                            errors="replace")
+    words = listed.stdout.split()
+    if listed.returncode != 0 or len(words) < 2:
+        return None
+    return words[1]
+
+
+def sign_manifest(stage, keyfile):
+    """The issuer signature (ADR-0026 ruling 4, ADR-0008): ssh-keygen
+    signs the manifest's shipped bytes with KEYFILE and writes
+    manifest.json.sig beside it. This file never opens the private key;
+    only ssh-keygen does, and its own prompts, a passphrase or a
+    hardware touch, reach the terminal because its output is not
+    captured. The public key ships as manifest.json.pub, testimony
+    (ADR-0008 ruling 4): KEYFILE.pub when it exists, else what
+    `ssh-keygen -y` derives from the key, which asks for an encrypted
+    key's passphrase a second time; its two tokens only, type and key,
+    since the comment is a name and the package carries none. Then the
+    recipient's check, twice over: the signature must verify under the
+    key that ships, or a stale KEYFILE.pub beside a regenerated key
+    would send a package that could only ever read SEAL-INVALID.
+    Returns (the shipped key's fingerprint, None), or (None, the
+    problem sentence)."""
+    manifest = stage / "manifest.json"
+    signed = subprocess.run(
+        ["ssh-keygen", "-q", "-Y", "sign", "-n", SIGNATURE_NAMESPACE,
+         "-f", str(keyfile), str(manifest)])
+    if signed.returncode != 0:
+        return None, (f"the manifest was not signed (ssh-keygen exited "
+                      f"{signed.returncode}; its words are above)")
+    beside = keyfile.with_name(keyfile.name + ".pub")
+    if beside.is_file():
+        line = beside.read_text("utf-8", errors="replace")
+    else:
+        derived = subprocess.run(["ssh-keygen", "-y", "-f", str(keyfile)],
+                                 stdout=subprocess.PIPE, encoding="utf-8",
+                                 errors="replace")
+        if derived.returncode != 0:
+            return None, (f"the public key was not derived from {keyfile} "
+                          f"(ssh-keygen exited {derived.returncode}; its "
+                          "words are above)")
+        line = derived.stdout
+    key = " ".join(line.split()[:2])
+    write_lf(stage / MANIFEST_PUBLIC_KEY, key + "\n")
+    with tempfile.TemporaryDirectory() as scratch:
+        allowed = Path(scratch) / "allowed_signers"
+        write_lf(allowed, f"{SIGNATURE_PRINCIPAL} {key}\n")
+        with open(manifest, "rb") as shipped:
+            verified = subprocess.run(
+                ["ssh-keygen", "-Y", "verify", "-f", str(allowed),
+                 "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
+                 "-s", str(stage / MANIFEST_SIGNATURE)],
+                stdin=shipped, capture_output=True, encoding="utf-8",
+                errors="replace")
+    if verified.returncode != 0:
+        reason = "; ".join(verified.stderr.strip().splitlines()) \
+            or "ssh-keygen gave no reason"
+        source = beside if beside.is_file() else keyfile
+        return None, (f"the signature does not verify under the public key "
+                      f"{source} gave ({reason}); a stale .pub beside a "
+                      "regenerated key looks like this: move it aside and "
+                      "the key derives its own")
+    return key_fingerprint(stage / MANIFEST_PUBLIC_KEY), None
+
+
+def seal_package(stage, seals, calendars, keyfile):
+    """Apply the declared seals to the manifest, the last step of
+    ADR-0007's write order: the signature first, then the anchor, since
+    signing can fail on a passphrase or a touch and the anchor is the
+    one step that leaves the machine, so a signing that fails costs no
+    calendar submission. The signature: sign_manifest. The anchor
+    (ADR-0026 ruling 4): the recorder posts the manifest's sha256 to the
+    calendars once and writes the proof beside it as
+    manifest.json.anchors.jsonl; the supervisor never speaks OTS itself.
+    Returns (the seal files written, in order; the signing key's
+    fingerprint, or None; and the problem when a seal could not be
+    applied, the tool's own words already on stderr)."""
+    written, fingerprint = [], None
+    if SEAL_SIGNATURE in seals:
+        try:
+            fingerprint, problem = sign_manifest(stage, keyfile)
+        except (FileNotFoundError, PermissionError):
+            problem = ("the manifest was not signed: ssh-keygen is not on "
+                       "PATH or cannot run here (OpenSSH 8.0 or later "
+                       "carries it)")
+        if problem:
+            return [], None, problem
+        written += [MANIFEST_SIGNATURE, MANIFEST_PUBLIC_KEY]
+    if SEAL_ANCHOR in seals:
+        command = [sys.executable, str(LOXODONTA), "anchor",
+                   f"--manifest={stage / 'manifest.json'}"]
+        for calendar in calendars:
+            command += ["--calendar", calendar]
+        finished = subprocess.run(
+            command, capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        if finished.returncode != 0:
+            print(finished.stderr.strip() or "the recorder gave no reason",
+                  file=sys.stderr)
+            return [], None, "the manifest was not anchored"
+        written.append(MANIFEST_SIDECAR)
+    return written, fingerprint, None
+
+
+def zip_package(stage, written, out):
+    """The default shape: one zip, members in write order, so the
+    manifest is the last member too."""
+    import zipfile
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
+        for name in written:
+            package.write(stage / name, name)
+
+
+def select_session(selector, sessions):
+    """The session a selector names, with its chains: a session id, or
+    an entry address inside it, resolved over the whole store with the
+    recall commands' rules. (None, None) after the refusal is printed."""
+    if selector in sessions:
+        return selector, sessions[selector]
+    if ADDRESS_RE.match(selector.lower()):
+        logs = [log for chains in sessions.values() for log in chains]
+        match, _ = match_address(selector.lower(), logs, "the store",
+                                 hint="check the session id, or lengthen "
+                                      "the address")
+        if match is None:
+            return None, None
+        session = session_of(match[0])
+        return session, sessions[session]
+    print(f"error: {selector!r} is neither a session in the store nor an "
+          "entry address (4 to 64 hex characters)", file=sys.stderr)
+    return None, None
+
+
+def split_refusal(session, chains):
+    """True, the error printed, when a session's chains sit in more than
+    one drawer (possible before ADR-0023). The layout is flat, one
+    project record beside the chains; two drawers under one chain name
+    would mean one silently overwriting the other. Refused whether the
+    unit is the session or a drawer holding part of it: a drawer package
+    that looked complete and was not would be worse than the refusal."""
+    drawers = sorted({log.parent for log in chains})
+    if len(drawers) < 2:
+        return False
+    print(f"error: session {session} spans {len(drawers)} drawers "
+          f"({', '.join(d.name for d in drawers)}); packaging a split "
+          "session is not built", file=sys.stderr)
+    return True
+
+
+def cmd_package(args):
+    """Build one package (ADR-0026 ruling 1): of a session, selected by
+    id or by an entry address inside it, siblings included; or, with
+    --repo or no selector at all, of the repository's whole drawer,
+    resolved as `digest --repo` resolves it (CLAUDE_PROJECT_DIR, else the
+    current directory), its harness worktree drawers included
+    (ADR-0023). The scan underneath is one ordinary tick, as export's
+    is: its completeness rows and verdicts are the witness snapshot."""
+    everywhere = store_sessions()
+    if args.selector is not None:
+        session, chains = select_session(args.selector, everywhere)
+        if session is None:
+            return 1
+        drawer = chains[0].parent
+        sessions = {session: chains}
+        unit = {"kind": "session", "session": session,
+                "project": drawer_name(drawer)}
+        stem, label = session, f"session {session}"
+    else:
+        repo = invoking_repo(args)
+        drawer = store_receipts() / project_slug(repo)
+        sessions = drawer_sessions(repo)
+        if not sessions:
+            if repo_drawers(repo):
+                print(f"error: the drawer for {repo} holds no chain; nothing "
+                      "to package", file=sys.stderr)
+            else:
+                print(f"error: the store holds no drawer for {repo}; nothing "
+                      "to package (a legacy receipts/ layout moves into the "
+                      "store with `supervisor adopt`)", file=sys.stderr)
+            return 1
+        project = drawer_name(drawer) if drawer.is_dir() else repo.name
+        unit = {"kind": "drawer", "project": project,
+                "sessions": len(sessions)}
+        # The file is named for the drawer folder, the slug: safe on every
+        # filesystem and hash-suffixed, so two projects of one name never
+        # collide (ADR-0011). The README keeps the display name.
+        slug = drawer.name if drawer.is_dir() else project_slug(repo)
+        stem, label = slug, f"drawer {slug}, {len(sessions)} session(s)"
+    for session in sessions:
+        # Checked against the whole store, not the selection: half of a
+        # split session may sit in a drawer no selector reaches.
+        if split_refusal(session, everywhere.get(session, sessions[session])):
+            return 1
+    packed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    default = Path.cwd() / f"loxodonta-package-{stem}"
+    out = Path(args.out) if args.out else (
+        default if args.folder else default.with_name(default.name + ".zip"))
+    if out.exists():
+        print(f"error: {out} already exists; choose another --out",
+              file=sys.stderr)
+        return 1
+    # A reading, not a tick (tick=False): the keepers stay quiet, so
+    # packaging appends nothing to the chain it copies and sends nothing
+    # off the machine; the baseline still remembers the look. Only the
+    # seal step sends anything, and only with --anchor.
+    report = scan_root(store_receipts(), witness=Path(args.witness),
+                       store=True, tick=False)
+    # Declared in ADR-0007's ladder order, the anchor before the
+    # signature, which is the order the verifier judges and prints
+    # them; applied the other way round (seal_package), since neither
+    # depends on the other and only the anchor leaves the machine.
+    seals = ([SEAL_ANCHOR] if args.anchor else []) + (
+        [SEAL_SIGNATURE] if args.sign else [])
+    # `~` reaches argv unexpanded from PowerShell and cmd, and
+    # ssh-keygen does not expand it either; the docs' own example
+    # starts with it, so it means home on every shell here.
+    keyfile = Path(args.sign).expanduser() if args.sign else None
+    calendars = args.calendar or ()
+    transcripts = None
+    if args.transcript:
+        # The completeness watch's own pairing, session to transcript,
+        # read off the scan's rows rather than paired a second time. A
+        # session the watch found no readable transcript for is packaged
+        # without one, and the README says why.
+        transcripts = {
+            row["session"]: Path(row["transcript"])
+            for row in report.get("completeness", {}).get("sessions", [])
+            if row.get("session") in sessions and row.get("transcript")}
+    if transcripts is not None:
+        for session in sessions:
+            if not bare_file_name(f"transcript-{session}.jsonl"):
+                # The verifier refuses a manifest naming anything but a
+                # bare file name, so such a package would never verify.
+                print(f"error: session {session!r} cannot carry a transcript: "
+                      "its name is not a bare file name, and the package "
+                      "layout is flat", file=sys.stderr)
+                return 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if args.folder:
+        out.mkdir()
+        written = write_package(unit, sessions, drawer, report, out, packed,
+                                seals, transcripts)
+        if package_too_large(out, written):
+            shutil.rmtree(out)
+            return 1
+        sealed, fingerprint, problem = seal_package(out, seals, calendars,
+                                                    keyfile)
+        if problem:
+            # A package declaring a seal it does not carry would verify
+            # SEAL-MISSING; better nothing than that.
+            shutil.rmtree(out)
+    else:
+        with tempfile.TemporaryDirectory() as staging:
+            written = write_package(unit, sessions, drawer, report,
+                                    Path(staging), packed, seals, transcripts)
+            if package_too_large(Path(staging), written):
+                return 1
+            sealed, fingerprint, problem = seal_package(
+                Path(staging), seals, calendars, keyfile)
+            if not problem:
+                zip_package(Path(staging), written + sealed, out)
+    if problem:
+        print(f"error: {problem}; nothing written", file=sys.stderr)
+        return 1
+    written += sealed
+    chains = sum(len(logs) for logs in sessions.values())
+    print(f"written: {out.name} ({label}, {chains} chain(s), "
+          f"{len(written)} files)")
+    print(f'verify: python "{LOXODONTA.as_posix()}" verify-package '
+          f'"{out.as_posix()}"')
+    if args.anchor:
+        # The proof is pending until Bitcoin has it; the upgrade rewrites
+        # only the sidecar, so the manifest and its seal stand.
+        where = out if args.folder else Path("<the unpacked zip>")
+        print("anchored: the manifest's sha256 went to the calendars; the "
+              "proof is pending until Bitcoin has it, a few hours")
+        print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
+              f'--manifest="{(where / "manifest.json").as_posix()}"')
+    if fingerprint:
+        # The issuer's one job past signing (ADR-0008 ruling 4): the
+        # fingerprint is what the recipient compares, so it is printed
+        # here for publishing through a channel the package cannot
+        # rewrite. Never the key's comment: that is a name.
+        print(f"signed: key {fingerprint}; publish this fingerprint through "
+              "a channel the package cannot rewrite, since the recipient "
+              "compares it against one (ADR-0008)")
     return 0
 
 
@@ -3213,6 +4098,8 @@ class Watchtower(ThreadingHTTPServer):
                 report = scan_root(self.root, witness=self.witness,
                                    anchor_every=self.anchor_every,
                                    calendars=self.calendars,
+                                   publish_every=self.publish_every,
+                                   publish_url=self.publish_url,
                                    store=self.store)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
@@ -3327,6 +4214,8 @@ def cmd_serve(args):
     server.witness = Path(args.witness)
     server.anchor_every = args.anchor_every
     server.calendars = args.calendar or ()
+    server.publish_every = args.publish_every
+    server.publish_url = args.publish_url
     server.scan_lock = threading.Lock()
     server.scan_body = None
     server.scan_at = 0.0
@@ -3952,7 +4841,9 @@ this page draws them and decides nothing</footer>
           <div id="anchors">
             <p class="testimony">the block height is your half of the
             regeneration defense — confirm it against a Bitcoin block
-            source you trust</p>
+            source you trust; when a head last left this machine,
+            published or anchored, is staleness to read, not a
+            verdict</p>
             <div id="panel"></div>
           </div>
         </div>
@@ -4924,6 +5815,26 @@ function renderAnchors(report) {
             "head (entry " + a.head.n + ") unanchored" +
             (a.head.ts ? " for " + since(a.head.ts) : "")));
         }
+        // When a head last left the machine, published or anchored
+        // (ADR-0025): the same staleness voice as the unanchored head,
+        // never an alarm. A fresh reading proves nothing (both files
+        // are writer-reachable); a stale one is the reason to look.
+        const left = chain.left;
+        if (left) {
+          if (left.ts) {
+            const old = Date.now() - Date.parse(left.ts) > BARE_STALE;
+            row.appendChild(el("span", "bare" + (old ? " stale" : ""),
+              "a head last left " + since(left.ts) + " ago (" +
+              left.via + ")"));
+          } else {
+            row.appendChild(el("span", "bare",
+                               "no head has left this machine"));
+          }
+          if (left.note) {
+            row.appendChild(el("p", "claim" + (left.failed ? " shout" : ""),
+                               left.note));
+          }
+        }
         if (a.note) {
           row.appendChild(el("p", "claim" + (a.failed ? " shout" : ""),
                              a.note));
@@ -5308,13 +6219,32 @@ class VersionAction(argparse.Action):
         parser.exit()
 
 
+EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
+
+
+class UsageParser(argparse.ArgumentParser):
+    """argparse, with usage errors on an exit of their own, the recorder's
+    class twice over. A wrong flag, a missing argument, or a malformed
+    value exits 64 instead of argparse's stock 2, so scan's 5, 6, 7 and
+    verify's 0..5 are never an argparse error (ADR-0026 ruling 7). The
+    message is argparse's, unchanged, on stderr. Subparsers inherit this
+    class, so every command speaks the same number."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def main(argv):
-    parser = argparse.ArgumentParser(prog="supervisor",
-                                     description=__doc__.splitlines()[0])
+    parser = UsageParser(prog="supervisor",
+                         description=__doc__.splitlines()[0])
     parser.add_argument("--version", action=VersionAction,
                         help="print tool version, format version, and "
                              "the checkout's commit, then exit")
     sub = parser.add_subparsers(dest="command", required=True)
+    # Parents only donate arguments; the parser that errors is the
+    # subparser's, and add_subparsers gives every subparser `parser`'s
+    # class, so the helpers below stay plain.
     watching = argparse.ArgumentParser(add_help=False)
     watching.add_argument("--witness", default=str(WITNESS_ROOT),
                           help="the harness transcript layout (the "
@@ -5328,6 +6258,19 @@ def main(argv):
                           metavar="URL",
                           help="calendar for auto-anchoring (repeatable; "
                                "default: receipts' public pools)")
+    watching.add_argument("--publish-every", type=parse_cadence,
+                          default=None, metavar="AGE",
+                          help="opt in: publish a head once it is this old "
+                               "and has not left yet (e.g. 6h, 1d), to "
+                               "--publish-url, through `loxodonta publish` "
+                               "(ADR-0025). Off by default — nothing leaves "
+                               "the machine without it")
+    watching.add_argument("--publish-url", type=publish_url, default=None,
+                          metavar="URL",
+                          help="where --publish-every posts: a plain http "
+                               "or https URL the credentials on this "
+                               "machine cannot delete from, such as a chat "
+                               "incoming webhook")
     scan = sub.add_parser(
         "scan", parents=[watching],
         help="one tick: census + verdicts, JSON out, exit code")
@@ -5449,7 +6392,8 @@ def main(argv):
                         help="file to write (default: "
                              "loxodonta-export-<date>.json here)")
     export.add_argument("--raw", action="store_true",
-                        help="also bundle the chains themselves, "
+                        help="also write a raw archive of the chains "
+                             "themselves, "
                              "byte-for-byte; shows a sample line and asks "
                              "first, because chains carry command lines")
     export.add_argument("--send", action="store_true",
@@ -5457,8 +6401,67 @@ def main(argv):
                              "and open a field-data issue on "
                              f"{FIELD_DATA_REPO}")
     export.set_defaults(func=cmd_export)
+    package = sub.add_parser(
+        "package",
+        help="a session or a drawer as a package: its chains and anchor "
+             "sidecars, the project record, a witness snapshot labelled "
+             "testimony, a README, and a manifest written last; verified "
+             "by `loxodonta verify-package` alone (ADR-0026)")
+    # One unit or the other: argparse refuses both with a usage error.
+    unit = package.add_mutually_exclusive_group()
+    unit.add_argument("selector", nargs="?", default=None,
+                      metavar="SESSION|ADDRESS",
+                      help="a session id, or any entry address inside the "
+                           "session (siblings included either way)")
+    unit.add_argument("--repo", default=None, metavar="PATH",
+                      help="the whole drawer of this repository instead, "
+                           "every session and sibling, its harness worktree "
+                           "drawers included, as `digest --repo` reads it "
+                           "(default when no selector is given: "
+                           "CLAUDE_PROJECT_DIR, else the current directory)")
+    package.add_argument("--out", default=None,
+                         help="file (or, with --folder, folder) to write "
+                              "(default: loxodonta-package-<session>.zip "
+                              "here)")
+    package.add_argument("--folder", action="store_true",
+                         help="write an unpacked folder instead of a zip")
+    package.add_argument("--witness", default=str(WITNESS_ROOT),
+                         help="the harness transcript layout the scan "
+                              "underneath reads (same as scan)")
+    package.add_argument("--transcript", action="store_true",
+                         help="also carry each session's harness transcript "
+                              "while it is still on disk; it can hold what "
+                              "the session read, a secret included, so it "
+                              "ships only on request (ADR-0026)")
+    package.add_argument("--anchor", action="store_true",
+                         help="seal the package: post the manifest's sha256 "
+                              "to the OpenTimestamps calendars once and "
+                              "ship the proof beside it, so verify-package "
+                              "can earn + ANCHORED (ADR-0026 ruling 4). "
+                              "Nothing leaves the machine without this")
+    package.add_argument("--calendar", action="append", default=None,
+                         metavar="URL",
+                         help="calendar for --anchor (repeatable; default: "
+                              "the public pools)")
+    package.add_argument("--sign", default=None, metavar="KEYFILE",
+                         help="seal the package with the issuer signature: "
+                              "ssh-keygen signs the manifest with this SSH "
+                              "private key (it alone reads the key, and "
+                              "asks for a passphrase or a touch itself) and "
+                              "the signature and public key ship beside it, "
+                              "so verify-package can earn + SIGNED with the "
+                              "key's fingerprint (ADR-0026 ruling 4, "
+                              "ADR-0008). A key any process of this user "
+                              "could use without you is writer-reachable, "
+                              "and its signature is testimony")
+    package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)
+    # The cadence says when and the URL says where; one without the
+    # other is a command spoken wrong, refused before any tick runs.
+    if ((getattr(args, "publish_every", None) is None)
+            != (getattr(args, "publish_url", None) is None)):
+        parser.error("--publish-every and --publish-url go together")
     return args.func(args)
 
 

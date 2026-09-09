@@ -29,12 +29,16 @@ The sidecar is *evidence, not a chain*: a forged proof fails replay; a deleted p
 ```
 receipts anchor [--log PATH] [--calendar URL]...   # submit the current head
 receipts anchor --upgrade [...]                    # complete pending proofs
+receipts anchor --manifest PATH [--calendar URL]...  # anchor a package manifest's sha256 The door is general: `--manifest PATH` anchors the sha256 of any file's bytes; the package manifest is the case it exists for, and an anchored file's proof lives beside it as `PATH.anchors.jsonl`.
+receipts anchor --upgrade --manifest PATH          # complete that proof
 receipts verify --anchors [...]                    # judge proofs, offline
 ```
 
 **`anchor`** reads the current head, POSTs the raw 32-byte digest to each calendar (`POST <calendar>/digest`), and appends one sidecar record per calendar that answered. Success is ≥1 record written (exit 0); no calendar reachable is exit 1. Default calendars: `a.pool.opentimestamps.org`, `b.pool.opentimestamps.org`, `a.pool.eternitywall.com`, `ots.btc.catallaxy.com`.
 
 **`anchor --upgrade`** replays each pending proof to its calendar commitment, asks the calendar for the completion (`GET <calendar>/timestamp/<commitment-hex>`), and appends an upgraded record (same `head`, spliced proof ending in a Bitcoin attestation). Still-pending proofs (typically for a few hours after submission) are reported and left alone.
+
+**`anchor --manifest PATH`** anchors a package manifest the same way, its sha256 in place of a chain head (ADR-0026 ruling 4): the proof lands in `PATH.anchors.jsonl` as an ordinary record with no `n`, since a manifest has no entries, and `--upgrade --manifest PATH` completes it. `supervisor package --anchor` drives this and `loxodonta verify-package` judges it (docs/PACKAGE.md §2 and §5).
 
 **`verify --anchors`** — offline, like all of verify. For each sidecar record:
 
@@ -64,7 +68,7 @@ Proof bytes are stored exactly as calendars produced them (plus splicing on upgr
 Stage A: record the head out of the writer's reach, compare with `verify --expect-head`.
 Stage B replaces remembering a secret with two cheaper habits:
 
-1. **Anchor at meaningful moments** — end of a session, end of a pipeline run: `receipts anchor` (later, `--upgrade` once, any time after a few hours). Or opt in once and let the hook do it: `loxodonta install-hook --anchor-at-session-end` anchors every session's head when the session ends, after the tail commitment, under a twelve-second budget, quietly on failure, and spends the leftover budget upgrading the drawer's pending proofs (ADR-0024). What leaves the machine is the 32-byte head digest, to the public calendars, from your address, only after the opt-in. A same-account remote (a gist under your login) is not a head record for the same reason the supervisor's baseline is not: the agent on the machine can reach it.
+1. **Anchor at meaningful moments** — end of a session, end of a pipeline run: `receipts anchor` (later, `--upgrade` once, any time after a few hours). Or opt in once and let the hook do it: `loxodonta install-hook --anchor-at-session-end` anchors every session's head when the session ends, after the tail commitment, under a twelve-second budget, quietly on failure, and spends the leftover budget upgrading the drawer's pending proofs (ADR-0024). What leaves the machine is the 32-byte head digest, to the public calendars, from your address, only after the opt-in. A remote is a head record when the credentials on this machine cannot delete or overwrite what they wrote there (ADR-0025): a gist under your login is not one, because the `gh` token deletes it; a chat webhook or a retention-locked bucket is, and `install-hook --publish-head URL` sends each session's head there before the anchor.
 2. **When verifying, read the heights.** `verify --anchors` proves the math; only the operator can judge whether "existed by block H" is *old enough* to cover the history the log claims.
 
 Copying the sidecar off-machine remains recommended and makes the story airtight: proofs in hand, nothing on the writer's machine to trust at all.
