@@ -3262,7 +3262,10 @@ def send_export(data, out, archive):
 # downloads the one file that already verifies a bare chain.
 
 PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
-PACKAGE_SEALS = ()   # declared seals; --anchor and --sign are later slices
+# The seals a package can declare (ADR-0007's declared seal set): the
+# anchor is built (--anchor); the signature (--sign) is a later slice.
+SEAL_ANCHOR = "anchor"
+MANIFEST_SIDECAR = "manifest.json.anchors.jsonl"   # the anchor's proof
 # The completeness row travels with these fields only: no judge command,
 # no transcript path, no home. Paths the recipient cannot follow are
 # noise, and the project record already carries the one that matters.
@@ -3541,16 +3544,18 @@ def package_readme(unit, packed, sessions, witness, record, notes,
     return "\n".join(lines)
 
 
-def write_package(unit, sessions, drawer, report, stage, packed,
+def write_package(unit, sessions, drawer, report, stage, packed, seals,
                   transcripts=None):
     """Assemble one package in `stage`, in ADR-0007's write order: chain
-    snapshot and sidecars, then the artifacts, then the README, then the
-    manifest last. `sessions` is {session: [chains]} in the package's
-    order; `drawer` is the one whose project record ships; `transcripts`
-    is None when none was requested, else {session: transcript path} for
-    the sessions the scan paired with a transcript still on disk
-    (ADR-0026 ruling 2). Returns the file names in the order they were
-    written, which is the order the zip keeps."""
+    snapshot and sidecars, each session's transcript beside its chains,
+    then the artifacts, then the README, then the manifest last,
+    declaring `seals` before any of them exists so a stripped seal is
+    caught (seal_package applies them). `sessions` is {session:
+    [chains]} in the package's order; `drawer` is the one whose project
+    record ships; `transcripts` is None when none was requested, else
+    {session: transcript path} for the sessions the scan paired with a
+    transcript still on disk (ADR-0026 ruling 2). Returns the file names
+    in the order they were written, which is the order the zip keeps."""
     record = drawer / "project.json"   # travels only when it exists
     written = []
     listings = {}
@@ -3627,12 +3632,34 @@ def write_package(unit, sessions, drawer, report, stage, packed,
         "chains": [listing for per_session in listings.values()
                    for listing in per_session],
         "artifacts": artifacts,
-        "seals": list(PACKAGE_SEALS),
+        "seals": list(seals),
     }
     write_lf(stage / "manifest.json",
              json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     written.append("manifest.json")
     return written
+
+
+def seal_package(stage, seals, calendars):
+    """Apply the declared seals to the manifest's hash, the last step of
+    ADR-0007's write order. The anchor (ADR-0026 ruling 4): the recorder
+    posts the manifest's sha256 to the calendars once and writes the
+    proof beside it as manifest.json.anchors.jsonl; the supervisor never
+    speaks OTS itself. Returns (the seal files written, in order, and
+    the recorder's own words when a seal could not be applied)."""
+    written = []
+    if SEAL_ANCHOR in seals:
+        command = [sys.executable, str(LOXODONTA), "anchor",
+                   f"--manifest={stage / 'manifest.json'}"]
+        for calendar in calendars:
+            command += ["--calendar", calendar]
+        finished = subprocess.run(
+            command, capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        if finished.returncode != 0:
+            return [], finished.stderr.strip() or "the recorder gave no reason"
+        written.append(MANIFEST_SIDECAR)
+    return written, None
 
 
 def zip_package(stage, written, out):
@@ -3734,9 +3761,12 @@ def cmd_package(args):
         return 1
     # A reading, not a tick (tick=False): the keepers stay quiet, so
     # packaging appends nothing to the chain it copies and sends nothing
-    # off the machine; the baseline still remembers the look.
+    # off the machine; the baseline still remembers the look. Only the
+    # seal step sends anything, and only with --anchor.
     report = scan_root(store_receipts(), witness=Path(args.witness),
                        store=True, tick=False)
+    seals = [SEAL_ANCHOR] if args.anchor else []
+    calendars = args.calendar or ()
     transcripts = None
     if args.transcript:
         # The completeness watch's own pairing, session to transcript,
@@ -3760,22 +3790,43 @@ def cmd_package(args):
     if args.folder:
         out.mkdir()
         written = write_package(unit, sessions, drawer, report, out, packed,
-                                transcripts)
+                                seals, transcripts)
         if package_too_large(out, written):
             shutil.rmtree(out)
             return 1
+        sealed, problem = seal_package(out, seals, calendars)
+        if problem:
+            # A package declaring a seal it does not carry would verify
+            # SEAL-MISSING; better nothing than that.
+            shutil.rmtree(out)
     else:
         with tempfile.TemporaryDirectory() as staging:
             written = write_package(unit, sessions, drawer, report,
-                                    Path(staging), packed, transcripts)
+                                    Path(staging), packed, seals, transcripts)
             if package_too_large(Path(staging), written):
                 return 1
-            zip_package(Path(staging), written, out)
+            sealed, problem = seal_package(Path(staging), seals, calendars)
+            if not problem:
+                zip_package(Path(staging), written + sealed, out)
+    if problem:
+        print(problem, file=sys.stderr)
+        print("error: the manifest was not anchored; nothing written",
+              file=sys.stderr)
+        return 1
+    written += sealed
     chains = sum(len(logs) for logs in sessions.values())
     print(f"written: {out.name} ({label}, {chains} chain(s), "
           f"{len(written)} files)")
     print(f'verify: python "{LOXODONTA.as_posix()}" verify-package '
           f'"{out.as_posix()}"')
+    if args.anchor:
+        # The proof is pending until Bitcoin has it; the upgrade rewrites
+        # only the sidecar, so the manifest and its seal stand.
+        where = out if args.folder else Path("<the unpacked zip>")
+        print("anchored: the manifest's sha256 went to the calendars; the "
+              "proof is pending until Bitcoin has it, a few hours")
+        print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
+              f'--manifest="{(where / "manifest.json").as_posix()}"')
     return 0
 
 
@@ -6264,6 +6315,16 @@ def main(argv):
                               "while it is still on disk; it can hold what "
                               "the session read, a secret included, so it "
                               "ships only on request (ADR-0026)")
+    package.add_argument("--anchor", action="store_true",
+                         help="seal the package: post the manifest's sha256 "
+                              "to the OpenTimestamps calendars once and "
+                              "ship the proof beside it, so verify-package "
+                              "can earn + ANCHORED (ADR-0026 ruling 4). "
+                              "Nothing leaves the machine without this")
+    package.add_argument("--calendar", action="append", default=None,
+                         metavar="URL",
+                         help="calendar for --anchor (repeatable; default: "
+                              "the public pools)")
     package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)

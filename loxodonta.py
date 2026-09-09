@@ -609,14 +609,27 @@ def read_anchor_records(log):
 
 
 def append_anchor_record(log, head, n, calendar, proof_bytes):
+    """One anchor record beside `log`. `n` is the anchored entry's
+    number; a package manifest's anchor has none (ADR-0026 ruling 4),
+    and its record then carries no `n` at all rather than a null."""
     record = {
         "head": head,
-        "n": n,
         "ts": now_ts(),
         "calendar": calendar,
         "proof": base64.b64encode(proof_bytes).decode("ascii"),
     }
+    if n is not None:
+        record["n"] = n
     append_sidecar_record(anchors_path(log), record)
+
+
+def record_label(head, n):
+    """How an anchor record is named in messages: a chain head by its
+    entry number; a manifest digest, which has no entry, as the
+    manifest's."""
+    if n is None:
+        return f"manifest {head[:12]}…"
+    return f"head {head[:12]}… (entry {n})"
 
 
 def calendar_request(url, data=None, timeout=15):
@@ -745,7 +758,7 @@ def upgrade_pending_proofs(folder, remaining, deadline):
                     continuation)
             except (OSError, ProofError, ValueError):
                 continue
-            append_anchor_record(chain, record["head"], record["n"], url,
+            append_anchor_record(chain, record["head"], record.get("n"), url,
                                  upgraded)
             completed.add(key)
 
@@ -943,6 +956,21 @@ def cmd_publish(args):
 def cmd_anchor(args):
     if args.upgrade:
         return upgrade_anchors(args)
+    if args.manifest and args.log != DEFAULT_LOG:
+        print("error: --manifest anchors a file's digest and --log a chain's "
+              "head; give one of them", file=sys.stderr)
+        return EX_USAGE
+    if args.manifest:
+        # A package manifest (ADR-0026 ruling 4): the digest anchored is
+        # the file's sha256, the proof lands beside the manifest, and the
+        # record has no entry number, because a manifest has no entries.
+        try:
+            head = sha256_file(args.manifest)
+        except OSError as e:
+            print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
+            return 1
+        return submit_digest(args.manifest, head, None, args.calendar,
+                             f"--upgrade --manifest={args.manifest}")
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -956,11 +984,19 @@ def cmd_anchor(args):
         print(f"error: {args.log} has a damaged final line — run "
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
-    head, n = last["entry_hash"], last["n"]
-    digest = bytes.fromhex(head)
+    return submit_digest(args.log, last["entry_hash"], last["n"],
+                         args.calendar, "--upgrade")
 
+
+def submit_digest(target, head, n, calendars, upgrade_flags):
+    """POST the digest `head` to each calendar and append one record
+    beside `target` per calendar that answered: a chain (`n` is the
+    entry number) or a package manifest (`n` is None). Success is one
+    record or more; `upgrade_flags` is how the operator completes the
+    proof later."""
+    digest = bytes.fromhex(head)
     written = 0
-    for calendar in (args.calendar or DEFAULT_CALENDARS):
+    for calendar in (calendars or DEFAULT_CALENDARS):
         url = calendar.rstrip("/")
         try:
             proof_bytes = calendar_request(url + "/digest", data=digest)
@@ -968,22 +1004,25 @@ def cmd_anchor(args):
         except (OSError, ProofError) as e:
             print(f"warning: calendar {url}: {e}", file=sys.stderr)
             continue
-        append_anchor_record(args.log, head, n, url, proof_bytes)
+        append_anchor_record(target, head, n, url, proof_bytes)
         written += 1
-        print(f"anchored head {head[:12]}… (entry {n}) via {url}")
+        print(f"anchored {record_label(head, n)} via {url}")
     if not written:
-        print("error: no calendar accepted the digest — head not anchored",
+        print("error: no calendar accepted the digest — not anchored",
               file=sys.stderr)
         return 1
-    print("proof is pending — run `loxodonta anchor --upgrade` "
+    print(f"proof is pending — run `loxodonta anchor {upgrade_flags}` "
           "after a few hours to complete it")
     return 0
 
 
 def upgrade_anchors(args):
-    records = read_anchor_records(args.log)
+    # The upgrade reads only the sidecar, so a manifest's anchor goes
+    # the same way as a chain's: `--manifest PATH` names it.
+    target = args.manifest or args.log
+    records = read_anchor_records(target)
     if not records:
-        print(f"error: no anchors found at {anchors_path(args.log)} — "
+        print(f"error: no anchors found at {anchors_path(target)} — "
               "run `loxodonta anchor` first", file=sys.stderr)
         return 1
     # A head+calendar pair that already has a completed record needs nothing.
@@ -1009,11 +1048,12 @@ def upgrade_anchors(args):
         if key in completed:
             continue
         url = record["calendar"].rstrip("/")
+        label = record_label(record["head"], record.get("n"))
         try:
             continuation = calendar_request(f"{url}/timestamp/{commitment_hex}")
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                print(f"still pending at {url} (entry {record['n']}) — "
+                print(f"still pending at {url} ({label}) — "
                       "Bitcoin confirmation takes a few hours")
             else:
                 print(f"warning: calendar {url}: {e}", file=sys.stderr)
@@ -1032,10 +1072,10 @@ def upgrade_anchors(args):
                   file=sys.stderr)
             failures += 1
             continue
-        append_anchor_record(args.log, record["head"], record["n"], url, upgraded)
+        append_anchor_record(target, record["head"], record.get("n"), url,
+                             upgraded)
         completed.add(key)
-        print(f"upgraded: head {record['head'][:12]}… (entry {record['n']}) "
-              f"now has a Bitcoin attestation")
+        print(f"upgraded: {label} now has a Bitcoin attestation")
     return 1 if failures else 0
 
 
@@ -1405,8 +1445,9 @@ PACKAGE_MAX_BYTES = 1 << 30   # a zip declaring more unpacked is refused unopene
 # order: a refusal, a broken chain, a seal or an anchor that is not this
 # history, a transcript that no longer holds, an artifact off its manifest.
 # Every finding names its mechanism, and the verdict line is the gravest
-# finding's word (ADR-0007 ruling 5), so the seal rungs (`+ ANCHORED`,
-# `+ SIGNED`; SEAL-INVALID and SEAL-MISSING at exit 3) join by adding words.
+# finding's word (ADR-0007 ruling 5); the seal rungs (`+ ANCHORED`, and
+# `+ SIGNED` when the signature slice lands) join the ceiling by adding
+# words, and never by hiding a finding.
 PACKAGE_GRAVITY = (4, 1, 3, 5, 2)
 PACKAGE_WORDS = {
     "UNSUPPORTED-FORMAT": "a chain in this package is a format this verifier "
@@ -1415,6 +1456,10 @@ PACKAGE_WORDS = {
                     "above say where)",
     "ANCHOR-MISMATCH": "an anchor packaged with a chain is not evidence for "
                        "that chain (its lines above say which)",
+    "SEAL-INVALID": "a seal this package carries does not hold for its "
+                    "manifest (the seal line above says why)",
+    "SEAL-MISSING": "a seal the manifest declares is not in this package "
+                    "(the seal line above says which)",
     "TRANSCRIPT-DIVERGED": "a chain's transcript commitments do not hold: they "
                            "contradict each other, or the packaged transcript "
                            "differs from what they committed (its lines above "
@@ -1422,15 +1467,36 @@ PACKAGE_WORDS = {
     "ARTIFACT-DIVERGED": "something in this package is not what the manifest "
                          "lists (the lines above say what)",
     "SELF-CONSISTENT": "every chain walks clean and every artifact matches "
-                       "the manifest; indistinguishable from a wholesale "
-                       "regeneration, since no seal is declared",
+                       "the manifest",
 }
 CHAIN_WORDS = {1: "CHAIN-BROKEN", 3: "ANCHOR-MISMATCH",
                4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED"}
-RESIDUAL_TRUST = (
-    "residual trust: this package is unaltered since it was packed. That "
-    "the record inside is true and complete, and that it existed before "
-    "today, rests on the issuer's word alone, since no seal is declared.")
+# The ceiling verdict is printed with its limit (ADR-0007 ruling 5), and
+# the residual-trust line says what still rests on the issuer's word. Both
+# depend on what the declared seals earned: nothing, an anchor still
+# pending, or an anchor that reached a block.
+CEILING_LIMIT = {
+    "unsealed": "; indistinguishable from a wholesale regeneration, since "
+                "no seal is declared",
+    "pending": "; indistinguishable from a wholesale regeneration until "
+               "its manifest anchor completes",
+    "anchored": ", and the manifest existed by Bitcoin block {height}",
+}
+RESIDUAL_TRUST = {
+    "unsealed": "residual trust: this package is unaltered since it was "
+                "packed. That the record inside is true and complete, and "
+                "that it existed before today, rests on the issuer's word "
+                "alone, since no seal is declared.",
+    "pending": "residual trust: this package is unaltered since it was "
+               "packed. That the record inside is true and complete, and "
+               "that it existed before today, rests on the issuer's word "
+               "alone until its manifest anchor completes.",
+    "anchored": "residual trust: this package is unaltered since it was "
+                "packed, and it existed by Bitcoin block {height} if the "
+                "merkle root printed beside that block is the block's. That "
+                "the record inside "
+                "is true and complete rests on the issuer's word alone.",
+}
 
 
 def bare_name(value):
@@ -1617,21 +1683,94 @@ def judge_artifact(folder, listing):
     return False
 
 
+def judge_manifest_anchor(folder):
+    """The anchor seal (ADR-0026 rulings 4 and 6), judged offline the way
+    check_anchors judges a chain's: every record of
+    manifest.json.anchors.jsonl must name this manifest's sha256 and
+    replay. Returns (findings, height): the lowest block a completed
+    proof reached, or None while the rung is unearned. Only the
+    manifest's own anchor can earn the package rung; the chains' anchors
+    printed above are detail, since they seal a different object."""
+    manifest = os.path.join(folder, "manifest.json")
+    digest = sha256_file(manifest)
+    records = read_anchor_records(manifest)
+    if not records:
+        what = "is not in this package" if records is None else "holds no record"
+        print(f"seal anchor: SEAL-MISSING: {anchors_path('manifest.json')} "
+              f"{what} — the manifest declares an anchor it does not carry")
+        return [(3, "SEAL-MISSING")], None
+    findings = []
+    height = None
+    completed = set()
+    pending = []
+    for record in records:
+        head = record.get("head") if record else None
+        if not isinstance(head, str) or not isinstance(record.get("proof"), str):
+            reason = "sidecar line is not an anchor record"
+        elif head != digest:
+            reason = (f"the proof is for digest {head[:12]}…, and this "
+                      f"manifest's sha256 is {digest[:12]}…")
+        else:
+            try:
+                verdict = judge_proof(head, base64.b64decode(record["proof"]))
+            except (ProofError, KeyError, ValueError) as e:
+                reason = str(e)
+            else:
+                if verdict[0] == "pending":
+                    pending.append(record)
+                    continue
+                _, block, root = verdict
+                print(f"seal anchor: ANCHORED: the manifest existed by "
+                      f"Bitcoin block {block} — confirm merkle root "
+                      f"{root[::-1].hex()} against a block source you trust")
+                height = block if height is None else min(height, block)
+                completed.add(record.get("calendar"))
+                continue
+        print(f"seal anchor: SEAL-INVALID: {reason} — evidence that does "
+              "not verify is not evidence")
+        findings.append((3, "SEAL-INVALID"))
+    for record in pending:
+        if record.get("calendar") in completed:
+            continue  # superseded by the upgraded record from that calendar
+        print(f"seal anchor: ANCHOR-PENDING: the manifest was submitted "
+              f"{record.get('ts')} via {record.get('calendar')} — unpack the "
+              "package and run `loxodonta anchor --upgrade --manifest=<its "
+              "manifest.json>` after a few hours; the rung is not earned "
+              "until the proof completes")
+    return findings, height
+
+
 def judge_seals(folder, manifest):
-    """Each declared seal against what the package carries. This format's
-    first slice declares none; a kind this verifier does not judge yet is
-    named as such and adds nothing to the verdict, so the recipient is
-    never told a seal was checked when it was not. The seal rungs are
-    their own slices."""
+    """Each declared seal against what the package carries: the anchor is
+    judged; a kind this verifier does not judge yet is named as such and
+    adds nothing to the verdict, so the recipient is never told a seal
+    was checked when it was not. Returns (findings, the block height the
+    manifest anchor reached, or None)."""
+    findings = []
+    height = None
     for kind in manifest["seals"]:
-        print(f"seal {kind}: declared; this verifier does not judge it yet")
-    return []
+        if kind == "anchor":
+            found, height = judge_manifest_anchor(folder)
+            findings += found
+        else:
+            print(f"seal {kind}: declared; this verifier does not judge it yet")
+    return findings, height
+
+
+def seal_files(manifest):
+    """The files the declared seals put beside the manifest, which the
+    manifest cannot list because they are written after it."""
+    files = set()
+    if "anchor" in manifest["seals"]:
+        files.add(anchors_path("manifest.json"))
+    return files
 
 
 def print_unlisted(folder, manifest):
     """Files in the package the manifest does not list: named, not
-    judged, so a reader is never misled by a file nothing vouches for."""
-    listed = {"manifest.json"}
+    judged, so a reader is never misled by a file nothing vouches for.
+    A declared seal's own file is judged above, not here."""
+    listed = {"manifest.json"} | seal_files(manifest)
     listed.update(c["path"] for c in manifest["chains"])
     listed.update(a["path"] for a in manifest["artifacts"])
     for name in sorted(os.listdir(folder)):
@@ -1673,13 +1812,26 @@ def judge_package(shown, folder):
           "machine")
     if any([judge_artifact(folder, a) for a in manifest["artifacts"]]):
         findings.append((2, "ARTIFACT-DIVERGED"))
-    findings += judge_seals(folder, manifest)
+    found, height = judge_seals(folder, manifest)
+    findings += found
     print_unlisted(folder, manifest)
     code, word = gravest(findings)
-    if code == 0:
-        print(RESIDUAL_TRUST)
-    print(f"{word}: {PACKAGE_WORDS[word]}")
-    return code
+    if code != 0:
+        print(f"{word}: {PACKAGE_WORDS[word]}")
+        return code
+    # The ceiling, with its limit and the residual trust, by what the
+    # seals earned: `+ ANCHORED` is the manifest's anchor and no other's
+    # (ADR-0026 ruling 6).
+    if height is not None:
+        earned, rung = "anchored", " + ANCHORED"
+    elif "anchor" in manifest["seals"]:
+        earned, rung = "pending", ""
+    else:
+        earned, rung = "unsealed", ""
+    print(RESIDUAL_TRUST[earned].format(height=height))
+    print(f"{word}{rung}: {PACKAGE_WORDS[word]}"
+          f"{CEILING_LIMIT[earned].format(height=height)}")
+    return 0
 
 
 def cmd_verify_package(args):
@@ -2775,6 +2927,13 @@ def main(argv=None):
                                     "public OpenTimestamps pools)")
     anchor_parser.add_argument("--upgrade", action="store_true",
                                help="complete pending proofs once Bitcoin has them")
+    anchor_parser.add_argument("--manifest", default=None, metavar="PATH",
+                               help="anchor a package manifest's sha256 "
+                                    "instead of a chain head, the proof "
+                                    "beside it in PATH.anchors.jsonl; with "
+                                    "--upgrade, complete that proof "
+                                    "(ADR-0026 ruling 4; `supervisor "
+                                    "package --anchor` drives this)")
     anchor_parser.set_defaults(func=cmd_anchor)
     publish_parser = sub.add_parser(
         "publish", parents=[common],
