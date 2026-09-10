@@ -323,6 +323,22 @@ class DashboardTest(ServerFixture):
                       "fourteen days"):
             self.assertIn(named, page)
 
+    def test_the_gantt_is_bounded_and_puts_the_signal_on_top(self):
+        # ADR-0027 relaxed the cap to two screens, which the gantt can
+        # still blow past on its own: it draws one lane per session, so
+        # it is tall in proportion to how much the operator worked. It
+        # gets a box and scrolls inside it. That trade is only safe if
+        # the panel's own fold cannot bury a reason to look, so an
+        # alarm, a deficit or an owed tail sorts above recency.
+        page = self.page()
+        self.assertIn('id="gantt-scroll"', page)
+        self.assertIn("#gantt-scroll { max-height: 32rem; "
+                      "overflow-y: auto; }", page)
+        # The axis rides the bottom of the same scroller, so the dates
+        # keep the lanes' width and therefore the lanes' scale.
+        self.assertIn("position: sticky; bottom: 0;", page)
+        self.assertIn("a.flagged - b.flagged || b.to - a.to", page)
+
     def test_activity_takes_the_worktable_and_drops_the_redrawn_bar(self):
         # ADR-0027's cap is physical — one screen, no scrolling — and it
         # binds the incumbents too. The receipts-per-session bar goes:

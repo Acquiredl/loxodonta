@@ -67,15 +67,29 @@ The ratified shape, recorded here because the trade-offs were argued
   inspect/activity toggle to a fifth tab beside sessions, projects,
   search and evidence — honest about the weight it now carries, and
   twice the width, which is what makes a grid possible at all.
-- **One screen, no scroll, at 1440x900.** A physical cap rather than a
-  numeric one, because a tab that scrolls is a tab that gets skimmed,
-  and because numbers get argued up by half a panel. The cap binds the
-  incumbents too: the receipts-per-session chart is cut, being a bar
-  drawing of the receipts column already on screen beside it, with no
-  norm to compare against.
-- **Seven panels, and no headroom.** The tally, tempo against the norm,
-  looks per day, the histogram, files touched, working hours, and
-  sessions on one axis. The next panel displaces one of these.
+- **Two screens at 1440x900, measured as document height.** The cap is
+  physical rather than numeric, because a number gets argued up by half
+  a panel. *One* screen was ratified first, then measured against a
+  real store and abandoned: the four surviving panels came to 2,093
+  pixels against a 745-pixel budget, because three of them have no
+  height of their own. The gantt draws one lane per session in the
+  fortnight, so it is tall in proportion to how much the operator
+  worked, and taller next month. One screen was not reachable by
+  arranging panels — it would have meant redrawing the fortnight and
+  the gantt as different charts. Two screens is reachable and still
+  rejects: seven panels fit only if the gantt is bounded. The cap binds
+  the incumbents too — the receipts-per-session chart is cut, being a
+  bar drawing of the receipts column already on screen beside it, with
+  no norm to compare against.
+- **A panel that grows with the data gets a bounded box.** The gantt
+  takes a fixed height and scrolls inside itself, and sessions carrying
+  an owed tail sort to the top, so a reason to look is never pushed
+  below the fold *within* a panel. The pane bodies already work this
+  way; this is that idiom, not a new one.
+- **Seven panels.** The tally, tempo against the norm, looks per day,
+  the histogram, files touched, working hours, and sessions on one
+  axis. An eighth is not forbidden by count — it is forbidden by the
+  cap, and has to fit inside it or displace something to make room.
 - **Every panel names its own window; no global range picker.** The
   fortnight band and the ninety-day buckets are chosen shapes, not
   defaults someone forgot to expose, and the sessions tab already

@@ -4420,6 +4420,13 @@ PAGE = """<!doctype html>
   /* The session Gantt: one row per session on a shared fourteen-day
      axis. Ch. 18's move is the label riding the bar — when a row wants
      attention its name is already where the eye lands. */
+  /* The gantt draws one lane per session, so its height is set by how
+     much the operator worked and grows every month. It gets a box of
+     its own and scrolls inside it (ADR-0027) — 32rem, the same height
+     the pane bodies already use. The axis rides the bottom of that box
+     so it stays put and stays aligned: sharing the scroller's width is
+     what keeps the lanes and the dates on the same scale. */
+  #gantt-scroll { max-height: 32rem; overflow-y: auto; }
   #gantt { margin: 0.6rem 0; }
   .lane { position: relative; height: 1.55rem; margin: 0.2rem 0;
           border-radius: 0.3rem;
@@ -4454,7 +4461,8 @@ PAGE = """<!doctype html>
             color-mix(in srgb, var(--damage) 45%, transparent) 6px); }
   #axis { display: flex; justify-content: space-between; font-size: 0.7rem;
           opacity: 0.6; font-variant-numeric: tabular-nums;
-          margin-top: 0.15rem; }
+          margin-top: 0.15rem; position: sticky; bottom: 0;
+          background: var(--surface); padding-top: 0.15rem; }
 
   /* The working-hours heat map: local weekday against local hour. */
   #clock { display: grid; grid-template-columns: auto repeat(24, 1fr);
@@ -4905,8 +4913,10 @@ this page draws them and decides nothing</footer>
       <p class="testimony">drawn from the completeness watch; a hatched
       tail is receipts the session owed and never wrote. Reasons to
       look, never verdicts</p>
-      <div id="gantt">remembering…</div>
-      <div id="axis"></div>
+      <div id="gantt-scroll">
+        <div id="gantt">remembering…</div>
+        <div id="axis"></div>
+      </div>
     </div>
   </div>
 </section>
@@ -5453,12 +5463,22 @@ function renderGantt() {
   const now = Date.now();
   const start = startOfDay(new Date(now - 13 * 86400000));
   const width = now - start;
+  // Newest first, except that a reason to look outranks recency: the
+  // panel scrolls inside its own box now (ADR-0027), and a hatched
+  // tail or an alarm must never be the thing below the fold.
   const lanes = lastRecall.sessions
     .filter(story => story.started && story.ended)
-    .map(story => ({story, from: Date.parse(story.started),
-                    to: Date.parse(story.ended)}))
+    .map(story => {
+      const seen = watch.get(story.repo + "/" + story.session);
+      const state = seen ? seen.state : "";
+      const flagged = state.startsWith("ALARM") ||
+        state.endsWith("DEFICIT") || (seen && seen.deficit > 0);
+      return {story, seen, state, flagged: flagged ? 0 : 1,
+              from: Date.parse(story.started),
+              to: Date.parse(story.ended)};
+    })
     .filter(row => row.to >= start)
-    .sort((a, b) => b.to - a.to);
+    .sort((a, b) => a.flagged - b.flagged || b.to - a.to);
 
   host.replaceChildren();
   if (!lanes.length) {
@@ -5468,8 +5488,8 @@ function renderGantt() {
   for (const lane of lanes) {
     const story = lane.story;
     const row = el("div", "lane");
-    const seen = watch.get(story.repo + "/" + story.session);
-    const state = seen ? seen.state : "";
+    const seen = lane.seen;
+    const state = lane.state;
     const rung = state.startsWith("ALARM") ? " grave"
       : state.endsWith("DEFICIT") ? " damage" : "";
     const left = Math.max(0, (lane.from - start) / width) * 100;
