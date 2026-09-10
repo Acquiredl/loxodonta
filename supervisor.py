@@ -1886,6 +1886,61 @@ def panel_tool_key(entry):
     return head
 
 
+# The ladder of bucket widths for the density strip, in seconds, and
+# the most bars it may draw. A real store holds sessions eighteen
+# seconds long and sessions a week long, five orders of magnitude
+# apart, so no single width serves both: the strip takes the first rung
+# that fits the span into SHAPE_BARS bars or fewer. The panel then says
+# which rung won, because a bar chart whose scale the reader has to
+# guess is worse than no bar chart.
+SHAPE_RUNGS = (1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200,
+               10800, 21600, 43200, 86400)
+SHAPE_BARS = 60
+
+
+def session_shape(root, repo, session, store=False):
+    """One session's receipts bucketed across its own span.
+
+    The axis is the session as it happened, first receipt to last, gaps
+    and all. A session that went quiet for a day and woke up draws as
+    mostly empty, and that emptiness is the finding rather than a
+    rendering problem — it is ADR-0018's reawakening, seen (ADR-0027).
+    Sibling chains fold in: one session is one story (ADR-0004).
+
+    Testimony, like the rest of recall — writer-stamped timestamps,
+    counted — and it owns no verdicts. The owed tail the page draws
+    over this belongs to the completeness watch, not to here."""
+    stamps = []
+    for repo_name, name, _, log in universe(root, store):
+        if repo_name != repo or name != session:
+            continue
+        for entry in read_entries(log):
+            # The genesis records that a chain opened, not that work
+            # happened, and it would stretch the span backwards.
+            if entry.get("n") == 0:
+                continue
+            when = parse_when(entry.get("ts"))
+            if when is not None:
+                stamps.append(when)
+    if not stamps:
+        return None
+    stamps.sort()
+    first, last = stamps[0], stamps[-1]
+    span = int((last - first).total_seconds())
+    width = next((rung for rung in SHAPE_RUNGS
+                  if span <= rung * SHAPE_BARS), SHAPE_RUNGS[-1])
+    buckets = [0] * (span // width + 1)
+    for when in stamps:
+        buckets[int((when - first).total_seconds()) // width] += 1
+    peak = max(range(len(buckets)), key=lambda i: buckets[i])
+    return {"repo": repo, "session": session, "testimony": TESTIMONY,
+            "from": first.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": last.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "seconds": span, "bucket_seconds": width, "buckets": buckets,
+            "receipts": len(stamps),
+            "peak": {"index": peak, "count": buckets[peak]}}
+
+
 # Where a subagent's checkout lives inside the project it serves. File
 # references are already project-relative (ADR-0012), so this prefix is
 # the only thing that splits one file into several — and it splits it
@@ -4244,6 +4299,17 @@ class Face(BaseHTTPRequestHandler):
                                    store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
+        elif url.path == "/api/shape":
+            asked = {key: values[0]
+                     for key, values in parse_qs(url.query).items()}
+            report = session_shape(self.server.root, asked.get("repo", ""),
+                                   asked.get("session", ""),
+                                   store=self.server.store)
+            if report is None:
+                self.send_error(404)
+                return
+            self.reply(json.dumps(report).encode("utf-8"),
+                       "application/json")
         elif url.path == "/api/chain":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
@@ -4547,6 +4613,28 @@ PAGE = """<!doctype html>
   /* The deficit, drawn as absence: the tail a session owed and never
      wrote. Hatched, like an unwatched day, because it is the same
      kind of hole. */
+  /* The density strip: one session's receipts across its own span,
+     gaps and all (ADR-0027). An hour nobody worked is a floor line
+     rather than a missing bar, because a gap and a blank must not look
+     the same. The owed tail reuses the gantt's hatch on purpose —
+     receipts a session owed and never wrote mean the same thing here,
+     and one idiom is cheaper to learn than two. */
+  .shape { display: flex; align-items: flex-end; gap: 1px; height: 38px;
+           margin: 0.5rem 0 0.1rem;
+           border-bottom: 1px solid var(--border); }
+  .shape > div { flex: 1; min-width: 1px; background: var(--quiet);
+                 border-radius: 1px 1px 0 0; }
+  .shape .gap { height: 1px; background: var(--line); }
+  .shape .peak { background: var(--look); }
+  /* A fixed cap, never a proportion. This axis is time, and receipts
+     a session owed and never wrote are a count with no hour attached —
+     sizing the hatch by the deficit would put a number on the time
+     axis that is not a time, and squeeze the real bars to make room.
+     The count lives in the caption, where it can be read. */
+  .shape .owed { position: static; flex: none; width: 0.75rem;
+                 margin-left: 0.25rem; align-self: stretch;
+                 border-radius: 0.2rem; }
+  #inspect-shape .testimony { font-size: 0.7rem; padding: 0; margin: 0; }
   .owed { position: absolute; top: 0; bottom: 0; border-radius: 0.3rem;
           border: 1px dashed var(--damage);
           background: repeating-linear-gradient(45deg,
@@ -4994,6 +5082,7 @@ this page draws them and decides nothing</footer>
         <div id="p2-inspect">
           <div id="inspect-meta" class="pane-empty">click a session on
           the left — its chains, claims, and actions land here</div>
+          <div id="inspect-shape" hidden></div>
           <div id="inspect-judge" hidden></div>
           <div id="inspect-chains"></div>
         </div>
@@ -6072,6 +6161,69 @@ function renderRecall(report) {
 // Pane two: the selected session's chains, claims, and actions — the
 // chain rows are the same tier ladder the whole page speaks, and the
 // walk buttons still open the WebCrypto walker.
+// The density strip: one session's receipts across its own span, gaps
+// and all (ADR-0027). The axis is the session as it happened, so a
+// week of dormancy draws as a week of empty — which is the finding,
+// not a rendering problem. Bucket width comes off a ladder because
+// sessions here run from eighteen seconds to a week, and the caption
+// names the rung: a bar chart whose scale you have to guess is worse
+// than none. The owed tail is the completeness watch's, which the page
+// already holds — the strip itself owns no verdicts.
+function shapeWords(seconds) {
+  if (seconds < 60) return seconds + "s";
+  if (seconds < 3600) return Math.round(seconds / 60) + " min";
+  if (seconds < 86400) return Math.round(seconds / 3600) + "h";
+  return Math.round(seconds / 86400) + "d";
+}
+
+async function renderShape(story) {
+  const host = document.getElementById("inspect-shape");
+  const where = story.repo + "/" + story.session;
+  host.hidden = true;
+  host.replaceChildren();
+  let shape;
+  try {
+    const response = await fetch("/api/shape?repo=" +
+      encodeURIComponent(story.repo) + "&session=" +
+      encodeURIComponent(story.session));
+    if (!response.ok) return;
+    shape = await response.json();
+  } catch (error) {
+    return;
+  }
+  // A second click can land while the first fetch is still in flight;
+  // the answer to a question nobody is asking any more is dropped.
+  if (where !== selectedWhere) return;
+
+  const strip = el("div", "shape");
+  const top = Math.max(...shape.buckets, 1);
+  shape.buckets.forEach((count, i) => {
+    const bar = el("div", count
+      ? (i === shape.peak.index ? "peak" : "") : "gap");
+    if (count) {
+      bar.style.height =
+        Math.max(2, Math.round(count / top * 34)) + "px";
+    }
+    bar.title = count + " receipt(s)";
+    strip.appendChild(bar);
+  });
+  const watch = lastStatus && lastStatus.completeness.sessions.find(
+    s => s.repo === story.repo && s.session === story.session);
+  const owed = watch && watch.deficit > 0 ? watch.deficit : 0;
+  if (owed) {
+    const tail = el("div", "owed");
+    tail.title = owed + " receipt(s) owed and never written";
+    strip.appendChild(tail);
+  }
+  host.appendChild(strip);
+  host.appendChild(el("p", "testimony",
+    "one bar = " + shapeWords(shape.bucket_seconds) + " · " +
+    shape.buckets.length + " bars · busiest " + shape.peak.count +
+    (owed ? " · hatched: " + owed + " owed, never written" : "") +
+    " — testimony, not a verdict"));
+  host.hidden = false;
+}
+
 function selectSession(story) {
   selectedWhere = story.repo + "/" + story.session;
   for (const row of document.querySelectorAll("#sessions-body tr")) {
@@ -6089,6 +6241,7 @@ function selectSession(story) {
     meta.appendChild(el("p", "sibling", story.chains.length +
       " chains — recording continued in a sibling"));
   }
+  renderShape(story);
   // The last rung of the ladder: the walker, hashes rechecked in the
   // reader's own browser.
   for (const path of story.paths || []) {

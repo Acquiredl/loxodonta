@@ -412,6 +412,47 @@ class DashboardTest(ServerFixture):
         self.assertEqual(rows.get(".claude/settings.json"), 1)
         self.assertNotIn(".claude/worktrees/agent-a/widget.py", rows)
 
+    def test_the_density_strip_spans_the_session_it_is_given(self):
+        # ADR-0027: the axis is the session as it happened, first
+        # receipt to last, and every receipt lands in exactly one
+        # bucket. Width comes off a ladder because real sessions run
+        # from seconds to a week, and the ladder is pinned here because
+        # the panel promises the reader which rung it used.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=4)
+        self.serve()
+        shape = json.loads(
+            self.get("/api/shape?repo=alpha&session=sess-aaaa")[2])
+        # The genesis records that a chain opened, not that work
+        # happened, so it is not in the shape.
+        self.assertEqual(shape["receipts"], 4)
+        self.assertEqual(sum(shape["buckets"]), shape["receipts"])
+        self.assertIn(shape["bucket_seconds"],
+                      (1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200,
+                       10800, 21600, 43200, 86400))
+        self.assertLessEqual(len(shape["buckets"]), 60)
+        self.assertEqual(shape["buckets"][shape["peak"]["index"]],
+                         shape["peak"]["count"])
+        self.assertIn("testimony", shape)
+
+    def test_the_density_strip_says_nothing_about_a_stranger(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/api/shape?repo=alpha&session=nobody")
+        self.assertEqual(caught.exception.code, 404)
+
+    def test_the_strip_rides_inspect_and_names_its_own_scale(self):
+        # A bar chart whose scale the reader has to guess is worse than
+        # none, so the caption says the rung out loud. And the owed cap
+        # is a fixed marker rather than a proportion: this axis is time,
+        # and receipts that were never written have no hour to sit at.
+        page = self.page()
+        self.assertIn('id="inspect-shape"', page)
+        self.assertIn("one bar = ", page)
+        self.assertIn(".shape .owed { position: static; flex: none;",
+                      page)
+
     def test_the_export_key_still_folds_what_leaves_the_machine(self):
         # The dashboard naming servers must not have loosened the
         # export, whose value is that it fails closed with no switch to
