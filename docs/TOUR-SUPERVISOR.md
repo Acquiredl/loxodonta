@@ -258,8 +258,12 @@ is *nothing is ever offered off-machine* — which includes off-machine
 by trickery: a Host header that is not localhost is refused (DNS
 rebinding makes a stranger's page read as same-origin, and CORS never
 enters it), and a POST carrying a foreign Origin is refused (no
-stranger's page pokes the drill). `/api/chain` and `/api/drill` only
-resolve chains under the root; sidecars and path escapes get 404.
+stranger's page pokes the drill, or saves a view). The write path
+carries a second lock: a body this face will read must declare a
+small length and `application/json`, which a cross-origin form post
+cannot set without a preflight nothing here answers. `/api/chain`
+and `/api/drill` only resolve chains under the root; sidecars and
+path escapes get 404.
 
 **The page** is one inline HTML file, no framework, no build step,
 nothing fetched from anywhere but this machine. Writer-supplied text
@@ -269,9 +273,22 @@ must never become markup in the operator's browser. The layout (issue #48)
 is a status rail beside a tabbed worktable: the rail carries the
 verdict block, the severity-sorted attention queue, and the fourteen
 days; the worktable splits what you are looking at (sessions,
-projects, search, evidence) from the thing under inspection (a
-session's chains, or the activity charts), so everything quieter than
-an alarm waits behind a tab instead of shouting from the front page.
+projects, search, evidence) from the thing under inspection — a
+session's chains, its claims, and a density strip of its receipts
+across its own span — so everything quieter than an alarm waits
+behind a tab instead of shouting from the front page. A fifth tab,
+*activity*, is the exception to the split: it is the store counted
+rather than a list with a detail beside it, so it takes the whole
+worktable (ADR-0027). Seven panels under a two-screen cap — the
+tally, tempo against the store's norm, looks per day, the histogram
+of what the writer reached for, files touched, working hours, and
+sessions on one axis — each naming the window it draws, because the
+page has no range picker and a number over an unstated span says
+nothing. Every one of them counts what the chains already hold and
+owns no verdicts; the hook was not asked for a single new field.
+Saved filter sets live in `.supervisor-views.json` beside the day
+book, in the day book's posture, and hold a closed list of fields —
+a drawer, two dates, a path, a tab — so no view can reach the rail.
 The verdict strip is redundantly encoded (colour, words, and a shape
 mark), chosen for strong colour-vision deficiency: the quiet state is
 blue-teal, and the states part by lightness as well as hue. Tier language is the point:
