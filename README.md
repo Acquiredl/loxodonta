@@ -248,12 +248,12 @@ Tampering only gets caught if something actually looks at the chains, and nobody
 
 ```
 python supervisor.py scan                     # one tick: every chain in the store, verdicts, exit code for cron
-python supervisor.py serve                    # localhost-only dashboard: status rail, attention queue, sessions worktable
+python supervisor.py serve                    # localhost-only dashboard: status rail, attention queue, worktable, activity
 python supervisor.py drill --root ~/repos --log <chain>   # rehearse detection on a sandbox copy, real chains untouched
 python supervisor.py adopt --root ~/repos     # one-time move of pre-store chains into the store (--dry-run to preview)
 ```
 
-![The supervisor dashboard over the demo store: a verdict strip reading "all quiet, 4 chains, every receipt accounted for" with the recorder notice under it, an attention list saying nothing wants your eyes, a fourteen-day band with one watched day, and a sessions table listing four todo sessions with their receipt counts and time spans; the inspect pane on the right waits for a row to be clicked.](docs/images/dashboard.png)
+![The supervisor dashboard over the demo store: a verdict strip reading "all quiet, 4 chains, every receipt accounted for" with the recorder notice under it, an attention list saying nothing wants your eyes, and a fourteen-day band with one watched day; on the right, five tabs (sessions, projects, search, evidence, activity) over a row of saved views, and a sessions table listing four todo sessions with their receipt counts and time spans, with the inspect pane waiting for a row to be clicked.](docs/images/dashboard.png)
 
 *`supervisor serve` over the [demo store](tools/demo_store.py), captured headless; no real store appears in a tracked image.*
 
@@ -313,7 +313,7 @@ What comes back gets read into [docs/FIELD-DATA.md](docs/FIELD-DATA.md), one row
 
 ## Planned
 
-A better viewer for reviewing the logs, most likely growing the localhost page in `supervisor serve` into full memory navigation, so browsing history doesn't require the CLI (still open to change). More adapters as harnesses earn them, and a completeness witness for Codex sessions once its transcript layout settles. A richer query surface if shelling out ever turns out insufficient: filters and aggregation are deliberately not built until the plain commands above fall short. Recall that reaches a session's worktree-path drawer, and a verdict recall can cite instead of hedging: both found wanting in the §6 run.
+More adapters as harnesses earn them, and a completeness witness for Codex sessions once its transcript layout settles. A richer query surface on the CLI if shelling out ever turns out insufficient: filters and aggregation there are still deliberately not built until the plain commands above fall short. The localhost page went the other way and now counts what the chains already hold, on its own tab, without the recorder being asked for a single new field. Recall that reaches a session's worktree-path drawer, and a verdict recall can cite instead of hedging: both found wanting in the §6 run.
 
 ## License
 
