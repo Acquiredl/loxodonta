@@ -141,18 +141,16 @@ format, which stays at `0.1`. The ritual, in order:
    `supervisor.py`) prints each sum; compare it by eye with the line in
    `SHA256SUMS`. If a sum disagrees, the release is wrong, not the file:
    delete the release and the tag, find out why, and cut it again.
-7. Close what the release carried. A commit subject here names its issue
-   in parentheses, not with a `Closes #N` trailer, so nothing closes itself
-   when a pull request merges. List every number the promotion range names:
+7. Close the issues the release finished. Nothing here closes itself: a
+   commit subject names its issue in parentheses, not with a `Closes #N`
+   trailer. Read the promotion's commit subjects, and close each issue they
+   name with a comment pointing at the commit that did the work.
 
    ```
-   git log --oneline vx.y.z-1..vx.y.z | grep -o '#[0-9][0-9]*' | sort -u -V
+   git log --oneline <previous tag>..vx.y.z
    ```
 
-   Issues and pull requests share one sequence, so that list holds both;
-   check each before acting on it. Close every issue the release finished,
-   with a comment naming the commit that did the work. Leave open whatever
-   was parked on purpose, and say in its comment what it now waits for.
+   An issue the release parked rather than finished stays open.
 
 `1.0.0` waits for one export from another machine read into
 `docs/FIELD-DATA.md` (ADR-0022). Until then, minor versions may change
