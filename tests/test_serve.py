@@ -453,6 +453,50 @@ class DashboardTest(ServerFixture):
         self.assertIn(".shape .owed { position: static; flex: none;",
                       page)
 
+    def hot_store(self):
+        """Three ordinary sessions set the norm; one burns past it."""
+        for name in ("aaaa", "bbbb", "cccc"):
+            make_chain(self.root / name / "receipts", "sess-" + name,
+                       entries=3)
+        make_chain(self.root / "delta" / "receipts", "sess-hot",
+                   entries=12)
+        self.serve(extra_env={"SUPERVISOR_HOT_TIMES": "3",
+                              "SUPERVISOR_HOT_FLOOR": "10"})
+        return json.loads(self.get("/api/status")[2])["consumption"]
+
+    def test_the_watch_says_where_the_bar_is_set(self):
+        # Nobody discovers an environment variable by looking at a
+        # dashboard. ADR-0027 declined to grow a control — scan runs
+        # from the CLI and in CI, and the environment is the one place
+        # all three agree — so the panel names the two variables and
+        # the values in force instead.
+        words = self.hot_store()["norm"]["words"]
+        self.assertIn("SUPERVISOR_HOT_FLOOR", words)
+        self.assertIn("SUPERVISOR_HOT_TIMES", words)
+        self.assertIn("now 10", words)
+        self.assertIn("now 3", words)
+
+    def test_a_hot_session_carries_the_bar_it_cleared(self):
+        # Gradation needs both numbers on the record: a busiest hour of
+        # 713 against a bar of 153 is a different event from 155
+        # against 153, and the page divides one by the other to say so.
+        sessions = self.hot_store()["sessions"]
+        self.assertTrue(sessions, "one session should have run hot")
+        for session in sessions:
+            self.assertIn("busiest_hour", session)
+            self.assertIn("threshold", session)
+            self.assertGreater(session["threshold"], 0)
+
+    def test_the_hot_flag_says_how_far_past_the_bar(self):
+        # One helper, so the multiple reads the same in the attention
+        # queue and in the evidence panel. Not on the tempo chart: its
+        # value column would clip, and bar length against the norm line
+        # already draws the distance.
+        page = self.page()
+        self.assertIn("function pastTheBar", page)
+        self.assertIn("× the bar", page)
+        self.assertIn("against a bar of", page)
+
     def test_the_export_key_still_folds_what_leaves_the_machine(self):
         # The dashboard naming servers must not have loosened the
         # export, whose value is that it fails closed with no switch to

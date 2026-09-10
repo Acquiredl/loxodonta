@@ -1356,11 +1356,20 @@ def watch_consumption(families, now):
         "norm": {
             "median_busiest_hour": median_of(samples.values()),
             "sessions_counted": len(samples),
+            # The rule, and where the bar is set. Nobody discovers an
+            # environment variable by looking at a dashboard, so the
+            # panel names them rather than growing a control: `scan`
+            # runs from the CLI and in CI too, and the environment is
+            # the one place all three already agree (ADR-0027).
             "words": (f"hot means a busiest hour of at least "
                       f"max({HOT_FLOOR}, {HOT_TIMES} x the median busiest "
                       "hour of every other session) — a session never "
                       "sets its own norm. The norm is context for a "
-                      "flag, never a verdict; timestamps are testimony"),
+                      "flag, never a verdict; timestamps are testimony. "
+                      f"The bar moves with SUPERVISOR_HOT_FLOOR (now "
+                      f"{HOT_FLOOR}) and SUPERVISOR_HOT_TIMES (now "
+                      f"{HOT_TIMES}), read by the page, the CLI and CI "
+                      "alike"),
         },
         "sessions": [],
     }
@@ -5317,6 +5326,20 @@ function renderStrip(report) {
 // alarms outrank damaged history, which outranks reasons to look
 // (tripwire events, hot sessions). Everything else on the page is
 // deliberately quiet.
+// How far past its own bar a session actually burned. The bar is what
+// made it hot, so the multiple against the bar is the honest reading:
+// a busiest hour of 713 against a bar of 153 is a different event from
+// 155 against 153, and both wore the identical word until now
+// (ADR-0027). One helper, so the number reads the same in all three
+// places the flag appears.
+function pastTheBar(session) {
+  const bar = session.threshold;
+  if (!bar || !session.busiest_hour) return "";
+  const times = session.busiest_hour / bar;
+  return (times >= 10 ? Math.round(times)
+                      : Math.round(times * 10) / 10) + "× the bar";
+}
+
 const SEVERITY = ["alarm", "regenerated", "broken", "tripwire", "hot",
                   "reawakened"];
 
@@ -5357,9 +5380,11 @@ function attentionItems(report) {
   }
   for (const s of (report.consumption || {sessions: []}).sessions) {
     if (s.state === "RUNNING-HOT") {
+      const past = pastTheBar(s);
       items.push({rank: "hot", tone: "look", chip: "RUNNING-HOT",
         text: s.repo + " · " + s.session.slice(0, 8) +
-              " — burning far above the store's norm", tab: "evidence"});
+              " — busiest hour " + s.busiest_hour +
+              (past ? ", " + past : ""), tab: "evidence"});
     }
   }
   for (const w of ((report.lifecycle || {}).events || [])) {
@@ -5832,7 +5857,8 @@ function render(report) {
                    (s.state === "RUNNING-HOT" ? "hot" : "quiet"));
     row.appendChild(el("span", "chip", s.state));
     row.appendChild(el("span", "file", s.repo + " · " + s.session +
-      " · busiest hour " + s.busiest_hour + " entries, " +
+      " · busiest hour " + s.busiest_hour + " entries against a bar of " +
+      s.threshold + " — " + pastTheBar(s) + ". " +
       s.top_tool + " ran " + s.top_tool_count + " of them"));
     if (s.words) row.appendChild(el("p", "claim", s.words));
     return row;
@@ -6460,6 +6486,9 @@ function renderCharts() {
   const consumption = (lastStatus && lastStatus.consumption) ||
     {sessions: [], norm: null};
   if (consumption.sessions.length) {
+    // No multiple on this chart: the value column has 58 units and the
+    // words would clip. It grades already — bar length against the
+    // norm line is the distance, drawn (ADR-0027).
     hbars(tempoHost, consumption.sessions.map(s => ({
       label: s.session.slice(0, 8), v: s.busiest_hour, hot: true})),
       "calls in the busiest hour",
