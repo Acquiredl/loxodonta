@@ -497,6 +497,100 @@ class DashboardTest(ServerFixture):
         self.assertIn("× the bar", page)
         self.assertIn("against a bar of", page)
 
+    def views(self, body=None):
+        """GET the views, or POST one and read the list back."""
+        if body is None:
+            return json.loads(self.get("/api/views")[2])["views"]
+        request = urllib.request.Request(
+            self.url + "/api/views",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with OPENER.open(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))["views"]
+
+    def test_a_view_is_saved_listed_applied_and_forgotten(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        self.assertEqual(self.views(), [])
+        kept = self.views({"save": {"name": "alpha lately",
+                                    "repo": "alpha",
+                                    "from": "2026-09-01",
+                                    "tab": "sessions"}})
+        self.assertEqual(kept, [{"name": "alpha lately", "repo": "alpha",
+                                 "from": "2026-09-01",
+                                 "tab": "sessions"}])
+        # Saving the same name again replaces it rather than doubling.
+        again = self.views({"save": {"name": "alpha lately",
+                                     "repo": "beta"}})
+        self.assertEqual(again, [{"name": "alpha lately",
+                                  "repo": "beta"}])
+        self.assertEqual(self.views(), again)
+        self.assertEqual(self.views({"forget": "alpha lately"}), [])
+        # Forgetting what was never there leaves the file as asked.
+        self.assertEqual(self.views({"forget": "ghost"}), [])
+
+    def test_a_view_cannot_carry_a_field_this_format_does_not_know(self):
+        # The closed field list is the whole safety story: a view may
+        # name a drawer, a date range, a path and a tab, every one of
+        # them a control the operator can already work by hand. An
+        # unknown key makes the view invalid rather than being dropped
+        # quietly, which is what makes "a view can never touch the
+        # alarm" a property of the format (ADR-0027).
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        for bad in ({"name": "sneaky", "rail": "hide"},
+                    {"name": "sneaky", "exit": "0"},
+                    {"repo": "alpha"},
+                    "not even an object"):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.views({"save": bad})
+            self.assertEqual(caught.exception.code, 400)
+        self.assertEqual(self.views(), [])
+
+    def test_the_views_write_path_refuses_a_form_post(self):
+        # The one write path the page has. `application/json` cannot be
+        # sent by a cross-origin form post without a preflight nobody
+        # here answers, so insisting on it is the second lock beside
+        # the Origin check.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        request = urllib.request.Request(
+            self.url + "/api/views", data=b'save={"name":"x"}',
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            OPENER.open(request, timeout=30)
+        self.assertEqual(caught.exception.code, 400)
+        self.assertEqual(self.views(), [])
+
+    def test_a_hand_edited_views_file_is_read_through_the_same_gate(self):
+        # The file is writer-reachable, like the baseline and the day
+        # book, so it is trusted for nothing: what it holds is read
+        # back through the gate it was written through.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        (self.root / ".supervisor-views.json").write_text(json.dumps(
+            {"views": [{"name": "fine", "repo": "alpha"},
+                       {"name": "smuggled", "rail": "hide"},
+                       "junk"]}), encoding="utf-8")
+        self.serve()
+        self.assertEqual(self.views(), [{"name": "fine",
+                                         "repo": "alpha"}])
+
+    def test_the_views_row_sits_above_the_tabs_and_below_nothing_else(self):
+        page = self.page()
+        self.assertIn('id="view-list"', page)
+        self.assertIn('id="view-save"', page)
+        # Applying a view touches the four filter controls and the tab.
+        # It never reaches the rail, which reads the scan.
+        start = page.index("function applyView")
+        body = page[start:page.index("function said", start)]
+        for reached in ("ask-repo", "ask-from", "ask-to", "ask-path",
+                        "showTab", "loadRecall"):
+            self.assertIn(reached, body)
+        for forbidden in ("rail", "stateline", "attention", "strip",
+                          "lastStatus"):
+            self.assertNotIn(forbidden, body)
+
     def test_the_export_key_still_folds_what_leaves_the_machine(self):
         # The dashboard naming servers must not have loosened the
         # export, whose value is that it fails closed with no switch to

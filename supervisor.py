@@ -362,6 +362,106 @@ def remember_look(path, now):
     write_daybook(path, days, now)
 
 
+# --- Named views --------------------------------------------------------------
+# A second operator-side file in the day book's posture exactly:
+# writer-reachable, trusted for nothing, owning no verdicts, never
+# raising an exit. It holds saved filter sets for the worktable and
+# nothing else (ADR-0027).
+#
+# The field list is closed, and that is the whole safety story. A view
+# may name a drawer, a date range, a path and a tab — every one of them
+# a control the operator can already work by hand — and any key outside
+# that list makes the whole view invalid rather than being dropped
+# quietly. That is what makes "a view can never touch the alarm" a
+# property of the format instead of a promise about the interface: the
+# rail, the status strip and the attention queue read the scan, and
+# nothing storable here reaches them.
+
+VIEWS_NAME = ".supervisor-views.json"
+VIEWS_PURPOSE = ("the operator's saved worktable filters — "
+                 "writer-reachable, trusted for nothing, and unable to "
+                 "reach the alarm")
+VIEW_FIELDS = ("name", "repo", "from", "to", "path", "tab")
+VIEW_LIMIT = 40  # how many a book keeps; a filter set is not a corpus
+VIEW_TEXT = 200  # longest a single field may be
+VIEW_BODY = 16384  # largest request body this face will read at all
+
+
+def clean_view(raw):
+    """One view as the file may hold it, or None.
+
+    Unknown keys are refused rather than stripped: a caller sending a
+    field this format does not know is asking for something, and
+    silently saving a smaller thing than it asked for is how a reader
+    starts lying. Values are text, trimmed, and only `name` is
+    required — a view with no filters at all is the honest way to say
+    'everything'."""
+    if not isinstance(raw, dict):
+        return None
+    if any(key not in VIEW_FIELDS for key in raw):
+        return None
+    view = {}
+    for key in VIEW_FIELDS:
+        value = raw.get(key, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str) or len(value) > VIEW_TEXT:
+            return None
+        value = value.strip()
+        if value:
+            view[key] = value
+    return view if view.get("name") else None
+
+
+def read_views(path):
+    """The saved views. An unreadable file is replaced, never repaired
+    — the same posture the baseline and the day book take."""
+    try:
+        views = json.loads(path.read_text(encoding="utf-8"))["views"]
+    except (OSError, ValueError, KeyError, TypeError,
+            json.JSONDecodeError):
+        return []
+    if not isinstance(views, list):
+        return []
+    # Read back through the same gate they were written through: a file
+    # somebody hand-edited is still only allowed to say these things.
+    kept = [clean_view(row) for row in views]
+    return [view for view in kept if view][:VIEW_LIMIT]
+
+
+def write_views(path, views):
+    """Never let a write failure take the request down with it: the
+    views are a convenience, and no verdict lives here."""
+    kept = views[:VIEW_LIMIT]
+    try:
+        path.write_text(
+            json.dumps({"purpose": VIEWS_PURPOSE, "views": kept},
+                       indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return kept
+
+
+def save_view(path, raw):
+    """Save one view, replacing any of the same name. None when the
+    view is not one this format can hold."""
+    view = clean_view(raw)
+    if view is None:
+        return None
+    kept = [row for row in read_views(path) if row["name"] != view["name"]]
+    return write_views(path, kept + [view])
+
+
+def forget_view(path, name):
+    """Drop one view by name. Forgetting something that was never
+    there is not an error — the file ends up the way the caller
+    asked."""
+    if not isinstance(name, str):
+        return read_views(path)
+    return write_views(
+        path, [row for row in read_views(path) if row["name"] != name])
+
+
 # What a day contributes to the band, as against what the book keeps
 # for itself. The scan tally and the last-scan stamp stay on disk: they
 # move on every tick, and a report that changes when nothing changed
@@ -4247,6 +4347,12 @@ class Watchtower(ThreadingHTTPServer):
         with self.scan_lock:
             remember_look(book, datetime.now(timezone.utc))
 
+    def views_path(self):
+        """Beside the day book, wherever that is — the two share a
+        posture and should share a shelf (ADR-0027)."""
+        return (self.root.parent / "views.json" if self.store
+                else self.root / VIEWS_NAME)
+
     def fresh_status(self):
         with self.scan_lock:
             if (self.scan_body is None
@@ -4308,6 +4414,9 @@ class Face(BaseHTTPRequestHandler):
                                    store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
+        elif url.path == "/api/views":
+            with self.server.views_lock:
+                self.reply_views(read_views(self.server.views_path()))
         elif url.path == "/api/shape":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
@@ -4347,10 +4456,54 @@ class Face(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def body_json(self):
+        """The request body as JSON, or None.
+
+        A body this face will not read is refused rather than guessed
+        at: the length must be declared and small, and the type must be
+        `application/json` — which a cross-origin form post cannot set
+        without a preflight nobody here answers. That is the second
+        lock, beside the Origin check in `refused_off_machine`, on the
+        only write path the page has."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        if length <= 0 or length > VIEW_BODY:
+            return None
+        kind = (self.headers.get("Content-Type") or "").split(";")[0]
+        if kind.strip().lower() != "application/json":
+            return None
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def reply_views(self, views):
+        self.reply(json.dumps({"purpose": VIEWS_PURPOSE,
+                               "views": views}).encode("utf-8"),
+                   "application/json")
+
     def do_POST(self):
         if self.refused_off_machine():
             return
         url = urlparse(self.path)
+        if url.path == "/api/views":
+            asked = self.body_json()
+            if not isinstance(asked, dict):
+                self.send_error(400)
+                return
+            with self.server.views_lock:
+                book = self.server.views_path()
+                if "forget" in asked:
+                    self.reply_views(forget_view(book, asked["forget"]))
+                    return
+                views = save_view(book, asked.get("save"))
+            if views is None:
+                self.send_error(400)
+                return
+            self.reply_views(views)
+            return
         if url.path != "/api/drill":
             self.send_error(404)
             return
@@ -4384,6 +4537,7 @@ def cmd_serve(args):
     server.publish_every = args.publish_every
     server.publish_url = args.publish_url
     server.scan_lock = threading.Lock()
+    server.views_lock = threading.Lock()
     server.scan_body = None
     server.scan_at = 0.0
     print(f"watching {root.as_posix()} on "
@@ -4755,6 +4909,37 @@ PAGE = """<!doctype html>
   .pane-empty { color: var(--faint); padding: 1.2rem;
                 font-size: 0.85rem; }
   .tabpane { padding: 0; }
+  /* Named views: saved worktable filters, at worktable level so they
+     are reachable from any tab. A view may set the four filter
+     controls and the tab and nothing else — the rail reads the scan,
+     which no view can touch (ADR-0027). */
+  #views { display: flex; flex-wrap: wrap; align-items: center;
+           gap: 0.4rem; padding: 0.5rem 0 0.1rem; }
+  #views .vhead { font-family: var(--mono); font-size: 0.62rem;
+                  letter-spacing: 0.09em; text-transform: uppercase;
+                  color: var(--faint); }
+  #view-list { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  #view-name { font: inherit; font-size: 0.75rem; width: 9rem;
+               color: var(--fg); background: var(--surface);
+               border: 1px solid var(--border); border-radius: 0.35rem;
+               padding: 0.15rem 0.4rem; }
+  #view-save { font: inherit; font-size: 0.75rem; color: var(--dim);
+               background: var(--surface); border: 1px solid var(--border);
+               border-radius: 0.35rem; padding: 0.15rem 0.6rem;
+               cursor: pointer; }
+  #view-save:hover { color: var(--fg); border-color: var(--accent); }
+  #view-said { font-size: 0.7rem; color: var(--faint); }
+  .view { display: inline-flex; align-items: center;
+          background: var(--surface2); border: 1px solid var(--border);
+          border-radius: 0.35rem; }
+  .view .open, .view .drop { font: inherit; font-size: 0.75rem;
+          background: none; border: 0; cursor: pointer;
+          padding: 0.15rem 0.45rem; }
+  .view .open { color: var(--fg); }
+  .view .drop { color: var(--faint); padding-left: 0.1rem; }
+  .view .drop:hover { color: var(--damage); }
+  .view:hover { border-color: var(--accent); }
+
   /* The activity tab (ADR-0027): the store counted, at the full width
      of the work area rather than inside half of a split. The cap is
      physical — everything here fits one 1440x900 screen without
@@ -5024,6 +5209,14 @@ this page draws them and decides nothing</footer>
     <button type="button" class="tab" data-tab="search">search</button>
     <button type="button" class="tab" data-tab="evidence">evidence</button>
     <button type="button" class="tab" data-tab="activity">activity</button>
+  </div>
+  <div id="views">
+    <span class="vhead">views</span>
+    <span id="view-list"></span>
+    <input type="text" id="view-name" maxlength="40"
+           placeholder="name this view" aria-label="name for a saved view">
+    <button type="button" id="view-save">save</button>
+    <span id="view-said" role="status"></span>
   </div>
   <div id="split">
     <div class="pane">
@@ -6516,6 +6709,108 @@ function findScanSession(story) {
               : null;
 }
 
+// --- named views ----------------------------------------------------
+// Saved worktable filters (ADR-0027). A view sets the four filter
+// controls and the tab; it cannot reach the rail, the status strip or
+// the attention queue, because those read the scan and a view holds
+// only what the closed field list allows. Kept in a file beside the
+// day book, in the day book's posture: trusted for nothing, owning no
+// verdicts, and never raising an exit.
+
+function viewWords(view) {
+  const parts = [];
+  if (view.repo) parts.push(view.repo);
+  if (view.from) parts.push("from " + view.from);
+  if (view.to) parts.push("to " + view.to);
+  if (view.path) parts.push("path " + view.path);
+  if (view.tab) parts.push(view.tab + " tab");
+  return parts.length ? parts.join(" · ") : "every repo, no dates";
+}
+
+function applyView(view) {
+  document.getElementById("ask-repo").value = view.repo || "";
+  document.getElementById("ask-from").value = view.from || "";
+  document.getElementById("ask-to").value = view.to || "";
+  document.getElementById("ask-path").value = view.path || "";
+  if (view.tab) showTab(view.tab);
+  said("");
+  loadRecall();
+}
+
+function said(words) {
+  document.getElementById("view-said").textContent = words;
+}
+
+function renderViews(views) {
+  const list = document.getElementById("view-list");
+  list.replaceChildren();
+  for (const view of views) {
+    const chip = el("span", "view");
+    const open = el("button", "open", view.name);
+    open.type = "button";
+    open.title = viewWords(view);
+    open.addEventListener("click", () => applyView(view));
+    const drop = el("button", "drop", "×");
+    drop.type = "button";
+    drop.title = "forget this view";
+    drop.setAttribute("aria-label", "forget the view " + view.name);
+    drop.addEventListener("click", () => postViews({forget: view.name}));
+    chip.appendChild(open);
+    chip.appendChild(drop);
+    list.appendChild(chip);
+  }
+}
+
+async function postViews(body) {
+  try {
+    const response = await fetch("/api/views", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)});
+    if (!response.ok) {
+      said("the supervisor would not keep that one");
+      return;
+    }
+    renderViews((await response.json()).views);
+  } catch (error) {
+    said("views did not answer: " + error);
+  }
+}
+
+async function loadViews() {
+  try {
+    const response = await fetch("/api/views");
+    renderViews((await response.json()).views);
+  } catch (error) {
+    said("views did not answer: " + error);
+  }
+}
+
+function saveCurrentView() {
+  const field = document.getElementById("view-name");
+  const name = field.value.trim();
+  if (!name) {
+    said("a view needs a name");
+    field.focus();
+    return;
+  }
+  const on = document.querySelector("#tabs .tab.on");
+  const value = id => document.getElementById(id).value.trim();
+  postViews({save: {name: name, repo: value("ask-repo"),
+                    from: value("ask-from"), to: value("ask-to"),
+                    path: value("ask-path"),
+                    tab: on ? on.dataset.tab : ""}});
+  field.value = "";
+  said("kept");
+}
+
+document.getElementById("view-save")
+  .addEventListener("click", saveCurrentView);
+document.getElementById("view-name")
+  .addEventListener("keydown", event => {
+    if (event.key === "Enter") saveCurrentView();
+  });
+
 function asked() {
   const query = new URLSearchParams();
   const value = id => document.getElementById(id).value.trim();
@@ -6645,6 +6940,10 @@ document.getElementById("ask-path").addEventListener("input", () => {
 loadRecall();
 loadStatus();
 loadActivity();
+// Once, not on the poll: the views file only changes when this page
+// changes it, and re-fetching it every thirty seconds would fight the
+// operator's own typing for no news.
+loadViews();
 setInterval(loadRecall, 30000);
 setInterval(loadStatus, 30000);
 setInterval(loadActivity, 30000);
