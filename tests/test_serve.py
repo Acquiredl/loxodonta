@@ -323,6 +323,32 @@ class DashboardTest(ServerFixture):
                       "fourteen days"):
             self.assertIn(named, page)
 
+    def test_the_tally_states_the_stores_own_scale(self):
+        # ADR-0027: how much is actually in the store is said nowhere
+        # else on the page. The tally says it once, at the top of the
+        # activity tab, from payloads the page already holds — no new
+        # endpoint and no second walk.
+        page = self.page()
+        self.assertIn('id="tally"', page)
+        self.assertIn("the tally", page)
+        self.assertIn("the whole store", page)
+        for counted in ("drawers", "sessions", "chains", "receipts",
+                        "recording since"):
+            self.assertIn('"' + counted + '"', page)
+
+    def test_the_tally_counts_and_never_judges(self):
+        # Scale only. How many chains are broken and how many sessions
+        # ran hot are the rail's sentences to say; a second surface
+        # that can disagree with it about what is alarming is the one
+        # thing ADR-0013 says a cockpit must never be. So the tally's
+        # own code never reaches for a verdict word.
+        page = self.page()
+        start = page.index("function renderTally")
+        body = page[start:page.index("function renderCharts", start)]
+        for verdict in ("BROKEN", "VALID", "ALARM", "HOT", "exit",
+                        "worst", "deficit"):
+            self.assertNotIn(verdict, body)
+
     def test_the_gantt_is_bounded_and_puts_the_signal_on_top(self):
         # ADR-0027 relaxed the cap to two screens, which the gantt can
         # still blow past on its own: it draws one lane per session, so

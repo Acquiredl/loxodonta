@@ -4573,6 +4573,18 @@ PAGE = """<!doctype html>
                              border-radius: 0.4rem;
                              background: var(--surface); min-width: 0; }
   #activity-view .wide { grid-column: 1 / -1; }
+  /* The tally: how much is in here, stated once, in one row. Scale
+     only — no verdict counts. How many chains are broken is the
+     rail's sentence, and a cockpit whose two surfaces can disagree
+     about what is alarming is the failure ADR-0013 named by name. */
+  #tally { display: flex; flex-wrap: wrap; gap: 1.7rem;
+           padding: 0.25rem 0 0.35rem; }
+  #tally .count { display: flex; flex-direction: column; gap: 0.05rem; }
+  #tally .num { font-family: var(--mono); font-size: 1.45rem;
+                line-height: 1.15; color: var(--fg);
+                font-variant-numeric: tabular-nums; }
+  #tally .what { font-size: 0.68rem; letter-spacing: 0.09em;
+                 text-transform: uppercase; color: var(--faint); }
   @media (max-width: 60rem) {
     #activity-view { grid-template-columns: 1fr; }
   }
@@ -4892,6 +4904,10 @@ this page draws them and decides nothing</footer>
   </div>
 
   <div id="activity-view" hidden>
+    <div class="chartbox wide">
+      <h3>the tally — the whole store</h3>
+      <div id="tally">remembering…</div>
+    </div>
     <div class="chartbox">
       <h3>busiest hour vs the store's norm — every session</h3>
       <div id="chart-tempo"></div>
@@ -6059,7 +6075,46 @@ function hbars(host, items, unit, norm) {
   host.appendChild(svg);
 }
 
+// The tally: the store's own scale, which nothing else on this page
+// says out loud. Counts only — never how many chains are broken or how
+// many sessions ran hot. Those are the rail's sentences, and two
+// surfaces that can disagree about what is alarming is the one thing
+// ADR-0013 says a cockpit must never be. Derived from payloads the
+// page already holds, so it costs no endpoint and no second walk.
+function renderTally() {
+  if (!lastStatus || !lastRecall) return;
+  const host = document.getElementById("tally");
+  let receipts = 0;
+  let since = null;
+  for (const story of lastRecall.sessions) {
+    receipts += story.entries;
+    if (story.started && (!since || story.started < since)) {
+      since = story.started;
+    }
+  }
+  let chains = 0;
+  for (const repo of lastStatus.repos) {
+    for (const seen of repo.sessions) chains += seen.chains.length;
+  }
+  host.replaceChildren();
+  const counts = [["drawers", lastStatus.repos.length],
+                  ["sessions", lastRecall.sessions.length],
+                  ["chains", chains],
+                  ["receipts", receipts]];
+  for (const [what, value] of counts) {
+    const cell = el("div", "count");
+    cell.appendChild(el("span", "num", value.toLocaleString()));
+    cell.appendChild(el("span", "what", what));
+    host.appendChild(cell);
+  }
+  const first = el("div", "count");
+  first.appendChild(el("span", "num", since ? since.slice(0, 10) : "—"));
+  first.appendChild(el("span", "what", "recording since"));
+  host.appendChild(first);
+}
+
 function renderCharts() {
+  renderTally();
   // No receipts-per-session bar here: the sessions table already
   // carries that column, in the same order, and a bar with no norm
   // beside it only redraws what is already on screen (ADR-0027).
@@ -6115,6 +6170,7 @@ async function loadRecall() {
     renderRecall(report);
     renderTiles();
     renderGantt();
+    renderTally();
   } catch (error) {
     document.getElementById("inspect-meta").textContent =
       "recall did not answer: " + error;
