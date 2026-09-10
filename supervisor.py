@@ -1886,18 +1886,47 @@ def panel_tool_key(entry):
     return head
 
 
+# Where a subagent's checkout lives inside the project it serves. File
+# references are already project-relative (ADR-0012), so this prefix is
+# the only thing that splits one file into several — and it splits it
+# badly, because the worktree is pruned when its branch merges and the
+# directory in the receipt stops existing.
+WORKTREE_PREFIX = ".claude/worktrees/"
+
+
+def panel_file_key(path):
+    """One file reference, folded to the file it actually names.
+
+    A subagent working in `.claude/worktrees/<name>/` records its edits
+    under that prefix, so the same file arrives as several paths and
+    ranks as several files — none of them right, and most of them
+    naming a directory that was deleted when the branch merged. The
+    prefix folds away and nothing else does: a path this rule does not
+    recognise is shown exactly as the writer wrote it, because quietly
+    rewriting a path is how a reader starts lying about what happened
+    (ADR-0027)."""
+    if not isinstance(path, str) or not path:
+        return None
+    if path.startswith(WORKTREE_PREFIX):
+        rest = path[len(WORKTREE_PREFIX):]
+        cut = rest.find("/")
+        if cut > 0:
+            return rest[cut + 1:]
+    return path
+
+
 def activity_root(root, store=False, days=ACTIVITY_DAYS):
     """Receipts counted into UTC hour buckets, per repo, plus what the
-    writer reached for.
+    writer reached for and what it touched.
 
-    Three surfaces read this: the working-hours heat map, the
-    per-drawer sparklines, and the histogram. The first two are
+    Four surfaces read this: the working-hours heat map, the per-drawer
+    sparklines, the histogram, and files touched. The first two are
     questions about the operator's local calendar, and only the browser
     knows their zone — so the buckets stay hourly and stay UTC, and the
     client folds them into local days and weekdays. Aggregating to days
     here would bake a UTC midnight into an answer about somebody's
-    evenings. The histogram rides the same walk rather than paying for
-    a second one, and therefore shares its window.
+    evenings. The other two ride the same walk rather than paying for a
+    second one, and therefore share its window.
 
     Testimony like the rest of recall: this counts what the writer said
     it attempted, and owns no verdicts."""
@@ -1905,6 +1934,7 @@ def activity_root(root, store=False, days=ACTIVITY_DAYS):
              - timedelta(days=days)).strftime("%Y-%m-%dT%H")
     counts = {}
     tools = {}
+    files = {}
     for repo_name, _, _, log in universe(root, store):
         drawer = counts.setdefault(repo_name, {})
         for entry in read_entries(log):
@@ -1922,8 +1952,23 @@ def activity_root(root, store=False, days=ACTIVITY_DAYS):
             reached = panel_tool_key(entry)
             if reached:
                 tools[reached] = tools.get(reached, 0) + 1
+            # One receipt counts once per file it named, however many
+            # times it named it: the question is how often a file was
+            # in the work, not how long a `files` array ran.
+            touched = set()
+            for ref in entry.get("files") or ():
+                if isinstance(ref, dict):
+                    folded = panel_file_key(ref.get("path"))
+                    if folded:
+                        touched.add(folded)
+            for path in touched:
+                where = (repo_name, path)
+                files[where] = files.get(where, 0) + 1
     return {"root": root.as_posix(), "testimony": TESTIMONY,
-            "since": floor, "activity": counts, "tools": tools}
+            "since": floor, "activity": counts, "tools": tools,
+            "files": [{"repo": repo, "path": path, "receipts": count}
+                      for (repo, path), count in
+                      sorted(files.items(), key=lambda kv: (-kv[1], kv[0]))]}
 
 
 def resolve_chain(root, asked):
@@ -4979,6 +5024,14 @@ this page draws them and decides nothing</footer>
       <div id="chart-tools"></div>
       <p class="testimony" id="tools-tail"></p>
     </div>
+    <div class="chartbox">
+      <h3>files touched — ninety days</h3>
+      <p class="testimony">receipts that named the file. A subagent's
+      worktree copy folds into the file it copied; any other path is
+      shown as the writer wrote it</p>
+      <div id="chart-files"></div>
+      <p class="testimony" id="files-tail"></p>
+    </div>
     <div class="chartbox wide">
       <h3>working hours — ninety days, your own timezone</h3>
       <p class="testimony">when receipts actually arrive: what your
@@ -6099,11 +6152,14 @@ function svgEl(tag, attrs) {
 
 // Thin horizontal bars, rounded data ends, direct value labels, ink
 // for text and one hue for marks; an optional dashed norm line.
-function hbars(host, items, unit, norm) {
+// `left` widens the label gutter for charts whose labels are long by
+// nature — a file path is not a tool name — and trades bar length for
+// it. Everything else keeps the default.
+function hbars(host, items, unit, norm, left) {
   host.replaceChildren();
   if (!items.length) return;
   const peak = Math.max(norm || 0, ...items.map(i => i.v), 1);
-  const W = 420, LEFT = 100, BARS = W - LEFT - 58, ROW = 24;
+  const W = 420, LEFT = left || 100, BARS = W - LEFT - 58, ROW = 24;
   const svg = svgEl("svg",
     {viewBox: "0 0 " + W + " " + (items.length * ROW + 6),
      role: "img", style: "width:100%;height:auto"});
@@ -6211,9 +6267,39 @@ function renderHistogram() {
   }
 }
 
+// Files touched: which files the work actually kept returning to.
+// Ranked per drawer, because two projects both holding a README hold
+// two different files. Labels trim from the *left*, the opposite of
+// the histogram's: a path is identified by its tail.
+function renderFiles() {
+  const host = document.getElementById("chart-files");
+  const tail = document.getElementById("files-tail");
+  const ranked = (lastActivity && lastActivity.files) || [];
+  tail.textContent = "";
+  if (!ranked.length) {
+    host.replaceChildren();
+    host.appendChild(el("p", "testimony",
+      "no files fingerprinted in the window"));
+    return;
+  }
+  const fit = path =>
+    path.length > 23 ? "…" + path.slice(-22) : path;
+  const TOP = 6;
+  hbars(host, ranked.slice(0, TOP).map(row => ({
+    label: fit(row.path), full: row.repo + " · " + row.path,
+    v: row.receipts})), "receipt(s)", 0, 150);
+  const rest = ranked.slice(TOP);
+  if (rest.length) {
+    tail.textContent = "and " + rest.length + " more, " +
+      rest.reduce((sum, row) => sum + row.receipts, 0) +
+      " receipt(s) between them";
+  }
+}
+
 function renderCharts() {
   renderTally();
   renderHistogram();
+  renderFiles();
   // No receipts-per-session bar here: the sessions table already
   // carries that column, in the same order, and a bar with no norm
   // beside it only redraws what is already on screen (ADR-0027).
@@ -6343,6 +6429,7 @@ async function loadActivity() {
     renderClock();
     renderTiles();
     renderHistogram();
+    renderFiles();
   } catch (error) {
     document.getElementById("clock").textContent =
       "activity did not answer: " + error;

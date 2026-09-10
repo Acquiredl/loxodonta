@@ -378,6 +378,40 @@ class DashboardTest(ServerFixture):
         self.assertEqual(tools.get("hand-logged"), 1)
         self.assertNotIn("transcript-commitment", tools)
 
+    def test_files_touched_names_its_window(self):
+        page = self.page()
+        self.assertIn('id="chart-files"', page)
+        self.assertIn('id="files-tail"', page)
+        self.assertIn("files touched", page)
+
+    def test_files_touched_folds_worktree_copies_into_one_file(self):
+        # File references are already project-relative (ADR-0012), so
+        # the only thing that splits one file into several is a
+        # subagent's worktree — and those directories are pruned when
+        # the branch merges, so an unfolded panel ranks by paths that
+        # no longer exist. The prefix folds. Nothing else does: a path
+        # the rule does not recognise is shown as the writer wrote it.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        here = log.parent
+        for spot in ("a", "b"):
+            tree = here / ".claude" / "worktrees" / ("agent-" + spot)
+            tree.mkdir(parents=True, exist_ok=True)
+            (tree / "widget.py").write_text("pass\n", encoding="utf-8")
+            log_entry(log, "Edit: widget", files=[
+                ".claude/worktrees/agent-" + spot + "/widget.py"])
+        (here / "widget.py").write_text("pass\n", encoding="utf-8")
+        log_entry(log, "Edit: widget", files=["widget.py"])
+        odd = here / ".claude" / "settings.json"
+        odd.write_text("{}\n", encoding="utf-8")
+        log_entry(log, "Edit: settings", files=[".claude/settings.json"])
+        self.serve()
+
+        rows = {row["path"]: row["receipts"] for row
+                in json.loads(self.get("/api/activity")[2])["files"]}
+        self.assertEqual(rows.get("widget.py"), 3)
+        self.assertEqual(rows.get(".claude/settings.json"), 1)
+        self.assertNotIn(".claude/worktrees/agent-a/widget.py", rows)
+
     def test_the_export_key_still_folds_what_leaves_the_machine(self):
         # The dashboard naming servers must not have loosened the
         # export, whose value is that it fails closed with no switch to
