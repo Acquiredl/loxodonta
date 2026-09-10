@@ -141,6 +141,16 @@ format, which stays at `0.1`. The ritual, in order:
    `supervisor.py`) prints each sum; compare it by eye with the line in
    `SHA256SUMS`. If a sum disagrees, the release is wrong, not the file:
    delete the release and the tag, find out why, and cut it again.
+7. Close the issues the release finished. Nothing here closes itself: a
+   commit subject names its issue in parentheses, not with a `Closes #N`
+   trailer. Read the promotion's commit subjects, and close each issue they
+   name with a comment pointing at the commit that did the work.
+
+   ```
+   git log --oneline <previous tag>..vx.y.z
+   ```
+
+   An issue the release parked rather than finished stays open.
 
 `1.0.0` waits for one export from another machine read into
 `docs/FIELD-DATA.md` (ADR-0022). Until then, minor versions may change
