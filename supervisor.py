@@ -71,6 +71,16 @@ LOXODONTA = HERE / "loxodonta.py"
 TOOL_VERSION = "0.3.0"
 FORMAT_VERSION = "0.1"
 
+# Who wrote an entry, read off the actor field. The harness actors are
+# the ones whose entries are tool calls (ADR-0020): their action lines
+# start with the tool's name. The recorder's own name marks bookkeeping
+# it writes about itself — transcript commitments and the like — which
+# is housekeeping rather than work the agent did, so every reader that
+# counts tool calls sets it aside. Both live up here because two
+# sections read them: the export's allowlist and the histogram.
+HOOK_ACTORS = ("claude-code", "codex", "openai-agents")
+BOOKKEEPING_ACTOR = "receipts"
+
 
 # --- Census -------------------------------------------------------------------
 
@@ -1841,21 +1851,60 @@ def recall_root(root, repo=None, since=None, until=None, path=None,
 ACTIVITY_DAYS = 90
 
 
-def activity_root(root, store=False, days=ACTIVITY_DAYS):
-    """Receipts counted into UTC hour buckets, per repo.
+def panel_tool_key(entry):
+    """What one entry reached for, named for the operator's own eyes.
 
-    Two surfaces read this: the working-hours heat map and the
-    per-drawer sparklines. Both are questions about the operator's
-    local calendar, and only the browser knows their zone — so the
-    buckets stay hourly and stay UTC, and the client folds them into
-    local days and weekdays. Aggregating to days here would bake a UTC
-    midnight into an answer about somebody's evenings.
+    Deliberately not `histogram_key`, which folds hard because its
+    answers leave the machine (ADR-0021): there, a name off the
+    allowlist becomes `other` and every MCP call collapses into one
+    `mcp` bucket. Nothing leaves the machine here — serve binds
+    localhost and offers this to nobody — so a tool is named as the
+    harness named it, and an MCP call is named by the server it
+    reached (`mcp:reddit`), which on your own machine is information
+    rather than exposure. The two must stay apart rather than become
+    one function with a switch: the export's whole value is that it
+    has no switch anybody can get wrong (ADR-0027).
+
+    Bookkeeping is not a tool call and returns None; so does the
+    genesis, which records that a chain opened, not that work
+    happened. An entry from anything but a harness actor was
+    hand-logged — `loxodonta log`, `loxodonta run` — and is counted
+    as that rather than guessed at."""
+    if entry.get("n") == 0:
+        return None
+    actor = entry.get("actor")
+    if actor == BOOKKEEPING_ACTOR:
+        return None
+    if actor not in HOOK_ACTORS:
+        return "hand-logged"
+    head = str(entry.get("action", "")).split(":", 1)[0].strip()
+    if not head:
+        return "unnamed"
+    if head.startswith("mcp__"):
+        parts = head.split("__")
+        return "mcp:" + parts[1] if len(parts) > 1 and parts[1] else "mcp"
+    return head
+
+
+def activity_root(root, store=False, days=ACTIVITY_DAYS):
+    """Receipts counted into UTC hour buckets, per repo, plus what the
+    writer reached for.
+
+    Three surfaces read this: the working-hours heat map, the
+    per-drawer sparklines, and the histogram. The first two are
+    questions about the operator's local calendar, and only the browser
+    knows their zone — so the buckets stay hourly and stay UTC, and the
+    client folds them into local days and weekdays. Aggregating to days
+    here would bake a UTC midnight into an answer about somebody's
+    evenings. The histogram rides the same walk rather than paying for
+    a second one, and therefore shares its window.
 
     Testimony like the rest of recall: this counts what the writer said
     it attempted, and owns no verdicts."""
     floor = (datetime.now(timezone.utc)
              - timedelta(days=days)).strftime("%Y-%m-%dT%H")
     counts = {}
+    tools = {}
     for repo_name, _, _, log in universe(root, store):
         drawer = counts.setdefault(repo_name, {})
         for entry in read_entries(log):
@@ -1870,8 +1919,11 @@ def activity_root(root, store=False, days=ACTIVITY_DAYS):
             if hour < floor:
                 continue
             drawer[hour] = drawer.get(hour, 0) + 1
+            reached = panel_tool_key(entry)
+            if reached:
+                tools[reached] = tools.get(reached, 0) + 1
     return {"root": root.as_posix(), "testimony": TESTIMONY,
-            "since": floor, "activity": counts}
+            "since": floor, "activity": counts, "tools": tools}
 
 
 def resolve_chain(root, asked):
@@ -2898,11 +2950,6 @@ def cmd_mcp(args):
 
 EXPORT_VERSION = 1
 FIELD_DATA_REPO = "Acquiredl/loxodonta"
-# The harness actors whose entries are tool calls (ADR-0020). Their
-# action lines start with the tool name; everything else — hand-logged
-# entries, foreign actors — is one `other` bucket.
-HOOK_ACTORS = ("claude-code", "codex", "openai-agents")
-BOOKKEEPING_ACTOR = "receipts"
 # The tool names the histogram may carry: the harnesses' own built-ins,
 # written down here. A name is the harness's word rather than the
 # sender's only when it is on this list. MCP tool names say which
@@ -4422,11 +4469,13 @@ PAGE = """<!doctype html>
      attention its name is already where the eye lands. */
   /* The gantt draws one lane per session, so its height is set by how
      much the operator worked and grows every month. It gets a box of
-     its own and scrolls inside it (ADR-0027) — 32rem, the same height
-     the pane bodies already use. The axis rides the bottom of that box
-     so it stays put and stays aligned: sharing the scroller's width is
-     what keeps the lanes and the dates on the same scale. */
-  #gantt-scroll { max-height: 32rem; overflow-y: auto; }
+     its own and scrolls inside it (ADR-0027). That box is the cap's
+     cheapest give: the panel scrolls either way, so its height is a
+     display choice and not an information one, and it shrank when the
+     histogram arrived. The axis rides the bottom of the same box so it
+     stays put and stays aligned — sharing the scroller's width is what
+     keeps the lanes and the dates on one scale. */
+  #gantt-scroll { max-height: 24rem; overflow-y: auto; }
   #gantt { margin: 0.6rem 0; }
   .lane { position: relative; height: 1.55rem; margin: 0.2rem 0;
           border-radius: 0.3rem;
@@ -4467,7 +4516,11 @@ PAGE = """<!doctype html>
   /* The working-hours heat map: local weekday against local hour. */
   #clock { display: grid; grid-template-columns: auto repeat(24, 1fr);
            gap: 1px; margin: 0.6rem 0; font-size: 0.62rem; }
-  .cell { aspect-ratio: 1; border-radius: 0.15rem;
+  /* Wider than tall on purpose. The cells were square when the
+     clock lived in half a pane; at the activity tab's full width
+     square makes every row 40px and the panel twice the height
+     it needs for the same 24 columns (ADR-0027's cap). */
+  .cell { aspect-ratio: 2 / 1; border-radius: 0.15rem;
           background: color-mix(in srgb, currentColor 6%, transparent); }
   .cell.on { background: color-mix(in srgb, var(--busy)
              calc(var(--heat) * 1%), transparent); }
@@ -4917,6 +4970,14 @@ this page draws them and decides nothing</footer>
       <p class="testimony">red marks a day that carried an alarm; an
       unread day is a gap, not a quiet day</p>
       <div id="chart-looks"></div>
+    </div>
+    <div class="chartbox">
+      <h3>the histogram — ninety days</h3>
+      <p class="testimony">the tool each receipt names, counted; an MCP
+      call by the server it reached. Bookkeeping is not a tool call and
+      is left out</p>
+      <div id="chart-tools"></div>
+      <p class="testimony" id="tools-tail"></p>
     </div>
     <div class="chartbox wide">
       <h3>working hours — ninety days, your own timezone</h3>
@@ -6056,7 +6117,8 @@ function hbars(host, items, unit, norm) {
     const bar = svgEl("rect", {x: LEFT, y: y + 4, width: w, height: 13,
       rx: 4, "class": "cbar" + (item.hot ? " hot" : "")});
     const tip = svgEl("title", {});
-    tip.textContent = item.label + ": " + item.v + " " + unit;
+    tip.textContent = (item.full || item.label) + ": " + item.v + " " +
+      unit;
     bar.appendChild(tip);
     svg.appendChild(bar);
     const value = svgEl("text", {x: LEFT + w + 7, y: y + 15,
@@ -6113,8 +6175,45 @@ function renderTally() {
   host.appendChild(first);
 }
 
+// The histogram: what the writer reached for, counted. Admitted as a
+// recording-health panel (ADR-0027) — on a settled machine its shape
+// barely moves, and the shape *moving* is what a switched harness or a
+// broken adapter looks like from here. Read it for movement, not for
+// news. Only the top few get bars: the tail is long, the panel is not,
+// and a bar per name would say less than the count of what is missing.
+function renderHistogram() {
+  const host = document.getElementById("chart-tools");
+  const tail = document.getElementById("tools-tail");
+  const ranked = Object.entries((lastActivity && lastActivity.tools) || {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  tail.textContent = "";
+  if (!ranked.length) {
+    host.replaceChildren();
+    host.appendChild(el("p", "testimony",
+      "nothing recorded in the window"));
+    return;
+  }
+  // hbars anchors a label at its right edge, so an over-long name is
+  // clipped from the left and loses the part that identifies it. Trim
+  // from the right instead, and hand hbars the whole name for the
+  // tooltip: an MCP server can be called anything.
+  const fit = name =>
+    name.length > 15 ? name.slice(0, 14) + "…" : name;
+  const TOP = 6;
+  hbars(host, ranked.slice(0, TOP).map(
+    ([name, count]) => ({label: fit(name), full: name, v: count})),
+    "receipt(s)");
+  const rest = ranked.slice(TOP);
+  if (rest.length) {
+    tail.textContent = "and " + rest.length + " more, " +
+      rest.reduce((sum, row) => sum + row[1], 0) +
+      " receipt(s) between them";
+  }
+}
+
 function renderCharts() {
   renderTally();
+  renderHistogram();
   // No receipts-per-session bar here: the sessions table already
   // carries that column, in the same order, and a bar with no norm
   // beside it only redraws what is already on screen (ADR-0027).
@@ -6243,6 +6342,7 @@ async function loadActivity() {
     lastActivity = await response.json();
     renderClock();
     renderTiles();
+    renderHistogram();
   } catch (error) {
     document.getElementById("clock").textContent =
       "activity did not answer: " + error;

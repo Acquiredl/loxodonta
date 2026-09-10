@@ -349,6 +349,48 @@ class DashboardTest(ServerFixture):
                         "worst", "deficit"):
             self.assertNotIn(verdict, body)
 
+    def test_the_histogram_names_tools_the_export_would_fold(self):
+        # ADR-0027: the dashboard is localhost-only and offers this to
+        # nobody, so a tool is named as the harness named it and an MCP
+        # call is named by the server it reached. The export's key stays
+        # unparameterised and keeps folding, because the value of that
+        # code path is that it has no switch anyone can get wrong.
+        page = self.page()
+        self.assertIn('id="chart-tools"', page)
+        self.assertIn("the histogram", page)
+        self.assertIn('id="tools-tail"', page)
+        self.assertIn("ninety days", page)
+
+    def test_the_histogram_counts_by_server_and_skips_bookkeeping(self):
+        # The key through the public surface: an MCP call counts under
+        # the server it reached, an entry from anything but a harness
+        # actor was hand-logged and says so, and the recorder's own
+        # bookkeeping is not a tool call at all.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        log_entry(log, "mcp__reddit__browse_subreddit: technology")
+        log_entry(log, "Bash: ls -la")
+        log_entry(log, "wrote a note by hand", actor="human")
+        log_entry(log, "transcript-commitment", actor="receipts")
+        self.serve()
+        tools = json.loads(self.get("/api/activity")[2])["tools"]
+        self.assertEqual(tools.get("mcp:reddit"), 1)
+        self.assertEqual(tools.get("Bash"), 1)
+        self.assertEqual(tools.get("hand-logged"), 1)
+        self.assertNotIn("transcript-commitment", tools)
+
+    def test_the_export_key_still_folds_what_leaves_the_machine(self):
+        # The dashboard naming servers must not have loosened the
+        # export, whose value is that it fails closed with no switch to
+        # get wrong. Two functions, deliberately apart (ADR-0027).
+        source = SUPERVISOR.read_text(encoding="utf-8")
+        self.assertIn("def panel_tool_key", source)
+        start = source.index("def histogram_key")
+        body = source[start:source.index("\ndef ", start + 10)]
+        self.assertIn('return "mcp"', body)
+        self.assertIn("EXPORT_TOOLS else \"other\"", body)
+        self.assertNotIn("redact", body)
+        self.assertNotIn("mcp:", body)
+
     def test_the_gantt_is_bounded_and_puts_the_signal_on_top(self):
         # ADR-0027 relaxed the cap to two screens, which the gantt can
         # still blow past on its own: it draws one lane per session, so
@@ -358,7 +400,7 @@ class DashboardTest(ServerFixture):
         # alarm, a deficit or an owed tail sorts above recency.
         page = self.page()
         self.assertIn('id="gantt-scroll"', page)
-        self.assertIn("#gantt-scroll { max-height: 32rem; "
+        self.assertIn("#gantt-scroll { max-height: 24rem; "
                       "overflow-y: auto; }", page)
         # The axis rides the bottom of the same scroller, so the dates
         # keep the lanes' width and therefore the lanes' scale.
