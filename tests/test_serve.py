@@ -272,29 +272,32 @@ class DashboardTest(ServerFixture):
         self.assertIn("judge transcript", page)
         self.assertIn("seen.judge", page)
 
-    def test_the_worktable_carries_all_four_tabs(self):
+    def test_the_worktable_carries_all_five_tabs(self):
         # Slice 3 of the #48 shape: projects, search, and evidence join
         # sessions in pane one — the old full-width sections retire, and
-        # every id they carried keeps its name inside its tab.
+        # every id they carried keeps its name inside its tab. Activity
+        # joined them under ADR-0027, and is the one tab that owns no
+        # pane: it replaces the split instead of sitting inside it.
         page = self.page()
         for tab in ("sessions", "projects", "search", "evidence"):
             self.assertIn('data-tab="' + tab + '"', page)
             self.assertIn('id="pane-' + tab + '"', page)
+        self.assertIn('data-tab="activity"', page)
+        self.assertNotIn('id="pane-activity"', page)
         for kept in ('id="tiles"', 'id="ask-search"', 'id="tripwire"',
                      'id="watch"', 'id="consumption"', 'id="anchors"',
                      'id="filters"'):
             self.assertIn(kept, page)
 
-    def test_the_activity_pane_draws_the_store(self):
-        # Slice 4 of the #48 shape: pane two's second tab draws the
-        # store — receipts per session, tempo against the store's own
-        # norm (with the watch's honest empty state), looks per day
-        # (red rides a HOT word, never colour alone), plus the
-        # working-hours clock and the session gantt, moved in whole.
+    def test_the_activity_tab_draws_the_store(self):
+        # ADR-0027: the store counted, at the full width of the work
+        # area. Tempo against the store's own norm (with the watch's
+        # honest empty state), looks per day (red rides a HOT word,
+        # never colour alone), the working-hours clock and the session
+        # gantt.
         page = self.page()
-        self.assertIn('id="p2-activity"', page)
-        self.assertIn('data-p2="activity"', page)
-        for chart in ("chart-receipts", "chart-tempo", "chart-looks"):
+        self.assertIn('id="activity-view"', page)
+        for chart in ("chart-tempo", "chart-looks"):
             self.assertIn('id="' + chart + '"', page)
         self.assertIn("no session ran hot", page)
         self.assertIn("HOT", page)
@@ -303,6 +306,335 @@ class DashboardTest(ServerFixture):
         # No chart library, no canvas fingerprinting — bars are SVG
         # built in the page's own script.
         self.assertIn("createElementNS", page)
+
+    def test_every_activity_panel_names_the_window_it_draws(self):
+        # ADR-0027 declined a global range picker, on the grounds that
+        # the fortnight band and the ninety-day buckets are chosen
+        # shapes rather than defaults nobody exposed. The price of
+        # declining it is that each panel has to say its own window out
+        # loud, so nothing on the tab is a number over an unstated span.
+        page = self.page()
+        for named in ("busiest hour vs the store's norm",
+                      "every session",
+                      "looks per day",
+                      "working hours",
+                      "ninety days",
+                      "sessions on one axis",
+                      "fourteen days"):
+            self.assertIn(named, page)
+
+    def test_the_tally_states_the_stores_own_scale(self):
+        # ADR-0027: how much is actually in the store is said nowhere
+        # else on the page. The tally says it once, at the top of the
+        # activity tab, from payloads the page already holds — no new
+        # endpoint and no second walk.
+        page = self.page()
+        self.assertIn('id="tally"', page)
+        self.assertIn("the tally", page)
+        self.assertIn("the whole store", page)
+        for counted in ("drawers", "sessions", "chains", "receipts",
+                        "recording since"):
+            self.assertIn('"' + counted + '"', page)
+
+    def test_the_tally_counts_and_never_judges(self):
+        # Scale only. How many chains are broken and how many sessions
+        # ran hot are the rail's sentences to say; a second surface
+        # that can disagree with it about what is alarming is the one
+        # thing ADR-0013 says a cockpit must never be. So the tally's
+        # own code never reaches for a verdict word.
+        page = self.page()
+        start = page.index("function renderTally")
+        body = page[start:page.index("function renderCharts", start)]
+        for verdict in ("BROKEN", "VALID", "ALARM", "HOT", "exit",
+                        "worst", "deficit"):
+            self.assertNotIn(verdict, body)
+
+    def test_the_histogram_names_tools_the_export_would_fold(self):
+        # ADR-0027: the dashboard is localhost-only and offers this to
+        # nobody, so a tool is named as the harness named it and an MCP
+        # call is named by the server it reached. The export's key stays
+        # unparameterised and keeps folding, because the value of that
+        # code path is that it has no switch anyone can get wrong.
+        page = self.page()
+        self.assertIn('id="chart-tools"', page)
+        self.assertIn("the histogram", page)
+        self.assertIn('id="tools-tail"', page)
+        self.assertIn("ninety days", page)
+
+    def test_the_histogram_counts_by_server_and_skips_bookkeeping(self):
+        # The key through the public surface: an MCP call counts under
+        # the server it reached, an entry from anything but a harness
+        # actor was hand-logged and says so, and the recorder's own
+        # bookkeeping is not a tool call at all.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        log_entry(log, "mcp__reddit__browse_subreddit: technology")
+        log_entry(log, "Bash: ls -la")
+        log_entry(log, "wrote a note by hand", actor="human")
+        log_entry(log, "transcript-commitment", actor="receipts")
+        self.serve()
+        tools = json.loads(self.get("/api/activity")[2])["tools"]
+        self.assertEqual(tools.get("mcp:reddit"), 1)
+        self.assertEqual(tools.get("Bash"), 1)
+        self.assertEqual(tools.get("hand-logged"), 1)
+        self.assertNotIn("transcript-commitment", tools)
+
+    def test_files_touched_names_its_window(self):
+        page = self.page()
+        self.assertIn('id="chart-files"', page)
+        self.assertIn('id="files-tail"', page)
+        self.assertIn("files touched", page)
+
+    def test_files_touched_folds_worktree_copies_into_one_file(self):
+        # File references are already project-relative (ADR-0012), so
+        # the only thing that splits one file into several is a
+        # subagent's worktree — and those directories are pruned when
+        # the branch merges, so an unfolded panel ranks by paths that
+        # no longer exist. The prefix folds. Nothing else does: a path
+        # the rule does not recognise is shown as the writer wrote it.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        here = log.parent
+        for spot in ("a", "b"):
+            tree = here / ".claude" / "worktrees" / ("agent-" + spot)
+            tree.mkdir(parents=True, exist_ok=True)
+            (tree / "widget.py").write_text("pass\n", encoding="utf-8")
+            log_entry(log, "Edit: widget", files=[
+                ".claude/worktrees/agent-" + spot + "/widget.py"])
+        (here / "widget.py").write_text("pass\n", encoding="utf-8")
+        log_entry(log, "Edit: widget", files=["widget.py"])
+        odd = here / ".claude" / "settings.json"
+        odd.write_text("{}\n", encoding="utf-8")
+        log_entry(log, "Edit: settings", files=[".claude/settings.json"])
+        self.serve()
+
+        rows = {row["path"]: row["receipts"] for row
+                in json.loads(self.get("/api/activity")[2])["files"]}
+        self.assertEqual(rows.get("widget.py"), 3)
+        self.assertEqual(rows.get(".claude/settings.json"), 1)
+        self.assertNotIn(".claude/worktrees/agent-a/widget.py", rows)
+
+    def test_the_density_strip_spans_the_session_it_is_given(self):
+        # ADR-0027: the axis is the session as it happened, first
+        # receipt to last, and every receipt lands in exactly one
+        # bucket. Width comes off a ladder because real sessions run
+        # from seconds to a week, and the ladder is pinned here because
+        # the panel promises the reader which rung it used.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=4)
+        self.serve()
+        shape = json.loads(
+            self.get("/api/shape?repo=alpha&session=sess-aaaa")[2])
+        # The genesis records that a chain opened, not that work
+        # happened, so it is not in the shape.
+        self.assertEqual(shape["receipts"], 4)
+        self.assertEqual(sum(shape["buckets"]), shape["receipts"])
+        self.assertIn(shape["bucket_seconds"],
+                      (1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200,
+                       10800, 21600, 43200, 86400))
+        self.assertLessEqual(len(shape["buckets"]), 60)
+        self.assertEqual(shape["buckets"][shape["peak"]["index"]],
+                         shape["peak"]["count"])
+        self.assertIn("testimony", shape)
+
+    def test_the_density_strip_says_nothing_about_a_stranger(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/api/shape?repo=alpha&session=nobody")
+        self.assertEqual(caught.exception.code, 404)
+
+    def test_the_strip_rides_inspect_and_names_its_own_scale(self):
+        # A bar chart whose scale the reader has to guess is worse than
+        # none, so the caption says the rung out loud. And the owed cap
+        # is a fixed marker rather than a proportion: this axis is time,
+        # and receipts that were never written have no hour to sit at.
+        page = self.page()
+        self.assertIn('id="inspect-shape"', page)
+        self.assertIn("one bar = ", page)
+        self.assertIn(".shape .owed { position: static; flex: none;",
+                      page)
+
+    def hot_store(self):
+        """Three ordinary sessions set the norm; one burns past it."""
+        for name in ("aaaa", "bbbb", "cccc"):
+            make_chain(self.root / name / "receipts", "sess-" + name,
+                       entries=3)
+        make_chain(self.root / "delta" / "receipts", "sess-hot",
+                   entries=12)
+        self.serve(extra_env={"SUPERVISOR_HOT_TIMES": "3",
+                              "SUPERVISOR_HOT_FLOOR": "10"})
+        return json.loads(self.get("/api/status")[2])["consumption"]
+
+    def test_the_watch_says_where_the_bar_is_set(self):
+        # Nobody discovers an environment variable by looking at a
+        # dashboard. ADR-0027 declined to grow a control — scan runs
+        # from the CLI and in CI, and the environment is the one place
+        # all three agree — so the panel names the two variables and
+        # the values in force instead.
+        words = self.hot_store()["norm"]["words"]
+        self.assertIn("SUPERVISOR_HOT_FLOOR", words)
+        self.assertIn("SUPERVISOR_HOT_TIMES", words)
+        self.assertIn("now 10", words)
+        self.assertIn("now 3", words)
+
+    def test_a_hot_session_carries_the_bar_it_cleared(self):
+        # Gradation needs both numbers on the record: a busiest hour of
+        # 713 against a bar of 153 is a different event from 155
+        # against 153, and the page divides one by the other to say so.
+        sessions = self.hot_store()["sessions"]
+        self.assertTrue(sessions, "one session should have run hot")
+        for session in sessions:
+            self.assertIn("busiest_hour", session)
+            self.assertIn("threshold", session)
+            self.assertGreater(session["threshold"], 0)
+
+    def test_the_hot_flag_says_how_far_past_the_bar(self):
+        # One helper, so the multiple reads the same in the attention
+        # queue and in the evidence panel. Not on the tempo chart: its
+        # value column would clip, and bar length against the norm line
+        # already draws the distance.
+        page = self.page()
+        self.assertIn("function pastTheBar", page)
+        self.assertIn("× the bar", page)
+        self.assertIn("against a bar of", page)
+
+    def views(self, body=None):
+        """GET the views, or POST one and read the list back."""
+        if body is None:
+            return json.loads(self.get("/api/views")[2])["views"]
+        request = urllib.request.Request(
+            self.url + "/api/views",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with OPENER.open(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))["views"]
+
+    def test_a_view_is_saved_listed_applied_and_forgotten(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        self.assertEqual(self.views(), [])
+        kept = self.views({"save": {"name": "alpha lately",
+                                    "repo": "alpha",
+                                    "from": "2026-09-01",
+                                    "tab": "sessions"}})
+        self.assertEqual(kept, [{"name": "alpha lately", "repo": "alpha",
+                                 "from": "2026-09-01",
+                                 "tab": "sessions"}])
+        # Saving the same name again replaces it rather than doubling.
+        again = self.views({"save": {"name": "alpha lately",
+                                     "repo": "beta"}})
+        self.assertEqual(again, [{"name": "alpha lately",
+                                  "repo": "beta"}])
+        self.assertEqual(self.views(), again)
+        self.assertEqual(self.views({"forget": "alpha lately"}), [])
+        # Forgetting what was never there leaves the file as asked.
+        self.assertEqual(self.views({"forget": "ghost"}), [])
+
+    def test_a_view_cannot_carry_a_field_this_format_does_not_know(self):
+        # The closed field list is the whole safety story: a view may
+        # name a drawer, a date range, a path and a tab, every one of
+        # them a control the operator can already work by hand. An
+        # unknown key makes the view invalid rather than being dropped
+        # quietly, which is what makes "a view can never touch the
+        # alarm" a property of the format (ADR-0027).
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        for bad in ({"name": "sneaky", "rail": "hide"},
+                    {"name": "sneaky", "exit": "0"},
+                    {"repo": "alpha"},
+                    "not even an object"):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.views({"save": bad})
+            self.assertEqual(caught.exception.code, 400)
+        self.assertEqual(self.views(), [])
+
+    def test_the_views_write_path_refuses_a_form_post(self):
+        # The one write path the page has. `application/json` cannot be
+        # sent by a cross-origin form post without a preflight nobody
+        # here answers, so insisting on it is the second lock beside
+        # the Origin check.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        request = urllib.request.Request(
+            self.url + "/api/views", data=b'save={"name":"x"}',
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            OPENER.open(request, timeout=30)
+        self.assertEqual(caught.exception.code, 400)
+        self.assertEqual(self.views(), [])
+
+    def test_a_hand_edited_views_file_is_read_through_the_same_gate(self):
+        # The file is writer-reachable, like the baseline and the day
+        # book, so it is trusted for nothing: what it holds is read
+        # back through the gate it was written through.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        (self.root / ".supervisor-views.json").write_text(json.dumps(
+            {"views": [{"name": "fine", "repo": "alpha"},
+                       {"name": "smuggled", "rail": "hide"},
+                       "junk"]}), encoding="utf-8")
+        self.serve()
+        self.assertEqual(self.views(), [{"name": "fine",
+                                         "repo": "alpha"}])
+
+    def test_the_views_row_sits_above_the_tabs_and_below_nothing_else(self):
+        page = self.page()
+        self.assertIn('id="view-list"', page)
+        self.assertIn('id="view-save"', page)
+        # Applying a view touches the four filter controls and the tab.
+        # It never reaches the rail, which reads the scan.
+        start = page.index("function applyView")
+        body = page[start:page.index("function said", start)]
+        for reached in ("ask-repo", "ask-from", "ask-to", "ask-path",
+                        "showTab", "loadRecall"):
+            self.assertIn(reached, body)
+        for forbidden in ("rail", "stateline", "attention", "strip",
+                          "lastStatus"):
+            self.assertNotIn(forbidden, body)
+
+    def test_the_export_key_still_folds_what_leaves_the_machine(self):
+        # The dashboard naming servers must not have loosened the
+        # export, whose value is that it fails closed with no switch to
+        # get wrong. Two functions, deliberately apart (ADR-0027).
+        source = SUPERVISOR.read_text(encoding="utf-8")
+        self.assertIn("def panel_tool_key", source)
+        start = source.index("def histogram_key")
+        body = source[start:source.index("\ndef ", start + 10)]
+        self.assertIn('return "mcp"', body)
+        self.assertIn("EXPORT_TOOLS else \"other\"", body)
+        self.assertNotIn("redact", body)
+        self.assertNotIn("mcp:", body)
+
+    def test_the_gantt_is_bounded_and_puts_the_signal_on_top(self):
+        # ADR-0027 relaxed the cap to two screens, which the gantt can
+        # still blow past on its own: it draws one lane per session, so
+        # it is tall in proportion to how much the operator worked. It
+        # gets a box and scrolls inside it. That trade is only safe if
+        # the panel's own fold cannot bury a reason to look, so an
+        # alarm, a deficit or an owed tail sorts above recency.
+        page = self.page()
+        self.assertIn('id="gantt-scroll"', page)
+        self.assertIn("#gantt-scroll { max-height: 24rem; "
+                      "overflow-y: auto; }", page)
+        # The axis rides the bottom of the same scroller, so the dates
+        # keep the lanes' width and therefore the lanes' scale.
+        self.assertIn("position: sticky; bottom: 0;", page)
+        self.assertIn("a.flagged - b.flagged || b.to - a.to", page)
+
+    def test_activity_takes_the_worktable_and_drops_the_redrawn_bar(self):
+        # ADR-0027's cap is physical — one screen, no scrolling — and it
+        # binds the incumbents too. The receipts-per-session bar goes:
+        # the sessions table already carries that column, in the same
+        # order, and without a norm beside it the bar only redraws what
+        # is on screen. Pane two loses its own tab strip with it.
+        page = self.page()
+        self.assertNotIn("chart-receipts", page)
+        self.assertNotIn("data-p2=", page)
+        self.assertNotIn('id="p2-activity"', page)
+        # Activity hides the split outright. The browser's own [hidden]
+        # rule loses to any author `display`, so without this the grid
+        # and the split would paint at once.
+        self.assertIn("[hidden] { display: none !important; }", page)
+        self.assertIn('document.getElementById("split").hidden', page)
 
     def test_the_page_carries_the_lifecycle_reading(self):
         # ADR-0018: reawakenings speak in the investigate voice in the

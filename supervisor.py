@@ -71,6 +71,16 @@ LOXODONTA = HERE / "loxodonta.py"
 TOOL_VERSION = "0.3.0"
 FORMAT_VERSION = "0.1"
 
+# Who wrote an entry, read off the actor field. The harness actors are
+# the ones whose entries are tool calls (ADR-0020): their action lines
+# start with the tool's name. The recorder's own name marks bookkeeping
+# it writes about itself — transcript commitments and the like — which
+# is housekeeping rather than work the agent did, so every reader that
+# counts tool calls sets it aside. Both live up here because two
+# sections read them: the export's allowlist and the histogram.
+HOOK_ACTORS = ("claude-code", "codex", "openai-agents")
+BOOKKEEPING_ACTOR = "receipts"
+
 
 # --- Census -------------------------------------------------------------------
 
@@ -350,6 +360,106 @@ def remember_look(path, now):
     row["looks"] = row.get("looks", 0) + 1
     days[today] = row
     write_daybook(path, days, now)
+
+
+# --- Named views --------------------------------------------------------------
+# A second operator-side file in the day book's posture exactly:
+# writer-reachable, trusted for nothing, owning no verdicts, never
+# raising an exit. It holds saved filter sets for the worktable and
+# nothing else (ADR-0027).
+#
+# The field list is closed, and that is the whole safety story. A view
+# may name a drawer, a date range, a path and a tab — every one of them
+# a control the operator can already work by hand — and any key outside
+# that list makes the whole view invalid rather than being dropped
+# quietly. That is what makes "a view can never touch the alarm" a
+# property of the format instead of a promise about the interface: the
+# rail, the status strip and the attention queue read the scan, and
+# nothing storable here reaches them.
+
+VIEWS_NAME = ".supervisor-views.json"
+VIEWS_PURPOSE = ("the operator's saved worktable filters — "
+                 "writer-reachable, trusted for nothing, and unable to "
+                 "reach the alarm")
+VIEW_FIELDS = ("name", "repo", "from", "to", "path", "tab")
+VIEW_LIMIT = 40  # how many a book keeps; a filter set is not a corpus
+VIEW_TEXT = 200  # longest a single field may be
+VIEW_BODY = 16384  # largest request body this face will read at all
+
+
+def clean_view(raw):
+    """One view as the file may hold it, or None.
+
+    Unknown keys are refused rather than stripped: a caller sending a
+    field this format does not know is asking for something, and
+    silently saving a smaller thing than it asked for is how a reader
+    starts lying. Values are text, trimmed, and only `name` is
+    required — a view with no filters at all is the honest way to say
+    'everything'."""
+    if not isinstance(raw, dict):
+        return None
+    if any(key not in VIEW_FIELDS for key in raw):
+        return None
+    view = {}
+    for key in VIEW_FIELDS:
+        value = raw.get(key, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str) or len(value) > VIEW_TEXT:
+            return None
+        value = value.strip()
+        if value:
+            view[key] = value
+    return view if view.get("name") else None
+
+
+def read_views(path):
+    """The saved views. An unreadable file is replaced, never repaired
+    — the same posture the baseline and the day book take."""
+    try:
+        views = json.loads(path.read_text(encoding="utf-8"))["views"]
+    except (OSError, ValueError, KeyError, TypeError,
+            json.JSONDecodeError):
+        return []
+    if not isinstance(views, list):
+        return []
+    # Read back through the same gate they were written through: a file
+    # somebody hand-edited is still only allowed to say these things.
+    kept = [clean_view(row) for row in views]
+    return [view for view in kept if view][:VIEW_LIMIT]
+
+
+def write_views(path, views):
+    """Never let a write failure take the request down with it: the
+    views are a convenience, and no verdict lives here."""
+    kept = views[:VIEW_LIMIT]
+    try:
+        path.write_text(
+            json.dumps({"purpose": VIEWS_PURPOSE, "views": kept},
+                       indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return kept
+
+
+def save_view(path, raw):
+    """Save one view, replacing any of the same name. None when the
+    view is not one this format can hold."""
+    view = clean_view(raw)
+    if view is None:
+        return None
+    kept = [row for row in read_views(path) if row["name"] != view["name"]]
+    return write_views(path, kept + [view])
+
+
+def forget_view(path, name):
+    """Drop one view by name. Forgetting something that was never
+    there is not an error — the file ends up the way the caller
+    asked."""
+    if not isinstance(name, str):
+        return read_views(path)
+    return write_views(
+        path, [row for row in read_views(path) if row["name"] != name])
 
 
 # What a day contributes to the band, as against what the book keeps
@@ -1346,11 +1456,20 @@ def watch_consumption(families, now):
         "norm": {
             "median_busiest_hour": median_of(samples.values()),
             "sessions_counted": len(samples),
+            # The rule, and where the bar is set. Nobody discovers an
+            # environment variable by looking at a dashboard, so the
+            # panel names them rather than growing a control: `scan`
+            # runs from the CLI and in CI too, and the environment is
+            # the one place all three already agree (ADR-0027).
             "words": (f"hot means a busiest hour of at least "
                       f"max({HOT_FLOOR}, {HOT_TIMES} x the median busiest "
                       "hour of every other session) — a session never "
                       "sets its own norm. The norm is context for a "
-                      "flag, never a verdict; timestamps are testimony"),
+                      "flag, never a verdict; timestamps are testimony. "
+                      f"The bar moves with SUPERVISOR_HOT_FLOOR (now "
+                      f"{HOT_FLOOR}) and SUPERVISOR_HOT_TIMES (now "
+                      f"{HOT_TIMES}), read by the page, the CLI and CI "
+                      "alike"),
         },
         "sessions": [],
     }
@@ -1841,21 +1960,145 @@ def recall_root(root, repo=None, since=None, until=None, path=None,
 ACTIVITY_DAYS = 90
 
 
-def activity_root(root, store=False, days=ACTIVITY_DAYS):
-    """Receipts counted into UTC hour buckets, per repo.
+def panel_tool_key(entry):
+    """What one entry reached for, named for the operator's own eyes.
 
-    Two surfaces read this: the working-hours heat map and the
-    per-drawer sparklines. Both are questions about the operator's
-    local calendar, and only the browser knows their zone — so the
-    buckets stay hourly and stay UTC, and the client folds them into
-    local days and weekdays. Aggregating to days here would bake a UTC
-    midnight into an answer about somebody's evenings.
+    Deliberately not `histogram_key`, which folds hard because its
+    answers leave the machine (ADR-0021): there, a name off the
+    allowlist becomes `other` and every MCP call collapses into one
+    `mcp` bucket. Nothing leaves the machine here — serve binds
+    localhost and offers this to nobody — so a tool is named as the
+    harness named it, and an MCP call is named by the server it
+    reached (`mcp:reddit`), which on your own machine is information
+    rather than exposure. The two must stay apart rather than become
+    one function with a switch: the export's whole value is that it
+    has no switch anybody can get wrong (ADR-0027).
+
+    Bookkeeping is not a tool call and returns None; so does the
+    genesis, which records that a chain opened, not that work
+    happened. An entry from anything but a harness actor was
+    hand-logged — `loxodonta log`, `loxodonta run` — and is counted
+    as that rather than guessed at."""
+    if entry.get("n") == 0:
+        return None
+    actor = entry.get("actor")
+    if actor == BOOKKEEPING_ACTOR:
+        return None
+    if actor not in HOOK_ACTORS:
+        return "hand-logged"
+    head = str(entry.get("action", "")).split(":", 1)[0].strip()
+    if not head:
+        return "unnamed"
+    if head.startswith("mcp__"):
+        parts = head.split("__")
+        return "mcp:" + parts[1] if len(parts) > 1 and parts[1] else "mcp"
+    return head
+
+
+# The ladder of bucket widths for the density strip, in seconds, and
+# the most bars it may draw. A real store holds sessions eighteen
+# seconds long and sessions a week long, five orders of magnitude
+# apart, so no single width serves both: the strip takes the first rung
+# that fits the span into SHAPE_BARS bars or fewer. The panel then says
+# which rung won, because a bar chart whose scale the reader has to
+# guess is worse than no bar chart.
+SHAPE_RUNGS = (1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200,
+               10800, 21600, 43200, 86400)
+SHAPE_BARS = 60
+
+
+def session_shape(root, repo, session, store=False):
+    """One session's receipts bucketed across its own span.
+
+    The axis is the session as it happened, first receipt to last, gaps
+    and all. A session that went quiet for a day and woke up draws as
+    mostly empty, and that emptiness is the finding rather than a
+    rendering problem — it is ADR-0018's reawakening, seen (ADR-0027).
+    Sibling chains fold in: one session is one story (ADR-0004).
+
+    Testimony, like the rest of recall — writer-stamped timestamps,
+    counted — and it owns no verdicts. The owed tail the page draws
+    over this belongs to the completeness watch, not to here."""
+    stamps = []
+    for repo_name, name, _, log in universe(root, store):
+        if repo_name != repo or name != session:
+            continue
+        for entry in read_entries(log):
+            # The genesis records that a chain opened, not that work
+            # happened, and it would stretch the span backwards.
+            if entry.get("n") == 0:
+                continue
+            when = parse_when(entry.get("ts"))
+            if when is not None:
+                stamps.append(when)
+    if not stamps:
+        return None
+    stamps.sort()
+    first, last = stamps[0], stamps[-1]
+    span = int((last - first).total_seconds())
+    width = next((rung for rung in SHAPE_RUNGS
+                  if span <= rung * SHAPE_BARS), SHAPE_RUNGS[-1])
+    buckets = [0] * (span // width + 1)
+    for when in stamps:
+        buckets[int((when - first).total_seconds()) // width] += 1
+    peak = max(range(len(buckets)), key=lambda i: buckets[i])
+    return {"repo": repo, "session": session, "testimony": TESTIMONY,
+            "from": first.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": last.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "seconds": span, "bucket_seconds": width, "buckets": buckets,
+            "receipts": len(stamps),
+            "peak": {"index": peak, "count": buckets[peak]}}
+
+
+# Where a subagent's checkout lives inside the project it serves. File
+# references are already project-relative (ADR-0012), so this prefix is
+# the only thing that splits one file into several — and it splits it
+# badly, because the worktree is pruned when its branch merges and the
+# directory in the receipt stops existing.
+WORKTREE_PREFIX = ".claude/worktrees/"
+
+
+def panel_file_key(path):
+    """One file reference, folded to the file it actually names.
+
+    A subagent working in `.claude/worktrees/<name>/` records its edits
+    under that prefix, so the same file arrives as several paths and
+    ranks as several files — none of them right, and most of them
+    naming a directory that was deleted when the branch merged. The
+    prefix folds away and nothing else does: a path this rule does not
+    recognise is shown exactly as the writer wrote it, because quietly
+    rewriting a path is how a reader starts lying about what happened
+    (ADR-0027)."""
+    if not isinstance(path, str) or not path:
+        return None
+    if path.startswith(WORKTREE_PREFIX):
+        rest = path[len(WORKTREE_PREFIX):]
+        cut = rest.find("/")
+        if cut > 0:
+            return rest[cut + 1:]
+    return path
+
+
+def activity_root(root, store=False, days=ACTIVITY_DAYS):
+    """Receipts counted into UTC hour buckets, per repo, plus what the
+    writer reached for and what it touched.
+
+    Four surfaces read this: the working-hours heat map, the per-drawer
+    sparklines, the histogram, and files touched. The first two are
+    questions about the operator's local calendar, and only the browser
+    knows their zone — so the buckets stay hourly and stay UTC, and the
+    client folds them into local days and weekdays. Aggregating to days
+    here would bake a UTC midnight into an answer about somebody's
+    evenings. The other two ride the same walk rather than paying for a
+    second one, and therefore share its window.
 
     Testimony like the rest of recall: this counts what the writer said
     it attempted, and owns no verdicts."""
     floor = (datetime.now(timezone.utc)
              - timedelta(days=days)).strftime("%Y-%m-%dT%H")
     counts = {}
+    tools = {}
+    files = {}
     for repo_name, _, _, log in universe(root, store):
         drawer = counts.setdefault(repo_name, {})
         for entry in read_entries(log):
@@ -1870,8 +2113,26 @@ def activity_root(root, store=False, days=ACTIVITY_DAYS):
             if hour < floor:
                 continue
             drawer[hour] = drawer.get(hour, 0) + 1
+            reached = panel_tool_key(entry)
+            if reached:
+                tools[reached] = tools.get(reached, 0) + 1
+            # One receipt counts once per file it named, however many
+            # times it named it: the question is how often a file was
+            # in the work, not how long a `files` array ran.
+            touched = set()
+            for ref in entry.get("files") or ():
+                if isinstance(ref, dict):
+                    folded = panel_file_key(ref.get("path"))
+                    if folded:
+                        touched.add(folded)
+            for path in touched:
+                where = (repo_name, path)
+                files[where] = files.get(where, 0) + 1
     return {"root": root.as_posix(), "testimony": TESTIMONY,
-            "since": floor, "activity": counts}
+            "since": floor, "activity": counts, "tools": tools,
+            "files": [{"repo": repo, "path": path, "receipts": count}
+                      for (repo, path), count in
+                      sorted(files.items(), key=lambda kv: (-kv[1], kv[0]))]}
 
 
 def resolve_chain(root, asked):
@@ -2898,11 +3159,6 @@ def cmd_mcp(args):
 
 EXPORT_VERSION = 1
 FIELD_DATA_REPO = "Acquiredl/loxodonta"
-# The harness actors whose entries are tool calls (ADR-0020). Their
-# action lines start with the tool name; everything else — hand-logged
-# entries, foreign actors — is one `other` bucket.
-HOOK_ACTORS = ("claude-code", "codex", "openai-agents")
-BOOKKEEPING_ACTOR = "receipts"
 # The tool names the histogram may carry: the harnesses' own built-ins,
 # written down here. A name is the harness's word rather than the
 # sender's only when it is on this list. MCP tool names say which
@@ -4091,6 +4347,12 @@ class Watchtower(ThreadingHTTPServer):
         with self.scan_lock:
             remember_look(book, datetime.now(timezone.utc))
 
+    def views_path(self):
+        """Beside the day book, wherever that is — the two share a
+        posture and should share a shelf (ADR-0027)."""
+        return (self.root.parent / "views.json" if self.store
+                else self.root / VIEWS_NAME)
+
     def fresh_status(self):
         with self.scan_lock:
             if (self.scan_body is None
@@ -4152,6 +4414,20 @@ class Face(BaseHTTPRequestHandler):
                                    store=self.server.store)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
+        elif url.path == "/api/views":
+            with self.server.views_lock:
+                self.reply_views(read_views(self.server.views_path()))
+        elif url.path == "/api/shape":
+            asked = {key: values[0]
+                     for key, values in parse_qs(url.query).items()}
+            report = session_shape(self.server.root, asked.get("repo", ""),
+                                   asked.get("session", ""),
+                                   store=self.server.store)
+            if report is None:
+                self.send_error(404)
+                return
+            self.reply(json.dumps(report).encode("utf-8"),
+                       "application/json")
         elif url.path == "/api/chain":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
@@ -4180,10 +4456,54 @@ class Face(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def body_json(self):
+        """The request body as JSON, or None.
+
+        A body this face will not read is refused rather than guessed
+        at: the length must be declared and small, and the type must be
+        `application/json` — which a cross-origin form post cannot set
+        without a preflight nobody here answers. That is the second
+        lock, beside the Origin check in `refused_off_machine`, on the
+        only write path the page has."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        if length <= 0 or length > VIEW_BODY:
+            return None
+        kind = (self.headers.get("Content-Type") or "").split(";")[0]
+        if kind.strip().lower() != "application/json":
+            return None
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def reply_views(self, views):
+        self.reply(json.dumps({"purpose": VIEWS_PURPOSE,
+                               "views": views}).encode("utf-8"),
+                   "application/json")
+
     def do_POST(self):
         if self.refused_off_machine():
             return
         url = urlparse(self.path)
+        if url.path == "/api/views":
+            asked = self.body_json()
+            if not isinstance(asked, dict):
+                self.send_error(400)
+                return
+            with self.server.views_lock:
+                book = self.server.views_path()
+                if "forget" in asked:
+                    self.reply_views(forget_view(book, asked["forget"]))
+                    return
+                views = save_view(book, asked.get("save"))
+            if views is None:
+                self.send_error(400)
+                return
+            self.reply_views(views)
+            return
         if url.path != "/api/drill":
             self.send_error(404)
             return
@@ -4217,6 +4537,7 @@ def cmd_serve(args):
     server.publish_every = args.publish_every
     server.publish_url = args.publish_url
     server.scan_lock = threading.Lock()
+    server.views_lock = threading.Lock()
     server.scan_body = None
     server.scan_at = 0.0
     print(f"watching {root.as_posix()} on "
@@ -4281,6 +4602,10 @@ PAGE = """<!doctype html>
     --look: #a78bfa;
   }
   * { box-sizing: border-box; }
+  /* The browser's own [hidden] rule loses to any author `display`, so
+     an element the script hides would keep painting the moment someone
+     gives it a grid. Say it once, here, and `hidden` means hidden. */
+  [hidden] { display: none !important; }
   body { font-family: var(--sans); background: var(--bg); color: var(--fg);
          margin: 0; line-height: 1.5; }
   a { color: inherit; }
@@ -4416,6 +4741,15 @@ PAGE = """<!doctype html>
   /* The session Gantt: one row per session on a shared fourteen-day
      axis. Ch. 18's move is the label riding the bar — when a row wants
      attention its name is already where the eye lands. */
+  /* The gantt draws one lane per session, so its height is set by how
+     much the operator worked and grows every month. It gets a box of
+     its own and scrolls inside it (ADR-0027). That box is the cap's
+     cheapest give: the panel scrolls either way, so its height is a
+     display choice and not an information one, and it shrank when the
+     histogram arrived. The axis rides the bottom of the same box so it
+     stays put and stays aligned — sharing the scroller's width is what
+     keeps the lanes and the dates on one scale. */
+  #gantt-scroll { max-height: 24rem; overflow-y: auto; }
   #gantt { margin: 0.6rem 0; }
   .lane { position: relative; height: 1.55rem; margin: 0.2rem 0;
           border-radius: 0.3rem;
@@ -4442,6 +4776,28 @@ PAGE = """<!doctype html>
   /* The deficit, drawn as absence: the tail a session owed and never
      wrote. Hatched, like an unwatched day, because it is the same
      kind of hole. */
+  /* The density strip: one session's receipts across its own span,
+     gaps and all (ADR-0027). An hour nobody worked is a floor line
+     rather than a missing bar, because a gap and a blank must not look
+     the same. The owed tail reuses the gantt's hatch on purpose —
+     receipts a session owed and never wrote mean the same thing here,
+     and one idiom is cheaper to learn than two. */
+  .shape { display: flex; align-items: flex-end; gap: 1px; height: 38px;
+           margin: 0.5rem 0 0.1rem;
+           border-bottom: 1px solid var(--border); }
+  .shape > div { flex: 1; min-width: 1px; background: var(--quiet);
+                 border-radius: 1px 1px 0 0; }
+  .shape .gap { height: 1px; background: var(--line); }
+  .shape .peak { background: var(--look); }
+  /* A fixed cap, never a proportion. This axis is time, and receipts
+     a session owed and never wrote are a count with no hour attached —
+     sizing the hatch by the deficit would put a number on the time
+     axis that is not a time, and squeeze the real bars to make room.
+     The count lives in the caption, where it can be read. */
+  .shape .owed { position: static; flex: none; width: 0.75rem;
+                 margin-left: 0.25rem; align-self: stretch;
+                 border-radius: 0.2rem; }
+  #inspect-shape .testimony { font-size: 0.7rem; padding: 0; margin: 0; }
   .owed { position: absolute; top: 0; bottom: 0; border-radius: 0.3rem;
           border: 1px dashed var(--damage);
           background: repeating-linear-gradient(45deg,
@@ -4450,12 +4806,17 @@ PAGE = """<!doctype html>
             color-mix(in srgb, var(--damage) 45%, transparent) 6px); }
   #axis { display: flex; justify-content: space-between; font-size: 0.7rem;
           opacity: 0.6; font-variant-numeric: tabular-nums;
-          margin-top: 0.15rem; }
+          margin-top: 0.15rem; position: sticky; bottom: 0;
+          background: var(--surface); padding-top: 0.15rem; }
 
   /* The working-hours heat map: local weekday against local hour. */
   #clock { display: grid; grid-template-columns: auto repeat(24, 1fr);
            gap: 1px; margin: 0.6rem 0; font-size: 0.62rem; }
-  .cell { aspect-ratio: 1; border-radius: 0.15rem;
+  /* Wider than tall on purpose. The cells were square when the
+     clock lived in half a pane; at the activity tab's full width
+     square makes every row 40px and the panel twice the height
+     it needs for the same 24 columns (ADR-0027's cap). */
+  .cell { aspect-ratio: 2 / 1; border-radius: 0.15rem;
           background: color-mix(in srgb, currentColor 6%, transparent); }
   .cell.on { background: color-mix(in srgb, var(--busy)
              calc(var(--heat) * 1%), transparent); }
@@ -4548,11 +4909,65 @@ PAGE = """<!doctype html>
   .pane-empty { color: var(--faint); padding: 1.2rem;
                 font-size: 0.85rem; }
   .tabpane { padding: 0; }
-  .p2tab { font: inherit; font-size: 0.7rem; font-family: var(--mono);
-           color: var(--faint); background: none; border: 0;
-           border-radius: 0.3rem; padding: 0.1rem 0.5rem;
-           cursor: pointer; }
-  .p2tab.on { color: var(--fg); background: var(--surface2); }
+  /* Named views: saved worktable filters, at worktable level so they
+     are reachable from any tab. A view may set the four filter
+     controls and the tab and nothing else — the rail reads the scan,
+     which no view can touch (ADR-0027). */
+  #views { display: flex; flex-wrap: wrap; align-items: center;
+           gap: 0.4rem; padding: 0.5rem 0 0.1rem; }
+  #views .vhead { font-family: var(--mono); font-size: 0.62rem;
+                  letter-spacing: 0.09em; text-transform: uppercase;
+                  color: var(--faint); }
+  #view-list { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  #view-name { font: inherit; font-size: 0.75rem; width: 9rem;
+               color: var(--fg); background: var(--surface);
+               border: 1px solid var(--border); border-radius: 0.35rem;
+               padding: 0.15rem 0.4rem; }
+  #view-save { font: inherit; font-size: 0.75rem; color: var(--dim);
+               background: var(--surface); border: 1px solid var(--border);
+               border-radius: 0.35rem; padding: 0.15rem 0.6rem;
+               cursor: pointer; }
+  #view-save:hover { color: var(--fg); border-color: var(--accent); }
+  #view-said { font-size: 0.7rem; color: var(--faint); }
+  .view { display: inline-flex; align-items: center;
+          background: var(--surface2); border: 1px solid var(--border);
+          border-radius: 0.35rem; }
+  .view .open, .view .drop { font: inherit; font-size: 0.75rem;
+          background: none; border: 0; cursor: pointer;
+          padding: 0.15rem 0.45rem; }
+  .view .open { color: var(--fg); }
+  .view .drop { color: var(--faint); padding-left: 0.1rem; }
+  .view .drop:hover { color: var(--damage); }
+  .view:hover { border-color: var(--accent); }
+
+  /* The activity tab (ADR-0027): the store counted, at the full width
+     of the work area rather than inside half of a split. The cap is
+     physical — everything here fits one 1440x900 screen without
+     scrolling, and the next panel displaces one of these rather than
+     lengthening the page. Paired panels sit two across; the clock and
+     the gantt want the whole row and take it. */
+  #activity-view { display: grid; gap: 0.5rem;
+                   grid-template-columns: repeat(2, minmax(0, 1fr));
+                   padding: 0.6rem 0; }
+  #activity-view .chartbox { border: 1px solid var(--line);
+                             border-radius: 0.4rem;
+                             background: var(--surface); min-width: 0; }
+  #activity-view .wide { grid-column: 1 / -1; }
+  /* The tally: how much is in here, stated once, in one row. Scale
+     only — no verdict counts. How many chains are broken is the
+     rail's sentence, and a cockpit whose two surfaces can disagree
+     about what is alarming is the failure ADR-0013 named by name. */
+  #tally { display: flex; flex-wrap: wrap; gap: 1.7rem;
+           padding: 0.25rem 0 0.35rem; }
+  #tally .count { display: flex; flex-direction: column; gap: 0.05rem; }
+  #tally .num { font-family: var(--mono); font-size: 1.45rem;
+                line-height: 1.15; color: var(--fg);
+                font-variant-numeric: tabular-nums; }
+  #tally .what { font-size: 0.68rem; letter-spacing: 0.09em;
+                 text-transform: uppercase; color: var(--faint); }
+  @media (max-width: 60rem) {
+    #activity-view { grid-template-columns: 1fr; }
+  }
   .chartbox { padding: 0.7rem 0.9rem 0.4rem; }
   .chartbox h3 { margin: 0 0 0.3rem; font-size: 0.72rem;
                  letter-spacing: 0.08em; text-transform: uppercase;
@@ -4793,6 +5208,15 @@ this page draws them and decides nothing</footer>
     <button type="button" class="tab" data-tab="projects">projects</button>
     <button type="button" class="tab" data-tab="search">search</button>
     <button type="button" class="tab" data-tab="evidence">evidence</button>
+    <button type="button" class="tab" data-tab="activity">activity</button>
+  </div>
+  <div id="views">
+    <span class="vhead">views</span>
+    <span id="view-list"></span>
+    <input type="text" id="view-name" maxlength="40"
+           placeholder="name this view" aria-label="name for a saved view">
+    <button type="button" id="view-save">save</button>
+    <span id="view-said" role="status"></span>
   </div>
   <div id="split">
     <div class="pane">
@@ -4854,50 +5278,65 @@ this page draws them and decides nothing</footer>
             aria-label="drag or use arrow keys to resize the panes"
             title="drag to resize"></button>
     <div class="pane">
-      <div class="phead"><span class="no">[2]</span>
-        <button type="button" class="p2tab on" data-p2="inspect">inspect</button>
-        <button type="button" class="p2tab" data-p2="activity">activity</button>
-        <span>— the chain as <code>receipts verify</code> sees it,
-        or the store drawn</span></div>
+      <div class="phead"><span class="no">[2]</span> inspect — the chain
+        as <code>receipts verify</code> sees it</div>
       <div class="pbody">
         <div id="p2-inspect">
           <div id="inspect-meta" class="pane-empty">click a session on
           the left — its chains, claims, and actions land here</div>
+          <div id="inspect-shape" hidden></div>
           <div id="inspect-judge" hidden></div>
           <div id="inspect-chains"></div>
         </div>
-        <div id="p2-activity" hidden>
-          <div class="chartbox">
-            <h3>receipts per session — last ten</h3>
-            <div id="chart-receipts"></div>
-          </div>
-          <div class="chartbox">
-            <h3>busiest hour vs the store's norm</h3>
-            <div id="chart-tempo"></div>
-          </div>
-          <div class="chartbox">
-            <h3>looks per day — fourteen days</h3>
-            <p class="testimony">red marks a day that carried an alarm;
-            an unread day is a gap, not a quiet day</p>
-            <div id="chart-looks"></div>
-          </div>
-          <div class="chartbox">
-            <h3>working hours</h3>
-            <p class="testimony">when receipts actually arrive, in your
-            own timezone — the selfish view: what your weeks really
-            look like</p>
-            <div id="clock">remembering…</div>
-          </div>
-          <div class="chartbox">
-            <h3>sessions on one axis</h3>
-            <p class="testimony">every session of the last fourteen
-            days, drawn from the completeness watch — a hatched tail is
-            receipts the session owed and never wrote. Reasons to look,
-            never verdicts</p>
-            <div id="gantt">remembering…</div>
-            <div id="axis"></div>
-          </div>
-        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="activity-view" hidden>
+    <div class="chartbox wide">
+      <h3>the tally — the whole store</h3>
+      <div id="tally">remembering…</div>
+    </div>
+    <div class="chartbox">
+      <h3>busiest hour vs the store's norm — every session</h3>
+      <div id="chart-tempo"></div>
+    </div>
+    <div class="chartbox">
+      <h3>looks per day — fourteen days</h3>
+      <p class="testimony">red marks a day that carried an alarm; an
+      unread day is a gap, not a quiet day</p>
+      <div id="chart-looks"></div>
+    </div>
+    <div class="chartbox">
+      <h3>the histogram — ninety days</h3>
+      <p class="testimony">the tool each receipt names, counted; an MCP
+      call by the server it reached. Bookkeeping is not a tool call and
+      is left out</p>
+      <div id="chart-tools"></div>
+      <p class="testimony" id="tools-tail"></p>
+    </div>
+    <div class="chartbox">
+      <h3>files touched — ninety days</h3>
+      <p class="testimony">receipts that named the file. A subagent's
+      worktree copy folds into the file it copied; any other path is
+      shown as the writer wrote it</p>
+      <div id="chart-files"></div>
+      <p class="testimony" id="files-tail"></p>
+    </div>
+    <div class="chartbox wide">
+      <h3>working hours — ninety days, your own timezone</h3>
+      <p class="testimony">when receipts actually arrive: what your
+      weeks really look like</p>
+      <div id="clock">remembering…</div>
+    </div>
+    <div class="chartbox wide">
+      <h3>sessions on one axis — fourteen days</h3>
+      <p class="testimony">drawn from the completeness watch; a hatched
+      tail is receipts the session owed and never wrote. Reasons to
+      look, never verdicts</p>
+      <div id="gantt-scroll">
+        <div id="gantt">remembering…</div>
+        <div id="axis"></div>
       </div>
     </div>
   </div>
@@ -5080,6 +5519,20 @@ function renderStrip(report) {
 // alarms outrank damaged history, which outranks reasons to look
 // (tripwire events, hot sessions). Everything else on the page is
 // deliberately quiet.
+// How far past its own bar a session actually burned. The bar is what
+// made it hot, so the multiple against the bar is the honest reading:
+// a busiest hour of 713 against a bar of 153 is a different event from
+// 155 against 153, and both wore the identical word until now
+// (ADR-0027). One helper, so the number reads the same in all three
+// places the flag appears.
+function pastTheBar(session) {
+  const bar = session.threshold;
+  if (!bar || !session.busiest_hour) return "";
+  const times = session.busiest_hour / bar;
+  return (times >= 10 ? Math.round(times)
+                      : Math.round(times * 10) / 10) + "× the bar";
+}
+
 const SEVERITY = ["alarm", "regenerated", "broken", "tripwire", "hot",
                   "reawakened"];
 
@@ -5120,9 +5573,11 @@ function attentionItems(report) {
   }
   for (const s of (report.consumption || {sessions: []}).sessions) {
     if (s.state === "RUNNING-HOT") {
+      const past = pastTheBar(s);
       items.push({rank: "hot", tone: "look", chip: "RUNNING-HOT",
         text: s.repo + " · " + s.session.slice(0, 8) +
-              " — burning far above the store's norm", tab: "evidence"});
+              " — busiest hour " + s.busiest_hour +
+              (past ? ", " + past : ""), tab: "evidence"});
     }
   }
   for (const w of ((report.lifecycle || {}).events || [])) {
@@ -5253,9 +5708,20 @@ function worstTier(chains) {
 
 // The worktable's tab row: pane one shows exactly one of the four
 // views; pane two stays the inspection surface throughout.
+// Four tabs share the split: a list on the left, whatever you clicked
+// on the right. Activity is neither — it is the store counted, with no
+// detail to open — so it takes the whole worktable, which is the width
+// its grid needs (ADR-0027).
 function showTab(name) {
+  const drawn = name === "activity";
   for (const b of document.querySelectorAll("#tabs .tab")) {
     b.classList.toggle("on", b.dataset.tab === name);
+  }
+  document.getElementById("split").hidden = drawn;
+  document.getElementById("activity-view").hidden = !drawn;
+  if (drawn) {
+    renderCharts();
+    return;
   }
   for (const pane of document.querySelectorAll("#pane1 > .tabpane")) {
     pane.hidden = pane.id !== "pane-" + name;
@@ -5434,12 +5900,22 @@ function renderGantt() {
   const now = Date.now();
   const start = startOfDay(new Date(now - 13 * 86400000));
   const width = now - start;
+  // Newest first, except that a reason to look outranks recency: the
+  // panel scrolls inside its own box now (ADR-0027), and a hatched
+  // tail or an alarm must never be the thing below the fold.
   const lanes = lastRecall.sessions
     .filter(story => story.started && story.ended)
-    .map(story => ({story, from: Date.parse(story.started),
-                    to: Date.parse(story.ended)}))
+    .map(story => {
+      const seen = watch.get(story.repo + "/" + story.session);
+      const state = seen ? seen.state : "";
+      const flagged = state.startsWith("ALARM") ||
+        state.endsWith("DEFICIT") || (seen && seen.deficit > 0);
+      return {story, seen, state, flagged: flagged ? 0 : 1,
+              from: Date.parse(story.started),
+              to: Date.parse(story.ended)};
+    })
     .filter(row => row.to >= start)
-    .sort((a, b) => b.to - a.to);
+    .sort((a, b) => a.flagged - b.flagged || b.to - a.to);
 
   host.replaceChildren();
   if (!lanes.length) {
@@ -5449,8 +5925,8 @@ function renderGantt() {
   for (const lane of lanes) {
     const story = lane.story;
     const row = el("div", "lane");
-    const seen = watch.get(story.repo + "/" + story.session);
-    const state = seen ? seen.state : "";
+    const seen = lane.seen;
+    const state = lane.state;
     const rung = state.startsWith("ALARM") ? " grave"
       : state.endsWith("DEFICIT") ? " damage" : "";
     const left = Math.max(0, (lane.from - start) / width) * 100;
@@ -5494,7 +5970,7 @@ function render(report) {
   renderStrip(report);
   renderAttention(report);
   renderFortnight(report);
-  if (!document.getElementById("p2-activity").hidden) renderCharts();
+  if (!document.getElementById("activity-view").hidden) renderCharts();
   renderTiles();
   renderGantt();
 
@@ -5574,7 +6050,8 @@ function render(report) {
                    (s.state === "RUNNING-HOT" ? "hot" : "quiet"));
     row.appendChild(el("span", "chip", s.state));
     row.appendChild(el("span", "file", s.repo + " · " + s.session +
-      " · busiest hour " + s.busiest_hour + " entries, " +
+      " · busiest hour " + s.busiest_hour + " entries against a bar of " +
+      s.threshold + " — " + pastTheBar(s) + ". " +
       s.top_tool + " ran " + s.top_tool_count + " of them"));
     if (s.words) row.appendChild(el("p", "claim", s.words));
     return row;
@@ -5903,6 +6380,69 @@ function renderRecall(report) {
 // Pane two: the selected session's chains, claims, and actions — the
 // chain rows are the same tier ladder the whole page speaks, and the
 // walk buttons still open the WebCrypto walker.
+// The density strip: one session's receipts across its own span, gaps
+// and all (ADR-0027). The axis is the session as it happened, so a
+// week of dormancy draws as a week of empty — which is the finding,
+// not a rendering problem. Bucket width comes off a ladder because
+// sessions here run from eighteen seconds to a week, and the caption
+// names the rung: a bar chart whose scale you have to guess is worse
+// than none. The owed tail is the completeness watch's, which the page
+// already holds — the strip itself owns no verdicts.
+function shapeWords(seconds) {
+  if (seconds < 60) return seconds + "s";
+  if (seconds < 3600) return Math.round(seconds / 60) + " min";
+  if (seconds < 86400) return Math.round(seconds / 3600) + "h";
+  return Math.round(seconds / 86400) + "d";
+}
+
+async function renderShape(story) {
+  const host = document.getElementById("inspect-shape");
+  const where = story.repo + "/" + story.session;
+  host.hidden = true;
+  host.replaceChildren();
+  let shape;
+  try {
+    const response = await fetch("/api/shape?repo=" +
+      encodeURIComponent(story.repo) + "&session=" +
+      encodeURIComponent(story.session));
+    if (!response.ok) return;
+    shape = await response.json();
+  } catch (error) {
+    return;
+  }
+  // A second click can land while the first fetch is still in flight;
+  // the answer to a question nobody is asking any more is dropped.
+  if (where !== selectedWhere) return;
+
+  const strip = el("div", "shape");
+  const top = Math.max(...shape.buckets, 1);
+  shape.buckets.forEach((count, i) => {
+    const bar = el("div", count
+      ? (i === shape.peak.index ? "peak" : "") : "gap");
+    if (count) {
+      bar.style.height =
+        Math.max(2, Math.round(count / top * 34)) + "px";
+    }
+    bar.title = count + " receipt(s)";
+    strip.appendChild(bar);
+  });
+  const watch = lastStatus && lastStatus.completeness.sessions.find(
+    s => s.repo === story.repo && s.session === story.session);
+  const owed = watch && watch.deficit > 0 ? watch.deficit : 0;
+  if (owed) {
+    const tail = el("div", "owed");
+    tail.title = owed + " receipt(s) owed and never written";
+    strip.appendChild(tail);
+  }
+  host.appendChild(strip);
+  host.appendChild(el("p", "testimony",
+    "one bar = " + shapeWords(shape.bucket_seconds) + " · " +
+    shape.buckets.length + " bars · busiest " + shape.peak.count +
+    (owed ? " · hatched: " + owed + " owed, never written" : "") +
+    " — testimony, not a verdict"));
+  host.hidden = false;
+}
+
 function selectSession(story) {
   selectedWhere = story.repo + "/" + story.session;
   for (const row of document.querySelectorAll("#sessions-body tr")) {
@@ -5920,6 +6460,7 @@ function selectSession(story) {
     meta.appendChild(el("p", "sibling", story.chains.length +
       " chains — recording continued in a sibling"));
   }
+  renderShape(story);
   // The last rung of the ladder: the walker, hashes rechecked in the
   // reader's own browser.
   for (const path of story.paths || []) {
@@ -5967,20 +6508,9 @@ function selectSession(story) {
   }
 }
 
-// Pane two's own tabs: inspection or the store drawn. The charts
-// speak the house rules — one hue per chart, values reachable as
-// text, red only for status and never alone (a HOT word rides it).
-function showPane2(name) {
-  for (const b of document.querySelectorAll(".p2tab")) {
-    b.classList.toggle("on", b.dataset.p2 === name);
-  }
-  document.getElementById("p2-inspect").hidden = name !== "inspect";
-  document.getElementById("p2-activity").hidden = name !== "activity";
-  if (name === "activity") renderCharts();
-}
-for (const b of document.querySelectorAll(".p2tab")) {
-  b.addEventListener("click", () => showPane2(b.dataset.p2));
-}
+// The charts speak the house rules — one hue per chart, values
+// reachable as text, red only for status and never alone (a HOT word
+// rides it).
 
 const SVGNS = "http://www.w3.org/2000/svg";
 
@@ -5994,11 +6524,14 @@ function svgEl(tag, attrs) {
 
 // Thin horizontal bars, rounded data ends, direct value labels, ink
 // for text and one hue for marks; an optional dashed norm line.
-function hbars(host, items, unit, norm) {
+// `left` widens the label gutter for charts whose labels are long by
+// nature — a file path is not a tool name — and trades bar length for
+// it. Everything else keeps the default.
+function hbars(host, items, unit, norm, left) {
   host.replaceChildren();
   if (!items.length) return;
   const peak = Math.max(norm || 0, ...items.map(i => i.v), 1);
-  const W = 420, LEFT = 100, BARS = W - LEFT - 58, ROW = 24;
+  const W = 420, LEFT = left || 100, BARS = W - LEFT - 58, ROW = 24;
   const svg = svgEl("svg",
     {viewBox: "0 0 " + W + " " + (items.length * ROW + 6),
      role: "img", style: "width:100%;height:auto"});
@@ -6012,7 +6545,8 @@ function hbars(host, items, unit, norm) {
     const bar = svgEl("rect", {x: LEFT, y: y + 4, width: w, height: 13,
       rx: 4, "class": "cbar" + (item.hot ? " hot" : "")});
     const tip = svgEl("title", {});
-    tip.textContent = item.label + ": " + item.v + " " + unit;
+    tip.textContent = (item.full || item.label) + ": " + item.v + " " +
+      unit;
     bar.appendChild(tip);
     svg.appendChild(bar);
     const value = svgEl("text", {x: LEFT + w + 7, y: y + 15,
@@ -6031,16 +6565,123 @@ function hbars(host, items, unit, norm) {
   host.appendChild(svg);
 }
 
-function renderCharts() {
-  const recent = (shownRecall ? shownRecall.sessions : [])
-    .slice(0, 10).map(story => ({label: story.session.slice(0, 8),
-                                 v: story.entries}));
-  hbars(document.getElementById("chart-receipts"), recent, "receipts");
+// The tally: the store's own scale, which nothing else on this page
+// says out loud. Counts only — never how many chains are broken or how
+// many sessions ran hot. Those are the rail's sentences, and two
+// surfaces that can disagree about what is alarming is the one thing
+// ADR-0013 says a cockpit must never be. Derived from payloads the
+// page already holds, so it costs no endpoint and no second walk.
+function renderTally() {
+  if (!lastStatus || !lastRecall) return;
+  const host = document.getElementById("tally");
+  let receipts = 0;
+  let since = null;
+  for (const story of lastRecall.sessions) {
+    receipts += story.entries;
+    if (story.started && (!since || story.started < since)) {
+      since = story.started;
+    }
+  }
+  let chains = 0;
+  for (const repo of lastStatus.repos) {
+    for (const seen of repo.sessions) chains += seen.chains.length;
+  }
+  host.replaceChildren();
+  const counts = [["drawers", lastStatus.repos.length],
+                  ["sessions", lastRecall.sessions.length],
+                  ["chains", chains],
+                  ["receipts", receipts]];
+  for (const [what, value] of counts) {
+    const cell = el("div", "count");
+    cell.appendChild(el("span", "num", value.toLocaleString()));
+    cell.appendChild(el("span", "what", what));
+    host.appendChild(cell);
+  }
+  const first = el("div", "count");
+  first.appendChild(el("span", "num", since ? since.slice(0, 10) : "—"));
+  first.appendChild(el("span", "what", "recording since"));
+  host.appendChild(first);
+}
 
+// The histogram: what the writer reached for, counted. Admitted as a
+// recording-health panel (ADR-0027) — on a settled machine its shape
+// barely moves, and the shape *moving* is what a switched harness or a
+// broken adapter looks like from here. Read it for movement, not for
+// news. Only the top few get bars: the tail is long, the panel is not,
+// and a bar per name would say less than the count of what is missing.
+function renderHistogram() {
+  const host = document.getElementById("chart-tools");
+  const tail = document.getElementById("tools-tail");
+  const ranked = Object.entries((lastActivity && lastActivity.tools) || {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  tail.textContent = "";
+  if (!ranked.length) {
+    host.replaceChildren();
+    host.appendChild(el("p", "testimony",
+      "nothing recorded in the window"));
+    return;
+  }
+  // hbars anchors a label at its right edge, so an over-long name is
+  // clipped from the left and loses the part that identifies it. Trim
+  // from the right instead, and hand hbars the whole name for the
+  // tooltip: an MCP server can be called anything.
+  const fit = name =>
+    name.length > 15 ? name.slice(0, 14) + "…" : name;
+  const TOP = 6;
+  hbars(host, ranked.slice(0, TOP).map(
+    ([name, count]) => ({label: fit(name), full: name, v: count})),
+    "receipt(s)");
+  const rest = ranked.slice(TOP);
+  if (rest.length) {
+    tail.textContent = "and " + rest.length + " more, " +
+      rest.reduce((sum, row) => sum + row[1], 0) +
+      " receipt(s) between them";
+  }
+}
+
+// Files touched: which files the work actually kept returning to.
+// Ranked per drawer, because two projects both holding a README hold
+// two different files. Labels trim from the *left*, the opposite of
+// the histogram's: a path is identified by its tail.
+function renderFiles() {
+  const host = document.getElementById("chart-files");
+  const tail = document.getElementById("files-tail");
+  const ranked = (lastActivity && lastActivity.files) || [];
+  tail.textContent = "";
+  if (!ranked.length) {
+    host.replaceChildren();
+    host.appendChild(el("p", "testimony",
+      "no files fingerprinted in the window"));
+    return;
+  }
+  const fit = path =>
+    path.length > 23 ? "…" + path.slice(-22) : path;
+  const TOP = 6;
+  hbars(host, ranked.slice(0, TOP).map(row => ({
+    label: fit(row.path), full: row.repo + " · " + row.path,
+    v: row.receipts})), "receipt(s)", 0, 150);
+  const rest = ranked.slice(TOP);
+  if (rest.length) {
+    tail.textContent = "and " + rest.length + " more, " +
+      rest.reduce((sum, row) => sum + row.receipts, 0) +
+      " receipt(s) between them";
+  }
+}
+
+function renderCharts() {
+  renderTally();
+  renderHistogram();
+  renderFiles();
+  // No receipts-per-session bar here: the sessions table already
+  // carries that column, in the same order, and a bar with no norm
+  // beside it only redraws what is already on screen (ADR-0027).
   const tempoHost = document.getElementById("chart-tempo");
   const consumption = (lastStatus && lastStatus.consumption) ||
     {sessions: [], norm: null};
   if (consumption.sessions.length) {
+    // No multiple on this chart: the value column has 58 units and the
+    // words would clip. It grades already — bar length against the
+    // norm line is the distance, drawn (ADR-0027).
     hbars(tempoHost, consumption.sessions.map(s => ({
       label: s.session.slice(0, 8), v: s.busiest_hour, hot: true})),
       "calls in the busiest hour",
@@ -6068,6 +6709,108 @@ function findScanSession(story) {
               : null;
 }
 
+// --- named views ----------------------------------------------------
+// Saved worktable filters (ADR-0027). A view sets the four filter
+// controls and the tab; it cannot reach the rail, the status strip or
+// the attention queue, because those read the scan and a view holds
+// only what the closed field list allows. Kept in a file beside the
+// day book, in the day book's posture: trusted for nothing, owning no
+// verdicts, and never raising an exit.
+
+function viewWords(view) {
+  const parts = [];
+  if (view.repo) parts.push(view.repo);
+  if (view.from) parts.push("from " + view.from);
+  if (view.to) parts.push("to " + view.to);
+  if (view.path) parts.push("path " + view.path);
+  if (view.tab) parts.push(view.tab + " tab");
+  return parts.length ? parts.join(" · ") : "every repo, no dates";
+}
+
+function applyView(view) {
+  document.getElementById("ask-repo").value = view.repo || "";
+  document.getElementById("ask-from").value = view.from || "";
+  document.getElementById("ask-to").value = view.to || "";
+  document.getElementById("ask-path").value = view.path || "";
+  if (view.tab) showTab(view.tab);
+  said("");
+  loadRecall();
+}
+
+function said(words) {
+  document.getElementById("view-said").textContent = words;
+}
+
+function renderViews(views) {
+  const list = document.getElementById("view-list");
+  list.replaceChildren();
+  for (const view of views) {
+    const chip = el("span", "view");
+    const open = el("button", "open", view.name);
+    open.type = "button";
+    open.title = viewWords(view);
+    open.addEventListener("click", () => applyView(view));
+    const drop = el("button", "drop", "×");
+    drop.type = "button";
+    drop.title = "forget this view";
+    drop.setAttribute("aria-label", "forget the view " + view.name);
+    drop.addEventListener("click", () => postViews({forget: view.name}));
+    chip.appendChild(open);
+    chip.appendChild(drop);
+    list.appendChild(chip);
+  }
+}
+
+async function postViews(body) {
+  try {
+    const response = await fetch("/api/views", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)});
+    if (!response.ok) {
+      said("the supervisor would not keep that one");
+      return;
+    }
+    renderViews((await response.json()).views);
+  } catch (error) {
+    said("views did not answer: " + error);
+  }
+}
+
+async function loadViews() {
+  try {
+    const response = await fetch("/api/views");
+    renderViews((await response.json()).views);
+  } catch (error) {
+    said("views did not answer: " + error);
+  }
+}
+
+function saveCurrentView() {
+  const field = document.getElementById("view-name");
+  const name = field.value.trim();
+  if (!name) {
+    said("a view needs a name");
+    field.focus();
+    return;
+  }
+  const on = document.querySelector("#tabs .tab.on");
+  const value = id => document.getElementById(id).value.trim();
+  postViews({save: {name: name, repo: value("ask-repo"),
+                    from: value("ask-from"), to: value("ask-to"),
+                    path: value("ask-path"),
+                    tab: on ? on.dataset.tab : ""}});
+  field.value = "";
+  said("kept");
+}
+
+document.getElementById("view-save")
+  .addEventListener("click", saveCurrentView);
+document.getElementById("view-name")
+  .addEventListener("keydown", event => {
+    if (event.key === "Enter") saveCurrentView();
+  });
+
 function asked() {
   const query = new URLSearchParams();
   const value = id => document.getElementById(id).value.trim();
@@ -6089,6 +6832,7 @@ async function loadRecall() {
     renderRecall(report);
     renderTiles();
     renderGantt();
+    renderTally();
   } catch (error) {
     document.getElementById("inspect-meta").textContent =
       "recall did not answer: " + error;
@@ -6161,6 +6905,8 @@ async function loadActivity() {
     lastActivity = await response.json();
     renderClock();
     renderTiles();
+    renderHistogram();
+    renderFiles();
   } catch (error) {
     document.getElementById("clock").textContent =
       "activity did not answer: " + error;
@@ -6194,6 +6940,10 @@ document.getElementById("ask-path").addEventListener("input", () => {
 loadRecall();
 loadStatus();
 loadActivity();
+// Once, not on the poll: the views file only changes when this page
+// changes it, and re-fetching it every thirty seconds would fight the
+// operator's own typing for no news.
+loadViews();
 setInterval(loadRecall, 30000);
 setInterval(loadStatus, 30000);
 setInterval(loadActivity, 30000);
