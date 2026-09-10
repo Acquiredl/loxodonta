@@ -272,29 +272,32 @@ class DashboardTest(ServerFixture):
         self.assertIn("judge transcript", page)
         self.assertIn("seen.judge", page)
 
-    def test_the_worktable_carries_all_four_tabs(self):
+    def test_the_worktable_carries_all_five_tabs(self):
         # Slice 3 of the #48 shape: projects, search, and evidence join
         # sessions in pane one — the old full-width sections retire, and
-        # every id they carried keeps its name inside its tab.
+        # every id they carried keeps its name inside its tab. Activity
+        # joined them under ADR-0027, and is the one tab that owns no
+        # pane: it replaces the split instead of sitting inside it.
         page = self.page()
         for tab in ("sessions", "projects", "search", "evidence"):
             self.assertIn('data-tab="' + tab + '"', page)
             self.assertIn('id="pane-' + tab + '"', page)
+        self.assertIn('data-tab="activity"', page)
+        self.assertNotIn('id="pane-activity"', page)
         for kept in ('id="tiles"', 'id="ask-search"', 'id="tripwire"',
                      'id="watch"', 'id="consumption"', 'id="anchors"',
                      'id="filters"'):
             self.assertIn(kept, page)
 
-    def test_the_activity_pane_draws_the_store(self):
-        # Slice 4 of the #48 shape: pane two's second tab draws the
-        # store — receipts per session, tempo against the store's own
-        # norm (with the watch's honest empty state), looks per day
-        # (red rides a HOT word, never colour alone), plus the
-        # working-hours clock and the session gantt, moved in whole.
+    def test_the_activity_tab_draws_the_store(self):
+        # ADR-0027: the store counted, at the full width of the work
+        # area. Tempo against the store's own norm (with the watch's
+        # honest empty state), looks per day (red rides a HOT word,
+        # never colour alone), the working-hours clock and the session
+        # gantt.
         page = self.page()
-        self.assertIn('id="p2-activity"', page)
-        self.assertIn('data-p2="activity"', page)
-        for chart in ("chart-receipts", "chart-tempo", "chart-looks"):
+        self.assertIn('id="activity-view"', page)
+        for chart in ("chart-tempo", "chart-looks"):
             self.assertIn('id="' + chart + '"', page)
         self.assertIn("no session ran hot", page)
         self.assertIn("HOT", page)
@@ -303,6 +306,38 @@ class DashboardTest(ServerFixture):
         # No chart library, no canvas fingerprinting — bars are SVG
         # built in the page's own script.
         self.assertIn("createElementNS", page)
+
+    def test_every_activity_panel_names_the_window_it_draws(self):
+        # ADR-0027 declined a global range picker, on the grounds that
+        # the fortnight band and the ninety-day buckets are chosen
+        # shapes rather than defaults nobody exposed. The price of
+        # declining it is that each panel has to say its own window out
+        # loud, so nothing on the tab is a number over an unstated span.
+        page = self.page()
+        for named in ("busiest hour vs the store's norm",
+                      "every session",
+                      "looks per day",
+                      "working hours",
+                      "ninety days",
+                      "sessions on one axis",
+                      "fourteen days"):
+            self.assertIn(named, page)
+
+    def test_activity_takes_the_worktable_and_drops_the_redrawn_bar(self):
+        # ADR-0027's cap is physical — one screen, no scrolling — and it
+        # binds the incumbents too. The receipts-per-session bar goes:
+        # the sessions table already carries that column, in the same
+        # order, and without a norm beside it the bar only redraws what
+        # is on screen. Pane two loses its own tab strip with it.
+        page = self.page()
+        self.assertNotIn("chart-receipts", page)
+        self.assertNotIn("data-p2=", page)
+        self.assertNotIn('id="p2-activity"', page)
+        # Activity hides the split outright. The browser's own [hidden]
+        # rule loses to any author `display`, so without this the grid
+        # and the split would paint at once.
+        self.assertIn("[hidden] { display: none !important; }", page)
+        self.assertIn('document.getElementById("split").hidden', page)
 
     def test_the_page_carries_the_lifecycle_reading(self):
         # ADR-0018: reawakenings speak in the investigate voice in the
