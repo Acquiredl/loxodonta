@@ -66,7 +66,7 @@ Never inside: file contents. The tool holds fingerprints of the files the agent 
 |---|---|
 | `format` | `"loxodonta-package/1"`. The verifier refuses any other tag (`UNSUPPORTED-FORMAT`). The receipt format inside stays `0.1`. |
 | `packed` | when the package was assembled, UTC. Testimony. |
-| `tool` | which supervisor packed it, e.g. `"loxodonta supervisor 0.3.0"`. Testimony. |
+| `tool` | which supervisor packed it, e.g. `"loxodonta supervisor 0.4.0"`. Testimony. |
 | `unit` | `{"kind": "session", "session": "<id>", "project": "<drawer name>"}` for a session; `{"kind": "drawer", "project": "<drawer name>", "sessions": N}` for a drawer. Displayed convenience; testimony. The verifier prints whatever the unit holds and judges none of it. |
 | `chains` | one row per chain, in the package: `path`, `head` (the last entry's `entry_hash`), `entries` (line count), `anchors` (the sidecar's file name, or `null`), and `transcript` (the packaged transcript's file name) only when one travels with the chain's session, every chain of that session naming the same file. The verifier refuses a `transcript` that is not a bare file name or that `artifacts` does not list. |
 | `artifacts` | one row per post-close artifact: `path`, `sha256` of its bytes, `bytes`. Sidecars, transcripts, `project.json`, `witness.json`, `README.md`. |
@@ -154,7 +154,7 @@ The demo store (`python tools/demo_store.py --home <dir>`) holds a session that 
 ```
 package: loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907
 format: loxodonta-package/1
-packed: 2026-09-09T04:11:33Z by loxodonta supervisor 0.3.0 (testimony)
+packed: 2026-09-09T04:11:33Z by loxodonta supervisor 0.4.0 (testimony)
 unit: kind session, session b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907, project todo
 contents: 1 chain(s), 3 artifact(s), seals: none declared
 chain: receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl (manifest: head 751d054dfeff…, 6 entries)
@@ -176,7 +176,7 @@ The manifest the verifier judged against:
 {
   "format": "loxodonta-package/1",
   "packed": "2026-09-09T04:11:33Z",
-  "tool": "loxodonta supervisor 0.3.0",
+  "tool": "loxodonta supervisor 0.4.0",
   "unit": {
     "kind": "session",
     "session": "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907",
