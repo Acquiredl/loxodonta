@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-11
+
+The release that came out of walking the front door as a stranger. Following the five steps in order left a new installer with nothing judged at all, because the supervisor could date the beginning of coverage no earlier than its own first look and the page puts a week of work before that. The recorder knows when coverage begins, since it is the thing that wires it, so now it writes that down. Three smaller faults on the same path went with it, each of them something a reader met in their first two commands.
+
 ### Added
 
 - The coverage marker (ADR-0030): `install-hook` appends what it wired to `~/.loxodonta/coverage.json` as `since`, `matchers` and `harness`, one entry per change and nothing on an unchanged wiring. Every scan reads it fresh, merges it in memory, and never copies it into the baseline, which goes on holding only what the supervisor observed. A marker may fill time before the supervisor's first observation and never reach past it, the rule ADR-0029 already applies to an operator's seed; on the same instant the operator's word wins. Epochs now name their source, and any surface that judged a session by a non-observed one says so. `uninstall-hook` writes nothing, because a start claim says more calls owe receipts while an end claim says fewer, and "nothing was owed from here" is the silence the completeness alarm exists to catch. A store with no marker behaves exactly as before.
@@ -116,7 +120,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.5.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.6.0...dev
+[0.6.0]: https://github.com/Acquiredl/loxodonta/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Acquiredl/loxodonta/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Acquiredl/loxodonta/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Acquiredl/loxodonta/compare/v0.2.0...v0.3.0

@@ -39,7 +39,7 @@ One file, Python 3.9 or newer, nothing to install. Download `loxodonta.py` and `
 
 ```
 sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Windows
-python loxodonta.py --version     # loxodonta 0.5.0 (format 0.1, commit unknown)
+python loxodonta.py --version     # loxodonta 0.6.0 (format 0.1, commit unknown)
 ```
 
 `commit unknown` is the right answer for a file you downloaded. The version
