@@ -790,6 +790,10 @@ WATCH_WORDS = {
     "UNWATCHED": "no recorder hook is wired into the harness settings — "
                  "nothing owes a receipt, so there is nothing to be "
                  "behind.",
+    "ELSEWHERE": "this session's receipts are in the store, not under this "
+                 "--root — the wrong universe is being scanned (ADR-0011), "
+                 "not a session that stopped recording. A plain `scan` "
+                 "watches it; nothing is judged from here.",
 }
 
 
@@ -1206,6 +1210,21 @@ def lifecycle_tier(last_grew, now):
     return tier, int(still)
 
 
+def store_session_ids():
+    """Every session id the store holds a chain for (ADR-0011). A legacy
+    --root scan reads this to tell a session whose recording moved into
+    the store from one that never recorded at all (#117); the store is
+    the default universe, so an operator following older notes points
+    --root at a folder the chains have already left."""
+    receipts = Path(store_home()) / "receipts"
+    try:
+        return {log.name[len("receipts-"):-len(".jsonl")]
+                for log in receipts.glob("*/receipts-*.jsonl")
+                if not log.name.endswith(SIDECAR_SUFFIXES)}
+    except OSError:
+        return set()
+
+
 def watch_completeness(root, witness, families, everywhere=False,
                        calibration=None, sessionend=None):
     """The completeness half of a tick: every census session paired with
@@ -1349,9 +1368,22 @@ def watch_completeness(root, witness, families, everywhere=False,
     # Chainless sessions: only transcript folders under this root are
     # this scan's business; a folder's name past the root prefix is the
     # best name the witness has for the project.
+    # #117: in legacy mode a transcript with no chain under this root
+    # is one of two different things, and charging both the same way
+    # fakes the flagship alarm out of a wrong invocation.
+    stored = set() if everywhere else store_session_ids()
+    elsewhere = 0
     for stem, transcript in transcripts.items():
         folder = transcript.parent.name
         if not matchers or (not everywhere and not folder.startswith(ours)):
+            continue
+        if stem in stored:
+            # Its receipts exist; they are in the store, where a plain
+            # `scan` judges them. Named here, judged nowhere twice.
+            add(folder if everywhere
+                else folder[len(ours):].strip("-") or root.name,
+                stem, "ELSEWHERE", 0, 0, transcript=transcript)
+            elsewhere += 1
             continue
         try:
             state, tools = watch_session(transcript, 0, None, now,
@@ -1361,6 +1393,13 @@ def watch_completeness(root, witness, families, everywhere=False,
         name = (folder if everywhere
                 else folder[len(ours):].strip("-") or root.name)
         add(name, stem, state, tools, 0, transcript=transcript)
+
+    if elsewhere and "note" not in watch:
+        watch["note"] = (f"{elsewhere} witnessed session(s) under this "
+                         "--root keep their receipts in the store "
+                         "(ADR-0011), not here, so they are named and not "
+                         "judged. The store is the default universe: run "
+                         "`scan` with no --root to watch them.")
 
     return watch
 
@@ -1756,6 +1795,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         report_note = (f"store empty at {root.as_posix()} — run "
                        "`loxodonta install-hook` to wire recording, or "
                        "scan a legacy layout with --root")
+    elif not store and not repos:
+        # The other empty universe (#117): --root found no legacy
+        # receipts/ folder. Said once, above the report, so an operator
+        # following older notes sees the invocation and not a census.
+        report_note = (f"no chains under {root.as_posix()} — --root "
+                       "scans a legacy folder of repos for receipts/ "
+                       "folders (ADR-0011) and found none. The store is "
+                       "the default universe: run `scan` with no --root.")
     return {
         **({"note": report_note} if report_note else {}),
         "root": root.as_posix(),

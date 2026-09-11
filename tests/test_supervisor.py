@@ -985,6 +985,54 @@ class CompletenessTest(unittest.TestCase):
         return {s["session"]: s
                 for s in report["completeness"]["sessions"]}
 
+    def store_holding(self, *sessions):
+        """A store (ADR-0011) with a drawer holding these sessions'
+        chains, and the env that points the supervisor at it."""
+        home = Path(self._tmp.name).resolve() / "store"
+        for session in sessions:
+            make_chain(home / "receipts" / "alpha-deadbeef", session)
+        return {**os.environ, "LOXODONTA_HOME": str(home)}
+
+    def test_a_session_recorded_into_the_store_is_named_not_charged(self):
+        # #117, from the field (2026-09-03): --root scans a legacy folder
+        # of repos for receipts/ folders, and a machine migrated to the
+        # store has none left. Legacy pairing then charged every
+        # transcript under the root its whole witnessed count: 111
+        # ENDED-DEFICIT rows, the live session reading ALARM-SILENT, and
+        # exit 6, from a wrong invocation rather than from anything
+        # wrong. The alarm is the flagship claim and must not be faked.
+        # Past the grace window, inside the idle one: live and silent.
+        write_transcript(self.witness, self.root / "alpha", "sess-live",
+                         event_times=[ago(600), ago(400), ago(120)])
+        env = self.store_holding("sess-live")
+
+        result = self.scan(env=env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["exit"], 0,
+                         "receipts that exist elsewhere are not a deficit")
+        row = self.states(result)["sess-live"]
+        self.assertEqual(row["state"], "ELSEWHERE")
+        self.assertEqual(row["deficit"], 0)
+        self.assertIn("store", report["completeness"]["note"])
+        self.assertIn("no chains", report["note"])
+
+    def test_a_session_that_never_recorded_anywhere_still_alarms(self):
+        # The other half, and the one the guard must not swallow: no
+        # chain under the root and none in the store either is the
+        # disabled hook, which is exactly what the watch exists to
+        # catch.
+        write_transcript(self.witness, self.root / "beta", "sess-nowhere",
+                         event_times=[ago(600), ago(400), ago(120)])
+        env = self.store_holding("sess-someone-else")
+
+        result = self.scan(env=env)
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        self.assertEqual(self.states(result)["sess-nowhere"]["state"],
+                         "ALARM-SILENT")
+
     def test_the_silent_fork_alarms_while_the_chain_verifies_valid(self):
         # The flagship case, from the field (2026-08-14): witness saw 8
         # tools, the chain holds 6 receipts and verifies VALID — entries
