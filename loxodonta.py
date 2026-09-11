@@ -1049,8 +1049,11 @@ def upgrade_anchors(args):
         print(f"error: no anchors found at {anchors_path(target)} — "
               "run `loxodonta anchor` first", file=sys.stderr)
         return 1
-    # A head+calendar pair that already has a completed record needs nothing.
+    # A head+calendar pair that already has a completed record needs
+    # nothing, and neither does any pair whose head another calendar has
+    # already settled (#199): the anchor's claim is about the head.
     completed = set()
+    settled_heads = set()
     pending = []
     for record in records:
         if record is None:
@@ -1063,6 +1066,7 @@ def upgrade_anchors(args):
         key = (record["head"], record["calendar"])
         if verdict[0] == "bitcoin":
             completed.add(key)
+            settled_heads.add(record["head"])
         else:
             pending.append((record, verdict[1]))
 
@@ -1073,6 +1077,10 @@ def upgrade_anchors(args):
             continue
         url = record["calendar"].rstrip("/")
         label = record_label(record["head"], record.get("n"))
+        if record["head"] in settled_heads:
+            print(f"skipped {label} at {url}: another calendar already "
+                  "settled this head")
+            continue
         try:
             continuation = calendar_request(f"{url}/timestamp/{commitment_hex}")
         except urllib.error.HTTPError as e:
@@ -1099,6 +1107,7 @@ def upgrade_anchors(args):
         append_anchor_record(target, record["head"], record.get("n"), url,
                              upgraded)
         completed.add(key)
+        settled_heads.add(record["head"])
         print(f"upgraded: {label} now has a Bitcoin attestation")
     return 1 if failures else 0
 
@@ -1153,6 +1162,11 @@ def check_anchors(log, entries):
 
     completed = {(r["head"], r.get("calendar"))
                  for r, kind, *_ in judged if r and kind == "bitcoin"}
+    # The anchor's claim is about the head, not about any one calendar
+    # (#199). Four calendars is the default and they disagree routinely,
+    # so once any of them settles a head the stragglers are evidence of
+    # where the submission went, not work still owed.
+    settled_heads = {head for head, _ in completed}
     bad = False
     for record, kind, *detail in judged:
         if kind == "bitcoin":
@@ -1162,7 +1176,14 @@ def check_anchors(log, entries):
                   f"{root[::-1].hex()} against a block source you trust")
         elif kind == "pending":
             if (record["head"], record.get("calendar")) in completed:
-                continue  # superseded by an upgraded record for the same head
+                continue  # this submission's own upgraded record supersedes it
+            if record["head"] in settled_heads:
+                print(f"ANCHOR-UNANSWERED: head {record['head'][:12]}… "
+                      f"submitted {record.get('ts')} via "
+                      f"{record.get('calendar')} never came back, and "
+                      "another calendar settled this head — no upgrade is "
+                      "owed")
+                continue
             print(f"ANCHOR-PENDING: head {record['head'][:12]}… submitted "
                   f"{record.get('ts')} via {record.get('calendar')} — run "
                   "`loxodonta anchor --upgrade`")
@@ -1739,6 +1760,14 @@ def judge_manifest_anchor(folder):
     for record in pending:
         if record.get("calendar") in completed:
             continue  # superseded by the upgraded record from that calendar
+        if completed:
+            # Some calendar settled this manifest, so the stragglers are
+            # not work the recipient owes either (#199).
+            print(f"seal anchor: ANCHOR-UNANSWERED: the manifest was "
+                  f"submitted {record.get('ts')} via "
+                  f"{record.get('calendar')}, which never came back; "
+                  "another calendar settled it, so no upgrade is owed")
+            continue
         print(f"seal anchor: ANCHOR-PENDING: the manifest was submitted "
               f"{record.get('ts')} via {record.get('calendar')} — unpack the "
               "package and run `loxodonta anchor --upgrade --manifest=<its "

@@ -62,18 +62,25 @@ def write_pending_anchor(log, head, submitted,
         json.dumps(record) + "\n", encoding="utf-8")
 
 
-def write_completed_anchor(log, head, height=850000):
+def write_completed_anchor(log, head, height=850000, append=False):
     """A minimal but genuine OTS timestamp: one sha256 op, then a Bitcoin
     attestation — enough for `verify --anchors` to replay offline and
-    report ANCHORED, with no network and no calendar (ANCHORING.md §4)."""
+    report ANCHORED, with no network and no calendar (ANCHORING.md §4).
+    `append=True` adds it behind whatever the sidecar already holds,
+    the way an upgrade lands beside the pending record it completes."""
     payload = ots_varint(height)
     proof = (b"\x08"
              + b"\x00" + TAG_BITCOIN + ots_varint(len(payload)) + payload)
     record = {"head": head, "n": 2, "ts": "2026-08-22T09:00:00Z",
               "calendar": "https://calendar.example.test",
               "proof": base64.b64encode(proof).decode()}
-    Path(str(log) + ".anchors.jsonl").write_text(
-        json.dumps(record) + "\n", encoding="utf-8")
+    sidecar = Path(str(log) + ".anchors.jsonl")
+    line = json.dumps(record) + "\n"
+    if append and sidecar.exists():
+        with sidecar.open("a", encoding="utf-8") as out:
+            out.write(line)
+    else:
+        sidecar.write_text(line, encoding="utf-8")
 
 
 def run_scan(root, *extra, env=None):
@@ -1747,6 +1754,27 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertFalse(bare["head"]["anchored"])
         self.assertTrue(bare["head"]["ts"], "age is the reader's to judge "
                         "from the surfaced timestamp")
+
+    def test_a_head_settled_by_one_calendar_leaves_no_pending_proof(self):
+        # #199: a pending record from a calendar that never came back,
+        # beside the upgrade another calendar delivered for the same
+        # head. The panel reads verify's own words (ADR-0005), so the
+        # dashboard stops painting anchor staleness on an anchored head.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-split")
+        head = chain_head(log)
+        write_pending_anchor(log, head, submitted=ago(2400000))
+        write_completed_anchor(log, head, append=True)
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-split")
+        self.assertEqual(chain["anchors"]["anchored"],
+                         [{"upto": 2, "height": 850000}])
+        self.assertEqual(chain["anchors"]["pending"], [],
+                         "a settled head owes no pending proof")
+        self.assertTrue(chain["anchors"]["head"]["anchored"])
+        self.assertTrue(chain["anchored"])
 
     def test_a_completed_calendar_upgrades_on_tick_with_no_operator(self):
         calendar = self.start_calendar()

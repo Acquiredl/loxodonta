@@ -483,5 +483,101 @@ class AnchorTest(unittest.TestCase):
         self.assertEqual(result.stdout.count("ANCHOR-PENDING"), 2)
 
 
+def start_calendar(case, nonce, height=850000):
+    """A fake calendar, bound to a free port, serving in a thread, closed
+    when `case` finishes. Each one carries its own nonce, the way real
+    calendars do, so two of them commit a head to two digests."""
+    server = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
+    server.nonce = nonce
+    server.prefix = b"left-branch"
+    server.suffix = b"right-branch"
+    server.height = height
+    server.mode = "pending"
+    server.submitted = []
+    server.polled = []
+    server.url = f"http://127.0.0.1:{server.server_address[1]}"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    case.addCleanup(server.server_close)
+    case.addCleanup(server.shutdown)
+    return server
+
+
+class CalendarsDisagreeTest(unittest.TestCase):
+    """#199: four calendars is the default and calendars disagree, so a
+    head settled by one while another never answers is the ordinary case,
+    not the exotic one. The anchor's claim is about the head, so once any
+    calendar settles it, the straggler's record is evidence of where the
+    submission went and not work anyone still owes. Two fake calendars
+    here: one comes back, one stays 404 forever."""
+
+    HEIGHT = 962604
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+        self.settles = start_calendar(self, b"nonce-settles", self.HEIGHT)
+        self.lags = start_calendar(self, b"nonce-lags")
+
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        submitted = run_receipts("anchor", "--calendar", self.settles.url,
+                                 "--calendar", self.lags.url,
+                                 cwd=self.workdir)
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        # One of the two gets its Bitcoin attestation; the other keeps
+        # answering 404, as the opentimestamps.org pools did for 27 days.
+        self.settles.mode = "complete"
+        upgraded = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+
+    def verify(self):
+        return run_receipts("verify", "--anchors", cwd=self.workdir)
+
+    def test_a_settled_head_stops_advising_an_upgrade_that_cannot_help(self):
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"block {self.HEIGHT}", result.stdout)
+        self.assertNotIn("ANCHOR-PENDING", result.stdout)
+        self.assertNotIn("--upgrade", result.stdout)
+        self.assertIn("VALID", result.stdout)
+
+    def test_the_calendar_that_never_came_back_is_still_named(self):
+        result = self.verify()
+
+        self.assertIn("ANCHOR-UNANSWERED", result.stdout)
+        self.assertIn(self.lags.url, result.stdout)
+        # The settled calendar's own pending record is superseded by its
+        # upgrade, so it is not named twice.
+        self.assertEqual(result.stdout.count("ANCHOR-UNANSWERED"), 1)
+
+    def test_upgrade_stops_re_asking_for_a_head_another_calendar_settled(self):
+        self.lags.polled.clear()
+
+        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lags.polled, [],
+                         "the dead pool was asked again")
+        self.assertIn("skipped", result.stdout)
+        self.assertIn(self.lags.url, result.stdout)
+        self.assertNotIn("still pending", result.stdout)
+
+    def test_a_head_no_calendar_settled_still_advises_the_upgrade(self):
+        run_receipts("log", "--actor", "agent", "--action", "step 2",
+                     cwd=self.workdir)
+        run_receipts("anchor", "--calendar", self.lags.url, cwd=self.workdir)
+
+        result = self.verify()
+
+        # The old head is settled; the new one is not, and says so.
+        self.assertIn("ANCHOR-PENDING", result.stdout)
+        self.assertIn("`loxodonta anchor --upgrade`", result.stdout)
+        self.assertIn("ANCHOR-UNANSWERED", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

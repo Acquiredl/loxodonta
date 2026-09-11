@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- `verify --anchors` no longer advises `anchor --upgrade` on a head another calendar has already settled (#199). The suppression was keyed by head and calendar while its comment said head, so on a store anchored to the four default calendars a settled head printed one pending line per calendar that lagged, each advising a command that changed nothing, above the lines settling that same head. An anchor's claim is about the head, so a straggler's record is now reported as `ANCHOR-UNANSWERED`, naming the calendar that never came back and saying no upgrade is owed; the record stays in the sidecar as evidence of where the submission went. `ANCHOR-PENDING` and its advice are unchanged for a head nothing has settled. `anchor --upgrade` skips a settled head instead of re-asking a calendar that has dropped its commitment, and says why. Through the verdict-line seam this empties the scan's pending list for such a chain, so the dashboard stops painting anchor staleness on an anchored head. `verify-package` carried the same shape over the manifest digest and now says `ANCHOR-UNANSWERED` there too.
+
 ### Added
 
 - `tools/publish_echo.py`: a loopback echo that prints what `--publish-head` posts, with the field names beside each body, so an operator reads the claim in ADR-0025 for themselves before wiring a real remote. `--port 0` binds a free port and prints it, `--once` stops after one body. It says on startup, and `docs/HOOK.md` says with it, that an address on this machine is not a head record and never a place to publish to: the head has not left, and nothing there is out of the writer's reach.

@@ -36,7 +36,7 @@ receipts verify --anchors [...]                    # judge proofs, offline
 
 **`anchor`** reads the current head, POSTs the raw 32-byte digest to each calendar (`POST <calendar>/digest`), and appends one sidecar record per calendar that answered. Success is ≥1 record written (exit 0); no calendar reachable is exit 1. Default calendars: `a.pool.opentimestamps.org`, `b.pool.opentimestamps.org`, `a.pool.eternitywall.com`, `ots.btc.catallaxy.com`.
 
-**`anchor --upgrade`** replays each pending proof to its calendar commitment, asks the calendar for the completion (`GET <calendar>/timestamp/<commitment-hex>`), and appends an upgraded record (same `head`, spliced proof ending in a Bitcoin attestation). Still-pending proofs (typically for a few hours after submission) are reported and left alone.
+**`anchor --upgrade`** replays each pending proof to its calendar commitment, asks the calendar for the completion (`GET <calendar>/timestamp/<commitment-hex>`), and appends an upgraded record (same `head`, spliced proof ending in a Bitcoin attestation). Still-pending proofs (typically for a few hours after submission) are reported and left alone. A pending proof whose head another calendar has already settled is skipped with a line saying why, rather than re-asked every run: the anchor's claim is about the head, not about any one calendar (#199).
 
 **`anchor --manifest PATH`** anchors a package manifest the same way, its sha256 in place of a chain head (ADR-0026 ruling 4): the proof lands in `PATH.anchors.jsonl` as an ordinary record with no `n`, since a manifest has no entries, and `--upgrade --manifest PATH` completes it. `supervisor package --anchor` drives this and `loxodonta verify-package` judges it (docs/PACKAGE.md §2 and §5).
 
@@ -47,6 +47,7 @@ receipts verify --anchors [...]                    # judge proofs, offline
 3. A clean replay reports one of:
    - `ANCHORED: entries 0..n existed by Bitcoin block H — confirm merkle root <R> against a block source you trust` — the offline tier ends at the block-header commitment; the printed root and height are exactly what to check (ADR-0003).
    - `ANCHOR-PENDING: submitted <ts> via <calendar> — run receipts anchor --upgrade` — not a failure; exit unchanged.
+   - `ANCHOR-UNANSWERED: head <h>… submitted <ts> via <calendar> never came back, and another calendar settled this head — no upgrade is owed` — the record stays in the sidecar as evidence of where the submission went, and the line stops advising a command that cannot help. Calendars disagreeing is ordinary, and four of them is the default (#199).
 
 A missing or empty sidecar under `--anchors` prints `NO-ANCHORS` and leaves the exit code to the other checks — anchoring is optional, and absence of local evidence is a fact for the operator (who knows whether they anchor) rather than a verdict. Verdict precedence is unchanged from SPEC §6: `BROKEN` (1) short-circuits; exit-3 findings (head or anchor) outrank `FILES-DIVERGED` (2).
 
