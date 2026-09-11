@@ -139,9 +139,16 @@ class ExportFileTest(ExportBase):
                                       "sessions"])
         self.assertEqual(sorted(data["machine"]), sorted([
             "recorder_commit", "python", "os", "matchers", "actors", "store",
-            "day_book", "lifecycle", "scan_exit"]))
+            "day_book", "lifecycle", "scan_exit", "before_memory"]))
         self.assertEqual(sorted(data["machine"]["store"]),
                          ["bytes", "chains", "entries"])
+        # ADR-0029 ruling 4: the count of sessions older than this
+        # supervisor's memory travels, and never the rows. Without it a
+        # store older than its supervisor exports as a clean bill, and
+        # a reader's first question about field data goes unanswered.
+        self.assertEqual(sorted(data["machine"]["before_memory"]),
+                         ["count", "since"])
+        self.assertEqual(data["machine"]["before_memory"]["count"], 0)
         for session in data["sessions"]:
             self.assertEqual(sorted(session), sorted([
                 "session", "repo", "entries", "span", "verdict",

@@ -137,13 +137,27 @@ ALARM-DEFICIT (the fork-shaped hole: receipts arrive, fewer than owed)
 / SURPLUS (an investigate flag, never a verdict) / ENDED-CLEAN /
 ENDED-DEFICIT (missing forever; kept as evidence, not a siren) /
 ENDED-SURPLUS (a surplus does not become clean by the session ending) /
-UNWITNESSED / UNWATCHED / ELSEWHERE. Deficit is sticky — lost
-receipts never arrive later. ELSEWHERE belongs to legacy `--root`
+UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY. Deficit is sticky
+— lost receipts never arrive later. ELSEWHERE belongs to legacy `--root`
 mode alone (#117): a witnessed session whose chain is not under the
 root but *is* in the store has recorded fine, and the wrong universe
 is being scanned (ADR-0011). Naming it rather than charging it keeps
 the alarm about recording stopping; a session with no chain in either
-place is still the disabled hook, and still alarms. One session is judged *once* even when its receipts span
+place is still the disabled hook, and still alarms.
+
+BEFORE-MEMORY is the other refusal to judge, and it is about time
+rather than place (ADR-0029, issue #114). The calibration memory has an
+inception — the first observation stamps the moment it was made — and a
+session whose first witnessed tool event is older than that ran under
+coverage this supervisor never saw. What it owed is unknown, and an
+unknown owed is not a deficit. Such a session is counted in one block
+and never given a row, because a store older than its supervisor holds
+scores of them and a listing they fill is one where the sessions that
+mean something cannot be found. `scan --before-memory` lists them for
+anyone who wants to look, and `supervisor calibrate --since` lets an
+operator state what *was* wired before the supervisor arrived: a seeded
+epoch is marked as the operator's word forever, may only reach time the
+supervisor never watched, and can be withdrawn with `--forget`. One session is judged *once* even when its receipts span
 drawers (a worktree session logs to the main repo's drawer, ADR-0011,
 while the transcript is named after the worktree): the witness counts
 sessions, not drawers.
