@@ -42,6 +42,8 @@ sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Wi
 python loxodonta.py --version     # loxodonta 0.4.0 (format 0.1, commit ...)
 ```
 
+*Handed this repo by someone and you just want it recording? [docs/START.md](docs/START.md) is the same install as five steps, ending where this project needs it to end: sending back what your machine saw.*
+
 `main` is the stable branch: it is tested on Linux, macOS, and Windows, and every claim on this page is true of it. New work lands on `dev` and reaches `main` with a tag and a release.
 
 ## Quick start

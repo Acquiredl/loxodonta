@@ -70,10 +70,12 @@ REFUTATIONS_AFTER = [
 # The front door: the files a stranger reads before deciding to trust the
 # tool. They are written without em dashes (a ruling from the presentation
 # arc: a dash reads as the author thinking aloud; the front door states).
-# The GLOSSARY and docs/ keep theirs. Matched by file name, wherever the
-# file sits, so a fixture in a temporary directory is judged like the root.
+# The GLOSSARY and the rest of docs/ keep theirs. Matched by file name,
+# wherever the file sits, so a fixture in a temporary directory is judged
+# like the root, and docs/START.md is judged as the front door it is: the
+# page a stranger is handed before they have decided to trust anything.
 FRONT_DOOR = {"README.md", "SECURITY.md", "CONTRIBUTING.md",
-              "CHANGELOG.md", "CODE_OF_CONDUCT.md"}
+              "CHANGELOG.md", "CODE_OF_CONDUCT.md", "START.md"}
 EM_DASH = "\u2014"
 
 FAIL, WARN = "fail", "warning"
