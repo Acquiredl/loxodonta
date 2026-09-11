@@ -41,7 +41,7 @@ the same release, then ask the file which version it is.
 
 ```
 sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Windows
-python loxodonta.py --version     # loxodonta 0.4.0 (format 0.1, commit ...)
+python loxodonta.py --version     # loxodonta 0.5.0 (format 0.1, commit ...)
 ```
 
 ### 2. Wire the hook

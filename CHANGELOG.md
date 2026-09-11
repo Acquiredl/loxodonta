@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-11
+
+The release where the witness stops claiming more than it saw, and starts seeing all of what it should. It judged sessions older than its own memory by today's coverage, scarring history that was recorded honestly under older rules, and it read only a session's parent transcript, so every tool call a subagent made came back as a receipt nobody owed. Both were loudest on the surface a stranger meets first: a fresh install reported the whole pre-install history as loss.
+
 ### Added
 
 - `BEFORE-MEMORY`, a completeness state for a session whose first witnessed tool event predates the supervisor's first calibration observation (ADR-0029, issue #114). What such a session owed is unknown, so it is judged not at all: evidence, not deficit, and no receipt of its is called missing. It never takes a row. One counted block reports it on the scan, on the dashboard beside the calibration note, in the field-data export and in a package's `witness.json`, because a store older than its supervisor holds scores of these and a listing they fill is one where the sessions that mean something cannot be found. `supervisor scan --before-memory` lists them for anyone who wants to look.
@@ -102,7 +106,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.4.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.5.0...dev
+[0.5.0]: https://github.com/Acquiredl/loxodonta/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Acquiredl/loxodonta/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Acquiredl/loxodonta/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Acquiredl/loxodonta/compare/v0.1.0...v0.2.0
