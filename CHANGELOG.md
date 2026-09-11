@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- The install step in the README and `docs/START.md` showed the version line as `commit ...`, as though a hash would appear there. A file downloaded from the releases page prints `commit unknown`, because the version line reads the commit from the git checkout the file sits in and a download sits in none. Every reader following step 1 correctly met that word on their first command with nothing saying it was expected. Both pages now show the real output and say why.
+
 ## [0.5.0] - 2026-09-11
 
 The release where the witness stops claiming more than it saw, and starts seeing all of what it should. It judged sessions older than its own memory by today's coverage, scarring history that was recorded honestly under older rules, and it read only a session's parent transcript, so every tool call a subagent made came back as a receipt nobody owed. Both were loudest on the surface a stranger meets first: a fresh install reported the whole pre-install history as loss.
