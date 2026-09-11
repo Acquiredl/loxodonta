@@ -41,8 +41,13 @@ the same release, then ask the file which version it is.
 
 ```
 sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Windows
-python loxodonta.py --version     # loxodonta 0.5.0 (format 0.1, commit ...)
+python loxodonta.py --version     # loxodonta 0.6.0 (format 0.1, commit unknown)
 ```
+
+That last word is `unknown` on purpose, and it is the first thing you will
+see, so it is worth saying now. The version line reads the commit from the
+git checkout the file sits in, and a file you downloaded sits in none. It
+says so rather than guessing. Nothing is wrong.
 
 ### 2. Wire the hook
 

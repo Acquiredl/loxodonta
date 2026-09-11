@@ -39,8 +39,12 @@ One file, Python 3.9 or newer, nothing to install. Download `loxodonta.py` and `
 
 ```
 sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Windows
-python loxodonta.py --version     # loxodonta 0.5.0 (format 0.1, commit ...)
+python loxodonta.py --version     # loxodonta 0.6.0 (format 0.1, commit unknown)
 ```
+
+`commit unknown` is the right answer for a file you downloaded. The version
+line reads the commit from the git checkout the file sits in, and a download
+sits in none. Run it inside a clone of this repo and it names the commit.
 
 *Handed this repo by someone and you just want it recording? [docs/START.md](docs/START.md) is the same install as five steps, ending where this project needs it to end: sending back what your machine saw.*
 

@@ -827,6 +827,86 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class CoverageMarkerTest(unittest.TestCase):
+    """ADR-0030: the recorder writes down what coverage it wired, and the
+    supervisor reads it. Without this the supervisor can date the
+    beginning of coverage no earlier than its own first look, and
+    docs/START.md puts a week of work between the two: install, work,
+    then scan. Every session in that week fell outside the memory
+    watching it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.work = Path(self._tmp.name).resolve()
+        self.home = self.work / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        self.store = self.work / "store"
+        self.codex = self.work / "codex"
+        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
+                    "LOXODONTA_HOME": str(self.store),
+                    "CODEX_HOME": str(self.codex)}
+
+    def run_tool(self, *args):
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), *args],
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, **self.env, "PYTHONIOENCODING": "utf-8"})
+
+    def marker(self):
+        path = self.store / "coverage.json"
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_install_writes_down_the_coverage_it_wired(self):
+        result = self.run_tool("install-hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        marker = self.marker()
+        self.assertIsNotNone(marker, "the installer records what it wired")
+        self.assertEqual(len(marker["epochs"]), 1)
+        epoch = marker["epochs"][0]
+        self.assertEqual(epoch["matchers"], ["*"])
+        self.assertEqual(epoch["harness"], "claude-code")
+        self.assertRegex(epoch["since"],
+                         r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")
+
+    def test_a_second_install_appends_nothing(self):
+        # The heal rule applied to matchers: re-running the installer is
+        # the documented way to fix a moved script, and it must not grow
+        # a file every time.
+        self.run_tool("install-hook")
+
+        self.run_tool("install-hook")
+
+        self.assertEqual(len(self.marker()["epochs"]), 1)
+
+    def test_codex_coverage_never_speaks_for_claude_code(self):
+        # Codex wires `.*` into a different settings file, and the
+        # completeness witness reads Claude Code's transcripts alone.
+        self.run_tool("install-hook")
+        self.run_tool("install-hook", "--codex")
+
+        harnesses = {epoch["harness"]: epoch["matchers"]
+                     for epoch in self.marker()["epochs"]}
+
+        self.assertEqual(harnesses, {"claude-code": ["*"], "codex": [".*"]})
+
+    def test_uninstall_writes_nothing(self):
+        # Ruling 2, and the asymmetry is the whole argument: a start
+        # claim says more calls owe receipts, an end claim says fewer,
+        # and "nothing was owed from here" is the silence the
+        # completeness alarm exists to catch.
+        self.run_tool("install-hook")
+        before = self.marker()
+
+        self.run_tool("uninstall-hook")
+
+        self.assertEqual(self.marker(), before,
+                         "removing the hook never records an end")
+
+
 class ClockOverrideTest(unittest.TestCase):
     """SOURCE_DATE_EPOCH (the reproducible-builds convention) pins the
     recorder's clock so a demo store (tools/demo_store.py) writes the

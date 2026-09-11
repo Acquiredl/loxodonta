@@ -68,7 +68,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # supervisor is running and is tagged together with loxodonta.py — the
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
-TOOL_VERSION = "0.5.0"
+TOOL_VERSION = "0.6.0"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -762,6 +762,8 @@ DORMANT_SECONDS = int(os.environ.get("SUPERVISOR_DORMANT_SECONDS",
 TAIL_KEEPER = os.environ.get("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
+# What the recorder writes down about the coverage it wired (ADR-0030).
+COVERAGE_NAME = "coverage.json"
 
 WATCH_WORDS = {
     "ALARM-SILENT": "the witness saw tools run but no receipt has arrived "
@@ -934,6 +936,50 @@ def before_memory(calibration, first_event):
     unknown beginning cannot be half-counted."""
     since = memory_since(calibration)
     return bool(since and first_event and first_event < since)
+
+
+def coverage_epochs(harness="claude-code"):
+    """The recorder's own record of what it wired (ADR-0030), read fresh
+    on every scan. Never copied into the baseline: one sentence stays
+    true of that file, that it holds what the supervisor observed and
+    nothing else. Scoped by harness, because `install-hook --codex`
+    wires `.*` into a different settings file and Codex's coverage must
+    never speak for the Claude Code witness."""
+    try:
+        with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    epochs = [{"since": epoch["since"], "matchers": epoch["matchers"],
+               "source": "recorder"}
+              for epoch in (data.get("epochs") or [])
+              if isinstance(epoch, dict)
+              and isinstance(epoch.get("since"), str)
+              and isinstance(epoch.get("matchers"), list)
+              and epoch.get("harness") == harness]
+    return sorted(epochs, key=lambda epoch: epoch["since"])
+
+
+def merge_coverage(calibration, recorded):
+    """ADR-0030 rulings 3 to 5. A marker fills time before the
+    supervisor's first observation and never reaches past it, which is
+    ADR-0029 ruling 6 applied to a second source rather than a second
+    policy written for it. On the same instant an operator's seed wins,
+    being the more deliberate act. The result is used for judging and
+    thrown away; only `calibration` is remembered."""
+    observed = [epoch.get("since") for epoch in calibration
+                if epoch.get("source") is None and epoch.get("since")]
+    if not observed or not recorded:
+        return calibration
+    floor = min(observed)
+    stated = {epoch.get("since") for epoch in calibration
+              if epoch.get("source") == "operator"}
+    taken = [epoch for epoch in recorded
+             if epoch["since"] < floor and epoch["since"] not in stated]
+    if not taken:
+        return calibration
+    return sorted(calibration + taken,
+                  key=lambda epoch: epoch.get("since") or "")
 
 
 def matchers_at(calibration, ts):
@@ -1342,20 +1388,35 @@ def watch_completeness(root, witness, families, everywhere=False,
         calibration = [{"since": None, "matchers": hook_matchers(witness)}]
     matchers = calibration[-1]["matchers"]
     said = []
-    if len(calibration) > 1:
-        said.append("the wired matchers changed on "
-                    f"{calibration[-1]['since']} — each session is "
-                    "judged by the coverage in force at its time "
-                    "(ADR-0016)")
+    # The most recent epoch whose matchers actually differ from the one
+    # before it. More than one epoch is not a change: a recorder marker
+    # and this supervisor's first look describe the same wiring from
+    # two sides (ADR-0030), and calling that a change would report a
+    # widening nobody performed.
+    changed = None
+    for older, newer in zip(calibration, calibration[1:]):
+        if newer["matchers"] != older["matchers"]:
+            changed = newer["since"]
+    if changed:
+        said.append(f"the wired matchers changed on {changed} — each "
+                    "session is judged by the coverage in force at its "
+                    "time (ADR-0016)")
     # ADR-0029 ruling 6: a seeded epoch is the operator's word for a
     # time the supervisor never watched, and any surface that judged by
     # one says so. Observation and testimony do not get to look alike.
-    seeded = [epoch.get("since") for epoch in calibration
-              if epoch.get("source") == "operator"]
-    if seeded:
-        said.append(f"{len(seeded)} coverage epoch(s) here were stated by "
-                    f"the operator, not observed (from {min(seeded)}) — "
-                    "sessions judged by one are judged on that word")
+    told = {"operator": [], "recorder": []}
+    for epoch in calibration:
+        if epoch.get("source") in told and epoch.get("since"):
+            told[epoch["source"]].append(epoch["since"])
+    for source, whose in (("recorder", "written down by install-hook when "
+                                       "it wired them (ADR-0030)"),
+                          ("operator", "stated by the operator, not "
+                                       "observed (ADR-0029)")):
+        if told[source]:
+            said.append(f"{len(told[source])} coverage epoch(s) here were "
+                        f"{whose}, from {min(told[source])} — sessions "
+                        "judged by one are judged on that word, not on "
+                        "anything this supervisor watched")
     if said:
         watch["calibration"] = {"epochs": calibration,
                                 "words": "; ".join(said)}
@@ -1535,8 +1596,12 @@ def watch_completeness(root, witness, families, everywhere=False,
                       f"{since}, when this supervisor first observed what "
                       "the hook covered. What they owed is unknown, so none "
                       "of them is judged here and none is called a deficit "
-                      "(ADR-0029). `calibrate --since` seeds what you know "
-                      "of that time; `scan --before-memory` lists them."),
+                      "(ADR-0029). Three ways forward: `scan "
+                      "--before-memory` lists them, `calibrate --since` "
+                      "states what you know was wired back then, and "
+                      "re-running `loxodonta install-hook` records "
+                      "coverage from now on so this edge stops moving "
+                      "(ADR-0030)."),
         }
         if show_before_memory:
             block["sessions"] = unjudged
@@ -1707,6 +1772,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # Observe the wired matchers before anything is judged, so this
     # tick's own judgments use a memory that includes this tick's look.
     calibration = calibrate(calibration, witness, now)
+    # ADR-0030: the recorder's markers date coverage from when it was
+    # wired rather than from this tick's look. Merged for judging,
+    # never remembered — `calibration` alone goes back to the baseline.
+    judging = merge_coverage(calibration, coverage_epochs())
     sessionend = sessionend_epoch(sessionend, witness, now)
     events = []
     awakened = {}
@@ -1903,7 +1972,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
 
     completeness = watch_completeness(root, witness, families,
                                       everywhere=store,
-                                      calibration=calibration,
+                                      calibration=judging,
                                       sessionend=sessionend,
                                       show_before_memory=show_before_memory)
     # The keeper closes what the annotation reports — after the rows
@@ -1935,9 +2004,21 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         baseline["note"] = note
     report_note = None
     if store and not repos:
-        report_note = (f"store empty at {root.as_posix()} — run "
-                       "`loxodonta install-hook` to wire recording, or "
-                       "scan a legacy layout with --root")
+        # An empty store has two unlike causes and this note named only
+        # one of them, so a reader who had just finished step 2 of
+        # docs/START.md and scanned out of curiosity was told to run
+        # install-hook again (found walking the five steps as a
+        # stranger, 2026-09-11). The wired matchers tell them apart.
+        if hook_matchers(witness):
+            report_note = (f"store empty at {root.as_posix()} — the hook "
+                           "is wired and nothing has recorded yet. That "
+                           "is what a fresh install looks like until a "
+                           "NEW session runs: restart anything already "
+                           "open, then work normally.")
+        else:
+            report_note = (f"store empty at {root.as_posix()} — run "
+                           "`loxodonta install-hook` to wire recording, or "
+                           "scan a legacy layout with --root")
     elif not store and not repos:
         # The other empty universe (#117): --root found no legacy
         # receipts/ folder. Said once, above the report, so an operator
@@ -3639,6 +3720,11 @@ def build_export(report):
     # dict — the first dry run shipped `matchers: null` for that).
     _, _, calibration, _, _ = read_baseline(
         Path(store_home()) / "baseline.json")
+    # Judged the way the scan judged it, with the recorder's markers
+    # merged in (ADR-0030). The baseline's own inception would date the
+    # memory later than the boundary that actually decided which
+    # sessions were judged, and the export would understate itself.
+    calibration = merge_coverage(calibration, coverage_epochs())
     matchers = matchers_at(calibration, report.get("scanned")) \
         if calibration else None
     lifecycle = report.get("lifecycle") or {}
