@@ -64,6 +64,10 @@ The supervisor's reading of *which recorder is actually running*: the file the h
 
 The supervisor's reading of tool *tempo* against the store's own norm: entries per session per hour, computed from what the chains already hold (OWASP GenAI LLM06 mitigation #8; wide [coverage](#coverage), ADR-0016, is what makes the chains this dataset). Peak against peaks: the norm is the median of every session's own busiest hour, and a session never sets its own — each is judged against every other session's peak. A session whose busiest hour burns far past that norm surfaces as `RUNNING-HOT` while receipts still arrive and is kept as `ENDED-HOT` evidence once it goes quiet; the runaway loop and the recursion without an end state are the shapes this catches. Built entirely on [testimony](#testimony) (writer-stamped timestamps and action lines), so it never raises the scan exit and owns no verdicts — the norm is context for a flag, never a truth about the session. Boundary, in the hook's own rule (`.out-of-scope/001`): this watch evidences someone else's circuit breaker; it never is one.
 
+### Tally
+
+The supervisor's plainest reading: how much is in the store, said once at the top of the activity tab — drawers, sessions, chains, receipts, and the date recording began. Scale only, and deliberately no verdict counts: how many chains are broken and how many sessions ran hot are the alarm rail's sentences, and a cockpit whose two surfaces can disagree about what is alarming is the failure ADR-0013 named. Derived in the browser from payloads the page already holds, so it costs no endpoint and no second walk of the store. [Testimony](#testimony) like the rest of [recall](#recall): it counts what the [writer](#writer) said it did, and owns no verdicts (ADR-0027).
+
 ### Issuer
 
 The party who seals a [package](#package) and ships it across a trust boundary under its own name — the one taking responsibility for the deliverable. The issuer holds the signing key **out of the writer's reach** (the head-record property, applied to a second object) and applies the [issuer signature](#issuer-signature) at package close, after the manifest is written. In a solo deployment the operator and issuer are the same person wearing two hats; the roles diverge the moment issuing becomes a service, exactly as writer and operator diverged to found this project (ADR-0008).
@@ -244,9 +248,9 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`, `adrs/0018-session-lifecycle-reading.md`, `adrs/0024-anchor-at-session-end-opt-in-at-install.md`, `adrs/0025-a-head-record-is-what-the-machine-cannot-unsay.md`, `adrs/0026-the-store-ships-as-a-package-verified-by-one-file.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`, `adrs/0018-session-lifecycle-reading.md`, `adrs/0024-anchor-at-session-end-opt-in-at-install.md`, `adrs/0025-a-head-record-is-what-the-machine-cannot-unsay.md`, `adrs/0026-the-store-ships-as-a-package-verified-by-one-file.md`, `adrs/0027-the-dashboard-counts-what-the-chain-holds.md`
 - Related out-of-scope decisions: none yet.
 
 ---
 
-*Last updated: 2026-09-08*
+*Last updated: 2026-09-10*

@@ -18,6 +18,10 @@ import unittest
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_publish`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -329,7 +333,7 @@ class PublishAtSessionEndTest(PublishBase):
         # for its POST instead of the full three (#183, the numbers in
         # docs/HOOK.md). A remote that sits on the request is left behind
         # early enough that Codex never kills the hook; the same remote
-        # costs the default wait twice as long. The seal is on the chain
+        # holds the default wait past the cap. The seal is on the chain
         # either way, since the commitment goes first.
         self.receiver.delay = 6   # longer than either bound waits
         self.transcript.write_bytes(b"page one\n")
@@ -347,16 +351,32 @@ class PublishAtSessionEndTest(PublishBase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stderr, "")
         # The property #183 measured: the Codex hook comes back inside
-        # Codex's cap, and it is the bound that brought it back.
+        # Codex's cap, and it is the bound that brought it back. Each run
+        # is judged on its own clock against the cap, never one against
+        # the other: the difference of two runs carries both runs' noise,
+        # and on a loaded runner it drifted far enough to fail a window
+        # the bounds themselves were nowhere near leaving.
+        #
+        # Waiting is a floor, since the bound is a join the elapsed time
+        # can only exceed, so the two lower bounds here cannot be crossed
+        # by a slow machine — only by a wait that really is shorter. The
+        # control comes first: the same remote holds the default wait
+        # past three, so it truly sat, and the Codex run's early return
+        # is the bound and not a remote that answered.
+        self.assertGreater(default_took, 3,
+                           "the remote answered, so nothing sat")
+        # Three seconds of waiting cannot fit inside three seconds, so
+        # this fails by construction if the Codex hook is ever handed the
+        # default bound. It is the one line load could break, and to
+        # break it load has to eat the whole gap between the wait and the
+        # cap, where the difference had only half a second to give.
         self.assertLess(codex_took, 3, "Codex would have killed the hook")
         self.assertGreater(codex_took, 1, "the POST was never waited on")
-        # The two runs share this machine's floor, so the difference is
-        # the two bounds apart and nothing else: it pins the Codex bound
-        # to a second-wide window around the 1.5 the docs quote, which is
-        # as tight as a timing test can hold on a loaded runner.
-        apart = default_took - codex_took
-        self.assertGreater(apart, 1, apart)
-        self.assertLess(apart, 2, apart)
+        # What this cannot prove: that the bound is 1.5 exactly. Any wait
+        # between one second and the cap passes. The 1.5 is a decision
+        # (CODEX_SESSION_END_PUBLISH) and the worst case it buys is a
+        # measurement, both quoted in docs/HOOK.md; this test guards the
+        # property those numbers exist to serve.
         last = json.loads(self.chain().read_text(
             encoding="utf-8").splitlines()[-1])
         self.assertTrue(last["action"].startswith("transcript-commitment:"))

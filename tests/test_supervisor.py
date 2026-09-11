@@ -62,18 +62,25 @@ def write_pending_anchor(log, head, submitted,
         json.dumps(record) + "\n", encoding="utf-8")
 
 
-def write_completed_anchor(log, head, height=850000):
+def write_completed_anchor(log, head, height=850000, append=False):
     """A minimal but genuine OTS timestamp: one sha256 op, then a Bitcoin
     attestation — enough for `verify --anchors` to replay offline and
-    report ANCHORED, with no network and no calendar (ANCHORING.md §4)."""
+    report ANCHORED, with no network and no calendar (ANCHORING.md §4).
+    `append=True` adds it behind whatever the sidecar already holds,
+    the way an upgrade lands beside the pending record it completes."""
     payload = ots_varint(height)
     proof = (b"\x08"
              + b"\x00" + TAG_BITCOIN + ots_varint(len(payload)) + payload)
     record = {"head": head, "n": 2, "ts": "2026-08-22T09:00:00Z",
               "calendar": "https://calendar.example.test",
               "proof": base64.b64encode(proof).decode()}
-    Path(str(log) + ".anchors.jsonl").write_text(
-        json.dumps(record) + "\n", encoding="utf-8")
+    sidecar = Path(str(log) + ".anchors.jsonl")
+    line = json.dumps(record) + "\n"
+    if append and sidecar.exists():
+        with sidecar.open("a", encoding="utf-8") as out:
+            out.write(line)
+    else:
+        sidecar.write_text(line, encoding="utf-8")
 
 
 def run_scan(root, *extra, env=None):
@@ -978,6 +985,54 @@ class CompletenessTest(unittest.TestCase):
         return {s["session"]: s
                 for s in report["completeness"]["sessions"]}
 
+    def store_holding(self, *sessions):
+        """A store (ADR-0011) with a drawer holding these sessions'
+        chains, and the env that points the supervisor at it."""
+        home = Path(self._tmp.name).resolve() / "store"
+        for session in sessions:
+            make_chain(home / "receipts" / "alpha-deadbeef", session)
+        return {**os.environ, "LOXODONTA_HOME": str(home)}
+
+    def test_a_session_recorded_into_the_store_is_named_not_charged(self):
+        # #117, from the field (2026-09-03): --root scans a legacy folder
+        # of repos for receipts/ folders, and a machine migrated to the
+        # store has none left. Legacy pairing then charged every
+        # transcript under the root its whole witnessed count: 111
+        # ENDED-DEFICIT rows, the live session reading ALARM-SILENT, and
+        # exit 6, from a wrong invocation rather than from anything
+        # wrong. The alarm is the flagship claim and must not be faked.
+        # Past the grace window, inside the idle one: live and silent.
+        write_transcript(self.witness, self.root / "alpha", "sess-live",
+                         event_times=[ago(600), ago(400), ago(120)])
+        env = self.store_holding("sess-live")
+
+        result = self.scan(env=env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["exit"], 0,
+                         "receipts that exist elsewhere are not a deficit")
+        row = self.states(result)["sess-live"]
+        self.assertEqual(row["state"], "ELSEWHERE")
+        self.assertEqual(row["deficit"], 0)
+        self.assertIn("store", report["completeness"]["note"])
+        self.assertIn("no chains", report["note"])
+
+    def test_a_session_that_never_recorded_anywhere_still_alarms(self):
+        # The other half, and the one the guard must not swallow: no
+        # chain under the root and none in the store either is the
+        # disabled hook, which is exactly what the watch exists to
+        # catch.
+        write_transcript(self.witness, self.root / "beta", "sess-nowhere",
+                         event_times=[ago(600), ago(400), ago(120)])
+        env = self.store_holding("sess-someone-else")
+
+        result = self.scan(env=env)
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        self.assertEqual(self.states(result)["sess-nowhere"]["state"],
+                         "ALARM-SILENT")
+
     def test_the_silent_fork_alarms_while_the_chain_verifies_valid(self):
         # The flagship case, from the field (2026-08-14): witness saw 8
         # tools, the chain holds 6 receipts and verifies VALID — entries
@@ -1747,6 +1802,27 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertFalse(bare["head"]["anchored"])
         self.assertTrue(bare["head"]["ts"], "age is the reader's to judge "
                         "from the surfaced timestamp")
+
+    def test_a_head_settled_by_one_calendar_leaves_no_pending_proof(self):
+        # #199: a pending record from a calendar that never came back,
+        # beside the upgrade another calendar delivered for the same
+        # head. The panel reads verify's own words (ADR-0005), so the
+        # dashboard stops painting anchor staleness on an anchored head.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-split")
+        head = chain_head(log)
+        write_pending_anchor(log, head, submitted=ago(2400000))
+        write_completed_anchor(log, head, append=True)
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-split")
+        self.assertEqual(chain["anchors"]["anchored"],
+                         [{"upto": 2, "height": 850000}])
+        self.assertEqual(chain["anchors"]["pending"], [],
+                         "a settled head owes no pending proof")
+        self.assertTrue(chain["anchors"]["head"]["anchored"])
+        self.assertTrue(chain["anchored"])
 
     def test_a_completed_calendar_upgrades_on_tick_with_no_operator(self):
         calendar = self.start_calendar()

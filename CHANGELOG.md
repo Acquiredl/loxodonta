@@ -10,6 +10,20 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-11
+
+The release where the reader starts counting. The dashboard gains an activity tab over what the chains already hold, and the hook is asked for nothing new to draw it. Three lines that were teaching the operator to ignore the tool are fixed: an anchor that stayed pending after it had settled, a scan that raised the flagship alarm out of a wrong invocation, and a suite that ran only one way.
+
+### Added
+
+- The dashboard's activity tab (ADR-0027, #200 and #201): the reader counts what the chains already hold, and the hook is asked for nothing new to draw it. Activity moves out of the second pane's inspect toggle to a fifth tab beside sessions, projects, search and evidence, carrying seven panels under a cap of two screens at 1440x900, measured as document height rather than set as a number. The panels: the tally (drawers, sessions, chains, receipts, and the date recording began), tempo against the store's own norm with the distance past the bar shown rather than one word for every hot session, looks per day, a tool histogram, files touched with the worktree prefix folded so one file is one row, working hours, and sessions on one time axis in a bounded box that scrolls inside itself with owed tails sorted to the top. The inspect pane gains a density strip: receipts bucketed across a session's span, the peak marked, the owed tail hatched, because a session of 3,721 receipts has a shape no waterfall can draw. Every panel names its own window and there is no global range picker, since a picker some panels quietly ignored would be the page lying about what it shows. Named views are saved in a sibling dotfile beside the day book and share its posture: writer-reachable, trusted for nothing, owning no verdicts, never raising an exit. `SUPERVISOR_HOT_TIMES` and `SUPERVISOR_HOT_FLOOR` stay the only place the hot threshold is set, and are surfaced on the panel. No count raises the scan exit, and `.out-of-scope/001` stands unamended. GLOSSARY gained *Tally*.
+- `tools/publish_echo.py`: a loopback echo that prints what `--publish-head` posts, with the field names beside each body, so an operator reads the claim in ADR-0025 for themselves before wiring a real remote. `--port 0` binds a free port and prints it, `--once` stops after one body. It says on startup, and `docs/HOOK.md` says with it, that an address on this machine is not a head record and never a place to publish to: the head has not left, and nothing there is out of the writer's reach.
+
+### Fixed
+
+- `verify --anchors` no longer advises `anchor --upgrade` on a head another calendar has already settled (#199). The suppression was keyed by head and calendar while its comment said head, so on a store anchored to the four default calendars a settled head printed one pending line per calendar that lagged, each advising a command that changed nothing, above the lines settling that same head. An anchor's claim is about the head, so a straggler's record is now reported as `ANCHOR-UNANSWERED`, naming the calendar that never came back and saying no upgrade is owed; the record stays in the sidecar as evidence of where the submission went. `ANCHOR-PENDING` and its advice are unchanged for a head nothing has settled. `anchor --upgrade` skips a settled head instead of re-asking a calendar that has dropped its commitment, and says why. Through the verdict-line seam this empties the scan's pending list for such a chain, so the dashboard stops painting anchor staleness on an anchored head. `verify-package` carried the same shape over the manifest digest and now says `ANCHOR-UNANSWERED` there too.
+- `supervisor scan --root DIR` no longer raises the completeness alarm over sessions whose receipts live in the store (#117). `--root` walks a legacy folder of repos for `receipts/` folders (ADR-0011), and a machine that has adopted its chains into the store has none left there, so legacy pairing charged every transcript under the root its whole witnessed count: on the author's machine, 111 sessions read `ENDED-DEFICIT` with zero receipts and the live one read `ALARM-SILENT`, exit 6, while a plain `scan` of the same machine in the same minute exited 0 with the session OK. A wrong invocation should not fake the flagship claim. A witnessed session with no chain under the root is now checked against the store before it is judged: a chain there means the receipts exist and the wrong universe is being scanned, reported as the new `ELSEWHERE` state, named and not judged, with a note saying to run `scan` with no `--root`. A session with no chain in either place is still the disabled hook and still alarms, which is what the watch is for. A `--root` holding no chains at all also says so above the report.
+
 ## [0.3.0] - 2026-09-09
 
 The release that makes the evidence portable: a session or a drawer packs into one file, and one command on a machine that has never seen yours judges it layer by layer and says what each layer does not settle. Chain heads can leave the machine as a session ends, to a remote the credentials here cannot delete from.
@@ -73,7 +87,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.3.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.4.0...dev
+[0.4.0]: https://github.com/Acquiredl/loxodonta/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Acquiredl/loxodonta/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Acquiredl/loxodonta/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Acquiredl/loxodonta/releases/tag/v0.1.0
