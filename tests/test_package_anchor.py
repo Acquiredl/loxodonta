@@ -22,6 +22,10 @@ import unittest
 import zipfile
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_package_anchor`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from test_anchor import (FakeCalendar, FakeCalendarHandler, clean_env,
                          expected_merkle_root)
 from test_package import (LOXODONTA, SUPERVISOR, PackageCase, completed_anchor,

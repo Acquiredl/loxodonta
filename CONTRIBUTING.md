@@ -34,6 +34,13 @@ Reading three files first saves everyone a round trip:
    python -m unittest discover -s tests
    ```
 
+   One module runs on its own too, for a tight red/green loop while you
+   are fixing one thing:
+
+   ```
+   python -m unittest tests.test_mcp
+   ```
+
 ## The one local check
 
 The repo enforces its own vocabulary. `tools/house_check.py` fails on the
