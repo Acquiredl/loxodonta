@@ -83,6 +83,17 @@ class EmDashTest(Fixture):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("README.md:3: em-dash:", result.stdout)
 
+    def test_the_start_page_is_front_door_even_though_it_lives_in_docs(self):
+        # docs/START.md is what a stranger is handed before they have
+        # decided to trust anything, so it is judged like the README.
+        start = self.write("docs/START.md",
+                           "# Start here\n\nFive steps — no service.\n")
+
+        result = run_checker(start)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("START.md:3: em-dash:", result.stdout)
+
     def test_the_glossary_and_docs_keep_their_em_dashes(self):
         glossary = self.write("GLOSSARY.md", "- **Receipt** — one entry.\n")
         doc = self.write("docs/SPEC.md", "Canonical JSON — sorted keys.\n")
