@@ -130,6 +130,32 @@ harness fires no hook for them and marks them with `is_error` on the
 `tool_result` block, not on `toolUseResult`. So witnessed count equals
 receipts owed, and a chat-only session can never alarm.
 
+A third finding widened where the witness looks (#211). A session that
+delegates work spawns subagents, and the harness fires `PostToolUse`
+for a subagent's calls under the *parent* session id — so those
+receipts land in the parent's chain, while the record of them sits in
+`<session>/subagents/agent-*.jsonl`, a file the witness never opened.
+Such a session read `ENDED-SURPLUS` for work it did honestly. The
+largest case in the author's store was a session with 118 subagents:
+534 events witnessed against 3721 receipts, every one of the 3187
+missing sitting in those files. `witness_files` now reads them beside
+the parent, and that session reads 3721 against 3721.
+
+What went missing without them was the ingest leg. A delegating parent
+spawns and writes while its subagents read and search, so the reads and
+greps ADR-0016 widened coverage to capture are exactly what a
+parent-only witness could not see. The pairing rule is the same one in
+both places: a sidechain record carries the `tool_result` block and not
+the `toolUseResult` field, which is why counting by the field alone
+found 57 of that session's 3244 sidechain calls. Across every
+transcript in the author's store the two shapes agree wherever both
+appear, so the block is the signal and the field is corroboration.
+
+The cost, measured on that store: 20 of 171 sessions have a sidechain
+at all, 186 files holding 78 MB against the parents' 353 MB, so a scan
+reads about 22% more bytes. Sessions that never delegate pay one failed
+directory lookup each.
+
 `classify` is the ratified state machine — a pure reading of the
 evidence: OK / QUIET / LAGGING (a 30-second grace, because an honest
 lock wait must never alarm) / ALARM-SILENT (recording stopped) /
