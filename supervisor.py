@@ -1092,6 +1092,30 @@ def owes_receipt(name, matchers):
     return False
 
 
+def witness_files(transcript):
+    """Every file a session's tool calls are written to (#211): the
+    parent transcript, plus one per subagent under
+    `<session>/subagents/`. The harness fires PostToolUse for a
+    subagent's calls under the *parent* session id, so their receipts
+    land in the parent's chain — and a witness that read only the
+    parent called the session surplus for work it did honestly. The
+    largest case in the author's store was a session with 118
+    subagents: 534 events witnessed against 3721 receipts, and the
+    3187 missing were in these files.
+
+    It is the ingest leg that goes missing without them. A delegating
+    parent spawns and writes while its subagents read and search, so
+    the reads and greps ADR-0016 widened coverage to capture are
+    exactly what a parent-only witness cannot see."""
+    files = [transcript]
+    try:
+        files.extend(sorted((transcript.with_suffix("") / "subagents")
+                            .glob("*.jsonl")))
+    except OSError:
+        pass  # no sidechain here, or unreadable: the parent still counts
+    return files
+
+
 def read_witness(transcript, calibration):
     """The witness signal: timestamps of tool events that owe a receipt.
     A tool event is a tool_use block paired by id with its result line;
@@ -1116,47 +1140,62 @@ def read_witness(transcript, calibration):
     events = []
     latest = None
     first = None
-    with open(transcript, encoding="utf-8", errors="replace") as lines:
-        for line in lines:
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict):
-                continue
-            stamped = parse_when(record.get("timestamp"))
-            if stamped is not None:
-                if stamped.tzinfo is None:
-                    stamped = stamped.replace(tzinfo=timezone.utc)
-                if latest is None or stamped > latest:
-                    latest = stamped
-            message = record.get("message")
-            blocks = (message.get("content")
-                      if isinstance(message, dict) else None)
-            if not isinstance(blocks, list):
-                blocks = []
-            for block in blocks:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    names[block.get("id")] = block.get("name")
-            result = record.get("toolUseResult")
-            if result is None:
-                continue
-            if isinstance(result, dict) and result.get("is_error"):
-                continue
-            found = next((block for block in blocks
-                          if isinstance(block, dict)
-                          and block.get("type") == "tool_result"), None)
-            if found is not None and found.get("is_error"):
-                # A failed call, as the harness really writes it: the
-                # result collapses to an error string and the flag sits
-                # on the tool_result block (field capture, 2026-08-29).
-                continue
-            name = names.get(found.get("tool_use_id")) if found else None
-            when = record.get("timestamp")
-            if isinstance(when, str) and (first is None or when < first):
-                first = when
-            if owes_receipt(name, matchers_at(calibration, when)):
-                events.append(when)
+    for path in witness_files(transcript):
+        with open(path, encoding="utf-8", errors="replace") as lines:
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                stamped = parse_when(record.get("timestamp"))
+                if stamped is not None:
+                    if stamped.tzinfo is None:
+                        stamped = stamped.replace(tzinfo=timezone.utc)
+                    if latest is None or stamped > latest:
+                        latest = stamped
+                message = record.get("message")
+                blocks = (message.get("content")
+                          if isinstance(message, dict) else None)
+                if not isinstance(blocks, list):
+                    blocks = []
+                for block in blocks:
+                    if isinstance(block, dict)                             and block.get("type") == "tool_use":
+                        names[block.get("id")] = block.get("name")
+                found = next((block for block in blocks
+                              if isinstance(block, dict)
+                              and block.get("type") == "tool_result"), None)
+                result = record.get("toolUseResult")
+                # The completed call, in either shape the harness
+                # writes it. A parent's record carries `toolUseResult`
+                # and the block both; a subagent's carries only the
+                # block (#211), so keying on the field alone found 57
+                # of one session's 3244 sidechain calls. Measured over
+                # every transcript in the author's store, the two
+                # shapes agree wherever both are present — so the block
+                # is the signal and the field is the corroboration.
+                if result is None and found is None:
+                    continue
+                if isinstance(result, dict) and result.get("is_error"):
+                    continue
+                if found is not None and found.get("is_error"):
+                    # A failed call, as the harness really writes it:
+                    # the result collapses to an error string and the
+                    # flag sits on the tool_result block (field
+                    # capture, 2026-08-29). In a sidechain file that
+                    # block is the only place it ever sits.
+                    continue
+                name = names.get(found.get("tool_use_id")) if found else None
+                when = record.get("timestamp")
+                if isinstance(when, str) and (first is None or when < first):
+                    first = when
+                if owes_receipt(name, matchers_at(calibration, when)):
+                    events.append(when)
+    # Merged across files, so order is no longer a given, and the
+    # deficit clock reads `events[receipts]` — the first unpaired call
+    # — which names the right moment only in time order.
+    events.sort()
     return events, latest, first
 
 

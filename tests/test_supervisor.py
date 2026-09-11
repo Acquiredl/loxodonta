@@ -874,6 +874,131 @@ def write_transcript(witness, project, session, event_times=(),
     return transcript
 
 
+def write_subagent_transcript(witness, project, session, agent,
+                              event_times=(), error_times=(), tool="Bash"):
+    """A subagent transcript as the harness really writes one (#211):
+    `<slug>/<session>/subagents/agent-*.jsonl`, one file per subagent.
+    The shape differs from the parent's in the way that matters — the
+    result is a `tool_result` block carrying `is_error`, and the
+    `toolUseResult` field the parent's records carry is absent. The
+    harness fires PostToolUse for these calls under the *parent*
+    session id, so their receipts land in the parent's chain."""
+    folder = witness / munge(project) / session / "subagents"
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = []
+
+    def event(i, ts, name, failed):
+        use_id = f"tu_{agent}_{i}"
+        lines.append({"type": "assistant", "timestamp": ts, "message": {
+            "content": [{"type": "tool_use", "id": use_id, "name": name}],
+        }})
+        lines.append({"type": "user", "timestamp": ts, "message": {
+            "content": [{"type": "tool_result", "tool_use_id": use_id,
+                         "is_error": failed}]}})
+
+    for i, ts in enumerate(event_times):
+        event(i, ts, tool if isinstance(tool, str) else tool[i], False)
+    for i, ts in enumerate(error_times):
+        event(1000 + i, ts, "Bash", True)
+    path = folder / f"agent-{agent}.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines),
+                    encoding="utf-8")
+    return path
+
+
+class SubagentWitnessTest(unittest.TestCase):
+    """#211: the harness fires PostToolUse for a subagent's tool calls
+    under the *parent* session id, so their receipts land in the
+    parent's chain — while the record of them sits in a separate file
+    the witness never opened. A session that delegated read as
+    ENDED-SURPLUS for work it did honestly, and the ingest leg ADR-0016
+    widened coverage to capture went missing from the completeness
+    picture entirely, because a delegating parent spawns and writes
+    while its subagents read and search."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name).resolve() / "witness"
+        install_witness_hook(self.witness, matcher="*")
+        prime_memory(self.root, matcher="*")
+
+    def scan(self, *extra):
+        return run_scan(self.root, "--witness", str(self.witness), *extra)
+
+    def states(self, result):
+        return {s["session"]: s
+                for s in json.loads(result.stdout)["completeness"]["sessions"]}
+
+    def test_a_delegated_call_owes_a_receipt_like_any_other(self):
+        # Two calls in the parent, three in a subagent, five receipts.
+        # The witness saw two before this and called the session
+        # surplus for the three it could not see.
+        make_chain(self.root / "alpha" / "receipts", "sess-deep", entries=5)
+        write_transcript(self.witness, self.root / "alpha", "sess-deep",
+                         event_times=[ago(6000), ago(5990)], tool="Agent")
+        write_subagent_transcript(
+            self.witness, self.root / "alpha", "sess-deep", "aaa",
+            event_times=[ago(5980), ago(5970), ago(5960)], tool="Read")
+
+        judged = self.states(self.scan())["sess-deep"]
+
+        self.assertEqual(judged["tools"], 5,
+                         "a subagent's calls owe receipts too")
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+    def test_several_subagents_are_all_read(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-fanout", entries=7)
+        write_transcript(self.witness, self.root / "alpha", "sess-fanout",
+                         event_times=[ago(6000)], tool="Agent")
+        for n, agent in enumerate(("aaa", "bbb", "ccc")):
+            write_subagent_transcript(
+                self.witness, self.root / "alpha", "sess-fanout", agent,
+                event_times=[ago(5900 - n * 10), ago(5890 - n * 10)],
+                tool="Grep")
+
+        judged = self.states(self.scan())["sess-fanout"]
+
+        self.assertEqual(judged["tools"], 7)
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+    def test_a_failed_delegated_call_owes_nothing(self):
+        # The harness fires no hook for a failed call, and the witness
+        # counts by that same rule — in a subagent file the flag sits on
+        # the tool_result block, which is the only place it ever sits.
+        make_chain(self.root / "alpha" / "receipts", "sess-fail", entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-fail",
+                         event_times=[ago(6000)], tool="Agent")
+        write_subagent_transcript(
+            self.witness, self.root / "alpha", "sess-fail", "aaa",
+            event_times=[ago(5900)], error_times=[ago(5890), ago(5880)],
+            tool="Bash")
+
+        judged = self.states(self.scan())["sess-fail"]
+
+        self.assertEqual(judged["tools"], 2)
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+    def test_a_subagents_calls_are_judged_by_their_own_coverage(self):
+        # ADR-0016 reaches the sidechain too: a Read from before the
+        # widening owes nothing, whoever ran it.
+        prime_memory(self.root, matcher="Edit|Write|NotebookEdit|Bash")
+        make_chain(self.root / "alpha" / "receipts", "sess-narrow", entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-narrow",
+                         event_times=[ago(6000)], tool="Bash")
+        write_subagent_transcript(
+            self.witness, self.root / "alpha", "sess-narrow", "aaa",
+            event_times=[ago(5900), ago(5890)], tool="Read")
+
+        judged = self.states(self.scan())["sess-narrow"]
+
+        self.assertEqual(judged["tools"], 1,
+                         "uncovered reads owe nothing in a sidechain either")
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+
 class DaybookTest(unittest.TestCase):
     """The day book (GLOSSARY: Day book): one row per UTC day, so the
     page can answer the third question a monitoring surface owes its
