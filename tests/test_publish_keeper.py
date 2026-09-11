@@ -20,6 +20,10 @@ import unittest
 import urllib.request
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_publish_keeper`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from test_anchor import clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)

@@ -19,6 +19,10 @@ import unittest
 import zipfile
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_package_sign`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from test_package import LOXODONTA, SUPERVISOR, run
 from test_package_anchor import SESSION, SIDECAR, AnchoredStoreCase
 

@@ -23,6 +23,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_mcp`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from test_recall import forge_chain, run_py
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
