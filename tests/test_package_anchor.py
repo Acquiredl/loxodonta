@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import (FakeCalendar, FakeCalendarHandler, clean_env,
-                         expected_merkle_root)
+                         expected_merkle_root, start_calendar)
 from test_package import (LOXODONTA, SUPERVISOR, PackageCase, completed_anchor,
                           neutral_env, run)
 
@@ -218,6 +218,36 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertIn(f"block {self.server.height}", lines[-2])
         # The chain's own anchor is still detail, at its own block.
         self.assertIn(self.CHAIN_DETAIL, out)
+
+    def test_a_manifest_settled_by_one_calendar_stops_advising_the_other(self):
+        # #199 reaches the seal too: the anchor's claim is about the
+        # manifest's digest, not about any one calendar. Once one of them
+        # settles it, the straggler is not work the recipient owes, and
+        # the rung is earned.
+        lags = start_calendar(self, b"nonce-lags")
+        folder = self.work / "two-calendars"
+        built = self.package(SESSION, "--folder", "--out", str(folder),
+                             "--anchor", "--calendar", self.server.url,
+                             "--calendar", lags.url)
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        self.server.mode = "complete"
+
+        upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
+                      str(folder / "manifest.json"), env=self.env)
+
+        self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
+        self.assertEqual(lags.polled, [], "the lagging calendar was re-asked")
+
+        judged = self.verify_package(folder)
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        self.assertIn("seal anchor: ANCHORED", out)
+        self.assertNotIn("seal anchor: ANCHOR-PENDING", out)
+        self.assertIn("seal anchor: ANCHOR-UNANSWERED", out)
+        self.assertIn(lags.url, out)
+        self.assertTrue(out.strip().splitlines()[-1].startswith(
+            "SELF-CONSISTENT + ANCHORED:"), out.strip().splitlines()[-1])
 
     def test_a_stripped_sidecar_is_seal_missing_exit_3(self):
         # ADR-0007's declared seal set: the manifest says an anchor
