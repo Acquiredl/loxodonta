@@ -10,9 +10,20 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-11
+
+The release where the witness stops claiming more than it saw, and starts seeing all of what it should. It judged sessions older than its own memory by today's coverage, scarring history that was recorded honestly under older rules, and it read only a session's parent transcript, so every tool call a subagent made came back as a receipt nobody owed. Both were loudest on the surface a stranger meets first: a fresh install reported the whole pre-install history as loss.
+
 ### Added
 
+- `BEFORE-MEMORY`, a completeness state for a session whose first witnessed tool event predates the supervisor's first calibration observation (ADR-0029, issue #114). What such a session owed is unknown, so it is judged not at all: evidence, not deficit, and no receipt of its is called missing. It never takes a row. One counted block reports it on the scan, on the dashboard beside the calibration note, in the field-data export and in a package's `witness.json`, because a store older than its supervisor holds scores of these and a listing they fill is one where the sessions that mean something cannot be found. `supervisor scan --before-memory` lists them for anyone who wants to look.
+- `supervisor calibrate --since <ts> --matchers <m>`, for stating what coverage was wired before the supervisor started watching. It inserts an epoch only ahead of the first observed one and refuses anything later with no `--force` behind it, because observed time is the one part of the calibration memory that is not testimony. A seeded epoch is marked as the operator's word permanently, every surface that judged by one says so, and `--forget <ts>` withdraws a statement without hand-editing a writer-reachable file. `--root` mirrors `scan`'s.
 - `docs/START.md`, the page for someone who has already decided to run the tool: five steps from the releases page to `supervisor export`, with the agent install offered above them as a copy-pasteable prompt for the Claude Code or Codex the reader most likely already has in their terminal, and the plain statement of what it means to ask an agent to wire up its own recorder. The README keeps the front door for the undecided and carries one pointer to it under Install. `tools/house_check.py` judges `START.md` as a front-door file although it lives in `docs/`, where em dashes and hedged overclaims are otherwise allowed, because it is read before any trust has been extended, which is why that rule exists; one test pins it.
+
+### Fixed
+
+- The completeness witness read only a session's parent transcript, so every tool call a subagent made counted as an unowed receipt (#211). The harness fires `PostToolUse` for a subagent's calls under the *parent* session id, so their receipts land in the parent's chain while the record of them sits in `<session>/subagents/agent-*.jsonl`. A session that delegated therefore read `ENDED-SURPLUS` for work it did honestly, and the ingest leg ADR-0016 widened coverage to capture went missing from the completeness picture altogether, because a delegating parent spawns and writes while its subagents read and search. `witness_files` now reads the sidechain beside the parent. The pairing rule is the one already there: a sidechain result carries the `tool_result` block and not the `toolUseResult` field, so keying on the field alone found 57 of one session's 3244 sidechain calls, and the two shapes agree wherever both appear across every transcript in the author's store. Every surplus in that store closed; four of the seven land exactly, the largest at 3721 against 3721, and the three that do not are all from before the cross-drive hook bug was fixed on 2026-08-30.
+- The witness judged sessions from before its own memory by today's matcher (issue #114). `calibrate()` wrote its first observation as `{"since": null}` and `matchers_at()` gave that epoch to every earlier timestamp, so on a machine whose calibration memory began after coverage went wide every session recorded under the narrow matcher was re-judged by `*`. ADR-0016 ruling 2 promised a matcher change would manufacture no scars; this was the one case its mechanism could not see, because the change predated the memory. The first observation now stamps the moment it is made, and a store carrying the old `null` has it stamped on the next scan. On the author's machine that turned 133 witnessed sessions with 116 deficits into six judged rows and one counted line, and it is what a stranger's first `supervisor export` stops saying about their pre-install history.
 
 ### Changed
 
@@ -95,7 +106,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.4.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.5.0...dev
+[0.5.0]: https://github.com/Acquiredl/loxodonta/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Acquiredl/loxodonta/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Acquiredl/loxodonta/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Acquiredl/loxodonta/compare/v0.1.0...v0.2.0

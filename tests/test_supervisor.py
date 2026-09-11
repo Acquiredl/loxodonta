@@ -23,6 +23,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
+BASELINE_NAME = ".supervisor-baseline.json"
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
@@ -785,6 +786,23 @@ def ago(seconds):
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def prime_memory(root, matcher="Edit|Write|NotebookEdit|Bash", age=864000):
+    """Give a supervisor a calibration memory older than the fixtures.
+
+    ADR-0029: a session whose first witnessed event predates the
+    supervisor's first observation is BEFORE-MEMORY and is judged not
+    at all. Every transcript in these suites is written into the past,
+    while a scan started here stamps its first observation *now* — so
+    without this, every fixture would be older than the memory watching
+    it. A real machine's supervisor has been looking for weeks by the
+    time these sessions run; this is that machine.
+    """
+    (root / BASELINE_NAME).write_text(json.dumps({
+        "chains": {},
+        "calibration": [{"since": ago(age), "matchers": [matcher]}],
+    }), encoding="utf-8")
+
+
 def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash",
                          command="python loxodonta.py hook",
                          sessionend=False):
@@ -854,6 +872,131 @@ def write_transcript(witness, project, session, event_times=(),
         quiet_since = time.time() - idle
         os.utime(transcript, (quiet_since, quiet_since))
     return transcript
+
+
+def write_subagent_transcript(witness, project, session, agent,
+                              event_times=(), error_times=(), tool="Bash"):
+    """A subagent transcript as the harness really writes one (#211):
+    `<slug>/<session>/subagents/agent-*.jsonl`, one file per subagent.
+    The shape differs from the parent's in the way that matters — the
+    result is a `tool_result` block carrying `is_error`, and the
+    `toolUseResult` field the parent's records carry is absent. The
+    harness fires PostToolUse for these calls under the *parent*
+    session id, so their receipts land in the parent's chain."""
+    folder = witness / munge(project) / session / "subagents"
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = []
+
+    def event(i, ts, name, failed):
+        use_id = f"tu_{agent}_{i}"
+        lines.append({"type": "assistant", "timestamp": ts, "message": {
+            "content": [{"type": "tool_use", "id": use_id, "name": name}],
+        }})
+        lines.append({"type": "user", "timestamp": ts, "message": {
+            "content": [{"type": "tool_result", "tool_use_id": use_id,
+                         "is_error": failed}]}})
+
+    for i, ts in enumerate(event_times):
+        event(i, ts, tool if isinstance(tool, str) else tool[i], False)
+    for i, ts in enumerate(error_times):
+        event(1000 + i, ts, "Bash", True)
+    path = folder / f"agent-{agent}.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines),
+                    encoding="utf-8")
+    return path
+
+
+class SubagentWitnessTest(unittest.TestCase):
+    """#211: the harness fires PostToolUse for a subagent's tool calls
+    under the *parent* session id, so their receipts land in the
+    parent's chain — while the record of them sits in a separate file
+    the witness never opened. A session that delegated read as
+    ENDED-SURPLUS for work it did honestly, and the ingest leg ADR-0016
+    widened coverage to capture went missing from the completeness
+    picture entirely, because a delegating parent spawns and writes
+    while its subagents read and search."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name).resolve() / "witness"
+        install_witness_hook(self.witness, matcher="*")
+        prime_memory(self.root, matcher="*")
+
+    def scan(self, *extra):
+        return run_scan(self.root, "--witness", str(self.witness), *extra)
+
+    def states(self, result):
+        return {s["session"]: s
+                for s in json.loads(result.stdout)["completeness"]["sessions"]}
+
+    def test_a_delegated_call_owes_a_receipt_like_any_other(self):
+        # Two calls in the parent, three in a subagent, five receipts.
+        # The witness saw two before this and called the session
+        # surplus for the three it could not see.
+        make_chain(self.root / "alpha" / "receipts", "sess-deep", entries=5)
+        write_transcript(self.witness, self.root / "alpha", "sess-deep",
+                         event_times=[ago(6000), ago(5990)], tool="Agent")
+        write_subagent_transcript(
+            self.witness, self.root / "alpha", "sess-deep", "aaa",
+            event_times=[ago(5980), ago(5970), ago(5960)], tool="Read")
+
+        judged = self.states(self.scan())["sess-deep"]
+
+        self.assertEqual(judged["tools"], 5,
+                         "a subagent's calls owe receipts too")
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+    def test_several_subagents_are_all_read(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-fanout", entries=7)
+        write_transcript(self.witness, self.root / "alpha", "sess-fanout",
+                         event_times=[ago(6000)], tool="Agent")
+        for n, agent in enumerate(("aaa", "bbb", "ccc")):
+            write_subagent_transcript(
+                self.witness, self.root / "alpha", "sess-fanout", agent,
+                event_times=[ago(5900 - n * 10), ago(5890 - n * 10)],
+                tool="Grep")
+
+        judged = self.states(self.scan())["sess-fanout"]
+
+        self.assertEqual(judged["tools"], 7)
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+    def test_a_failed_delegated_call_owes_nothing(self):
+        # The harness fires no hook for a failed call, and the witness
+        # counts by that same rule — in a subagent file the flag sits on
+        # the tool_result block, which is the only place it ever sits.
+        make_chain(self.root / "alpha" / "receipts", "sess-fail", entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-fail",
+                         event_times=[ago(6000)], tool="Agent")
+        write_subagent_transcript(
+            self.witness, self.root / "alpha", "sess-fail", "aaa",
+            event_times=[ago(5900)], error_times=[ago(5890), ago(5880)],
+            tool="Bash")
+
+        judged = self.states(self.scan())["sess-fail"]
+
+        self.assertEqual(judged["tools"], 2)
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+    def test_a_subagents_calls_are_judged_by_their_own_coverage(self):
+        # ADR-0016 reaches the sidechain too: a Read from before the
+        # widening owes nothing, whoever ran it.
+        prime_memory(self.root, matcher="Edit|Write|NotebookEdit|Bash")
+        make_chain(self.root / "alpha" / "receipts", "sess-narrow", entries=1)
+        write_transcript(self.witness, self.root / "alpha", "sess-narrow",
+                         event_times=[ago(6000)], tool="Bash")
+        write_subagent_transcript(
+            self.witness, self.root / "alpha", "sess-narrow", "aaa",
+            event_times=[ago(5900), ago(5890)], tool="Read")
+
+        judged = self.states(self.scan())["sess-narrow"]
+
+        self.assertEqual(judged["tools"], 1,
+                         "uncovered reads owe nothing in a sidechain either")
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
 
 
 class DaybookTest(unittest.TestCase):
@@ -975,6 +1118,7 @@ class CompletenessTest(unittest.TestCase):
         self.root.mkdir()
         self.witness = Path(self._tmp.name).resolve() / "witness"
         install_witness_hook(self.witness)
+        prime_memory(self.root)
 
     def scan(self, *extra, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -1626,6 +1770,20 @@ class CalibrationTest(unittest.TestCase):
         stamp = time.time() - age
         os.utime(self.witness.parent / "settings.json", (stamp, stamp))
 
+    def seed(self, since, matcher):
+        """The operator's word for coverage this supervisor never
+        watched (ADR-0029 ruling 6). A test's first scan stamps the
+        memory at *now*, so any session whose events predate the test
+        run is BEFORE-MEMORY unless someone states what was wired then
+        — which is the same thing the operator of a real machine does
+        after installing the supervisor onto months of history."""
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), "calibrate",
+             "--root", str(self.root), "--since", since,
+             "--matchers", matcher],
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
     def test_widening_does_not_rejudge_ended_sessions(self):
         # A session recorded honestly under the narrow matcher: three
         # Bash events with three receipts, five Reads nothing owed.
@@ -1634,6 +1792,9 @@ class CalibrationTest(unittest.TestCase):
         self.rewire("Edit|Write|NotebookEdit|Bash", age=7000)
         first = self.scan()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        # The memory starts at this scan (ADR-0029), and the session
+        # below ran before it; the operator states what was wired then.
+        self.seed(ago(7000), "Edit|Write|NotebookEdit|Bash")
         make_chain(self.root / "alpha" / "receipts", "sess-old", entries=3)
         # Event stamps are the liveness clock (issue #85), so "ended"
         # means genuinely old timestamps, not a back-dated mtime.
@@ -1660,6 +1821,8 @@ class CalibrationTest(unittest.TestCase):
         # and a session of unreceipted Reads after the change alarms.
         self.rewire("Edit|Write|NotebookEdit|Bash", age=600)
         self.scan()
+        self.seed(ago(700), "Edit|Write|NotebookEdit|Bash")
+        self.seed(ago(300), "*")
         self.rewire("*", age=300)
         write_transcript(self.witness, self.root / "alpha", "sess-new",
                          event_times=[ago(120), ago(110), ago(100)],
@@ -1687,8 +1850,10 @@ class CalibrationTest(unittest.TestCase):
         baseline = json.loads(self.baseline.read_text(encoding="utf-8"))
         epochs = baseline["calibration"]
         self.assertEqual(len(epochs), 2)
-        self.assertIsNone(epochs[0]["since"],
-                          "the first observation covers all history")
+        self.assertRegex(epochs[0]["since"] or "",
+                         r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+                         "the first observation stamps when it was made "
+                         "and claims nothing earlier (ADR-0029)")
         self.assertEqual(epochs[1]["matchers"], ["*"])
         report = json.loads(result.stdout)
         words = report["completeness"]["calibration"]["words"]
@@ -1698,6 +1863,143 @@ class CalibrationTest(unittest.TestCase):
                          "an unchanged matcher records no new epoch")
         self.assertEqual(again.returncode, 0,
                          again.stdout + again.stderr)
+
+
+class BeforeMemoryTest(unittest.TestCase):
+    """ADR-0029, from issue #114: the supervisor judges nothing older
+    than its own memory. This is the one case ADR-0016's effective
+    dating could not see — a matcher change that predates the
+    calibration memory itself, which left every session recorded under
+    the old rules judged by today's wide matcher and scarred for tools
+    it never owed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name).resolve() / "witness"
+        install_witness_hook(self.witness)
+        self.baseline = self.root / BASELINE_NAME
+
+    def scan(self, *extra):
+        return run_scan(self.root, "--witness", str(self.witness), *extra)
+
+    def calibrate(self, *args):
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), "calibrate",
+             "--root", str(self.root), *args],
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+    def watch(self, result):
+        return json.loads(result.stdout)["completeness"]
+
+    def test_the_first_observation_stamps_when_it_was_made(self):
+        # The null that was the whole bug: `matchers_at` read it as
+        # "this epoch covers all time before it", so a memory born
+        # after the widening judged the narrow era by `*`.
+        self.scan()
+
+        epochs = json.loads(
+            self.baseline.read_text(encoding="utf-8"))["calibration"]
+
+        self.assertEqual(len(epochs), 1)
+        self.assertRegex(epochs[0]["since"] or "",
+                         r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+    def test_a_session_older_than_the_memory_takes_no_row(self):
+        # Install day, ended sessions: tool calls, no chain, because
+        # there was no hook when they ran. Charged in full before this.
+        self.scan()
+        write_transcript(self.witness, self.root / "alpha", "sess-old",
+                         event_times=[ago(6000), ago(5900), ago(5800)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        watch = self.watch(result)
+        self.assertEqual(watch["sessions"], [],
+                         "a session from before the memory takes no row")
+        self.assertEqual(watch["before_memory"]["count"], 1)
+        self.assertIn("unknown", watch["before_memory"]["words"])
+
+    def test_a_live_session_older_than_the_memory_never_alarms(self):
+        # The stranger's first five minutes (ADR-0029 ruling 3, and the
+        # reason the *first* event decides and not the last): a session
+        # that has been running since before install owes nothing it
+        # could have paid, and judging it by today's matchers fires the
+        # flagship alarm on the tool's own arrival.
+        self.scan()
+        write_transcript(self.witness, self.root / "alpha", "sess-live",
+                         event_times=[ago(600), ago(400), ago(120)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         "no siren for history the supervisor never saw")
+        self.assertEqual(self.watch(result)["before_memory"]["count"], 1)
+
+    def test_the_rows_are_there_for_anyone_who_asks(self):
+        self.scan()
+        write_transcript(self.witness, self.root / "alpha", "sess-old",
+                         event_times=[ago(6000), ago(5900)])
+
+        result = self.scan("--before-memory")
+
+        rows = self.watch(result)["before_memory"]["sessions"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], "BEFORE-MEMORY")
+        self.assertNotIn("deficit", rows[0],
+                         "an unknown owed is not a deficit")
+
+    def test_seeding_restores_judgment_and_forgetting_takes_it_back(self):
+        # Ruling 6 end to end: the operator states what was wired before
+        # the supervisor looked, the session is judged on that word and
+        # said to be, and the statement can be withdrawn again.
+        self.scan()
+        make_chain(self.root / "alpha" / "receipts", "sess-old", entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-old",
+                         event_times=[ago(6000), ago(5900), ago(5800)])
+        self.assertEqual(self.watch(self.scan())["before_memory"]["count"], 1)
+        since = ago(9000)
+
+        seeded = self.calibrate("--since", since, "--matchers",
+                                "Edit|Write|NotebookEdit|Bash")
+
+        self.assertEqual(seeded.returncode, 0, seeded.stdout + seeded.stderr)
+        watch = self.watch(self.scan())
+        judged = {s["session"]: s for s in watch["sessions"]}["sess-old"]
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+        self.assertNotIn("before_memory", watch)
+        self.assertIn("stated by the operator",
+                      watch["calibration"]["words"])
+
+        forgot = self.calibrate("--forget", since)
+
+        self.assertEqual(forgot.returncode, 0, forgot.stdout + forgot.stderr)
+        self.assertEqual(self.watch(self.scan())["before_memory"]["count"], 1)
+
+    def test_a_seed_may_not_restate_what_the_supervisor_watched(self):
+        # The hard refusal, with no --force behind it: observed time is
+        # the one part of the calibration memory that is not testimony.
+        self.scan()
+
+        refused = self.calibrate("--since", ago(0), "--matchers", "*")
+
+        self.assertEqual(refused.returncode, 64)
+        self.assertIn("not yours to restate", refused.stderr)
+
+    def test_forgetting_an_observed_epoch_is_refused(self):
+        self.scan()
+        observed = json.loads(
+            self.baseline.read_text(encoding="utf-8"))["calibration"][0]
+
+        refused = self.calibrate("--forget", observed["since"])
+
+        self.assertEqual(refused.returncode, 64)
+        self.assertIn("Only a seeded epoch", refused.stderr)
 
 
 class FakeCalendarHandler(BaseHTTPRequestHandler):
