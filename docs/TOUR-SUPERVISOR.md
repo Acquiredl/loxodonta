@@ -137,8 +137,13 @@ ALARM-DEFICIT (the fork-shaped hole: receipts arrive, fewer than owed)
 / SURPLUS (an investigate flag, never a verdict) / ENDED-CLEAN /
 ENDED-DEFICIT (missing forever; kept as evidence, not a siren) /
 ENDED-SURPLUS (a surplus does not become clean by the session ending) /
-UNWITNESSED / UNWATCHED. Deficit is sticky — lost receipts never
-arrive later. One session is judged *once* even when its receipts span
+UNWITNESSED / UNWATCHED / ELSEWHERE. Deficit is sticky — lost
+receipts never arrive later. ELSEWHERE belongs to legacy `--root`
+mode alone (#117): a witnessed session whose chain is not under the
+root but *is* in the store has recorded fine, and the wrong universe
+is being scanned (ADR-0011). Naming it rather than charging it keeps
+the alarm about recording stopping; a session with no chain in either
+place is still the disabled hook, and still alarms. One session is judged *once* even when its receipts span
 drawers (a worktree session logs to the main repo's drawer, ADR-0011,
 while the transcript is named after the worktree): the witness counts
 sessions, not drawers.
