@@ -794,6 +794,11 @@ WATCH_WORDS = {
                  "--root — the wrong universe is being scanned (ADR-0011), "
                  "not a session that stopped recording. A plain `scan` "
                  "watches it; nothing is judged from here.",
+    "BEFORE-MEMORY": "this session began before the supervisor first "
+                     "observed what the hook covered, so what it owed is "
+                     "unknown — evidence, not deficit, and no receipt here "
+                     "is called missing (ADR-0029). `calibrate --since` "
+                     "seeds what you know of that time.",
 }
 
 
@@ -865,21 +870,39 @@ def sessionend_epoch(remembered, witness, now):
     return {"wired": wired, "since": since}
 
 
+def stamp_inception(remembered, stamp):
+    """The migration (ADR-0029 ruling 1): a calibration memory written
+    before this rule stamped its first observation `null`, which
+    `matchers_at` read as "covers all time before it" — the one case
+    ADR-0016's promise could not see, because the change predated the
+    memory. Stamp it. With a later observation already on the list the
+    inception cannot be now without landing out of order, so it takes
+    that observation's date instead: the supervisor then claims
+    knowledge only from the first change it actually recorded, which is
+    less than the truth and never more."""
+    if not remembered or remembered[0].get("since") is not None:
+        return remembered
+    inception = remembered[1]["since"] if len(remembered) > 1 else stamp
+    return [dict(remembered[0], since=inception)] + list(remembered[1:])
+
+
 def calibrate(remembered, witness, now):
     """Effective-dated coverage (ADR-0016): the supervisor's memory of
     which matchers were wired when, so a matcher change never re-judges
     history the old rules recorded honestly. The first observation
-    covers all time before it; a change is dated by the settings file's
-    mtime, clamped between the last observation and now — the best
-    estimate available, since the harness does not log its own config
-    changes. Lives in the baseline: writer-reachable, trusted for
-    nothing beyond calibration."""
+    stamps the moment it is made and claims nothing earlier — what lies
+    before it is BEFORE-MEMORY rather than deficit (ADR-0029). A change
+    is dated by the settings file's mtime, clamped between the last
+    observation and now — the best estimate available, since the
+    harness does not log its own config changes. Lives in the baseline:
+    writer-reachable, trusted for nothing beyond calibration."""
     current = hook_matchers(witness)
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    remembered = stamp_inception(remembered, stamp)
     if remembered and remembered[-1]["matchers"] == current:
         return remembered
     if not remembered:
-        return [{"since": None, "matchers": current}]
-    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return [{"since": stamp, "matchers": current}]
     try:
         changed = datetime.fromtimestamp(
             (witness.parent / "settings.json").stat().st_mtime,
@@ -891,12 +914,34 @@ def calibrate(remembered, witness, now):
                           "matchers": current}]
 
 
+def memory_since(calibration):
+    """When the calibration memory begins: the first observation's
+    stamp (ADR-0029 ruling 1). `None` only for a store with no
+    calibration at all, where nothing can be before a memory that does
+    not exist."""
+    if not calibration:
+        return None
+    return calibration[0].get("since")
+
+
+def before_memory(calibration, first_event):
+    """ADR-0029 ruling 2: a session whose first witnessed tool event
+    precedes the first calibration observation is judged not at all.
+    What it owed is unknown, and an unknown owed is not a deficit.
+    Ruling 3 is why this reads the *first* event and never the last:
+    the whole session is unjudged, live or ended, because a session's
+    completeness is one count over one window and a window with an
+    unknown beginning cannot be half-counted."""
+    since = memory_since(calibration)
+    return bool(since and first_event and first_event < since)
+
+
 def matchers_at(calibration, ts):
     """The matchers in force at one moment: the newest observation not
-    after `ts` (ISO timestamps compare as strings). A time before the
-    first observation gets the first — the supervisor claims no
-    knowledge older than its own memory — and a missing timestamp gets
-    the present."""
+    after `ts` (ISO timestamps compare as strings). A missing timestamp
+    gets the present. A time before the first observation still reads
+    the first, but no judged session has one: `before_memory` takes
+    those sessions out before their count is believed (ADR-0029)."""
     if not calibration:
         return []
     if not isinstance(ts, str):
@@ -1062,10 +1107,15 @@ def read_witness(transcript, calibration):
     timestamp-less metadata records (bridge-session, custom-title,
     appended to ended transcripts by restart and resume) never do,
     because an idle clock that resets on metadata re-presents an old
-    deficit as an immortal live alarm (issue #85)."""
+    deficit as an immortal live alarm (issue #85). Also returns `first`:
+    the earliest completed tool event of any kind, read before the
+    coverage filter, because ADR-0029 asks when the session started
+    working and not what it happened to owe — a session whose early
+    calls all fell outside coverage still began when it began."""
     names = {}
     events = []
     latest = None
+    first = None
     with open(transcript, encoding="utf-8", errors="replace") as lines:
         for line in lines:
             try:
@@ -1103,9 +1153,11 @@ def read_witness(transcript, calibration):
                 continue
             name = names.get(found.get("tool_use_id")) if found else None
             when = record.get("timestamp")
+            if isinstance(when, str) and (first is None or when < first):
+                first = when
             if owes_receipt(name, matchers_at(calibration, when)):
                 events.append(when)
-    return events, latest
+    return events, latest, first
 
 
 def classify(tools, receipts, ended, idle, deficit_age, silent):
@@ -1134,9 +1186,14 @@ def classify(tools, receipts, ended, idle, deficit_age, silent):
 def watch_session(transcript, receipts, last_receipt, now, calibration):
     """One session against its witness. deficit_since needs no stored
     state: receipts pair with tool events in order, so the first
-    unpaired event's timestamp is when the deficit began."""
-    events, latest = read_witness(transcript, calibration)
+    unpaired event's timestamp is when the deficit began. A session
+    older than the calibration memory is handed back unjudged
+    (ADR-0029): the tool count stands as what the witness saw, and the
+    state says the coverage behind that number is unknown."""
+    events, latest, first = read_witness(transcript, calibration)
     tools = len(events)
+    if before_memory(calibration, first):
+        return "BEFORE-MEMORY", tools
     # The idle clock reads the newest timestamped record, not file
     # mtime: the harness touches ended transcripts with timestamp-less
     # metadata, and an mtime clock resets on every touch (issue #85).
@@ -1226,7 +1283,8 @@ def store_session_ids():
 
 
 def watch_completeness(root, witness, families, everywhere=False,
-                       calibration=None, sessionend=None):
+                       calibration=None, sessionend=None,
+                       show_before_memory=False):
     """The completeness half of a tick: every census session paired with
     its transcript, plus witnessed sessions that never grew a chain at
     all — the disabled-hook case the census alone can never see.
@@ -1234,21 +1292,34 @@ def watch_completeness(root, witness, families, everywhere=False,
     machine, so every witnessed project is this scan's business, not
     just folders under one root. `calibration` is the effective-dated
     coverage memory (ADR-0016); without one, this look's wired matchers
-    are taken to have always been in force."""
+    are taken to have always been in force. `show_before_memory` lists
+    the sessions ADR-0029 leaves unjudged instead of only counting
+    them — the "be upfront" half made operable rather than promised."""
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
+    unjudged = []
     ours = munge(root)
     if calibration is None:
         calibration = [{"since": None, "matchers": hook_matchers(witness)}]
     matchers = calibration[-1]["matchers"]
+    said = []
     if len(calibration) > 1:
-        watch["calibration"] = {
-            "epochs": calibration,
-            "words": ("the wired matchers changed on "
-                      f"{calibration[-1]['since']} — each session is "
-                      "judged by the coverage in force at its time "
-                      "(ADR-0016)"),
-        }
+        said.append("the wired matchers changed on "
+                    f"{calibration[-1]['since']} — each session is "
+                    "judged by the coverage in force at its time "
+                    "(ADR-0016)")
+    # ADR-0029 ruling 6: a seeded epoch is the operator's word for a
+    # time the supervisor never watched, and any surface that judged by
+    # one says so. Observation and testimony do not get to look alike.
+    seeded = [epoch.get("since") for epoch in calibration
+              if epoch.get("source") == "operator"]
+    if seeded:
+        said.append(f"{len(seeded)} coverage epoch(s) here were stated by "
+                    f"the operator, not observed (from {min(seeded)}) — "
+                    "sessions judged by one are judged on that word")
+    if said:
+        watch["calibration"] = {"epochs": calibration,
+                                "words": "; ".join(said)}
     transcripts = {}
     if witness.is_dir():
         transcripts = {t.stem: t for t in sorted(witness.glob("*/*.jsonl"))}
@@ -1264,8 +1335,11 @@ def watch_completeness(root, witness, families, everywhere=False,
     def add(repo, session, state, tools, receipts, drawers=(), judge=None,
             transcript=None):
         entry = {"repo": repo, "session": session, "state": state,
-                 "tools": tools, "receipts": receipts,
-                 "deficit": max(0, tools - receipts)}
+                 "tools": tools, "receipts": receipts}
+        if state != "BEFORE-MEMORY":
+            # A session older than the memory has no deficit to name:
+            # the word is the claim ADR-0029 refuses to make about it.
+            entry["deficit"] = max(0, tools - receipts)
         if len(drawers) > 1:
             entry["drawers"] = list(drawers)
         if state in WATCH_WORDS:
@@ -1278,7 +1352,14 @@ def watch_completeness(root, witness, families, everywhere=False,
             # again. Local by nature; WITNESS_FIELDS keeps it out of a
             # package.
             entry["transcript"] = transcript.as_posix()
-        watch["sessions"].append(entry)
+        # ADR-0029 ruling 4: a session from before the memory never
+        # takes a row. On a store older than its supervisor there are
+        # scores of them, and a listing they fill is one where the
+        # sessions that do mean something cannot be found — the false
+        # scar ADR-0014 says teaches an operator to stop looking. One
+        # counted block speaks for all of them instead.
+        (unjudged if state == "BEFORE-MEMORY"
+         else watch["sessions"]).append(entry)
         return entry
 
     # One session, one watch. A single session's receipts can span
@@ -1400,6 +1481,27 @@ def watch_completeness(root, witness, families, everywhere=False,
                          "(ADR-0011), not here, so they are named and not "
                          "judged. The store is the default universe: run "
                          "`scan` with no --root to watch them.")
+
+    # One counted block for everything older than the memory (ADR-0029
+    # ruling 4). It is stated whether or not anyone asked, because the
+    # honest reading of a store is "this many sessions predate my
+    # knowledge of it" and a reader who is not told that will read the
+    # silence as a clean bill.
+    if unjudged:
+        since = memory_since(calibration)
+        block = {
+            "count": len(unjudged),
+            "since": since,
+            "words": (f"{len(unjudged)} witnessed session(s) began before "
+                      f"{since}, when this supervisor first observed what "
+                      "the hook covered. What they owed is unknown, so none "
+                      "of them is judged here and none is called a deficit "
+                      "(ADR-0029). `calibrate --since` seeds what you know "
+                      "of that time; `scan --before-memory` lists them."),
+        }
+        if show_before_memory:
+            block["sessions"] = unjudged
+        watch["before_memory"] = block
 
     return watch
 
@@ -1542,7 +1644,8 @@ def watch_consumption(families, now):
 # --- Scan ---------------------------------------------------------------------
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
-              publish_every=None, publish_url=None, store=False, tick=True):
+              publish_every=None, publish_url=None, store=False, tick=True,
+              show_before_memory=False):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
@@ -1762,7 +1865,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     completeness = watch_completeness(root, witness, families,
                                       everywhere=store,
                                       calibration=calibration,
-                                      sessionend=sessionend)
+                                      sessionend=sessionend,
+                                      show_before_memory=show_before_memory)
     # The keeper closes what the annotation reports — after the rows
     # are judged, so this scan says the truth it saw and the next scan
     # sees the tails committed.
@@ -1910,9 +2014,122 @@ def cmd_scan(args):
                        calendars=args.calendar or (),
                        publish_every=args.publish_every,
                        publish_url=args.publish_url,
-                       store=store)
+                       store=store,
+                       show_before_memory=args.before_memory)
     print(json.dumps(report, indent=None if args.json else 2))
     return report["exit"]
+
+
+# --- Seeding the calibration memory -------------------------------------------
+# ADR-0029 ruling 6. The supervisor's calibration memory is its diary of
+# what it observed, and it begins when it begins. An operator often knows
+# what was wired before that — they wired it — and this is how they say
+# so. Three properties make the saying safe. It only reaches time the
+# supervisor never watched: observed epochs are refused, with no --force,
+# because observed time is the one part of this memory that is not
+# testimony. What it writes is marked as the operator's word forever, so
+# no reader mistakes an assertion for an observation (git's replace
+# objects and grafts, visible by design; DFIR's rule that analyst
+# annotation never merges into collected artifact). And a seeded epoch
+# can be restated at the same date, which is the fix for a wrong one that
+# does not require hand-editing a writer-reachable file.
+
+def epoch_stamp(value):
+    """An argparse type for a seeded epoch: any timestamp `parse_when`
+    reads, normalized to the stamp shape the memory already stores, so
+    string comparison keeps ordering epochs correctly."""
+    when = parse_when(value)
+    if when is None:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a timestamp this reads — try "
+            "2026-08-31 or 2026-08-31T00:00:00Z")
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cmd_calibrate(args):
+    if args.forget and (args.since or args.matchers):
+        print("error: --forget removes a statement and --since/--matchers "
+              "make one; do one at a time", file=sys.stderr)
+        return 64
+    if not args.forget and not (args.since and args.matchers):
+        print("error: state an epoch with both --since and --matchers, or "
+              "remove one with --forget", file=sys.stderr)
+        return 64
+    # Both universes, as `scan` has them (ADR-0011): the store by
+    # default, a legacy folder of repos under an explicit --root.
+    path = (Path(store_home()) / "baseline.json" if args.root is None
+            else Path(args.root).resolve() / BASELINE_NAME)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print(f"error: no readable baseline at {path.as_posix()} — run "
+              "`supervisor scan` once so the supervisor stamps its own "
+              "inception, then seed what came before it", file=sys.stderr)
+        return 64
+    calibration = [epoch for epoch in data.get("calibration", [])
+                   if isinstance(epoch, dict)
+                   and isinstance(epoch.get("matchers"), list)]
+    observed = [epoch.get("since") for epoch in calibration
+                if epoch.get("source") != "operator" and epoch.get("since")]
+    if not observed:
+        print("error: this store has no observed coverage epoch yet — run "
+              "`supervisor scan` once first; a seed states what came "
+              "before an observation, and there is nothing to come before",
+              file=sys.stderr)
+        return 64
+    floor = min(observed)
+    if args.forget:
+        # Symmetry with the refusal below: what the operator said, the
+        # operator may unsay; what the supervisor observed stands. A
+        # seed made from a wrong date is otherwise only removable by
+        # hand-editing a writer-reachable file, which is the practice
+        # this command exists to spare them.
+        kept = [epoch for epoch in calibration
+                if not (epoch.get("source") == "operator"
+                        and epoch.get("since") == args.forget)]
+        if len(kept) == len(calibration):
+            print(f"error: no epoch you stated sits at {args.forget}. "
+                  "Only a seeded epoch can be forgotten; an observed one "
+                  "is what this supervisor saw", file=sys.stderr)
+            return 64
+        data["calibration"] = kept
+        write_lf(path, json.dumps(data, indent=2))
+        print(f"forgotten: your statement about {args.forget} is gone; "
+              "sessions it covered fall back to whatever epoch now "
+              "precedes them, or to BEFORE-MEMORY")
+        print(json.dumps(kept, indent=2))
+        return 0
+    if args.since >= floor:
+        print(f"error: {args.since} is not before this supervisor's first "
+              f"observation ({floor}). A seed may only state time the "
+              "supervisor never watched; what it did watch is not yours "
+              "to restate, and there is no --force for it", file=sys.stderr)
+        return 64
+    seeded = {"since": args.since, "matchers": list(args.matchers),
+              "source": "operator"}
+    kept = [epoch for epoch in calibration
+            if not (epoch.get("source") == "operator"
+                    and epoch.get("since") == args.since)]
+    restated = len(kept) != len(calibration)
+    data["calibration"] = sorted(kept + [seeded],
+                                 key=lambda epoch: epoch.get("since") or "")
+    write_lf(path, json.dumps(data, indent=2))
+    print(f"{'restated' if restated else 'seeded'}: from {args.since}, "
+          f"coverage was {' '.join(args.matchers)} — your word, not this "
+          "supervisor's observation, and marked as such wherever it judges")
+    print(json.dumps(data["calibration"], indent=2))
+    # Say exactly which window this statement governs, not "everything
+    # earlier": with more than one seed on the list a vaguer sentence
+    # would be wrong, and the operator is about to act on it.
+    after = [epoch["since"] for epoch in data["calibration"]
+             if (epoch.get("since") or "") > args.since]
+    oldest = data["calibration"][0].get("since") or args.since
+    print(f"\nsessions between {args.since} and "
+          f"{min(after) if after else 'now'} are judged by what you just "
+          f"stated. Anything older than {oldest} stays BEFORE-MEMORY.")
+    return 0
 
 
 # --- Recall -------------------------------------------------------------------
@@ -3244,7 +3461,9 @@ EXPORT_KEPT = [
     "session ids (random UUIDs the harness assigned)",
     "counts: entries, chains, bytes, tools per session, owed and received",
     "verdicts and states: VALID/BROKEN, completeness, dormancy, consumption",
-    "timestamps: when sessions started and ended, and the day book",
+    "timestamps: when sessions started and ended, the day book, and when "
+    "this supervisor's calibration memory begins",
+    "how many sessions are older than that memory and so went unjudged",
     "the recorder's commit, your Python version, and your OS family",
     "which harnesses recorded (claude-code, codex, openai-agents), by actor",
 ]
@@ -3396,6 +3615,15 @@ def build_export(report):
             "python": "%d.%d" % sys.version_info[:2],
             "os": platform.system(),
             "matchers": matchers,
+            # ADR-0029 ruling 4: the count travels, the rows never do.
+            # Without it a store older than its supervisor exports as a
+            # clean bill, and the first question a reader of field data
+            # asks is what happened before the tool was there.
+            "before_memory": {
+                "count": (report.get("completeness", {})
+                          .get("before_memory", {}).get("count", 0)),
+                "since": memory_since(calibration) if calibration else None,
+            },
             "actors": actors,
             "store": store,
             "day_book": day_book,
@@ -3691,7 +3919,7 @@ def witness_snapshot(report, unit, sessions):
                 for sess in repo.get("sessions", [])
                 for chain in sess.get("chains", [])
                 if Path(chain["log"]).name in names]
-    return {
+    snapshot = {
         "testimony": WITNESS_WORDS,
         "scanned": report.get("scanned"),
         "unit": unit,
@@ -3701,6 +3929,16 @@ def witness_snapshot(report, unit, sessions):
             for session in sessions],
         "scan": {"exit": report.get("exit"), "chains": verdicts},
     }
+    # ADR-0029 ruling 4: the count travels with the package, the rows do
+    # not. A recipient reading a row that says nothing but a session id
+    # needs to know the packing store is older than the supervisor that
+    # watched it, because that is one honest reason a row can be empty.
+    unjudged = (report.get("completeness", {}) or {}).get("before_memory")
+    if unjudged:
+        snapshot["before_memory"] = {k: unjudged[k]
+                                     for k in ("count", "since", "words")
+                                     if k in unjudged}
+    return snapshot
 
 
 def transcript_words(session, transcripts):
@@ -6084,6 +6322,14 @@ function render(report) {
     watch.appendChild(el("p", "claim",
       report.completeness.calibration.words));
   }
+  // ADR-0029: everything older than the calibration memory, counted in
+  // one line and never as rows. Stated even when the watch above is
+  // empty, because on a store older than its supervisor the silence
+  // would otherwise read as a clean bill.
+  if (report.completeness.before_memory) {
+    watch.appendChild(el("p", "claim",
+      report.completeness.before_memory.words));
+  }
 
   // The consumption watch (issue #67, OWASP LLM06 #8): sessions
   // burning far above the store's own norm — evidence for the
@@ -7077,7 +7323,39 @@ def main(argv):
                            "store, ADR-0011)")
     scan.add_argument("--json", action="store_true",
                       help="compact machine output (default pretty-prints)")
+    scan.add_argument("--before-memory", action="store_true",
+                      help="list the sessions older than this "
+                           "supervisor's calibration memory, which are "
+                           "counted but never judged (ADR-0029). Off by "
+                           "default: a store older than its supervisor "
+                           "holds scores of them")
     scan.set_defaults(func=cmd_scan)
+    calibrate_cmd = sub.add_parser(
+        "calibrate",
+        help="state what coverage was wired before this supervisor "
+             "started watching (ADR-0029)")
+    calibrate_cmd.add_argument(
+        "--root", default=None,
+        help="legacy/explicit mode: the folder of repos whose baseline "
+             "this seeds, instead of the store's (default: the store, "
+             "ADR-0011)")
+    calibrate_cmd.add_argument(
+        "--since", type=epoch_stamp, metavar="TS",
+        help="when the coverage you are stating came into force. Must be "
+             "before this supervisor's first observation: what it watched "
+             "itself is not yours to restate. Seeding the same date again "
+             "replaces that seed")
+    calibrate_cmd.add_argument(
+        "--matchers", action="append", metavar="M",
+        help="a PostToolUse matcher in force from --since (repeatable). "
+             "Use '*' for every completed tool call, or the list you had, "
+             "e.g. 'Edit|Write|NotebookEdit|Bash|PowerShell'")
+    calibrate_cmd.add_argument(
+        "--forget", type=epoch_stamp, metavar="TS",
+        help="remove an epoch you stated, by its --since date. Only your "
+             "own statements: an observed epoch is what this supervisor "
+             "saw and stands")
+    calibrate_cmd.set_defaults(func=cmd_calibrate)
     serve = sub.add_parser(
         "serve", parents=[watching],
         help="the face: status band on a localhost-only server")
