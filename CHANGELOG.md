@@ -10,8 +10,14 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- The coverage marker (ADR-0030): `install-hook` appends what it wired to `~/.loxodonta/coverage.json` as `since`, `matchers` and `harness`, one entry per change and nothing on an unchanged wiring. Every scan reads it fresh, merges it in memory, and never copies it into the baseline, which goes on holding only what the supervisor observed. A marker may fill time before the supervisor's first observation and never reach past it, the rule ADR-0029 already applies to an operator's seed; on the same instant the operator's word wins. Epochs now name their source, and any surface that judged a session by a non-observed one says so. `uninstall-hook` writes nothing, because a start claim says more calls owe receipts while an end claim says fewer, and "nothing was owed from here" is the silence the completeness alarm exists to catch. A store with no marker behaves exactly as before.
+
 ### Fixed
 
+- Following `docs/START.md` in order left a new installer with zero judged sessions. The page asks for five steps: wire the hook, work for a week, then scan. ADR-0029 stamps the calibration inception at the supervisor's first look, which is that scan, so every session recorded during the week fell before the memory watching it. Walked against the published files in a sandboxed home, install-work-scan gave 0 of 3 sessions judged; install-scan-work-scan gave 2 of 2. Closed by the coverage marker above, which dates coverage from when it was wired instead.
+- The empty-store scan note told a reader to run `loxodonta install-hook` even when the hook was already wired, so anyone who finished step 2 of `docs/START.md` and scanned out of curiosity was told to redo the step they had just done. An empty store means "nothing has run yet" when the hook is wired and "nothing is recording" when it is not, and those ask opposite things of the reader; the wired matchers tell them apart.
 - The install step in the README and `docs/START.md` showed the version line as `commit ...`, as though a hash would appear there. A file downloaded from the releases page prints `commit unknown`, because the version line reads the commit from the git checkout the file sits in and a download sits in none. Every reader following step 1 correctly met that word on their first command with nothing saying it was expected. Both pages now show the real output and say why.
 
 ## [0.5.0] - 2026-09-11

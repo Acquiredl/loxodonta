@@ -2002,6 +2002,144 @@ class BeforeMemoryTest(unittest.TestCase):
         self.assertIn("Only a seeded epoch", refused.stderr)
 
 
+class CoverageMarkerTest(unittest.TestCase):
+    """ADR-0030, from walking docs/START.md as a stranger: install the
+    hook, work for a week, then scan. The supervisor's first look is the
+    scan, so under ADR-0029 alone every session in that week falls
+    before its memory and is judged not at all — zero judged sessions
+    for a new installer, and an export that says nothing about the
+    flagship claim. The recorder knows when coverage began, because it
+    is the thing that wired it, and now it writes that down."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.store = Path(self._tmp.name).resolve() / "store"
+        self.store.mkdir()
+        install_witness_hook(self.witness, matcher="*")
+        self.env = {**os.environ, "LOXODONTA_HOME": str(self.store)}
+
+    def scan(self, *extra):
+        return run_scan(self.root, "--witness", str(self.witness),
+                        *extra, env=self.env)
+
+    def states(self, result):
+        return {s["session"]: s
+                for s in json.loads(result.stdout)["completeness"]["sessions"]}
+
+    def watch(self, result):
+        return json.loads(result.stdout)["completeness"]
+
+    def mark(self, since, matchers=("*",), harness="claude-code"):
+        """The marker as `install-hook` writes it (its own CLI is tested
+        in tests/test_hook.py); this exercises the reader."""
+        (self.store / "coverage.json").write_text(json.dumps({
+            "purpose": "test fixture",
+            "epochs": [{"since": since, "matchers": list(matchers),
+                        "harness": harness}]}), encoding="utf-8")
+
+    def a_session(self, name, when):
+        make_chain(self.root / "alpha" / "receipts", name, entries=3)
+        write_transcript(self.witness, self.root / "alpha", name,
+                         event_times=[when, when, when], tool="Bash")
+
+    def test_work_between_install_and_the_first_scan_is_judged(self):
+        # The walk, exactly: coverage wired two hours ago, work an hour
+        # ago, first scan now.
+        self.mark(ago(7200))
+        self.a_session("sess-week", ago(3600))
+
+        judged = self.states(self.scan())["sess-week"]
+
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+        self.assertEqual(judged["tools"], 3)
+
+    def test_without_the_marker_that_same_work_is_unjudged(self):
+        # The control, and the bug this ADR closes.
+        self.a_session("sess-week", ago(3600))
+
+        watch = self.watch(self.scan())
+
+        self.assertEqual(watch["sessions"], [])
+        self.assertEqual(watch["before_memory"]["count"], 1)
+
+    def test_the_marker_says_it_was_told_not_observed(self):
+        self.mark(ago(7200))
+        self.a_session("sess-week", ago(3600))
+
+        words = self.watch(self.scan())["calibration"]["words"]
+
+        self.assertIn("install-hook", words)
+        self.assertIn("judged on that word", words)
+
+    def test_a_marker_may_not_reach_time_the_supervisor_watched(self):
+        # Ruling 4. The first scan stamps the memory; a marker written
+        # afterwards cannot reopen what the supervisor has since been
+        # watching for itself.
+        self.scan()
+        self.a_session("sess-old", ago(3600))
+        self.mark(ago(60))
+
+        watch = self.watch(self.scan())
+
+        self.assertEqual(watch["before_memory"]["count"], 1,
+                         "a late marker never re-dates observed time")
+
+    def test_a_codex_marker_never_speaks_for_the_claude_code_witness(self):
+        self.mark(ago(7200), matchers=(".*",), harness="codex")
+        self.a_session("sess-week", ago(3600))
+
+        watch = self.watch(self.scan())
+
+        self.assertEqual(watch["before_memory"]["count"], 1)
+
+    def test_an_empty_store_tells_the_two_causes_apart(self):
+        # Found walking the five steps: a reader who finishes step 2 and
+        # scans out of curiosity was told to run install-hook, the step
+        # they had just finished. An empty store means "nothing has run
+        # yet" when the hook is wired and "nothing is recording" when it
+        # is not, and those want opposite things from the reader.
+        store = Path(self._tmp.name).resolve() / "freshstore"
+        env = {**os.environ, "LOXODONTA_HOME": str(store),
+               "PYTHONIOENCODING": "utf-8"}
+        # Its own parent: hook_matchers reads `<witness>/../settings.json`,
+        # so a bare path beside the wired witness would read the wired
+        # one's settings.
+        bare = Path(self._tmp.name).resolve() / "nohook" / "projects"
+        bare.mkdir(parents=True)
+
+        def scan_store(witness):
+            # No --root: the empty-store note belongs to store mode,
+            # which is the universe a new install lands in (ADR-0011).
+            return subprocess.run(
+                [sys.executable, str(SUPERVISOR), "scan", "--json",
+                 "--witness", str(witness)],
+                capture_output=True, encoding="utf-8", env=env)
+
+        unwired = scan_store(bare)
+        wired = scan_store(self.witness)
+
+        self.assertIn("install-hook", json.loads(unwired.stdout)["note"])
+        told = json.loads(wired.stdout)["note"]
+        self.assertIn("the hook is wired", told)
+        self.assertNotIn("install-hook", told,
+                         "never tell a reader to redo the step they just did")
+
+    def test_one_epoch_from_each_side_is_not_a_matcher_change(self):
+        # A marker and this supervisor's first look describe the same
+        # wiring from two sides. Calling that a change would report a
+        # widening nobody performed.
+        self.mark(ago(7200))
+        self.a_session("sess-week", ago(3600))
+
+        words = self.watch(self.scan())["calibration"]["words"]
+
+        self.assertNotIn("matchers changed", words)
+
+
 class FakeCalendarHandler(BaseHTTPRequestHandler):
     """The minimal calendar from the anchor suite: submits get a pending
     proof; polls get 404 while "pending", a Bitcoin continuation once

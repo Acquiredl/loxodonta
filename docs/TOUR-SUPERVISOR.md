@@ -156,6 +156,23 @@ at all, 186 files holding 78 MB against the parents' 353 MB, so a scan
 reads about 22% more bytes. Sessions that never delegate pay one failed
 directory lookup each.
 
+A fourth finding moved where the memory *starts* (ADR-0030). The
+calibration memory begins at the supervisor's first observation, and
+`docs/START.md` asks for a week of work between wiring the hook and the
+first scan, so a new installer's whole first week fell outside the
+memory watching it: zero judged sessions, and an export saying nothing
+about the flagship claim. The recorder knows when coverage begins,
+because it is the thing that wires it. `install-hook` now appends what
+it wired to `~/.loxodonta/coverage.json` (`since`, `matchers`,
+`harness`), and every scan reads that file fresh, merges it in memory,
+and never copies it into the baseline, which goes on holding only what
+the supervisor observed. A marker may fill time before the first
+observation and never reach past it, exactly as an operator's seed may
+not. `uninstall-hook` writes nothing, and that asymmetry is the point:
+a start claim says more calls owe receipts, an end claim says fewer,
+and "nothing was owed from here" is the silence the alarm exists to
+catch.
+
 `classify` is the ratified state machine — a pure reading of the
 evidence: OK / QUIET / LAGGING (a 30-second grace, because an honest
 lock wait must never alarm) / ALARM-SILENT (recording stopped) /

@@ -2794,8 +2794,16 @@ def install_codex_hooks(publish=None):
                                      "timeout": 5}]})
             installed.append(f"SessionStart: {digest}")
 
+    # ADR-0030: write down what is wired before the early return, so a
+    # machine that was already installed still records its coverage the
+    # first time a recorder that knows how walks past.
+    wired = [block.get("matcher", ".*") for block in post
+             if block_is_ours(block)]
+    marked = record_coverage(CODEX_ACTOR, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
+        if marked:
+            print(f"  coverage recorded in {coverage_path()}")
         return 0
     write_hooks_file(path, settings)
     print(f"installed in {path}"
@@ -2806,6 +2814,8 @@ def install_codex_hooks(publish=None):
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
               "moved — now pointing at this install")
+    if marked:
+        print(f"  coverage recorded in {coverage_path()}")
     print("Codex asks you to review new hooks once: open Codex and run "
           "/hooks to trust them.")
     print("every NEW Codex session on this machine then leaves a chain in")
@@ -2813,6 +2823,67 @@ def install_codex_hooks(publish=None):
           "drawer per project —")
     print("the same store your Claude Code sessions write to.")
     return 0
+
+
+# --- The coverage marker ------------------------------------------------------
+# ADR-0030. The recorder is the only program that knows the moment
+# coverage begins, because it is the one that wires it. Without this the
+# supervisor can date the beginning no earlier than its own first look,
+# and `docs/START.md` asks for a week of work between those two moments:
+# install, work, then scan. Every session in that week fell outside the
+# memory watching it and was judged not at all — silently, which is worse
+# for a first reader than the wrong-and-loud deficits ADR-0029 removed.
+
+COVERAGE_NAME = "coverage.json"
+COVERAGE_PURPOSE = (
+    "what install-hook wired, and when (ADR-0030). Testimony, written by "
+    "the recorder: the supervisor reads it to date coverage no later than "
+    "its own first look, and trusts it for nothing else. Only starts are "
+    "recorded here; uninstall-hook writes nothing, because 'nothing was "
+    "owed from here' is the one claim that could retire the completeness "
+    "alarm.")
+
+
+def coverage_path():
+    """Beside the supervisor's baseline, in the store the recorder owns
+    and creates."""
+    return os.path.join(store_home(), COVERAGE_NAME)
+
+
+def record_coverage(harness, matchers):
+    """Append what this install just wired, unless it wired what the
+    last one did — the `heal()` rule, applied to matchers, so re-running
+    the installer never grows the file (ADR-0030 ruling 1). Scoped by
+    harness because `--codex` wires `.*` into a different settings file
+    and must never speak for the Claude Code witness.
+
+    Every failure is a silent skip. An installer that refused to finish
+    over a bookkeeping file would be a worse trade than a memory that
+    starts late, and the operator has louder ways to learn the store is
+    unwritable. Returns whether an entry was appended."""
+    entry = {"since": now_ts(), "matchers": list(matchers),
+             "harness": harness}
+    try:
+        os.makedirs(store_home(), exist_ok=True)
+        try:
+            with open(coverage_path(), encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        epochs = [epoch for epoch in data.get("epochs", [])
+                  if isinstance(epoch, dict)
+                  and isinstance(epoch.get("matchers"), list)]
+        last = next((epoch for epoch in reversed(epochs)
+                     if epoch.get("harness") == harness), None)
+        if last and last.get("matchers") == entry["matchers"]:
+            return False
+        body = json.dumps({"purpose": COVERAGE_PURPOSE,
+                           "epochs": epochs + [entry]}, indent=2)
+        with open(coverage_path(), "w", encoding="utf-8", newline="\n") as f:
+            f.write(body + "\n")
+        return True
+    except OSError:
+        return False
 
 
 def cmd_install_hook(args):
@@ -2929,8 +3000,13 @@ def cmd_install_hook(args):
               "wired without the session-start digest; put supervisor.py "
               "next to loxodonta.py and re-run to add it")
 
+    # ADR-0030: as on the Codex half, before the early return.
+    wired = [block.get("matcher", "*") for block in post if ours(block)]
+    marked = record_coverage("claude-code", wired)
     if not installed and not healed:
         print(f"already installed in {path}")
+        if marked:
+            print(f"  coverage recorded in {coverage_path()}")
         return 0
 
     write_hooks_file(path, settings)
@@ -2942,6 +3018,8 @@ def cmd_install_hook(args):
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
               "moved — now pointing at this install")
+    if marked:
+        print(f"  coverage recorded in {coverage_path()}")
     print("every NEW Claude Code session on this machine now leaves a chain")
     print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
     print("drawer per project. Restart open sessions.")
