@@ -10,6 +10,14 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `docs/START.md`, the page for someone who has already decided to run the tool: five steps from the releases page to `supervisor export`, with the agent install offered above them as a copy-pasteable prompt for the Claude Code or Codex the reader most likely already has in their terminal, and the plain statement of what it means to ask an agent to wire up its own recorder. The README keeps the front door for the undecided and carries one pointer to it under Install. `tools/house_check.py` judges `START.md` as a front-door file although it lives in `docs/`, where em dashes and hedged overclaims are otherwise allowed, because it is read before any trust has been extended, which is why that rule exists; one test pins it.
+
+### Changed
+
+- ADR-0022 ruling 4 is amended by ADR-0028: a promotion to `main` that changes neither `loxodonta.py` nor `supervisor.py` carries no tag and no release, because the tool version says which recorder and supervisor a person is running (ruling 3) and a documentation page moves neither. The test is `git diff` over the two files. Promotions that move either tool are unchanged, as is the patch path for a hotfix cherry-picked to `main`, and the release workflow's tag-matches-`TOOL_VERSION` gate is untouched since it runs on a tag and such a promotion pushes none.
+
 ## [0.4.0] - 2026-09-11
 
 The release where the reader starts counting. The dashboard gains an activity tab over what the chains already hold, and the hook is asked for nothing new to draw it. Three lines that were teaching the operator to ignore the tool are fixed: an anchor that stayed pending after it had settled, a scan that raised the flagship alarm out of a wrong invocation, and a suite that ran only one way.
