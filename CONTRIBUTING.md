@@ -54,8 +54,23 @@ exactly this command, so passing it locally is passing CI:
 python tools/house_check.py
 ```
 
-The Markdown has two more checks, and they run in CI only: markdownlint
-(rules in `.markdownlint.yml`) and lychee, the link checker (exclusions and
+One markdownlint rule is worth catching before CI does, because it is the
+one an edit trips by accident: MD012, no two blank lines in a row. It
+failed two pull requests in a row on the same file, both times from a
+section appended with one newline too many.
+
+```
+python tools/md_blanks.py
+```
+
+That script deliberately strips the line ending before testing whether a
+line is blank. On a Windows checkout git leaves a carriage return on every
+line, so a blank line is `
+` rather than empty, and the obvious one-line
+shell version of this check silently passes everything.
+
+The rest of the Markdown checks run in CI only: the remaining markdownlint
+rules (in `.markdownlint.yml`) and lychee, the link checker (exclusions and
 their reasons in `lychee.toml`; it also runs weekly, so a link that dies
 quietly still gets noticed). Neither needs anything installed here.
 
