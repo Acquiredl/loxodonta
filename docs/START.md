@@ -64,6 +64,12 @@ on Windows). There is no daemon and no scheduled job. The command writes one
 entry into your harness's settings file, and the harness runs the recorder as
 a child process after each completed tool call.
 
+On its own that is the lower tier. An edit, a deletion, or a reorder of a
+receipt is caught unconditionally; a chain regenerated from scratch is caught
+only against a head kept off the machine. `install-hook --publish-head URL`
+posts the chain head to a remote when a session ends, and the installer says
+which tier you are on either way. [HOOK.md](HOOK.md) says which remotes count.
+
 ### 3. Work normally
 
 This is the step that takes time and no effort. Use your agent the way you

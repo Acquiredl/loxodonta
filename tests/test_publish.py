@@ -482,6 +482,44 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("no longer", result.stdout)
         self.assertIn("publish", result.stdout)
 
+    def test_a_flagless_install_says_no_head_record_is_wired(self):
+        # ADR-0002's tiers: an edit, a deletion, or a reorder is caught
+        # unconditionally; a regenerated chain only against a head kept
+        # off the machine. A plain install is the lower tier, and the
+        # installer says so, on first install and on every re-run (#221).
+        first = self.install()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("no head record", first.stdout)
+        self.assertIn("--publish-head", first.stdout)
+
+        again = self.install()
+        self.assertIn("already installed", again.stdout)
+        self.assertIn("no head record", again.stdout)
+
+    def test_an_install_with_an_opt_in_says_nothing_about_the_tier(self):
+        # Either opt-in is a rememberer off the machine: the published
+        # head (ADR-0025) or the anchor (ADR-0024). The line is for the
+        # install that has neither.
+        with_publish = self.install("--publish-head", self.URL)
+        self.assertEqual(with_publish.returncode, 0, with_publish.stderr)
+        self.assertNotIn("no head record", with_publish.stdout)
+
+        with_anchor = self.install("--anchor-at-session-end")
+        self.assertEqual(with_anchor.returncode, 0, with_anchor.stderr)
+        self.assertNotIn("no head record", with_anchor.stdout)
+
+    def test_a_flagless_codex_install_names_only_the_opt_in_codex_has(self):
+        # Codex refuses the session-end anchor (ADR-0024), so its line
+        # names --publish-head alone.
+        (self.home / ".codex").mkdir()
+
+        result = self.install("--codex")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no head record", result.stdout)
+        self.assertIn("--publish-head", result.stdout)
+        self.assertNotIn("--anchor-at-session-end", result.stdout)
+
     def test_both_opt_ins_ride_on_the_one_command(self):
         result = self.install("--anchor-at-session-end",
                               "--publish-head", self.URL)
