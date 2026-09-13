@@ -1045,6 +1045,33 @@ class OffMachineTest(ServerFixture):
             self.assertEqual(response.status, 200)
 
 
+class ResponseHeadersTest(ServerFixture):
+    """Two headers on every response (#225): a browser never guesses a
+    type for a JSON body, and no page on any origin may frame the
+    dashboard. The page is all inline script, so a full policy would
+    need a nonce; frame-ancestors is the one directive that costs
+    nothing here."""
+
+    def test_every_response_carries_nosniff_and_frame_ancestors(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        for path in ("/", "/api/status"):
+            with OPENER.open(self.url + path, timeout=30) as response:
+                self.assertEqual(response.headers.get("X-Content-Type-Options"),
+                                 "nosniff", path)
+                self.assertEqual(response.headers.get("Content-Security-Policy"),
+                                 "frame-ancestors 'none'", path)
+        # A refusal is a response too.
+        request = urllib.request.Request(
+            self.url + "/api/status", headers={"Host": "attacker.example"})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            OPENER.open(request, timeout=30)
+        self.assertEqual(caught.exception.code, 403)
+        self.assertEqual(caught.exception.headers.get("X-Content-Type-Options"),
+                         "nosniff")
+
+
 class RecallTest(ServerFixture):
     """The memory surface (GLOSSARY: Recall): the timeline endpoint reads
     chains as testimony — what was attempted, when, in which repo — and
