@@ -329,16 +329,20 @@ def append_locked(log, actor, action, files):
         return 1
 
     # SPEC §3: case-insensitivity belongs to filesystems, not the format.
-    # Catch a case-only respelling here, on the machine that knows. This
-    # re-parses the whole log on every append — fine at session scale
-    # (hundreds of entries), but it makes each append O(chain length) in
-    # the hook's hot path; revisit if chains ever grow long.
-    known_paths = {ref["path"] for line in lines for ref in json.loads(line)["files"]}
-    for ref in files:
-        for known in known_paths:
-            if ref["path"] != known and ref["path"].lower() == known.lower():
-                print(f"warning: {ref['path']} differs only by case from "
-                      f"already-referenced {known}", file=sys.stderr)
+    # Catch a case-only respelling here, on the machine that knows, and
+    # not at verify time, which may run on a machine whose filesystem
+    # does not (ADR-0026). The check parses the whole chain, so it runs
+    # only for a receipt that carries files; most hook receipts carry
+    # none, and those append without paying for it (#222; 19 ms on a
+    # 3,878-entry chain, against 55 ms of interpreter start).
+    if files:
+        known_paths = {ref["path"] for line in lines
+                       for ref in json.loads(line)["files"]}
+        for ref in files:
+            for known in known_paths:
+                if ref["path"] != known and ref["path"].lower() == known.lower():
+                    print(f"warning: {ref['path']} differs only by case from "
+                          f"already-referenced {known}", file=sys.stderr)
 
     entry = {
         "n": last["n"] + 1,
