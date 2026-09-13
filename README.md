@@ -175,7 +175,7 @@ One honest note on timing: an anchor hardens history **up to the anchored head**
 
 **Exit codes**, since scripts and cron will read them: `0` valid, `1` chain broken, `2` a logged file changed since its receipt (`verify --files`), `3` this is not the recorded history (head or anchor mismatch, the gravest tier). Usage errors (a wrong flag, a malformed value) exit `64`, a number no verdict uses. Read the stdout verdict line anyway: the code says how grave, the line says why.
 
-The recorder is one Python file, no dependencies, six core commands, and you can read the whole thing top to bottom in a sitting. That's a design constraint, not an accident: a tool whose job is auditing agents should itself be auditable in an afternoon.
+The recorder is one Python file, no dependencies, and you can read the whole thing top to bottom in a sitting. That's a design constraint, not an accident: a tool whose job is auditing agents should itself be auditable in an afternoon.
 
 ## What a recorded task looks like
 
