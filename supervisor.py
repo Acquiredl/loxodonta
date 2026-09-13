@@ -4925,6 +4925,16 @@ class Face(BaseHTTPRequestHandler):
             return
         self.reply(json.dumps(report).encode("utf-8"), "application/json")
 
+    def end_headers(self):
+        # Two headers on every response, refusals included (#225): a
+        # browser never guesses a type for a JSON body, and no page on
+        # any origin may frame the dashboard. The page is all inline
+        # script and style, so a full policy would need a nonce; this is
+        # the one directive that costs nothing here.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        super().end_headers()
+
     def reply(self, body, content_type):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
