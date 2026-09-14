@@ -8,7 +8,7 @@ The harness executes a *path*, not a version. `install-hook` writes an
 absolute command into the user's settings:
 
 ```
-"…/python.exe" "S:/Code/repos/loxodonta/loxodonta.py" hook
+"…/python.exe" "…/repos/loxodonta/loxodonta.py" hook
 ```
 
 Nothing about that line pins a commit and nothing copies the file. The
