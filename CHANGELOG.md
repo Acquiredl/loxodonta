@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- The README is rewritten from scratch at a third of its length, 135 lines in place of 334, by a reader who met the repo cold and reproduced every claim before writing one (#233). The wordmark, tagline and badges stay, and so do the three pinned command blocks the suite runs. Four wordings were tightened on the way: the install sentence names both files, `install-hook` is described as hook entries in the harness settings file rather than one entry, exit codes 4 and 5 are listed with the rest, and the recorded-task excerpt that carried a machine-specific drawer hash is gone. What the front door no longer says, it links to.
+
 ## [0.7.0] - 2026-09-13
 
 The release that came out of three outside reviews, all machine-written, of the public repo at v0.6.0. Most of what they observed was already true and stayed so, what they got wrong went nowhere, and three things they noticed in passing were real: a flagless install said nothing about the tier it left you on, every append re-read the whole chain for a check most receipts did not need, and the dashboard sent two headers fewer than a browser deserves. Two more came from how the reviews explained the tool back. They named the harnesses and drew the parts in their first lines, and the README did neither above the fold.
