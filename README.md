@@ -5,6 +5,8 @@
 
 [![tests](https://github.com/Acquiredl/loxodonta/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Acquiredl/loxodonta/actions/workflows/tests.yml) [![python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/downloads/) [![no dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#install) [![license MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
+Works with Claude Code, Codex CLI, and the OpenAI Agents SDK. Anything else that can run a command leaves a receipt through `run`.
+
 Every completed tool call your agent makes leaves a receipt, and one command tells you whether history was touched. The agent has the same access to that log as to everything else on the machine: a prompt-injected session can add tool calls that never ran, remove the ones that would give it away, and rewrite the file as if nothing happened. loxodonta is built with that agent as the adversary. Every receipt carries the hash of the one before it, so an edit, a deletion, or a reorder breaks the chain, and an anchor puts the chain head where no rewrite on the machine can reach.
 
 - **The bad day.** A prompt-injected session keeps leaving receipts, because the hook fires outside the agent's control. Afterward you have what it did, in order, whether that record was touched since, and a redacted export to study. In the OWASP Top 10 for LLM applications this is the forensic layer for LLM01, prompt injection, and the monitored tool use that LLM03, excessive agency, prescribes: one layer among several, never the only one.
@@ -33,13 +35,19 @@ BROKEN at entry 1: entry_hash does not match canonical form
 
 Tamper-evident, not immutable: the change was caught, not stopped. Nothing here keeps an agent from rewriting its log. Everything here makes the rewrite show.
 
+Three parts:
+
+- **`loxodonta.py`, the recorder.** Writes receipts, judges chains, anchors and publishes heads. The harness runs it after each completed tool call.
+- **`supervisor.py`, the reader.** Scans every chain in the store, serves the dashboard on localhost, hands the next session its history. It decides nothing itself: every verdict is the recorder's own `verify`.
+- **`adapters/`, the translators.** One file per harness that cannot spawn the hook itself, turning its events into the recorder's hook payload. Today that is the OpenAI Agents SDK; Claude Code and Codex CLI need none, `install-hook` wires the recorder in directly.
+
 ## Install
 
 One file, Python 3.9 or newer, nothing to install. Download `loxodonta.py` and `supervisor.py` from the [releases page](https://github.com/Acquiredl/loxodonta/releases) into one folder, check their sums against the `SHA256SUMS` attached to the same release, and ask the file which version it is:
 
 ```
 sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Windows
-python loxodonta.py --version     # loxodonta 0.6.0 (format 0.1, commit unknown)
+python loxodonta.py --version     # loxodonta 0.7.0 (format 0.1, commit unknown)
 ```
 
 `commit unknown` is the right answer for a file you downloaded. The version
@@ -167,7 +175,7 @@ One honest note on timing: an anchor hardens history **up to the anchored head**
 
 **Exit codes**, since scripts and cron will read them: `0` valid, `1` chain broken, `2` a logged file changed since its receipt (`verify --files`), `3` this is not the recorded history (head or anchor mismatch, the gravest tier). Usage errors (a wrong flag, a malformed value) exit `64`, a number no verdict uses. Read the stdout verdict line anyway: the code says how grave, the line says why.
 
-It's one Python file, no dependencies, six core commands, and you can read the whole thing top to bottom in a sitting. That's a design constraint, not an accident: a tool whose job is auditing agents should itself be auditable in an afternoon.
+The recorder is one Python file, no dependencies, and you can read the whole thing top to bottom in a sitting. That's a design constraint, not an accident: a tool whose job is auditing agents should itself be auditable in an afternoon.
 
 ## What a recorded task looks like
 

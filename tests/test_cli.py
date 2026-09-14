@@ -486,6 +486,32 @@ class FileReferenceTest(ReceiptsCliTest):
         self.assertIn("report.md", result.stderr.lower())
         self.assertEqual(self.last_entry()["files"][0]["path"], "Report.md")
 
+    def test_entries_without_files_do_not_lose_the_case_warning(self):
+        # The case check compares against chain history (SPEC §3). Most
+        # receipts carry no files and skip building that history (#222);
+        # the ones that do must still see every spelling ever recorded,
+        # however many file-less entries sit in between.
+        self.write_file("report.md", "content\n")
+        run_receipts("log", "--actor", "agent", "--action", "first spelling",
+                     "--file", "report.md", cwd=self.workdir)
+        for action in ("ran the tests", "read the diff"):
+            bare = run_receipts("log", "--actor", "agent", "--action", action,
+                                cwd=self.workdir)
+            self.assertEqual(bare.returncode, 0, bare.stderr)
+            self.assertEqual(bare.stderr, "")
+        self.write_file("Report.md", "content\n")
+
+        result = run_receipts(
+            "log", "--actor", "agent", "--action", "second spelling",
+            "--file", "Report.md", cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("case", result.stderr.lower())
+        self.assertIn("report.md", result.stderr.lower())
+        verified = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(verified.returncode, 0, verified.stdout)
+
     def test_log_with_nonexistent_file_errors_cleanly(self):
         before = self.log_path.read_text(encoding="utf-8")
 

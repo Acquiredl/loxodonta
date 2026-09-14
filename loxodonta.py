@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.6.0"
+TOOL_VERSION = "0.7.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -329,16 +329,20 @@ def append_locked(log, actor, action, files):
         return 1
 
     # SPEC §3: case-insensitivity belongs to filesystems, not the format.
-    # Catch a case-only respelling here, on the machine that knows. This
-    # re-parses the whole log on every append — fine at session scale
-    # (hundreds of entries), but it makes each append O(chain length) in
-    # the hook's hot path; revisit if chains ever grow long.
-    known_paths = {ref["path"] for line in lines for ref in json.loads(line)["files"]}
-    for ref in files:
-        for known in known_paths:
-            if ref["path"] != known and ref["path"].lower() == known.lower():
-                print(f"warning: {ref['path']} differs only by case from "
-                      f"already-referenced {known}", file=sys.stderr)
+    # Catch a case-only respelling here, on the machine that knows, and
+    # not at verify time, which may run on a machine whose filesystem
+    # does not (ADR-0026). The check parses the whole chain, so it runs
+    # only for a receipt that carries files; most hook receipts carry
+    # none, and those append without paying for it (#222; 19 ms on a
+    # 3,878-entry chain, against 55 ms of interpreter start).
+    if files:
+        known_paths = {ref["path"] for line in lines
+                       for ref in json.loads(line)["files"]}
+        for ref in files:
+            for known in known_paths:
+                if ref["path"] != known and ref["path"].lower() == known.lower():
+                    print(f"warning: {ref['path']} differs only by case from "
+                          f"already-referenced {known}", file=sys.stderr)
 
     entry = {
         "n": last["n"] + 1,
@@ -2681,6 +2685,24 @@ def session_end_notice(old, new, choices):
     return f" ({'; '.join(parts)})" if parts else ""
 
 
+def head_record_notice(anchor, publish, codex=False):
+    """The line a flagless install prints, on first install and on every
+    re-run. A chain with no head record wired is the lower tier of
+    ADR-0002: an edit, a deletion, or a reorder is caught unconditionally,
+    a regenerated chain only against a head kept off the machine. Nothing
+    leaves the machine without the opt-in (ADR-0024), so the installer
+    says which tier this is rather than defaulting the other (#221).
+    Codex has no session-end anchor (ADR-0024), so its line names the one
+    opt-in it has."""
+    if anchor or publish:
+        return ""
+    opt_ins = ("--publish-head URL" if codex
+               else "--publish-head URL or --anchor-at-session-end")
+    return ("note: no head record wired — a regenerated chain is caught only "
+            "against a head you keep (`head`, then `verify --expect-head`). "
+            f"Opt in with {opt_ins}; docs/HOOK.md says which remotes count.")
+
+
 def supervisor_path():
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, "supervisor.py")
@@ -2771,6 +2793,7 @@ def install_codex_hooks(publish=None):
     # states the choice each time: a re-run without the flag turns it
     # off and says so (ADR-0025 ruling 3), as on Claude Code.
     choices = session_end_choices(False, publish)
+    tier = head_record_notice(False, publish, codex=True)
     for block in end:
         for wired in block.get("hooks", []):
             old = wired.get("command", "")
@@ -2804,6 +2827,8 @@ def install_codex_hooks(publish=None):
         print(f"already installed in {path}")
         if marked:
             print(f"  coverage recorded in {coverage_path()}")
+        if tier:
+            print(tier)
         return 0
     write_hooks_file(path, settings)
     print(f"installed in {path}"
@@ -2822,6 +2847,8 @@ def install_codex_hooks(publish=None):
     print(f"the store ({os.path.join(store_home(), 'receipts')}), one "
           "drawer per project —")
     print("the same store your Claude Code sessions write to.")
+    if tier:
+        print(tier)
     return 0
 
 
@@ -2969,6 +2996,7 @@ def cmd_install_hook(args):
     # step off, and says so.
     choices = session_end_choices(args.anchor_at_session_end,
                                   args.publish_head)
+    tier = head_record_notice(args.anchor_at_session_end, args.publish_head)
     for block in end:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
@@ -3007,6 +3035,8 @@ def cmd_install_hook(args):
         print(f"already installed in {path}")
         if marked:
             print(f"  coverage recorded in {coverage_path()}")
+        if tier:
+            print(tier)
         return 0
 
     write_hooks_file(path, settings)
@@ -3023,6 +3053,8 @@ def cmd_install_hook(args):
     print("every NEW Claude Code session on this machine now leaves a chain")
     print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
     print("drawer per project. Restart open sessions.")
+    if tier:
+        print(tier)
     return 0
 
 

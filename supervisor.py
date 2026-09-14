@@ -68,7 +68,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # supervisor is running and is tagged together with loxodonta.py — the
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
-TOOL_VERSION = "0.6.0"
+TOOL_VERSION = "0.7.0"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -4924,6 +4924,16 @@ class Face(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         self.reply(json.dumps(report).encode("utf-8"), "application/json")
+
+    def end_headers(self):
+        # Two headers on every response, refusals included (#225): a
+        # browser never guesses a type for a JSON body, and no page on
+        # any origin may frame the dashboard. The page is all inline
+        # script and style, so a full policy would need a nonce; this is
+        # the one directive that costs nothing here.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        super().end_headers()
 
     def reply(self, body, content_type):
         self.send_response(200)

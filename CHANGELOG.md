@@ -10,6 +10,20 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-13
+
+The release that came out of three outside reviews, all machine-written, of the public repo at v0.6.0. Most of what they observed was already true and stayed so, what they got wrong went nowhere, and three things they noticed in passing were real: a flagless install said nothing about the tier it left you on, every append re-read the whole chain for a check most receipts did not need, and the dashboard sent two headers fewer than a browser deserves. Two more came from how the reviews explained the tool back. They named the harnesses and drew the parts in their first lines, and the README did neither above the fold.
+
+### Added
+
+- `install-hook` says which tier a flagless install is on (#221). A plain install wires local-only recording: an edit, a deletion, or a reorder of a receipt is caught unconditionally, a chain regenerated from scratch only against a head kept off the machine. Until now that went unsaid unless a flag was present. One line now, on first install and on every re-run, for Claude Code and Codex alike; the Codex line names the one opt-in it has, since it has no session-end anchor (ADR-0024). The opt-in posture itself is unchanged, and `docs/START.md` step 2 says the same in one paragraph.
+- The dashboard sends `X-Content-Type-Options: nosniff` and `Content-Security-Policy: frame-ancestors 'none'` on every response, refusals included (#225). Loopback-only listening, the Host and Origin refusals, and a page that never touches `innerHTML` were the defenses that mattered; these two close the browser behaviors they did not cover. A full policy would need a nonce, since the page is all inline script, and is held out.
+
+### Changed
+
+- The case-only respelling check runs only for receipts that carry files (#222). `append_locked` parsed every line of the chain on every append to build the set of paths ever referenced (SPEC §3), and most hook receipts carry no files and paid for it anyway. Measured through the CLI on a 3,878-entry chain, a file-less append went from 157 ms to 146 ms median, whole process, interpreter start included. The check stays at append time, on the machine whose filesystem knows the answer (ADR-0026), and a test guards the one way the guard could be wrong: file-less entries between two spellings must not lose the warning.
+- The README names its harnesses and its parts on the first screen: one line under the badges for Claude Code, Codex CLI, and the OpenAI Agents SDK, and a three-item map of recorder, reader, and translators between the demo and Install. The one-file sentence in How it works says which file it is true of, the recorder, and no longer counts its commands. Structure borrowed from the reviews; their phrasing was not, since it leans on the words this repo refuses.
+
 ## [0.6.0] - 2026-09-11
 
 The release that came out of walking the front door as a stranger. Following the five steps in order left a new installer with nothing judged at all, because the supervisor could date the beginning of coverage no earlier than its own first look and the page puts a week of work before that. The recorder knows when coverage begins, since it is the thing that wires it, so now it writes that down. Three smaller faults on the same path went with it, each of them something a reader met in their first two commands.
@@ -120,7 +134,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.6.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.7.0...dev
+[0.7.0]: https://github.com/Acquiredl/loxodonta/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Acquiredl/loxodonta/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Acquiredl/loxodonta/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Acquiredl/loxodonta/compare/v0.3.0...v0.4.0

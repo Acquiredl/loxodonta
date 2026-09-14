@@ -41,7 +41,7 @@ the same release, then ask the file which version it is.
 
 ```
 sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Windows
-python loxodonta.py --version     # loxodonta 0.6.0 (format 0.1, commit unknown)
+python loxodonta.py --version     # loxodonta 0.7.0 (format 0.1, commit unknown)
 ```
 
 That last word is `unknown` on purpose, and it is the first thing you will
@@ -63,6 +63,12 @@ Every new session on this machine now leaves a chain of receipts under
 on Windows). There is no daemon and no scheduled job. The command writes one
 entry into your harness's settings file, and the harness runs the recorder as
 a child process after each completed tool call.
+
+On its own that is the lower tier. An edit, a deletion, or a reorder of a
+receipt is caught unconditionally; a chain regenerated from scratch is caught
+only against a head kept off the machine. `install-hook --publish-head URL`
+posts the chain head to a remote when a session ends, and the installer says
+which tier you are on either way. [HOOK.md](HOOK.md) says which remotes count.
 
 ### 3. Work normally
 
