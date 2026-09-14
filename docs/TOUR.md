@@ -154,7 +154,7 @@ damage — cluster 3); the unattended hook *routes around* (sibling chains
 ## 3. Core commands — init / log / run / head
 
 The manual surface. `receipts init` opens the logbook; `receipts log
---actor steph --action "rewrote the intro" --file README.md` spikes a
+--actor author --action "rewrote the intro" --file README.md` spikes a
 ticket that not only *says* it touched a file but records a
 **fingerprint of the food itself** — the file's SHA-256 at that moment,
 which `verify --files` can later compare against the counter.
