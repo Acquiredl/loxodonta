@@ -272,7 +272,7 @@ An external commitment of the chain head to a system the log owner doesn't contr
 
 ## Cross-references
 
-- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`, `adrs/0018-session-lifecycle-reading.md`, `adrs/0024-anchor-at-session-end-opt-in-at-install.md`, `adrs/0025-a-head-record-is-what-the-machine-cannot-unsay.md`, `adrs/0026-the-store-ships-as-a-package-verified-by-one-file.md`, `adrs/0027-the-dashboard-counts-what-the-chain-holds.md`
+- ADRs that touched this glossary: `adrs/0001-hash-chain-not-signatures.md`, `adrs/0002-writer-as-adversary.md`, `adrs/0004-serialize-hook-appends.md`, `adrs/0005-supervisor-as-sibling-tool.md`, `adrs/0006-evidence-grades-generalize-testimony.md`, `adrs/0007-sidecar-manifest-seals-the-package.md`, `adrs/0008-issuer-signatures-for-derived-packages.md`, `adrs/0009-recall-surface-lives-in-the-supervisor.md`, `adrs/0016-coverage-goes-wide.md`, `adrs/0017-transcript-commitments.md`, `adrs/0018-session-lifecycle-reading.md`, `adrs/0024-anchor-at-session-end-opt-in-at-install.md`, `adrs/0025-a-head-record-is-what-the-machine-cannot-unsay.md`, `adrs/0026-the-store-ships-as-a-package-verified-by-one-file.md`, `adrs/0027-the-dashboard-counts-what-the-chain-holds.md`, `adrs/0031-the-entries-go-to-a-url-that-can-only-add-never-delete.md`
 - Related out-of-scope decisions: none yet.
 
 ---
