@@ -28,7 +28,7 @@ The human who owns the machine and the receipt log, and who runs `verify`. The o
 
 ### Writer
 
-The process that appends entries to the log — in the target use case, an AI agent (directly in Stage A, via a harness hook in Stage C). The writer is **semi-trusted**: trusted to run, *not* trusted to leave history alone afterward. The writer is the tool's primary adversary — receipts exists so that a writer that edits, deletes, or reorders its own history is always caught.
+The process that appends entries to the log — in the target use case, an AI agent (directly in Stage A, via a harness hook in Stage C). The writer is **semi-trusted**: trusted to run, *not* trusted to leave history alone afterward. The writer is the tool's primary adversary — the tool exists so that a writer that edits, deletes, or reorders its own history is always caught.
 
 **One writer per log — and the writer is a *process*, not a session.** The distinction is load-bearing and was learned the hard way (ADR-0004): a Claude Code session runs tool calls in parallel and the harness fires one hook process per call, so a chain keyed by session id has many writers at once. Where several processes must share a chain, the integration serializes them with a lock; the format itself offers no concurrency guarantee.
 
@@ -98,7 +98,7 @@ One line of the receipt log: a JSON object with exactly `n`, `ts`, `actor`, `act
 
 ### Genesis
 
-The entry with `n == 0` and `prev == null` — the only entry allowed a null `prev`, and the only entry carrying `v`, the format version. Written by `receipts init` with pinned contents (`actor: "receipts"`, `action: "genesis"`, `files: []`); only its timestamp varies. The chain's title page: who started it, when, and under which rulebook — all hash-committed, so a chain can't be relabeled to a different version without breaking. Derived trail designs extend the title page: their genesis payload must commit every ingredient whose change alters output (format version, engine identity, prompt hash, check-catalog version, evaluation-suite version), so "why did this assessment change" always has a recorded answer (ADR-0006, provenance corollary).
+The entry with `n == 0` and `prev == null` — the only entry allowed a null `prev`, and the only entry carrying `v`, the format version. Written by `loxodonta init` with pinned contents (`actor: "receipts"`, `action: "genesis"`, `files: []`); only its timestamp varies. The chain's title page: who started it, when, and under which rulebook — all hash-committed, so a chain can't be relabeled to a different version without breaking. Derived trail designs extend the title page: their genesis payload must commit every ingredient whose change alters output (format version, engine identity, prompt hash, check-catalog version, evaluation-suite version), so "why did this assessment change" always has a recorded answer (ADR-0006, provenance corollary).
 
 ### Tool version
 
@@ -206,7 +206,7 @@ The set of tool calls that owe a receipt: defined by the `PostToolUse` matchers 
 
 ### Completeness
 
-The property receipts deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`receipts run`, pipeline gate scripts, the Stage C harness hook) — and is judged against [coverage](#coverage). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
+The property the tool deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`loxodonta run`, pipeline gate scripts, the Stage C harness hook) — and is judged against [coverage](#coverage). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
 
 ### Adapter
 
