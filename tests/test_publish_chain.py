@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.request
 from pathlib import Path
 
 # This folder on sys.path, so the sibling imports below also resolve
@@ -28,10 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_anchor import clean_env
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
 from test_receiver import make_chain, run_recorder
+from test_supervisor import (chain_head, chains_by_session, keeper_env,
+                             make_chain as make_store_chain, run_scan)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 RECEIVER = REPO_ROOT / "receiver.py"
+SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 NDJSON = "application/x-ndjson"
 PUBLISH_TO = re.compile(r"^publish to (https?://\S+)$", re.M)
@@ -674,6 +678,186 @@ class InstallPublishChainTest(unittest.TestCase):
         self.assertIn("--publish-chain", result.stderr)
         self.assertIn("--publish-every", result.stderr)
         self.assertFalse((self.home / ".codex" / "hooks.json").exists())
+
+
+class PublishChainKeeperTest(unittest.TestCase):
+    """`scan|serve --publish-every AGE --publish-url URL --publish-chain
+    URL`: on the keeper's turn the head goes first and the chain's
+    entries since the cursor after it, through the recorder's command,
+    at most once each per throttle window (ADR-0031 ruling 3). The
+    chain route is its own opt-in: the head's flags alone never send
+    an entry anywhere."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.receiver = serve_fake(self)
+
+    def scan(self, *extra, **knobs):
+        return run_scan(self.root, *extra, env=keeper_env(**knobs))
+
+    def kinds(self):
+        return [sent["content_type"] for sent in self.receiver.received]
+
+    def test_the_turn_sends_the_head_then_the_chain_once_per_window(self):
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-turn")
+        head = chain_head(log)
+
+        result = self.scan("--publish-every", "0s",
+                           "--publish-url", self.receiver.url,
+                           "--publish-chain", self.receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.kinds(), ["application/json", NDJSON])
+        self.assertEqual(json.loads(self.receiver.received[0]["raw"])["head"],
+                         head)
+        batch = self.receiver.received[1]
+        self.assertEqual(batch["raw"], log.read_bytes())
+        self.assertEqual(batch["headers"]["x-loxodonta-range"], "0-2")
+        self.assertEqual(batch["headers"]["x-loxodonta-session"], "sess-turn")
+        self.assertEqual([row.get("kind") for row in memo_of(log)],
+                         [None, "chain"])
+        self.assertEqual(chain_rows(log)[0]["event"], "cadence")
+
+        # The same tick again, inside the throttle window: nothing moves.
+        again = self.scan("--publish-every", "0s",
+                          "--publish-url", self.receiver.url,
+                          "--publish-chain", self.receiver.url)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(len(self.receiver.received), 2)
+
+        # A chain that grew, on the next window: the new head, and only
+        # the lines after the cursor.
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "step 3"],
+            capture_output=True, check=True)
+        grown = self.scan("--publish-every", "0s",
+                          "--publish-url", self.receiver.url,
+                          "--publish-chain", self.receiver.url,
+                          SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        self.assertEqual(grown.returncode, 0, grown.stdout + grown.stderr)
+        self.assertEqual(self.kinds(),
+                         ["application/json", NDJSON,
+                          "application/json", NDJSON])
+        self.assertEqual(self.receiver.received[3]["headers"]
+                         ["x-loxodonta-range"], "3-3")
+        self.assertEqual(self.receiver.received[3]["raw"],
+                         log.read_bytes().splitlines(True)[-1])
+        self.assertEqual([(r["first"], r["last"]) for r in chain_rows(log)],
+                         [(0, 2), (3, 3)])
+
+    def test_the_heads_flags_alone_send_no_entry_and_the_chain_flag_alone_no_head(self):
+        # Each route is its own opt-in (ADR-0031 rulings 1 and 6): an
+        # operator whose --publish-url is a chat webhook never has
+        # command lines posted to it because a release added a route.
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-routes")
+
+        head_only = self.scan("--publish-every", "0s",
+                              "--publish-url", self.receiver.url)
+
+        self.assertEqual(head_only.returncode, 0, head_only.stderr)
+        self.assertEqual(self.kinds(), ["application/json"])
+        self.assertEqual(chain_rows(log), [])
+
+        chain_only = self.scan("--publish-every", "0s",
+                               "--publish-chain", self.receiver.url,
+                               SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+
+        self.assertEqual(chain_only.returncode, 0, chain_only.stderr)
+        self.assertEqual(self.kinds(), ["application/json", NDJSON])
+        self.assertEqual(len(head_rows(log)), 1)
+        self.assertEqual(len(chain_rows(log)), 1)
+
+    def test_a_chain_row_never_stands_the_head_keeper_down(self):
+        # A chain row carries the head after its last entry, for the
+        # operator's reading; it is not a head row, and the head route
+        # still owes this head to its own remote.
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-apart")
+        sent = run_recorder("publish", "--chain", "--log", log,
+                            self.receiver.url)
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+        self.assertEqual(self.kinds(), [NDJSON])
+
+        result = self.scan("--publish-every", "0s",
+                           "--publish-url", self.receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.kinds(), [NDJSON, "application/json"])
+        self.assertEqual(json.loads(self.receiver.received[1]["raw"])["head"],
+                         chain_head(log))
+
+    def test_a_dead_chain_remote_is_a_note_in_left_and_never_the_exit(self):
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-dead")
+
+        result = self.scan("--publish-every", "0s",
+                           "--publish-chain", "http://127.0.0.1:9/hook")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["exit"], 0)
+        (chain,) = chains_by_session(report)[("alpha", "sess-dead")]
+        self.assertTrue(chain["left"]["failed"])
+        self.assertIn("publishing failed", chain["left"]["note"])
+        self.assertIn("entries stay unsent", chain["left"]["note"])
+        self.assertIsNone(chain["left"]["ts"])
+        self.assertNotIn("127.0.0.1:9", result.stdout,
+                         "the URL is a credential; the report never holds it")
+        self.assertEqual(memo_of(log), [])
+
+    def test_a_url_without_a_cadence_is_a_usage_error(self):
+        make_store_chain(self.root / "alpha" / "receipts", "sess-half")
+        for half in (("--publish-every", "0s"),
+                     ("--publish-chain", self.receiver.url)):
+            result = self.scan(*half)
+            self.assertEqual(result.returncode, 64, result.stderr)
+            self.assertIn("--publish-every", result.stderr)
+            self.assertIn("--publish-chain", result.stderr)
+        self.assertEqual(self.receiver.received, [])
+
+    def test_serve_sends_both_on_its_tick_and_says_so_at_startup(self):
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-face")
+        proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--root",
+             str(self.root), "--port", "0",
+             "--publish-every", "0s",
+             "--publish-url", self.receiver.url,
+             "--publish-chain", self.receiver.url],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env=keeper_env(PYTHONIOENCODING="utf-8"))
+
+        def stop():
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+        self.addCleanup(stop)
+        line = proc.stdout.readline()
+        match = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if match is None:
+            proc.kill()
+            _, err = proc.communicate()
+            self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        # The keeper line, read before anything stops the process: a
+        # kill sent the instant the URL line arrives can beat the second
+        # flush (what CI on Linux and macOS showed the last wave).
+        said = proc.stdout.readline()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(match.group() + "/api/status", timeout=30) as answer:
+            status = json.loads(answer.read().decode("utf-8"))
+        stop()
+
+        self.assertIn("publish head and chain every", said)
+        self.assertIn("flag --publish-every", said)
+        self.assertEqual(self.kinds(), ["application/json", NDJSON])
+        (chain,) = chains_by_session(status)[("alpha", "sess-face")]
+        self.assertEqual(chain["left"]["via"], "published")
+        self.assertEqual(status["exit"], 0)
+        self.assertEqual([row.get("kind") for row in memo_of(log)],
+                         [None, "chain"])
 
 
 if __name__ == "__main__":

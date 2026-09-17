@@ -449,6 +449,51 @@ class NeverPublishedTest(ReceiverFixture):
         self.assertEqual(published, {"wired": False, "sent": False,
                                      "note": None})
 
+    def test_sent_is_measured_per_route_so_a_chain_wired_alone_is_read_as_its_own(self):
+        # #248: the chain route (`--publish-chain`) is wired in name only
+        # until a batch lands, whatever the head route did. A chain-only
+        # wiring, then a batch sent by hand, then the sentence is gone.
+        self.wire('python loxodonta.py hook --publish-chain '
+                  '"http://127.0.0.1:9/hook"')
+        log = make_chain(self.root / "alpha" / "receipts", "sess-chain")
+
+        published = json.loads(self.scan().stdout)["published"]
+
+        self.assertTrue(published["wired"])
+        self.assertFalse(published["sent"])
+        self.assertIn("--publish-chain", published["note"])
+        self.assertIn("a sent chain", published["note"])
+        self.assertNotIn("sent head", published["note"])
+
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", "--chain", "--log",
+             str(log), self.receiver.url],
+            capture_output=True, check=True, env=clean_env())
+
+        published = json.loads(self.scan().stdout)["published"]
+
+        self.assertEqual(published, {"wired": True, "sent": True,
+                                     "note": None})
+
+    def test_a_head_that_left_does_not_answer_for_a_chain_that_never_did(self):
+        # Both routes wired, the head sent, the chain never: the sentence
+        # names the chain route alone, and `sent` says something left.
+        self.wire('python loxodonta.py hook --publish "http://127.0.0.1:9/h" '
+                  '--publish-chain "http://127.0.0.1:9/c"')
+        log = make_chain(self.root / "alpha" / "receipts", "sess-both")
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
+             self.receiver.url],
+            capture_output=True, check=True, env=clean_env())
+
+        published = json.loads(self.scan().stdout)["published"]
+
+        self.assertEqual((published["wired"], published["sent"]), (True, True))
+        self.assertIn("--publish-chain", published["note"])
+        self.assertIn("a sent chain", published["note"])
+        self.assertNotIn("sent head", published["note"])
+        self.assertNotIn("127.0.0.1", json.dumps(published))
+
 
 class DashboardLeftTest(ReceiverFixture):
     """`serve` carries the same flags, publishes on its own tick, and the

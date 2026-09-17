@@ -604,16 +604,20 @@ def keeper_cadences(anchor_every, declared):
     return None, f"profile {profile}, {harness}; no flag"
 
 
-def keeper_words(anchor_every, anchor_source, publish_every):
+def keeper_words(anchor_every, anchor_source, publish_every,
+                 publish_url=None, publish_chain=None):
     """The startup line's second half: each keeper's cadence and its
     source, so the operator reads back what `serve` will send and why
     (ADR-0031 ruling 1, #246). Publishing follows flags alone in this
-    release; the tier that publishes on a cadence arrives with the
-    published chain."""
+    release, and names its routes: the head, the chain, or both; the
+    tier that publishes on a cadence arrives with `full`."""
     anchor = (f"anchor every {cadence_words(anchor_every)} ({anchor_source})"
               if anchor_every is not None else f"anchor off ({anchor_source})")
-    publish = (f"publish every {cadence_words(publish_every)} "
-               "(flag --publish-every)"
+    routes = " and ".join(name for name, url in (("head", publish_url),
+                                                 ("chain", publish_chain))
+                          if url)
+    publish = (f"publish {routes or 'head'} every "
+               f"{cadence_words(publish_every)} (flag --publish-every)"
                if publish_every is not None else "publish off (no flag)")
     return f"keeper: {anchor}; {publish}"
 
@@ -661,11 +665,32 @@ def is_attempt(record):
 SENT_OUTCOMES = ("sent", "submitted")
 
 
+def is_chain_row(record):
+    """True for a row of kind `chain` (ADR-0031 ruling 2): a batch of the
+    chain's entries the remote acknowledged, with its range. The
+    recorder's rule, twice over: it carries the head after its last
+    entry for the operator's reading and is not a head row, so the head
+    route's ripeness never mistakes it for a head that left by the head
+    route; the two routes are counted apart."""
+    return isinstance(record, dict) and record.get("kind") == "chain"
+
+
 def sidecar_heads(sidecar):
-    """Heads that already have a record, for scheduling only."""
+    """Heads that already have a record, for scheduling only: the head
+    route's rows, never a note and never a chain row."""
     return {record["head"] for record in sidecar_records(sidecar)
             if isinstance(record.get("head"), str)
-            and not is_attempt(record)}
+            and not is_attempt(record) and not is_chain_row(record)}
+
+
+def chain_cursor(memo):
+    """The last entry number the remote acknowledged by the chain route,
+    from the memo's chain rows; -1 when it holds none, so the recorder's
+    next send starts at genesis. For scheduling only: the memo is
+    writer-reachable and proves nothing."""
+    return max((record["last"] for record in sidecar_records(memo)
+                if is_chain_row(record)
+                and isinstance(record.get("last"), int)), default=-1)
 
 
 def ripe_head(entries, now, cadence):
@@ -751,45 +776,77 @@ def publish_url(value):
 PUBLISH_BACKSTOP = 60   # seconds; well past the recorder's own bound
 
 
-def keep_published(log, last_attempt, now, entries, cadence, url):
+def keep_published(log, last_attempt, now, entries, cadence, url,
+                   chain_url=None):
     """One chain's turn with the publish keeper, on the anchor keeper's
     throttle: only when the operator opted in with a cadence and a URL,
     a head that has aged past the cadence and is not yet in the chain's
-    publish memo is posted once, through `loxodonta publish`. The memo
+    publish memo is posted once, through `loxodonta publish`; then, when
+    the operator also named a URL for the entries, the lines after the
+    memo's last acknowledged chain row go the same way through
+    `loxodonta publish --chain` (ADR-0031 ruling 3), the head first and
+    the chain after it, at most once each per throttle window. The memo
     is the recorder's (`<log>.published.jsonl`), writer-reachable and
     therefore testimony: it stops a repeat and proves nothing; the
     remote's copy is the head record. Off by default: nothing leaves
     the machine without the say-so. Returns (attempted, note, failed)."""
-    if not url or not upgrade_due(last_attempt, now):
+    if not (url or chain_url) or not upgrade_due(last_attempt, now):
         return False, None, False
     memo = Path(str(log) + ".published.jsonl")
     head = ripe_head(entries, now, cadence)
-    if not head or head in sidecar_heads(memo):
+    if not head:
         return False, None, False
+    attempted = False
+    notes = []  # one turn can fail twice; every failure stays said
+    failed = False
+    if url and head not in sidecar_heads(memo):
+        attempted = True
+        note = publish_through_recorder(log, url, "head")
+        if note:
+            notes.append(note)
+            failed = True
+    if chain_url and isinstance(entries[-1].get("n"), int) \
+            and entries[-1]["n"] > chain_cursor(memo):
+        attempted = True
+        note = publish_through_recorder(log, chain_url, "chain")
+        if note:
+            notes.append(note)
+            failed = True
+    return attempted, "; ".join(notes) or None, failed
+
+
+def publish_through_recorder(log, url, what):
+    """One `loxodonta publish` as a subprocess: the head when `what` is
+    "head", the chain's entries after the cursor when it is "chain".
+    Returns the note for the panel when it did not land, else None. The
+    recorder's stderr names the failure and never the URL, but it is
+    not repeated here: the note is the panel's, and one sentence the
+    operator can act on beats a transport error."""
+    flags = ["--chain"] if what == "chain" else []
+    stays = ("the head stays unpublished" if what == "head"
+             else "the entries stay unsent")
     try:
         finished = subprocess.run(
-            [sys.executable, str(LOXODONTA), "publish", f"--log={log}", url],
+            [sys.executable, str(LOXODONTA), "publish", *flags,
+             f"--log={log}", url],
             capture_output=True, encoding="utf-8", timeout=PUBLISH_BACKSTOP,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     except subprocess.TimeoutExpired:
         # The recorder bounds its own POST; this is the backstop above
         # it, so one stuck publish can never hold a tick.
-        return True, ("publishing did not finish in time; the head stays "
-                      "unpublished and the keeper will try again"), True
+        return (f"publishing the {what} did not finish in time; {stays} "
+                "and the keeper will try again")
     if finished.returncode == 64:
         # A usage exit is the URL refused, not the remote: retrying
         # would never help, and the note must say so.
-        return True, ("publishing refused: the recorder would not take "
-                      "--publish-url as given; fix the URL (see "
-                      "`loxodonta publish --help`)"), True
+        flag = "--publish-url" if what == "head" else "--publish-chain"
+        return (f"publishing the {what} refused: the recorder would not "
+                f"take {flag} as given; fix the URL (see "
+                "`loxodonta publish --help`)")
     if finished.returncode != 0:
-        # The recorder's stderr names the failure and never the URL, but
-        # it is not repeated here: the note is the panel's, and one
-        # sentence the operator can act on beats a transport error.
-        return True, ("publishing failed — the remote did not take this "
-                      "head; it stays unpublished and the keeper will try "
-                      "again"), True
-    return True, None, False
+        return (f"publishing failed — the remote did not take this {what}; "
+                f"{stays} and the keeper will try again")
+    return None
 
 
 def last_departure(log):
@@ -1004,31 +1061,46 @@ def sessionend_wired(witness):
 
 
 def sessionend_publishes(witness):
-    """True when the wired SessionEnd command carries a publish flag
-    (`--publish URL` today; a later flag that starts the same way counts
-    too), so the scan can say when publishing is wired in name only
-    (#240 part 3). The URL on that line is a credential and is never
-    read past the flag."""
-    return any(re.search(r"(?:^|\s)--publish\b", command)
-               for command in sessionend_commands(witness))
+    """Which publish routes the wired SessionEnd command carries, as
+    {"head": bool, "chain": bool}: `--publish URL` is the head (ADR-0025),
+    `--publish-chain URL` the chain (ADR-0031), each read as its own
+    flag, so the scan can say per route when publishing is wired in
+    name only (#240 part 3). The URL on that line is a credential and
+    is never read past the flag."""
+    commands = sessionend_commands(witness)
+    return {"head": any(re.search(r"(?:^|\s)--publish(?=\s|=|$)", command)
+                        for command in commands),
+            "chain": any(re.search(r"(?:^|\s)--publish-chain(?=\s|=|$)",
+                                   command) for command in commands)}
 
 
 def published_reading(witness, logs):
-    """#240 part 3: whether the wired SessionEnd command publishes the
-    head, whether any chain here holds a head that was sent, and the one
-    sentence for the case that should not outlast a morning: wired, and
-    nothing ever sent. A receiver that was never listening looks exactly
-    like a hook that never fired until someone reads the memos; this
-    reads them. Never the URL, and never the exit."""
-    wired = sessionend_publishes(witness)
-    sent = any(sidecar_heads(Path(str(log) + ".published.jsonl"))
-               for log in logs)
+    """#240 part 3: whether the wired SessionEnd command publishes,
+    whether any chain here holds a row saying something was sent, and
+    the one sentence for the case that should not outlast a morning:
+    wired, and nothing ever sent. Sent is measured per route (#248): a
+    head row is the head route's, a chain row the chain route's, so a
+    chain wired beside a head that has left still reads as never sent
+    until a batch lands. A receiver that was never listening looks
+    exactly like a hook that never fired until someone reads the memos;
+    this reads them. Never the URL, and never the exit."""
+    routes = sessionend_publishes(witness)
+    memos = [Path(str(log) + ".published.jsonl") for log in logs]
+    landed = {"head": any(sidecar_heads(memo) for memo in memos),
+              "chain": any(chain_cursor(memo) >= 0 for memo in memos)}
+    wired = any(routes.values())
+    sent = any(landed.values())
+    silent = [route for route in ("head", "chain")
+              if routes[route] and not landed[route]]
     note = None
-    if wired and not sent:
-        note = ("publishing is wired on the SessionEnd command and no chain "
-                "here holds a sent head: either no session has ended since "
-                "the wiring, or the remote has never taken one — each "
-                "chain's last failed attempt says which")
+    if silent:
+        what = " and ".join(f"a sent {route}" for route in silent)
+        flags = " and ".join("--publish" if route == "head"
+                             else "--publish-chain" for route in silent)
+        note = (f"publishing is wired on the SessionEnd command ({flags}) "
+                f"and no chain here holds {what}: either no session has "
+                "ended since the wiring, or the remote has never taken "
+                "one — each chain's last failed attempt says which")
     return {"wired": wired, "sent": sent, "note": note}
 
 
@@ -1930,8 +2002,8 @@ def watch_consumption(families, now):
 # --- Scan ---------------------------------------------------------------------
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
-              publish_every=None, publish_url=None, store=False, tick=True,
-              show_before_memory=False):
+              publish_every=None, publish_url=None, publish_chain=None,
+              store=False, tick=True, show_before_memory=False):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
@@ -1988,7 +2060,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             if tick else (False, None, False))
         posted, publish_note, publish_failed = (
             keep_published(log, keeper.get("publish:" + relpath), now, entries,
-                           publish_every, publish_url)
+                           publish_every, publish_url, publish_chain)
             if tick else (False, None, False))
         # One throttle per keeper: an anchor attempt never delays the
         # publish keeper's turn, nor the other way round.
@@ -2323,6 +2395,7 @@ def cmd_scan(args):
                        calendars=args.calendar or (),
                        publish_every=args.publish_every,
                        publish_url=args.publish_url,
+                       publish_chain=args.publish_chain,
                        store=store,
                        show_before_memory=args.before_memory)
     print(json.dumps(report, indent=None if args.json else 2))
@@ -4961,6 +5034,7 @@ class Watchtower(ThreadingHTTPServer):
                                    calendars=self.calendars,
                                    publish_every=self.publish_every,
                                    publish_url=self.publish_url,
+                                   publish_chain=self.publish_chain,
                                    store=self.store)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
@@ -5149,6 +5223,7 @@ def cmd_serve(args):
     server.calendars = args.calendar or ()
     server.publish_every = args.publish_every
     server.publish_url = args.publish_url
+    server.publish_chain = args.publish_chain
     server.scan_lock = threading.Lock()
     server.views_lock = threading.Lock()
     server.scan_body = None
@@ -5156,7 +5231,8 @@ def cmd_serve(args):
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
-    print(keeper_words(anchor_every, anchor_source, args.publish_every),
+    print(keeper_words(anchor_every, anchor_source, args.publish_every,
+                       args.publish_url, args.publish_chain),
           flush=True)
     try:
         server.serve_forever()
@@ -7668,6 +7744,15 @@ def main(argv):
                                "or https URL the credentials on this "
                                "machine cannot delete from, such as a chat "
                                "incoming webhook")
+    watching.add_argument("--publish-chain", type=publish_url, default=None,
+                          metavar="URL",
+                          help="opt in: on --publish-every's cadence, also "
+                               "send the chain's entries since the last "
+                               "acknowledged one to this URL, after the "
+                               "head, through `loxodonta publish --chain` "
+                               "(ADR-0031). Every entry leaves; pick a "
+                               "remote that can only add, never delete, "
+                               "such as the receiver")
     scan = sub.add_parser(
         "scan", parents=[watching],
         help="one tick: census + verdicts, JSON out, exit code")
@@ -7886,11 +7971,15 @@ def main(argv):
     package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)
-    # The cadence says when and the URL says where; one without the
-    # other is a command spoken wrong, refused before any tick runs.
-    if ((getattr(args, "publish_every", None) is None)
-            != (getattr(args, "publish_url", None) is None)):
-        parser.error("--publish-every and --publish-url go together")
+    # The cadence says when and a URL says where, the head's or the
+    # chain's; one without the other is a command spoken wrong, refused
+    # before any tick runs.
+    cadence = getattr(args, "publish_every", None) is not None
+    anywhere = (getattr(args, "publish_url", None) is not None
+                or getattr(args, "publish_chain", None) is not None)
+    if cadence != anywhere:
+        parser.error("--publish-every goes with --publish-url or "
+                     "--publish-chain, and either of them with it")
     return args.func(args)
 
 
