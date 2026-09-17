@@ -950,13 +950,21 @@ def coverage_epochs(harness="claude-code"):
             data = json.load(f)
     except (OSError, ValueError):
         return []
-    epochs = [{"since": epoch["since"], "matchers": epoch["matchers"],
-               "source": "recorder"}
-              for epoch in (data.get("epochs") or [])
-              if isinstance(epoch, dict)
-              and isinstance(epoch.get("since"), str)
-              and isinstance(epoch.get("matchers"), list)
-              and epoch.get("harness") == harness]
+    epochs = []
+    for epoch in (data.get("epochs") or []):
+        if not (isinstance(epoch, dict)
+                and isinstance(epoch.get("since"), str)
+                and isinstance(epoch.get("matchers"), list)
+                and epoch.get("harness") == harness):
+            continue
+        told = {"since": epoch["since"], "matchers": epoch["matchers"],
+                "source": "recorder"}
+        # The profile rides beside the matchers (ADR-0031 ruling 1) so
+        # a change to it is as visible here as a matcher change; a
+        # marker from before profiles existed simply has none.
+        if isinstance(epoch.get("profile"), str):
+            told["profile"] = epoch["profile"]
+        epochs.append(told)
     return sorted(epochs, key=lambda epoch: epoch["since"])
 
 
