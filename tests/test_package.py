@@ -60,9 +60,9 @@ class PackageCase(unittest.TestCase):
         return run(SUPERVISOR, "package", "--witness", str(self.witness),
                    *args, env=self.env, cwd=str(self.work))
 
-    def verify_package(self, path):
-        return run(LOXODONTA, "verify-package", str(path), env=self.env,
-                   cwd=str(self.work))
+    def verify_package(self, path, *extra):
+        return run(LOXODONTA, "verify-package", str(path), *extra,
+                   env=self.env, cwd=str(self.work))
 
     def manifest_of(self, package):
         if package.is_dir():

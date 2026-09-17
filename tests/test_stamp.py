@@ -1216,6 +1216,12 @@ class InstallAuthorityTest(unittest.TestCase):
         return [h["command"] for b in self.settings()["hooks"][event]
                 for h in b["hooks"]]
 
+    def codex_commands(self, event):
+        settings = json.loads((self.home / ".codex" / "hooks.json")
+                              .read_text(encoding="utf-8"))
+        return [h["command"] for b in settings["hooks"][event]
+                for h in b["hooks"]]
+
     def epochs(self):
         return json.loads((self.store / "coverage.json")
                           .read_text(encoding="utf-8"))["epochs"]
@@ -1267,15 +1273,55 @@ class InstallAuthorityTest(unittest.TestCase):
         self.assertIn(self.WEBHOOK, result.stdout)
         self.assertIn(self.URL, result.stdout)
 
-    def test_the_flag_beside_a_named_tier_is_refused_naming_custom(self):
-        # In this release the authority is a raw flag: beside `local` or
-        # `timestamped` it is a command spoken wrong (ADR-0031 ruling 1).
+    def test_the_flag_composes_with_the_timestamped_tier(self):
+        # ADR-0032 ruling 2: the authority is the one raw flag a tier
+        # takes beside its own, because a tier can name the mechanism and
+        # never the authority. The tier's anchor and the stamp ride on
+        # the one command, and the marker records both.
         result = self.install("--profile", "timestamped",
+                              "--authority", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertTrue(end.endswith(f' --anchor --stamp "{self.URL}"'), end)
+        self.assertIn("anchors at session end", result.stdout)
+        self.assertIn(f"stamps the head with {self.URL}", result.stdout)
+        (epoch,) = self.epochs()
+        self.assertEqual(epoch["profile"], "timestamped")
+        self.assertEqual(epoch["authority"], self.URL)
+
+    def test_the_flag_is_refused_beside_local_where_nothing_leaves(self):
+        # `local` is the tier that sends nothing at all, so an authority
+        # beside it is a command spoken wrong, and the way out is named.
+        result = self.install("--profile", "local", "--authority", self.URL)
+
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("--profile custom", result.stderr)
+        self.assertFalse((self.home / ".claude" / "settings.json").exists())
+
+    def test_another_raw_flag_beside_the_tier_is_still_refused(self):
+        # Only the authority composes: the tier already says what else
+        # leaves the machine (ADR-0031 ruling 1).
+        result = self.install("--profile", "timestamped",
+                              "--publish-head", self.WEBHOOK,
                               "--authority", self.URL)
 
         self.assertEqual(result.returncode, 64, result.stderr)
         self.assertIn("--profile custom", result.stderr)
         self.assertFalse((self.home / ".claude" / "settings.json").exists())
+
+    def test_a_tier_rerun_without_the_flag_turns_stamping_off(self):
+        # The install command states the choice each time, at a tier as
+        # under `custom` (ADR-0025 ruling 3).
+        self.install("--profile", "timestamped", "--authority", self.URL)
+
+        result = self.install("--profile", "timestamped")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(self.URL, json.dumps(self.settings()["hooks"]))
+        self.assertIn("no longer stamps the head", result.stdout)
+        self.assertEqual([e.get("authority") for e in self.epochs()],
+                         [self.URL, None])
 
     def test_the_installer_refuses_a_url_a_shell_could_act_on(self):
         for bad in ("file:///tmp/tokens", "authority.example.test/tsr",
@@ -1286,15 +1332,40 @@ class InstallAuthorityTest(unittest.TestCase):
             self.assertFalse((self.home / ".claude" / "settings.json").exists(),
                              bad)
 
-    def test_codex_does_not_get_the_flag_yet(self):
-        # PRD #244: the stamp's one POST is measured inside Codex's
-        # three-second cap before Codex gets --authority, as #183
-        # measured the head.
+    def test_codex_gets_the_flag_now_that_the_post_is_measured(self):
+        # PRD #244 held the flag back until the stamp's one POST had
+        # been measured inside Codex's three-second cap, as #183
+        # measured the head. It has been (#251, docs/HOOK.md): the hook
+        # cuts the POST off at half the cap, so the flag is wired here
+        # like the two publishes.
+        (self.home / ".codex").mkdir(exist_ok=True)
+
         result = self.install("--codex", "--authority", self.URL)
 
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("not wired for Codex", result.stderr)
-        self.assertFalse((self.home / ".codex" / "hooks.json").exists())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.codex_commands("SessionEnd")
+        self.assertTrue(end.endswith(f' --stamp "{self.URL}"'), end)
+        self.assertIn("--actor codex", end)
+        self.assertIn(f"stamps the head with {self.URL}", result.stdout)
+        (epoch,) = self.epochs()
+        self.assertEqual(epoch["harness"], "codex")
+        self.assertEqual(epoch["authority"], self.URL)
+
+    def test_codex_at_the_tier_stamps_and_still_leaves_the_anchor_alone(self):
+        # The session-end anchor stays refused on Codex (ADR-0024), so
+        # the tier's other half is the supervisor's cadence; the stamp
+        # is wired all the same, and the notice says which is which.
+        (self.home / ".codex").mkdir(exist_ok=True)
+
+        result = self.install("--codex", "--profile", "timestamped",
+                              "--authority", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.codex_commands("SessionEnd")
+        self.assertNotIn("--anchor", end)
+        self.assertTrue(end.endswith(f' --stamp "{self.URL}"'), end)
+        self.assertIn("the session-end anchor stays refused for Codex",
+                      result.stdout)
 
     def test_uninstall_removes_the_stamping_session_end_hook(self):
         self.install("--authority", self.URL)

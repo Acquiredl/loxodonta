@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
+from test_stamp import start_authority
 from test_supervisor import (ago, chain_head, chains_by_session,
                              install_witness_hook, keeper_env, make_chain,
                              run_scan, write_attempt_row, write_chain_row,
@@ -610,9 +611,12 @@ class ProfileKeeperTest(unittest.TestCase):
     1): with no `--anchor-every` and a `timestamped` profile, the anchor
     keeper runs on a six-hour default; an explicit flag wins; `local`,
     or `custom` without a flag, runs no keeper. The startup line says
-    which cadence is in force and where it came from. The marker is the
-    real installer's, the chain is aged through the recorder's clock
-    override, and the calendar is a fake on a free port."""
+    which cadence is in force and where it came from. When that epoch
+    also names an authority, the same turn stamps the head it anchors
+    (ADR-0032 ruling 3, #251): one cadence, two commitments. The marker
+    is the real installer's, the chain is aged through the recorder's
+    clock override, and the calendar and the authority are fakes on free
+    ports."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -753,6 +757,94 @@ class ProfileKeeperTest(unittest.TestCase):
 
         self.assertIn("anchor off (profile custom, claude-code", said)
         self.assertEqual(self.calendar.submitted, [])
+
+    def authority(self):
+        """A fake timestamp authority on a free port, started only by the
+        tests that name one, so the rest pay for no server."""
+        return start_authority(self)
+
+    def tokens_of(self, log):
+        sidecar = Path(str(log) + ".stamps.jsonl")
+        if not sidecar.exists():
+            return []
+        return [json.loads(line) for line in
+                sidecar.read_text(encoding="utf-8").splitlines()
+                if "response" in line]
+
+    def test_an_authority_on_the_marker_is_stamped_on_the_anchor_turn(self):
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        log = self.aged_chain("sess-stamp", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        head = chain_head(log)
+        self.assertIn("anchor every 6h (profile timestamped, claude-code), "
+                      f"stamping the same head with {authority.url} on that "
+                      "turn", said)
+        self.assertEqual(self.calendar.submitted, [bytes.fromhex(head)],
+                         "the same turn anchored the ripe head")
+        self.assertEqual(len(authority.received), 1)
+        self.assertEqual([row["head"] for row in self.tokens_of(log)], [head])
+
+    def test_a_head_that_already_holds_a_token_is_not_asked_about_again(self):
+        # One head, one token: the keeper skips a head the sidecar
+        # already holds, and the recorder's own dedupe is the backstop
+        # under that (#250). The token here is a real one, left by the
+        # verb before `serve` ever runs.
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        log = self.aged_chain("sess-once", age=7 * 3600)
+        stamped = subprocess.run(
+            [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
+             "--authority", authority.url],
+            capture_output=True, encoding="utf-8",
+            env=keeper_env(PYTHONIOENCODING="utf-8"))
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+
+        self.serve()
+        self.tick()
+        self.said_at_startup()
+
+        self.assertEqual(len(authority.received), 1,
+                         "the keeper asked about a head that had a token")
+        self.assertEqual(len(self.tokens_of(log)), 1)
+
+    def test_a_marker_without_an_authority_stamps_nothing(self):
+        # The tier commits the head to the calendars and to nobody else
+        # until an authority is named: no default is baked in.
+        authority = self.authority()
+        self.install("--profile", "timestamped")
+        log = self.aged_chain("sess-plain", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile timestamped, claude-code)",
+                      said)
+        self.assertNotIn("stamping", said)
+        self.assertEqual(authority.received, [])
+        self.assertFalse(Path(str(log) + ".stamps.jsonl").exists())
+
+    def test_an_authority_with_no_anchor_cadence_is_not_claimed(self):
+        # `custom` asks the keeper for nothing, so there is no turn to
+        # ride and nothing is stamped; a startup line claiming otherwise
+        # is what that line exists to prevent.
+        authority = self.authority()
+        self.install("--profile", "custom", "--authority", authority.url)
+        log = self.aged_chain("sess-custom", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor off (profile custom, claude-code", said)
+        self.assertNotIn("stamping", said)
+        self.assertEqual(authority.received, [])
+        self.assertFalse(Path(str(log) + ".stamps.jsonl").exists())
 
     def test_a_later_local_install_for_another_harness_stands_no_keeper_down(self):
         # The keeper follows the strongest tier any harness declares,
