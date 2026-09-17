@@ -439,6 +439,28 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.assertEqual(sent["headers"]["x-loxodonta-range"], "0-2")
         self.assertEqual(sent["raw"], self.chain_lines())
 
+    def test_a_memo_that_cannot_be_read_is_a_note_and_never_a_traceback(self):
+        # Without the cursor there is no send, and a memo that exists
+        # and cannot be read at all — here, bytes that are not UTF-8 —
+        # must not turn the quiet path into a traceback and a failed
+        # hook. The row says which bookkeeping failed; the entries wait.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        memo = self.chain().with_name(self.chain().name + ".published.jsonl")
+        memo.write_bytes(b"\xff\xfe not a memo\n")
+
+        result = self.session_end("--publish-chain", self.receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "logged entry 2")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.receiver.received, [])
+        row = json.loads(memo.read_bytes().splitlines()[-1]
+                         .decode("utf-8", "replace"))
+        self.assertEqual((row["kind"], row["step"], row["outcome"]),
+                         ("attempt", "publish-chain",
+                          "the memo could not be read"))
+
     def test_a_second_session_end_with_nothing_new_sends_nothing_and_leaves_no_row(self):
         # An unchanged transcript seals nothing, so the chain holds
         # nothing after the cursor: the step did not run, and the memo

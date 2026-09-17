@@ -1077,7 +1077,10 @@ def chain_cursor(log):
     """The last entry number the remote acknowledged, from the memo's
     chain rows; -1 when it holds none, so the send starts at genesis
     (entry 0). Read tolerantly: the memo is bookkeeping, and a torn line
-    in it means a resend the receiver drops, never a stuck keeper."""
+    in it means a resend the receiver drops, never a stuck keeper. A
+    memo that exists and cannot be read at all is the caller's to
+    handle: raised, not guessed at, because guessing -1 would send the
+    whole chain again on every session end."""
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
@@ -1146,7 +1149,16 @@ def publish_chain(log, url, session, timeout, event):
         entries = entries_on_disk(log)
     except OSError:
         return None, None
-    cursor = chain_cursor(log)
+    try:
+        cursor = chain_cursor(log)
+    except (OSError, ValueError):
+        # A memo that exists and cannot be read — a directory in its
+        # place, a permission, bytes that are not UTF-8 — must not turn
+        # the quiet session-end path into a traceback and a failed
+        # hook. Without the cursor there is no send: say so, and the
+        # attempt row carries it (the head route guards its read the
+        # same way).
+        return None, "the memo could not be read"
     deadline = time.monotonic() + timeout
     sent = None
     while True:
