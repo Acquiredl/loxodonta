@@ -14,7 +14,7 @@
 
 ## Where things live
 
-- `loxodonta.py` — the recorder: `init` / `log` / `run` / `head` / `verify` / `verify-package` / `report` / `anchor` / `publish` / `hook` / `explain` / `install-hook` / `uninstall-hook`.
+- `loxodonta.py` — the recorder: `init` / `log` / `run` / `head` / `verify` / `verify-package` / `report` / `anchor` / `publish` / `stamp` / `hook` / `explain` / `install-hook` / `uninstall-hook`.
 - `supervisor.py` — the reader: `scan` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `verify` / `mcp` / `export` / `package`.
 - `receiver.py` — the receiver: `serve`, one verb; the URL that can only add, never delete (ADR-0031, `docs/RECEIVER.md`).
 - `adapters/` — per-harness recorder adapters (ADR-0020).
