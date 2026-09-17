@@ -1006,7 +1006,12 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.assertIn("flag --publish-every", said)
         self.assertEqual(self.kinds(), ["application/json", NDJSON])
         (chain,) = chains_by_session(status)[("alpha", "sess-face")]
-        self.assertEqual(chain["left"]["via"], "published")
+        # Both routes sent on this one tick, a second apart at most, so
+        # which of the two doors is the newer is a coin toss; that the
+        # door is a publish door and not the anchor is the reading.
+        # Which route `via` names is pinned at the reader, in
+        # test_publish_keeper.LeftReadingTest.
+        self.assertIn(chain["left"]["via"], ("published", "published-chain"))
         self.assertEqual(status["exit"], 0)
         self.assertEqual([row.get("kind") for row in memo_of(log)],
                          [None, "chain"])

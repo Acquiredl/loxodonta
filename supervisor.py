@@ -850,20 +850,30 @@ def publish_through_recorder(log, url, what):
 
 
 def last_departure(log):
-    """When a head of this chain last left the machine, and by which
+    """When something of this chain last left the machine, and by which
     door: the newest `ts` across the publish memo and the anchor
     sidecar, or {"ts": None, "via": None} when nothing has left. The
-    reading is the panel's staleness evidence, in the anchor keeper's
-    voice: a timestamp the reader ages, never an alarm, never the exit.
-    Both files are writer-reachable, so a fresh reading here proves
-    nothing; a stale one is the reason to look."""
+    door is the route, not the file (#248): `published` is a head that
+    the remote took, `published-chain` a batch of the entries
+    themselves, `anchored` a digest a calendar took. A batch counts,
+    and counts as more than a head — the entries are off the machine,
+    not just their fingerprint — but it is not the head route's
+    departure, so a head route that has been dead for a week beside a
+    live chain route reads as what it is (which route failed is
+    `last_failed`). The reading is the panel's staleness evidence, in
+    the anchor keeper's voice: a timestamp the reader ages, never an
+    alarm, never the exit. Both files are writer-reachable, so a fresh
+    reading here proves nothing; a stale one is the reason to look."""
     departures = []   # (when, ts, via)
     for record in sidecar_records(Path(str(log) + ".published.jsonl")):
         when = parse_when(record.get("ts"))
-        # A head row is a head that left; an attempt row is a note that
-        # a step was tried (#240), and a refused POST never left.
+        # A head row is a head that left and a chain row a batch of
+        # entries that left; an attempt row is a note that a step was
+        # tried (#240), and a refused POST never left.
         if when is not None and not is_attempt(record):
-            departures.append((when, record["ts"], "published"))
+            departures.append((when, record["ts"],
+                               "published-chain" if is_chain_row(record)
+                               else "published"))
     # An upgrade appends a second record for the same head, stamped
     # when the proof completed, so a head's departure is its first
     # record: the newest record would make an idle chain read fresh
@@ -6504,8 +6514,8 @@ function renderTiles() {
     const left = newest(chains.map(c => c.left));
     const failed = newest(chains.map(c => c.last_failed));
     tile.appendChild(el("span", "meta",
-      (left ? "a head last left " + since(left.ts) + " ago (" + left.via +
-              ")"
+      (left ? whatLeft(left.via) + " last left " + since(left.ts) +
+              " ago (" + left.via + ")"
             : "no head has left this machine") +
       (failed ? " · last failed: " + failed.step + " " + since(failed.ts) +
                 " ago, " + failed.outcome
@@ -6972,6 +6982,12 @@ function since(ts) {
   return Math.round(seconds / 86400) + "d";
 }
 
+// What left by a given door (#248): the chain route sends the
+// entries themselves, the head and the anchor send a fingerprint.
+function whatLeft(via) {
+  return via === "published-chain" ? "entries" : "a head";
+}
+
 const PENDING_STALE = 24 * 3600 * 1000;
 const BARE_STALE = 7 * 24 * 3600 * 1000;
 
@@ -7016,8 +7032,8 @@ function renderAnchors(report) {
           if (left.ts) {
             const old = Date.now() - Date.parse(left.ts) > BARE_STALE;
             row.appendChild(el("span", "bare" + (old ? " stale" : ""),
-              "a head last left " + since(left.ts) + " ago (" +
-              left.via + ")"));
+              whatLeft(left.via) + " last left " + since(left.ts) +
+              " ago (" + left.via + ")"));
           } else {
             row.appendChild(el("span", "bare",
                                "no head has left this machine"));
