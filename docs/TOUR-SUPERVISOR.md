@@ -90,9 +90,12 @@ Two adversary details worth noticing. The throttle memory lives in the
 writer-reachable baseline, so a timestamp *from the future* reads as no
 memory at all — otherwise one edit stands the keeper down silently and
 forever, which is exactly what an adversary would want from it. And a
-turn can fail twice (a refused upgrade and a refused submission); every
-failure stays said in the note, because evidence is not a scratchpad
-where the last writer wins. Staleness is quiet evidence, never an exit
+turn can fail more than once (a refused upgrade, a refused submission,
+and, when the coverage marker names a timestamp authority, a token that
+authority would not grant: the same turn asks for both commitments of
+the head, since ADR-0032 gave the authority no cadence of its own);
+every failure stays said in the note, because evidence is not a
+scratchpad where the last writer wins. Staleness is quiet evidence, never an exit
 shout — a siren that never stops sounding trains the operator to ignore
 the band.
 

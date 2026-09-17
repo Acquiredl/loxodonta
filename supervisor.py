@@ -954,12 +954,14 @@ def last_departure(log):
 
 
 def last_failed(log):
-    """The newest session-end step that failed, read from the attempt
-    rows in both sidecars (#240): the step, the time, and the recorder's
-    one line on what happened, or None when no attempt has failed. Read
-    whether or not a keeper cadence is set, so a posture wired in name
-    only is visible within a session rather than a week. Testimony like
-    the rows themselves: a reason to look, never the exit."""
+    """The newest step that failed, read from the attempt rows in every
+    sidecar (#240): the step, the time, and the recorder's one line on
+    what happened, or None when no attempt has failed. A session end
+    writes most of these rows, and the keeper's own turn writes the
+    rest, through the same verbs an operator runs by hand. Read whether
+    or not a keeper cadence is set, so a posture wired in name only is
+    visible within a session rather than a week. Testimony like the rows
+    themselves: a reason to look, never the exit."""
     newest = None
     for suffix in SIDECAR_SUFFIXES:
         for record in sidecar_records(Path(str(log) + suffix)):

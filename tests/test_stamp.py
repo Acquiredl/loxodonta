@@ -1188,7 +1188,9 @@ class InstallAuthorityTest(unittest.TestCase):
     """`install-hook --authority URL` writes `--stamp URL` onto the wired
     SessionEnd command, the way `--publish-head` writes `--publish`, and
     the coverage marker's epoch records the authority; `uninstall-hook`
-    removes it. In this release the flag lives under `custom`."""
+    removes it. The flag lives under `custom` and beside the tier that
+    commits the head, where it is the only raw flag accepted (ADR-0032
+    ruling 2), and on Codex as well as Claude Code."""
 
     URL = "https://authority.example.test/tsr"
     WEBHOOK = "https://hooks.example.test/services/T000/B000/XXXX"

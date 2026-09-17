@@ -1324,6 +1324,13 @@ def publish_chain_command(args):
         print(f"nothing to send: the remote has every entry through entry "
               f"{chain_cursor(args.log)}{damage}")
     if failure:
+        # The same note the head route leaves, under this route's own
+        # step: a batch the keeper could not send is written down where
+        # the memo already carries the session end's attempts. A partial
+        # send keeps its chain rows and gains this one, the shape the
+        # session-end half already has.
+        append_attempt_record(published_path(args.log), STEP_PUBLISH_CHAIN,
+                              PUBLISH_TIMEOUT, failure)
         print(f"error: the chain was not published: {failure}",
               file=sys.stderr)
         return 1
@@ -1351,6 +1358,15 @@ def cmd_publish(args):
     failure = post_bounded(args.url, json.dumps(body).encode("utf-8"),
                            PUBLISH_TIMEOUT)
     if failure:
+        # The note and no head row, the rule `stamp` follows for the
+        # same reason (#251): this verb is what the keeper's cadence
+        # runs, so a head it could not publish is one the supervisor
+        # should still read as unpublished and lately tried. Without the
+        # row a keeper-driven failure left nothing behind at all, and
+        # `last_failed` and its metric answered for the session-end half
+        # alone. Never the URL.
+        append_attempt_record(published_path(args.log), STEP_PUBLISH_HEAD,
+                              PUBLISH_TIMEOUT, failure)
         print(f"error: the head was not published: {failure}",
               file=sys.stderr)
         return 1

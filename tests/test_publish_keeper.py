@@ -137,11 +137,15 @@ class PublishCommandTest(ReceiverFixture):
         self.assertFalse(target.exists())
         self.assertEqual(memo_of(log), [])
 
-    def test_a_remote_that_does_not_take_the_head_leaves_no_memo(self):
-        # Exit 1 and one line naming the failure, never the URL; the memo
-        # is written only for a head the remote took, or the keeper would
-        # stand down on a POST that never landed. A redirect is a failure
-        # too: nothing reaches the host it points at.
+    def test_a_remote_that_does_not_take_the_head_leaves_no_head_row(self):
+        # Exit 1 and one line naming the failure, never the URL; a head
+        # row is written only for a head the remote took, or the keeper
+        # would stand down on a POST that never landed. What the memo
+        # does gain is the attempt row (#240, #251): this verb is what
+        # the keeper's cadence runs, so a failure here has to be
+        # readable afterwards, and the row carries the step and the
+        # outcome and never the URL. A redirect is a failure too:
+        # nothing reaches the host it points at.
         log = make_chain(self.root / "alpha" / "receipts", "sess-pub3")
         closed = "http://127.0.0.1:9/hook"  # discard port: nothing listens
         redirector = FakeReceiver(("127.0.0.1", 0), RedirectingHandler)
@@ -158,7 +162,12 @@ class PublishCommandTest(ReceiverFixture):
             self.assertIn("not published", result.stderr)
             self.assertNotIn("127.0.0.1", result.stderr)
         self.assertEqual(self.receiver.received, [])
-        self.assertEqual(memo_of(log), [])
+        rows = memo_of(log)
+        self.assertEqual([row for row in rows if row.get("kind") != "attempt"],
+                         [], "a head row for a head that never landed")
+        self.assertEqual([(row["step"], row["outcome"] != "sent")
+                          for row in rows], [("publish-head", True)] * 2)
+        self.assertNotIn("127.0.0.1", json.dumps(rows))
 
 
 class PublishKeeperTest(ReceiverFixture):
@@ -390,8 +399,10 @@ class LeftReadingTest(ReceiverFixture):
 
     def test_a_dead_remote_is_a_note_in_left_and_never_the_exit(self):
         # The keeper's existing voice for aging heads: the failure is said
-        # in the report, the exit code stays the chains' own, and no memo
-        # is written for a POST that never landed.
+        # in the report, the exit code stays the chains' own, and no head
+        # row is written for a POST that never landed. The turn does
+        # leave the attempt row the verb writes (#251), which is what
+        # makes a keeper-driven failure outlive this one tick's report.
         log = make_chain(self.root / "alpha" / "receipts", "sess-dead")
 
         result = run_scan(self.root, "--publish-every", "0s",
@@ -408,7 +419,14 @@ class LeftReadingTest(ReceiverFixture):
         self.assertIsNone(chain["left"]["ts"])
         self.assertNotIn("127.0.0.1:9", result.stdout,
                          "the URL is a credential; the report never holds it")
-        self.assertEqual(memo_of(log), [])
+        rows = memo_of(log)
+        self.assertEqual([row for row in rows if row.get("kind") != "attempt"],
+                         [])
+        (note,) = rows
+        self.assertEqual(note["step"], "publish-head")
+        self.assertNotEqual(note["outcome"], "sent")
+        self.assertNotIn("127.0.0.1", json.dumps(rows))
+        self.assertEqual(chain["last_failed"]["step"], "publish-head")
 
 
 class NeverPublishedTest(ReceiverFixture):
