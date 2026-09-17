@@ -846,6 +846,22 @@ def last_failed(log):
     return newest[1] if newest else None
 
 
+def head_published(log, entries):
+    """Whether this chain's current head has a head row in the publish
+    memo (ADR-0025, ADR-0031): `ripe_head`'s own test with the cadence
+    taken out, so what the keeper calls already sent and what the report
+    calls published are one reading rather than two. Attempt rows are
+    skipped by their kind (#240), so a POST the remote refused is never
+    a publication. None when the chain has no entries and so has no
+    head. Testimony, like every sidecar reading: the memo sits beside
+    the chain and the writer can reach both."""
+    if not entries:
+        return None
+    head = entries[-1].get("entry_hash")
+    return bool(head) and head in sidecar_heads(
+        Path(str(log) + ".published.jsonl"))
+
+
 def assess_anchors(detail, entries):
     """The panel's data, read from verify's own words (the documented
     verdict lines are the seam, ADR-0005): anchored spans with their
@@ -2021,6 +2037,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             # The last session-end step that failed, from the recorder's
             # own attempt rows (#240): step, time, outcome, or None.
             "last_failed": last_failed(log),
+            # Whether the current head has a head row in the publish memo
+            # (ADR-0031's published head): the flat reading the metrics
+            # route counts, None when the chain has no head at all.
+            # `left` above answers a different question, the newest door
+            # a head went out of, and keeps its shape.
+            "head_published": head_published(log, entries),
         }
         if keeper_note:
             chain["anchors"]["note"] = keeper_note
@@ -4939,7 +4961,11 @@ METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 # The label values every scrape carries, at zero when nothing is in them,
 # so a panel never meets a missing series. Each is the scan's own string.
 # One the scan emits that is not listed here is rendered all the same.
+# ANCHOR-PENDING and ANCHOR-UNANSWERED join the list because the scan
+# reads the verdict off verify's last line: with several anchor records
+# and the bad one not last, a wait line is what lands there.
 KNOWN_VERDICTS = ("VALID", "BROKEN", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
+                  "ANCHOR-PENDING", "ANCHOR-UNANSWERED",
                   "TRANSCRIPT-DIVERGED", "UNSUPPORTED-VERSION", "NO-VERDICT")
 KNOWN_COMPLETENESS = ("OK", "LAGGING", "SURPLUS", "QUIET", "ALARM-SILENT",
                       "ALARM-DEFICIT", "IDLE-CLEAN", "IDLE-DEFICIT",
@@ -5002,10 +5028,10 @@ def metrics_text(report, age_seconds):
           "4 the worst verify exit among the chains, 5 the baseline saw a "
           "change appends cannot explain, 6 a live session is behind its "
           "witness, 7 a chain's transcript commitments contradict each "
-          "other", "verdict", [((), report.get("exit") or 0)])
+          "other", "witness verdict", [((), report.get("exit") or 0)])
     gauge("loxodonta_scan_age_seconds",
           "Seconds since the scan these numbers come from; a gauge is as "
-          "fresh as the last tick", "testimony",
+          "fresh as the last tick", "witness verdict",
           [((), max(0, age_seconds))])
 
     # The chains, by the verdict verify handed each. A torn tail a sibling
@@ -5057,27 +5083,26 @@ def metrics_text(report, age_seconds):
 
     # The heads, and what has ever been done about them. Whether an
     # anchor covers a head is verify's own word, read from the verdict
-    # lines it prints (ADR-0005); whether a head has left the machine at
-    # all is what the two sidecars beside the chain say, and those the
-    # writer can reach — so a fresh reading here is worth nothing and a
-    # stale one is the reason to look. There is deliberately no per-chain
-    # "unpublished" gauge: the scan's departure reading names the newest
-    # door a head went out of, not every door it ever used, and a metric
-    # that can be wrong about which is worse than one that is narrower.
-    # The store-wide condition the scan says in one sentence — publishing
-    # wired and nothing ever sent — is the gauge instead (#240 part 3).
+    # lines it prints (ADR-0005), and a chain verify called BROKEN never
+    # reaches its anchor check, so a broken chain reads unanchored here
+    # too: the direction is toward the alarm, which is the right way for
+    # a reading to be wrong. Whether the head was published is the memo
+    # beside the chain, which the writer can reach — so a fresh reading
+    # there is worth nothing and a stale one is the reason to look.
+    # Both skip a chain with no entries, which has no head to judge.
+    # Beside them, the store-wide case #240 part 3 gave the scan a
+    # sentence for: the door is wired and has never taken a head.
     gauge("loxodonta_heads_unanchored",
           "Chains whose head no anchor covers yet, from the spans verify "
           "replayed on the last scan", "verdict",
           [((), sum(1 for chain in chains
                     if (chain.get("anchors") or {}).get("head")
                     and not chain["anchors"]["head"].get("anchored")))])
-    gauge("loxodonta_heads_unsent",
-          "Chains no head of which has left this machine yet, by the "
-          "publish door or the anchor door, as the writer-reachable "
-          "sidecars beside them say", "testimony",
+    gauge("loxodonta_heads_unpublished",
+          "Chains whose current head has no row in the publish memo "
+          "beside them, chains with no head excluded", "testimony",
           [((), sum(1 for chain in chains
-                    if not (chain.get("left") or {}).get("ts")))])
+                    if chain.get("head_published") is False))])
     published = report.get("published") or {}
     gauge("loxodonta_publishing_wired_nothing_sent",
           "1 when publishing is wired on the session-end command and no "
@@ -5097,9 +5122,13 @@ def metrics_text(report, age_seconds):
           by_label("step", {step: 1 if seen else 0
                             for step, seen in failures.items()}))
 
-    # The tally (GLOSSARY: Tally): the store's own scale, counted as the
-    # page's tally counts it — sessions per drawer, entries of every
-    # kind — and owning no verdicts.
+    # The tally (GLOSSARY: Tally): the store's own scale — sessions per
+    # drawer, entries of every kind — owning no verdicts. Counted from
+    # this report and from nothing else. The page's own tally is close
+    # kin but not the same arithmetic: it takes sessions and receipts
+    # from /api/recall and drawers and chains from the status payload,
+    # so the two agree by construction today and nothing here holds them
+    # together. Do not claim parity that no test keeps.
     gauge("loxodonta_store_drawers", "Drawers in the store, one per project",
           "testimony", [((), len(report.get("repos") or []))])
     gauge("loxodonta_store_sessions",

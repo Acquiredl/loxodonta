@@ -31,22 +31,22 @@ The response is `text/plain; version=0.0.4; charset=utf-8`, and every family on 
 Every name begins with `loxodonta_` and says the mechanism it counts, never the conclusion you might draw: `loxodonta_chains{verdict="BROKEN"}`, and no metric anywhere called "tampering detected". Every `# HELP` line ends with the grade of evidence behind the number, the same honesty labels [recall](../GLOSSARY.md#recall) carries:
 
 - **(verdict)** — the number came from `loxodonta verify` and its inputs: recomputed hashes, the chain rule, an anchor replayed against a Bitcoin block.
-- **(witness verdict)** — the supervisor decided it from its own watching: the harness transcript paired with the chain it witnessed, or its own diary of when it last saw a head move (ADR-0018).
+- **(witness verdict)** — the supervisor decided it from its own watching: the harness transcript paired with the chain it witnessed, its own diary of when it last saw a head move (ADR-0018), its own clock, or its own fold of all of those together with `verify`'s exits into one number.
 - **(testimony)** — the number counts writer-stamped lines and writer-reachable files. Recorded faithfully, trusted for nothing.
 
 The help line in the table is exactly the one the route prints, with its grade in the next column over. A gauge with labels carries one sample per value the scan knows, zero included, so a panel never meets a missing series.
 
 | Metric | Labels | Grade | Help line |
 |---|---|---|---|
-| `loxodonta_scan_exit_code` | none | verdict | The last scan's exit code: 0 nothing demanding attention, 1 to 4 the worst verify exit among the chains, 5 the baseline saw a change appends cannot explain, 6 a live session is behind its witness, 7 a chain's transcript commitments contradict each other |
-| `loxodonta_scan_age_seconds` | none | testimony | Seconds since the scan these numbers come from; a gauge is as fresh as the last tick |
+| `loxodonta_scan_exit_code` | none | witness verdict | The last scan's exit code: 0 nothing demanding attention, 1 to 4 the worst verify exit among the chains, 5 the baseline saw a change appends cannot explain, 6 a live session is behind its witness, 7 a chain's transcript commitments contradict each other |
+| `loxodonta_scan_age_seconds` | none | witness verdict | Seconds since the scan these numbers come from; a gauge is as fresh as the last tick |
 | `loxodonta_chains` | `verdict` | verdict | Chains by the verdict verify handed them on the last scan, torn tails a sibling continued excluded |
 | `loxodonta_chains_superseded` | none | verdict | Chains verify called BROKEN for a torn tail alone, stood down because a sibling chain continued the recording |
 | `loxodonta_completeness_sessions` | `state` | witness verdict | Sessions by completeness state, the chain paired with the harness transcript that witnessed it |
 | `loxodonta_lifecycle_sessions` | `state` | witness verdict | Sessions by dormancy tier, decided by when the supervisor's own scans last saw the chain's head move |
 | `loxodonta_consumption_sessions` | `state` | testimony | Sessions whose busiest hour ran past the store's own norm, still receiving or gone quiet |
 | `loxodonta_heads_unanchored` | none | verdict | Chains whose head no anchor covers yet, from the spans verify replayed on the last scan |
-| `loxodonta_heads_unsent` | none | testimony | Chains no head of which has left this machine yet, by the publish door or the anchor door, as the writer-reachable sidecars beside them say |
+| `loxodonta_heads_unpublished` | none | testimony | Chains whose current head has no row in the publish memo beside them, chains with no head excluded |
 | `loxodonta_publishing_wired_nothing_sent` | none | testimony | 1 when publishing is wired on the session-end command and no chain in the store holds a sent head, else 0 |
 | `loxodonta_last_attempt_failed` | `step` | testimony | 1 when some chain's newest failed session-end attempt is this step, else 0 |
 | `loxodonta_store_drawers` | none | testimony | Drawers in the store, one per project |
@@ -56,17 +56,30 @@ The help line in the table is exactly the one the route prints, with its grade i
 
 ### The label values
 
-Each is the scan's own string, unchanged. The sets below are what a scrape carries today; a value that joins later joins as a new sample under the same name (section 4).
+Each is the scan's own string, unchanged, and every one of them is on every scrape, at zero when nothing is in it. They are frozen exactly as the names are (section 4), and the suite holds this table against a live scrape in both directions: a value the route serves and this table omits fails, and so does a value this table names and the route does not serve.
 
-- `loxodonta_chains{verdict}` — `VALID`, `BROKEN`, `ANCHOR-MISMATCH`, `ANCHOR-INVALID`, `TRANSCRIPT-DIVERGED`, `UNSUPPORTED-VERSION`, `NO-VERDICT`. The vocabulary is the GLOSSARY's *States and transitions*, as the scan emits it. Note that a chain verify called `BROKEN` only because its tail is torn, where a sibling chain carried the recording on, is not in this count: it has its own gauge, so the broken count says what the dashboard's strip and the day book say (ADR-0004).
-- `loxodonta_completeness_sessions{state}` — `OK`, `LAGGING`, `SURPLUS`, `QUIET`, `ALARM-SILENT`, `ALARM-DEFICIT`, `IDLE-CLEAN`, `IDLE-DEFICIT`, `ENDED-CLEAN`, `ENDED-DEFICIT`, `ENDED-SURPLUS`, `UNWITNESSED`, `UNWATCHED`, `ELSEWHERE`, `BEFORE-MEMORY`. The last one is the counted block of sessions older than the supervisor's own memory (ADR-0029): they take no row anywhere, and the block's count is that label's value, so a store full of them reads as unjudged rather than as a clean bill.
-- `loxodonta_lifecycle_sessions{state}` — `awake`, `waning`, `dormant`. A session the completeness watch never paired with a transcript has no tier and is in none of the three.
-- `loxodonta_consumption_sessions{state}` — `RUNNING-HOT`, `ENDED-HOT`.
-- `loxodonta_last_attempt_failed{step}` — `anchor`, `publish-head`. The steps the recorder writes an attempt row for at session end (`docs/HOOK.md`).
+| Metric | Label | Values |
+|---|---|---|
+| `loxodonta_chains` | `verdict` | `VALID`, `BROKEN`, `ANCHOR-MISMATCH`, `ANCHOR-INVALID`, `ANCHOR-PENDING`, `ANCHOR-UNANSWERED`, `TRANSCRIPT-DIVERGED`, `UNSUPPORTED-VERSION`, `NO-VERDICT` |
+| `loxodonta_completeness_sessions` | `state` | `OK`, `LAGGING`, `SURPLUS`, `QUIET`, `ALARM-SILENT`, `ALARM-DEFICIT`, `IDLE-CLEAN`, `IDLE-DEFICIT`, `ENDED-CLEAN`, `ENDED-DEFICIT`, `ENDED-SURPLUS`, `UNWITNESSED`, `UNWATCHED`, `ELSEWHERE`, `BEFORE-MEMORY` |
+| `loxodonta_lifecycle_sessions` | `state` | `awake`, `waning`, `dormant` |
+| `loxodonta_consumption_sessions` | `state` | `RUNNING-HOT`, `ENDED-HOT` |
+| `loxodonta_last_attempt_failed` | `step` | `anchor`, `publish-head` |
 
-### Two readings that are deliberately absent
+Four notes on that table.
 
-**There is no per-chain "unpublished" gauge.** The scan's per-chain departure reading names the newest door a head went out of, not every door it ever used, so a chain that published a head in the morning and anchored a later one in the afternoon reads as *anchored* and nothing in the report contradicts that. A metric that can be wrong about which door is worse than one that is narrower, so the route offers the narrower pair instead: `loxodonta_heads_unsent`, which counts chains that have sent nothing anywhere, and `loxodonta_publishing_wired_nothing_sent`, the store-wide condition the scan already says in one sentence when publishing is wired in name only (#240 part 3).
+- **The verdicts are the GLOSSARY's *States and transitions*, as the scan emits them, and the list is wider than the vocabulary.** The scan reads a chain's verdict off the last line `verify --anchors` printed, so a chain carrying several anchor records whose bad one is not last ends on a wait line, and `ANCHOR-PENDING` or `ANCHOR-UNANSWERED` is what the scan reports. Those are readings about a proof in flight, not about the chain, and the route renders them as the label values they are.
+- **A torn tail a sibling continued is not in the `BROKEN` count.** `verify` calls it broken; the scan stands it down because another chain carried the recording on (ADR-0004), and it has a gauge of its own, so the broken count says what the dashboard's strip and the day book say.
+- **`BEFORE-MEMORY` is a counted block, not a run of rows.** A session older than the supervisor's first look takes no row anywhere (ADR-0029); the block's count is that label's value, so a store full of them reads as unjudged rather than as a clean bill.
+- **A session with no dormancy tier is in none of the three.** The tier comes from the completeness watch's pairing; a session it never paired has no tier, and the three lifecycle samples will not add up to the session count.
+
+### What the two head gauges count, and what they do not
+
+- **`loxodonta_heads_unanchored` counts every `BROKEN` chain as unanchored.** `verify` returns at the break, before it ever runs its anchor check, so no `ANCHORED` span reaches the scan and the head reads uncovered whether or not a proof exists beside it. The direction is toward the alarm, which is the right way for a reading to be wrong, and the broken count beside it says why.
+- **Both gauges skip a chain with no entries.** A chain with nothing in it has no head, so it is neither anchored nor unanchored and neither published nor unpublished. It still counts in `loxodonta_store_chains`, so the three will not add up, deliberately.
+- **`loxodonta_heads_unpublished` is about the publish door only.** It asks whether the chain's current head has a row in the publish memo beside it, which is the keeper's own already-sent test with the cadence taken out. A head that left by the anchor door has not been published and is counted here; that is not a contradiction, it is two different doors. Beside it, `loxodonta_publishing_wired_nothing_sent` is the store-wide case the scan already says in one sentence: the door is wired on the session-end command and has never taken a head (#240 part 3).
+
+### One reading that is deliberately absent
 
 **There is no metric for whether the supervisor is alive.** That one is `up`, which your Prometheus writes for you on every scrape, and a scrape that stops is the loudest signal on this page. A writer that can kill the supervisor can silence the route; no gauge served by the thing being killed can report that.
 

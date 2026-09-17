@@ -393,12 +393,17 @@ class HeadsTest(MetricsFixture):
              self.receiver.url],
             capture_output=True, check=True, env=clean_env())
 
-    def test_unanchored_and_unsent_heads_are_the_anchor_panels_counts(self):
+    def test_unanchored_and_unpublished_heads_are_the_panels_counts(self):
         make_chain(self.root / "alpha" / "receipts", "sess-bare")
         anchored = make_chain(self.root / "beta" / "receipts", "sess-anch")
         write_completed_anchor(anchored, chain_head(anchored))
         published = make_chain(self.root / "gamma" / "receipts", "sess-pub")
         self.publish_by_hand(published)
+        # A chain with nothing in it has no head, so it is neither
+        # anchored nor unanchored and neither published nor unpublished.
+        hollow = self.root / "zeta" / "receipts" / "receipts-sess-ffff.jsonl"
+        hollow.parent.mkdir(parents=True)
+        hollow.write_text("", encoding="utf-8")
         self.serve()
 
         _, _, scrape = self.scrape()
@@ -412,16 +417,43 @@ class HeadsTest(MetricsFixture):
         self.assertEqual(scrape.value("loxodonta_heads_unanchored"), 2,
                          "the bare chain and the published one")
         self.assertEqual(
-            scrape.value("loxodonta_heads_unsent"),
-            sum(1 for c in chains if not c["left"]["ts"]))
-        self.assertEqual(scrape.value("loxodonta_heads_unsent"), 1,
-                         "only the bare chain has sent nothing anywhere")
+            scrape.value("loxodonta_heads_unpublished"),
+            sum(1 for c in chains if c["head_published"] is False))
+        self.assertEqual(scrape.value("loxodonta_heads_unpublished"), 2,
+                         "the bare chain and the anchored one; a head that "
+                         "left by the anchor door was not published")
+        # The headless chain is in the store and in neither gauge, which
+        # is why the three do not add up.
+        self.assertEqual(scrape.value("loxodonta_store_chains"), 4)
+        self.assertEqual([c["head_published"] for c in chains
+                          if not c["entries"]], [None])
         # Publishing is not wired on this witness, so the sentence the
         # scan would print is not the case and the gauge says so.
         self.assertFalse(report["published"]["wired"])
         self.assertIsNone(report["published"]["note"])
         self.assertEqual(
             scrape.value("loxodonta_publishing_wired_nothing_sent"), 0)
+
+    def test_a_published_head_stops_counting_once_the_memo_holds_it(self):
+        # The reading is the keeper's own already-sent test with the
+        # cadence taken out, so it moves exactly when the memo gains the
+        # row and never when an attempt row lands beside it.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-pub")
+        write_attempt_row(log, "publish-head", "the remote answered 404",
+                          when=ago(600), budget=3.0)
+        self.serve(extra_env={"SUPERVISOR_SCAN_TTL_SECONDS": "0"})
+
+        _, _, before = self.scrape()
+        self.assertEqual(before.value("loxodonta_heads_unpublished"), 1,
+                         "a refused POST is not a publication")
+
+        self.publish_by_hand(log)
+        _, _, after = self.scrape()
+        report = self.scan()
+
+        self.assertEqual(after.value("loxodonta_heads_unpublished"), 0)
+        self.assertEqual([c["head_published"] for c in chains_of(report)],
+                         [True])
 
     def test_publishing_wired_with_nothing_sent_is_the_scans_sentence(self):
         # #240 part 3: the posture wired in name only. The scan says it
@@ -565,6 +597,20 @@ class DocumentedNamesTest(MetricsFixture):
     def page(self):
         return (REPO_ROOT / "docs" / "METRICS.md").read_text(encoding="utf-8")
 
+    def documented_values(self):
+        """The page's label-values table, as {(name, label): {values}}.
+        Three cells wide, which is what tells it from the table above."""
+        rows = {}
+        for line in self.page().splitlines():
+            cells = [cell.strip()
+                     for cell in line.strip().strip("|").split("|")]
+            if len(cells) != 3 or not cells[0].startswith("`loxodonta_"):
+                continue
+            rows[(cells[0].strip("`"), cells[1].strip("`"))] = {
+                cell.strip().strip("`") for cell in cells[2].split(",")
+                if cell.strip()}
+        return rows
+
     def documented(self):
         """The page's table, as {name: (labels, grade, help words)}."""
         rows = {}
@@ -595,6 +641,25 @@ class DocumentedNamesTest(MetricsFixture):
                 labels,
                 tuple(sorted({key for metric, pairs in scrape.samples
                               if metric == name for key, _ in pairs})), name)
+
+        # The label values are frozen exactly as the names are, so the
+        # page names every value the route serves and the route serves
+        # every value the page names. Without this, a state quietly
+        # dropped from the code would pass the suite: no sample and no
+        # test asks for one.
+        values = self.documented_values()
+        self.assertEqual(
+            sorted(values),
+            sorted({(metric, key) for metric, pairs in scrape.samples
+                    for key, _ in pairs}))
+        for (name, label), listed in values.items():
+            self.assertEqual(
+                listed,
+                {value for metric, pairs in scrape.samples if metric == name
+                 for key, value in pairs if key == label},
+                name + "{" + label + "}")
+            for value in listed:
+                scrape.value(name, **{label: value})
         # What the operator needs beside the list: the loopback scrape
         # config, the one line about reaching it from another box, and
         # the freeze rule the names are worth nothing without.
