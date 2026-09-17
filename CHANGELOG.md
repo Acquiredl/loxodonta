@@ -12,7 +12,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Added
 
-- Every session-end step writes down how it went, and the scan reports it (#240; #245, slice one of PRD #244). After the anchor and the head publish, the hook appends one row of kind `attempt` to the sidecar that step already owns, carrying the step, the time, the budget and the outcome, never the URL. Readers that judge (`verify --anchors`, the keeper, `verify-package`) skip the row by its kind. `scan --json` and the dashboard's project tile gain, per chain, when a head last left by any route and the last failed attempt, whether or not a keeper cadence is set, and the scan says in one sentence when publishing is wired on the SessionEnd command and no chain holds a sent head. The chain's schema and the SPEC are untouched.
+- Every session-end step writes down how it went, and the scan reports it (#240; #245, slice one of PRD #244). After the anchor and the head publish, the hook appends one row of kind `attempt` to the sidecar that step already owns, carrying the step, the time, the budget and the outcome, never the URL. Readers that judge (`verify --anchors`, the keeper, `verify-package`) skip the row by its kind. `scan --json` and the dashboard's project tile gain, per chain, when a head last left by any route and the last failed attempt, whether or not a keeper cadence is set, and the scan says in one sentence when publishing is wired on the SessionEnd command and no chain holds a sent head. The chain's schema and the SPEC are untouched. A verifier or supervisor from before this change reads an attempt row as an invalid anchor record or as a departure, so a package recipient needs this release or later.
 
 ### Changed
 
