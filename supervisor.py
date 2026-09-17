@@ -888,10 +888,10 @@ def sessionend_commands(witness):
         return []
     commands = []
     for rule in rules if isinstance(rules, list) else []:
-        if not isinstance(rule, dict) or not isinstance(rule.get("hooks"), list):
-            continue
-        for hook in rule["hooks"]:
-            command = str(hook.get("command", "")) if isinstance(hook, dict) else ""
+        hooks = rule.get("hooks") if isinstance(rule, dict) else None
+        for hook in hooks if isinstance(hooks, list) else []:
+            command = str(hook.get("command", "")) if isinstance(hook, dict) \
+                else ""
             if any(marker in command for marker in ("receipts", "loxodonta")):
                 commands.append(command)
     return commands
