@@ -521,7 +521,8 @@ def parse_cadence(text):
 
 def cadence_words(seconds):
     """A cadence the way the operator would say it back: 6h, 1d, 30m,
-    45s. The inverse of parse_cadence, for the startup line."""
+    45s. The inverse of parse_cadence, for the startup line that says
+    which cadence the keeper follows and why (ADR-0031 ruling 1)."""
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
         if seconds and seconds % size == 0:
             return f"{seconds // size}{unit}"
@@ -529,8 +530,8 @@ def cadence_words(seconds):
 
 
 # --- The keeper follows the profile -------------------------------------------
-# ADR-0031 ruling 1. The operator chose once, at install-hook, what
-# leaves the machine, and the recorder wrote the choice into the
+# ADR-0031 ruling 1 (#246). The operator chose once, at install-hook,
+# what leaves the machine, and the recorder wrote the choice into the
 # coverage marker beside the matchers (ADR-0030). `serve` reads that
 # choice so the keeper's cadences follow it without the flags being
 # typed again; a flag typed anyway still wins. Read once, when `serve`
@@ -539,46 +540,76 @@ def cadence_words(seconds):
 
 PROFILE_ANCHOR_EVERY = 6 * 3600   # seconds: the timestamped tier's default
 
+# The tiers in ascending order; `full` joins when the published chain
+# lands. `custom` is the raw flags and declares no tier, so it ranks
+# with `local` here: whatever it wired at session end, it asked the
+# keeper for nothing.
+TIERS = ("local", "timestamped")
+
 
 def marker_profile():
-    """The profile in the coverage marker's newest epoch, whichever
-    harness wrote it, or None when no epoch names one (a marker from
-    before profiles existed, or no marker at all)."""
+    """The strongest profile any harness declares in the coverage
+    marker, as (profile, harness), or None when no epoch names one (a
+    marker from before profiles existed, or no marker at all). Each
+    harness's newest epoch speaks for that harness, and the highest
+    tier among them speaks for the keeper (ADR-0031 ruling 1, #246).
+    Not simply the newest epoch of all: a flagless install for a
+    second harness would then read as the first harness's choice
+    withdrawn, and the keeper would stand down with nothing saying a
+    Codex install did it, which is the end claim ADR-0030 ruling 2
+    refuses arriving by another door."""
     try:
         with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
         return None
-    epochs = [epoch for epoch in (data.get("epochs") or [])
-              if isinstance(epoch, dict)
-              and isinstance(epoch.get("since"), str)
-              and isinstance(epoch.get("profile"), str)]
-    if not epochs:
-        return None
+    declared = {}   # harness -> its newest epoch that names a profile
     # Sorted is stable, so two epochs stamped the same second keep the
     # order the recorder appended them in, and the newest is the last.
-    return sorted(epochs, key=lambda epoch: epoch["since"])[-1]["profile"]
+    for epoch in sorted((epoch for epoch in (data.get("epochs") or [])
+                         if isinstance(epoch, dict)
+                         and isinstance(epoch.get("since"), str)
+                         and isinstance(epoch.get("harness"), str)
+                         and isinstance(epoch.get("profile"), str)),
+                        key=lambda epoch: epoch["since"]):
+        declared[epoch["harness"]] = epoch
+    if not declared:
+        return None
+
+    def tier(epoch):
+        return (TIERS.index(epoch["profile"])
+                if epoch["profile"] in TIERS else 0)
+
+    strongest = sorted(declared.values(),
+                       key=lambda epoch: (tier(epoch), epoch["since"]))[-1]
+    return strongest["profile"], strongest["harness"]
 
 
-def keeper_cadences(anchor_every, profile):
-    """The anchor cadence in force and where it came from: an explicit
-    `--anchor-every` wins; with none, a `timestamped` profile puts the
-    anchor keeper on its six-hour default; `local`, `custom` without a
-    flag, or no profile at all runs no anchor keeper. Returns (seconds
+def keeper_cadences(anchor_every, declared):
+    """The anchor cadence in force and where it came from (ADR-0031
+    ruling 1, #246): an explicit `--anchor-every` wins; with none, a
+    `timestamped` profile puts the anchor keeper on its six-hour
+    default; `local`, `custom` without a flag, or no profile at all
+    runs no anchor keeper. `declared` is marker_profile's (profile,
+    harness) or None, and the harness is named in the source so the
+    operator can see which install set the cadence. Returns (seconds
     or None, the source in words)."""
     if anchor_every is not None:
         return anchor_every, "flag --anchor-every"
+    if declared is None:
+        return None, "no profile on record; no flag"
+    profile, harness = declared
     if profile == "timestamped":
-        return PROFILE_ANCHOR_EVERY, f"profile {profile}"
-    return None, (f"profile {profile}, no flag" if profile
-                  else "no profile on record, no flag")
+        return PROFILE_ANCHOR_EVERY, f"profile {profile}, {harness}"
+    return None, f"profile {profile}, {harness}; no flag"
 
 
 def keeper_words(anchor_every, anchor_source, publish_every):
     """The startup line's second half: each keeper's cadence and its
-    source, so the operator reads back what `serve` will send and why.
-    Publishing follows flags alone in this release; the tier that
-    publishes on a cadence arrives with the published chain."""
+    source, so the operator reads back what `serve` will send and why
+    (ADR-0031 ruling 1, #246). Publishing follows flags alone in this
+    release; the tier that publishes on a cadence arrives with the
+    published chain."""
     anchor = (f"anchor every {cadence_words(anchor_every)} ({anchor_source})"
               if anchor_every is not None else f"anchor off ({anchor_source})")
     publish = (f"publish every {cadence_words(publish_every)} "

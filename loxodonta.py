@@ -2715,9 +2715,9 @@ def session_end_notice(old, new, choices):
 def profile_notice(profile, matchers, codex=False):
     """What the installer prints last, on first install and on every
     re-run: one line reading the choice back (the harness, the coverage,
-    the profile) and, at `local`, the ladder — one row per tier the
-    operator can reach from here, each naming its flag and what leaves
-    the machine (ADR-0031 ruling 1). `local` is the lower tier of
+    the profile) and, at `local`, the ladder — one row per tier, each
+    saying what leaves the machine, the row above naming the flag that
+    reaches it (ADR-0031 ruling 1). `local` is the lower tier of
     ADR-0002: an edit, a deletion, or a reorder is caught unconditionally,
     a regenerated chain only against a head kept off the machine (#221's
     sentence, kept). `timestamped` is the anchor at each session end. On

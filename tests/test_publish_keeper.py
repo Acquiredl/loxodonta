@@ -407,14 +407,18 @@ class ProfileKeeperTest(unittest.TestCase):
         self.addCleanup(self.calendar.server_close)
         self.addCleanup(self.calendar.shutdown)
 
-    def install(self, *args):
+    def install(self, *args, age=0):
         """The real installer writes the marker the keeper reads, into
-        this test's store; its settings land in a throwaway home."""
+        this test's store; its settings land in a throwaway home. `age`
+        stamps the epoch that many seconds into the past (the recorder's
+        clock override), so one install can be older than another."""
+        knobs = {"HOME": str(self.home), "USERPROFILE": str(self.home),
+                 "LOXODONTA_HOME": str(self.store)}
+        if age:
+            knobs["SOURCE_DATE_EPOCH"] = str(int(time.time()) - age)
         subprocess.run(
             [sys.executable, str(LOXODONTA), "install-hook", *args],
-            capture_output=True, check=True,
-            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
-                           LOXODONTA_HOME=str(self.store)))
+            capture_output=True, check=True, env=keeper_env(**knobs))
 
     def aged_chain(self, session, age):
         """A chain through the public CLI whose entries are `age`
@@ -475,7 +479,8 @@ class ProfileKeeperTest(unittest.TestCase):
         self.tick()
         said = self.said_at_startup()
 
-        self.assertIn("anchor every 6h (profile timestamped)", said)
+        self.assertIn("anchor every 6h (profile timestamped, claude-code)",
+                      said)
         self.assertEqual(self.calendar.submitted,
                          [bytes.fromhex(chain_head(log))],
                          "the keeper anchored the ripe head on the "
@@ -499,7 +504,7 @@ class ProfileKeeperTest(unittest.TestCase):
         self.tick()
         said = self.said_at_startup()
 
-        self.assertIn("anchor off (profile local", said)
+        self.assertIn("anchor off (profile local, claude-code", said)
         self.assertEqual(self.calendar.submitted, [])
         self.assertFalse(Path(str(log) + ".anchors.jsonl").exists())
 
@@ -511,8 +516,31 @@ class ProfileKeeperTest(unittest.TestCase):
         self.tick()
         said = self.said_at_startup()
 
-        self.assertIn("anchor off (profile custom", said)
+        self.assertIn("anchor off (profile custom, claude-code", said)
         self.assertEqual(self.calendar.submitted, [])
+
+    def test_a_later_local_install_for_another_harness_stands_no_keeper_down(self):
+        # The keeper follows the strongest tier any harness declares,
+        # each harness speaking through its newest epoch. A Claude Code
+        # install at `timestamped` a day ago, then a flagless Codex
+        # install today: the newest epoch of all says `local`, but
+        # reading it as the choice withdrawn would stand the keeper down
+        # with nothing saying a Codex install did it, the end claim
+        # ADR-0030 ruling 2 refuses. The line names the harness whose
+        # profile set the cadence.
+        (self.home / ".codex").mkdir()
+        self.install("--profile", "timestamped", age=86400)
+        self.install("--codex")
+        log = self.aged_chain("sess-two", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile timestamped, claude-code)",
+                      said)
+        self.assertEqual(self.calendar.submitted,
+                         [bytes.fromhex(chain_head(log))])
 
 
 if __name__ == "__main__":
