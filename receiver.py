@@ -30,6 +30,7 @@ import argparse
 import hmac
 import json
 import os
+import re
 import secrets
 import socket
 import socketserver
@@ -50,7 +51,23 @@ FORMAT_VERSION = "0.1"
 DEFAULT_PORT = 8790
 TOKEN_FILE = "token"
 HEADS_FILE = "heads.jsonl"
+
+# The wire contract (docs/RECEIVER.md). One POST is either a published
+# head, one JSON object, or a batch of a published chain, newline-
+# delimited entries exactly as they sit in the chain file; the content
+# type says which. A chain batch names its file in one header.
 HEAD_TYPE = "application/json"
+CHAIN_TYPE = "application/x-ndjson"
+CHAIN_HEADER = "X-Loxodonta-Chain"
+
+# The only file names a header can reach: the recorder's own chain
+# names, `receipts-<session>.jsonl` and the sibling
+# `receipts-<session>-002.jsonl` (GLOSSARY: sibling chain). A session id
+# is letters, digits, hyphens and underscores, and the sibling suffix is
+# made of the same, so one class covers both; the length keeps the name
+# inside what every filesystem takes. Nothing else in a header ever
+# becomes a path: no separator, no dot, no other extension.
+CHAIN_NAME = re.compile(r"^receipts-[A-Za-z0-9_-]{1,200}\.jsonl$")
 
 # The most one POST may carry. A session's chain runs to a few hundred
 # bytes per entry, so this holds many thousands of entries in one batch;
@@ -127,6 +144,17 @@ def head_line(body):
     return json.dumps(head, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def chain_lines(body):
+    """A chain batch as the lines it holds, each without its newline (a
+    carriage return before it is dropped too, so a proxy that rewrote
+    the line endings changes nothing on disk). The sender's trailing
+    newline is not an empty last line."""
+    lines = body.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    return [line[:-1] if line.endswith(b"\r") else line for line in lines]
+
+
 # --- The server ----------------------------------------------------------------
 
 class Receiver(HTTPServer):
@@ -184,9 +212,24 @@ class Door(BaseHTTPRequestHandler):
             return None
         return length
 
+    def content_type(self):
+        return (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+
     def do_POST(self):
         if not self.at_the_token():
             self.answer(404, "not the receiver's path")
+            return
+        kind = self.content_type()
+        if kind not in (HEAD_TYPE, CHAIN_TYPE):
+            self.answer(415, f"a head is {HEAD_TYPE}, a chain batch is "
+                             f"{CHAIN_TYPE}")
+            return
+        # The chain's name is judged before the body is read: a batch
+        # for a file this receiver would not write is not worth reading.
+        name = self.headers.get(CHAIN_HEADER) if kind == CHAIN_TYPE else None
+        if kind == CHAIN_TYPE and not CHAIN_NAME.match(name or ""):
+            self.answer(400, f"{CHAIN_HEADER} must be a receipt file name, "
+                             "receipts-<session>.jsonl")
             return
         length = self.declared_length()
         if length is None:
@@ -195,12 +238,17 @@ class Door(BaseHTTPRequestHandler):
         if len(body) != length:
             self.answer(400, "the body ended before its declared length")
             return
-        line = head_line(body)
-        if line is None:
-            self.answer(400, "a head is one JSON object")
+        if kind == HEAD_TYPE:
+            line = head_line(body)
+            if line is None:
+                self.answer(400, "a head is one JSON object")
+                return
+            append_durably(os.path.join(self.server.data, HEADS_FILE), [line])
+            self.answer(200, json.dumps({"appended": 1}))
             return
-        append_durably(os.path.join(self.server.data, HEADS_FILE), [line])
-        self.answer(200, json.dumps({"appended": 1}))
+        lines = chain_lines(body)
+        append_durably(os.path.join(self.server.data, name), lines)
+        self.answer(200, json.dumps({"appended": len(lines), "dropped": 0}))
 
     def answer(self, status, text, allow=None):
         body = (text + "\n").encode("utf-8")

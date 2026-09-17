@@ -39,6 +39,28 @@ PUBLISH_TO = re.compile(r"^publish to (https?://\S+)$", re.M)
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def run_recorder(*args, epoch=None):
+    """The recorder as a subprocess. `epoch` pins SOURCE_DATE_EPOCH so two
+    chains built by one test differ (or agree) by design, not by clock."""
+    env = clean_env()
+    if epoch is not None:
+        env["SOURCE_DATE_EPOCH"] = str(epoch)
+    return subprocess.run([sys.executable, str(LOXODONTA), *map(str, args)],
+                          capture_output=True, encoding="utf-8", env=env)
+
+
+def make_chain(log, actions, epoch=None):
+    """A real chain through the public CLI: genesis, then one receipt per
+    action. Returns its lines as bytes, the way the sender ships them."""
+    done = run_recorder("init", "--log", log, epoch=epoch)
+    assert done.returncode == 0, done.stderr
+    for action in actions:
+        done = run_recorder("log", "--log", log, "--actor", "claude-code",
+                            "--action", action, epoch=epoch)
+        assert done.returncode == 0, done.stderr
+    return log.read_bytes()
+
+
 def free_port():
     """A port nothing is listening on right now, for the tests that need
     the same URL across two starts (a port the receiver picks itself
@@ -211,6 +233,67 @@ class RefusalTest(ReceiverFixture):
                 status, _, body = request("GET", self.base + path)
                 self.assertIn(status, (404, 405))
                 self.assertNotIn(digest.encode(), body)
+
+
+CHAIN = "receipts-sess-0001.jsonl"
+NDJSON = "application/x-ndjson"
+
+
+class ContentTest(ReceiverFixture):
+    """Two content types, two destinations: a JSON head to the heads
+    file, an NDJSON batch to the chain file the header names."""
+
+    def setUp(self):
+        super().setUp()
+        self.proc = self.start()
+        self.log = self.root / CHAIN
+        self.lines = make_chain(self.log, ["step 1", "step 2"], epoch=1700000000)
+
+    def send_chain(self, body, name=CHAIN):
+        headers = {} if name is None else {"X-Loxodonta-Chain": name}
+        return post(self.proc.url, body, NDJSON, headers)
+
+    def test_a_json_post_from_the_recorder_lands_as_one_head_line(self):
+        for expected in (1, 2):
+            done = run_recorder("publish", "--log", self.log, self.proc.url)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            heads = (self.data / "heads.jsonl").read_text("utf-8").splitlines()
+            self.assertEqual(len(heads), expected)
+        head = run_recorder("head", "--log", self.log).stdout.strip()
+        self.assertEqual(json.loads(heads[-1])["head"], head)
+        self.assertEqual(self.stored(), ["heads.jsonl", "token"])
+
+    def test_an_ndjson_post_lands_in_the_file_the_chain_header_names(self):
+        status, answer = self.send_chain(self.lines)
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(json.loads(answer), {"appended": 3, "dropped": 0})
+        self.assertEqual((self.data / CHAIN).read_bytes(), self.lines)
+        # The sibling name is a receipt file name too (GLOSSARY: sibling chain).
+        status, _ = self.send_chain(self.lines, "receipts-sess-0001-002.jsonl")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.stored(),
+                         ["receipts-sess-0001-002.jsonl", CHAIN, "token"])
+
+    def test_a_chain_name_that_is_not_a_receipt_file_name_is_refused(self):
+        not_a_chain = (None, "", "receipts-x.txt", "x.jsonl", "receipts-.jsonl",
+                       "receipts-x.JSONL", "receipts-a b.jsonl", "heads.jsonl",
+                       "token", "../receipts-x.jsonl", "receipts/x.jsonl",
+                       "receipts\\x.jsonl", "/receipts-x.jsonl",
+                       "receipts-x.jsonl/", "receipts-..jsonl",
+                       "receipts-x.jsonl\tzzz", "receipts-" + "x" * 300 + ".jsonl")
+        for name in not_a_chain:
+            with self.subTest(name=name):
+                status, _ = self.send_chain(self.lines, name)
+                self.assertEqual(status, 400)
+        self.assertEqual(self.stored(), ["token"])
+
+    def test_any_other_content_type_is_415(self):
+        status, _ = post(self.proc.url, self.lines, "text/plain",
+                         {"X-Loxodonta-Chain": CHAIN})
+        self.assertEqual(status, 415)
+        status, _ = post(self.proc.url, b"{}", "")
+        self.assertEqual(status, 415)
+        self.assertEqual(self.stored(), ["token"])
 
 
 if __name__ == "__main__":
