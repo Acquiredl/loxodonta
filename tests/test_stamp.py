@@ -306,7 +306,13 @@ class StampCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("the head was not stamped: the authority answered "
                       "status 2 (rejection)", result.stderr)
-        self.assertFalse(self.sidecar.exists(), "a refusal is nobody's word")
+        self.assertEqual(token_rows(self.sidecar), [],
+                         "a refusal is nobody's word")
+        (note,) = attempt_rows(self.sidecar)
+        self.assertEqual(set(note), {"kind", "step", "ts", "budget", "outcome"})
+        self.assertEqual(note["step"], "stamp")
+        self.assertEqual(note["outcome"],
+                         "the authority answered status 2 (rejection)")
 
     def test_a_reply_that_is_not_a_timestamp_response_is_named(self):
         self.authority.answer = b"<html>a captive portal, say</html>"
@@ -315,7 +321,9 @@ class StampCommandTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("not a timestamp response", result.stderr)
-        self.assertFalse(self.sidecar.exists())
+        self.assertEqual(token_rows(self.sidecar), [])
+        (note,) = attempt_rows(self.sidecar)
+        self.assertIn("not a timestamp response", note["outcome"])
 
     def test_a_remote_that_answers_404_is_named_by_its_status(self):
         self.authority.status_code = 404
@@ -324,7 +332,9 @@ class StampCommandTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("the remote answered 404", result.stderr)
-        self.assertFalse(self.sidecar.exists())
+        self.assertEqual(token_rows(self.sidecar), [])
+        (note,) = attempt_rows(self.sidecar)
+        self.assertEqual(note["outcome"], "the remote answered 404")
 
     def test_an_unreachable_authority_fails_cleanly(self):
         result = self.stamp("http://127.0.0.1:9/tsr")  # discard port
@@ -332,7 +342,12 @@ class StampCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("not stamped", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertFalse(self.sidecar.exists())
+        self.assertEqual(token_rows(self.sidecar), [])
+        (note,) = attempt_rows(self.sidecar)
+        self.assertEqual(note["step"], "stamp")
+        self.assertAlmostEqual(note["budget"], 15, delta=0.1)
+        self.assertNotIn("127.0.0.1",
+                         self.sidecar.read_text(encoding="utf-8"))
 
     def test_an_authority_that_is_not_http_is_a_usage_error(self):
         result = self.stamp("file:///tmp/tokens")

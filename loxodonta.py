@@ -1274,10 +1274,17 @@ def cmd_stamp(args):
     head, n = last["entry_hash"], last["n"]
     reply, failure = ask_authority(args.authority, head, STAMP_TIMEOUT)
     if failure:
+        # A query that was refused leaves the note and no token row:
+        # nothing was granted, so there is nobody's word to keep, and
+        # what the store learns is that this head was asked about and
+        # came back empty (#240). Written from here as well as from the
+        # hook, unlike the anchor's and the publish's notes, because a
+        # head this verb failed to stamp is a head the supervisor should
+        # still be able to read as unstamped and lately tried.
+        append_attempt_record(stamps_path(args.log), STEP_STAMP,
+                              STAMP_TIMEOUT, failure)
         print(f"error: the head was not stamped: {failure}", file=sys.stderr)
         return 1
-    # The record is written only for a token the authority granted: a
-    # row for a query that was refused would stand nobody's word.
     append_stamp_record(args.log, head, n, args.authority, reply)
     print(f"stamped {record_label(head, n)} via {args.authority}")
     return 0
@@ -2082,9 +2089,17 @@ def judge_chain(folder, listing):
         print(f"{named}: MISSING (named on this chain, not in the package); "
               "its commitments go unjudged")
         transcript = None
+    # Every flag `cmd_verify` reads is named here, the package judge
+    # being the one caller that builds its own arguments: a flag left
+    # out is an attribute error mid-verdict rather than a default. The
+    # packaged stamps sidecar is judged when the package carries the
+    # authority's chain file to judge it against, which is the next
+    # slice (ADR-0032 ruling 5); until then a package is judged exactly
+    # as before.
     code = cmd_verify(argparse.Namespace(log=log, files=False,
                                          expect_head=None,
-                                         transcript=transcript, anchors=True))
+                                         transcript=transcript, anchors=True,
+                                         stamps=False, authority_chain=None))
     findings = [(code, CHAIN_WORDS[code])] if code in CHAIN_WORDS else []
     walked, count, references, commitments = walked_listing(log)
     if transcript is None and commitments and code != 5:
