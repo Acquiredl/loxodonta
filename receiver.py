@@ -34,6 +34,7 @@ import re
 import secrets
 import socket
 import socketserver
+import ssl
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -233,6 +234,11 @@ class Receiver(HTTPServer):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
+    def handle_error(self, request, client_address):
+        # A sender that stalled past the timeout, or spoke plain HTTP to
+        # a TLS door: one line, never the stdlib's traceback.
+        print(f"{client_address[0]} dropped: {sys.exc_info()[1]}", flush=True)
+
 
 class Door(BaseHTTPRequestHandler):
     """The one door: POST at the token's path. Everything else is turned
@@ -344,7 +350,21 @@ class Door(BaseHTTPRequestHandler):
         pass
 
 
+def tls_context(cert, key):
+    """The server side of TLS from the operator's own pair, through the
+    stdlib alone. The receiver mints no certificate: a pair from a CA the
+    sending machine trusts, or a self-signed one the operator installs
+    there, is the operator's choice (docs/RECEIVER.md)."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=cert, keyfile=key)
+    return context
+
+
 def cmd_serve(args):
+    if bool(args.cert) != bool(args.key):
+        print("receiver serve: error: --cert and --key go together",
+              file=sys.stderr)
+        return EX_USAGE
     data = os.path.abspath(args.data or data_home())
     os.makedirs(data, exist_ok=True)
     token = current_token(data, rotate=args.new_token)
@@ -356,14 +376,26 @@ def cmd_serve(args):
         return 1
     server.data = data
     server.token = token
+    scheme = "http"
+    if args.cert:
+        try:
+            server.socket = tls_context(args.cert, args.key).wrap_socket(
+                server.socket, server_side=True)
+        except (OSError, ssl.SSLError) as e:
+            print(f"error: cannot serve TLS from {args.cert} and {args.key}: "
+                  f"{e}", file=sys.stderr)
+            server.server_close()
+            return 1
+        scheme = "https"
     port = server.server_address[1]
     everywhere = args.bind in ("", "0.0.0.0", "::")
     host = socket.gethostname() if everywhere else args.bind
     print(f"receiver {TOOL_VERSION} keeping {data}")
     print(f"listening on {args.bind}:{port} "
           f"({'all interfaces' if everywhere else 'this address only'}), "
-          "speaking plain HTTP (give --cert and --key for TLS)")
-    print(f"publish to http://{host}:{port}/{token}")
+          + (f"speaking TLS from {args.cert}" if args.cert else
+             "speaking plain HTTP (give --cert and --key for TLS)"))
+    print(f"publish to {scheme}://{host}:{port}/{token}")
     if everywhere:
         print(f"  ({host} is this machine's name; use the address the "
               "sending machine reaches this one by)")
@@ -440,6 +472,10 @@ def main(argv):
     serve.add_argument("--port", type=int, default=DEFAULT_PORT,
                        help=f"the port to listen on (default: {DEFAULT_PORT}; "
                             "0 picks a free one and prints it)")
+    serve.add_argument("--cert", metavar="FILE",
+                       help="a PEM certificate (with --key): speak TLS")
+    serve.add_argument("--key", metavar="FILE",
+                       help="the certificate's PEM private key (with --cert)")
     serve.add_argument("--new-token", action="store_true",
                        help="mint a new token; the old URL answers 404 "
                             "from now on")

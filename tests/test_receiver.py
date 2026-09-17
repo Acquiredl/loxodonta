@@ -10,10 +10,13 @@ receiver's chain file verifies VALID, and a regenerated chain's batch
 lands beside the entries it replaced and verifies BROKEN there.
 """
 
+import http.client
 import json
 import os
 import re
+import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -389,6 +392,94 @@ class VerifyTest(ReceiverFixture):
         self.assertTrue(judged.stdout.startswith("BROKEN at entry 4"),
                         judged.stdout)
         self.assertNotIn("VALID", judged.stdout)
+
+
+class AddressTest(ReceiverFixture):
+    """Where it listens, and in what: all interfaces by default, since the
+    sender is another machine; plain HTTP until given a pair, said out
+    loud so command lines never cross a network in the clear unknowingly."""
+
+    def test_without_a_pair_the_startup_line_names_plain_http(self):
+        proc = self.start()
+        self.assertIn("plain HTTP", proc.said)
+        self.assertTrue(proc.url.startswith("http://127.0.0.1:"), proc.url)
+
+    def test_the_default_is_all_interfaces_and_bind_narrows_it(self):
+        everywhere = self.start(bind=None)
+        self.assertIn("all interfaces", everywhere.said)
+        # Whatever name it printed for this machine, the loopback address
+        # is one of the interfaces it took.
+        port = urllib.parse.urlsplit(everywhere.url).port
+        token = everywhere.url.rsplit("/", 1)[1]
+        status, _ = post(f"http://127.0.0.1:{port}/{token}", b"{}",
+                         "application/json")
+        self.assertEqual(status, 200)
+        self.stop(everywhere)
+
+        narrowed = self.start(bind="127.0.0.1")
+        self.assertIn("127.0.0.1", narrowed.said)
+        self.assertIn("this address only", narrowed.said)
+
+    def test_cert_without_key_is_a_usage_error(self):
+        for flags in (("--cert", "x.pem"), ("--key", "x.pem")):
+            with self.subTest(flags=flags):
+                done = subprocess.run(
+                    [sys.executable, str(RECEIVER), "serve", "--data",
+                     str(self.data), "--port", "0", *flags],
+                    capture_output=True, encoding="utf-8", env=clean_env())
+                self.assertEqual(done.returncode, 64, done.stderr)
+                self.assertIn("--cert", done.stderr)
+                self.assertIn("--key", done.stderr)
+
+
+@unittest.skipUnless(shutil.which("openssl"),
+                     "openssl is not on PATH; the stdlib cannot mint a "
+                     "certificate, so the TLS test has no pair to serve")
+class TlsTest(ReceiverFixture):
+    """`--cert` and `--key`: TLS through the stdlib's ssl module, from a
+    pair the operator supplies. The test's pair is self-signed and
+    minted by openssl, the one tool the suite already leans on."""
+
+    def setUp(self):
+        super().setUp()
+        self.cert = self.root / "cert.pem"
+        self.key = self.root / "key.pem"
+        minted = subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", str(self.key), "-out", str(self.cert),
+             "-subj", "/CN=localhost", "-days", "2"],
+            capture_output=True, encoding="utf-8")
+        self.assertEqual(minted.returncode, 0, minted.stderr)
+
+    def trusting_opener(self):
+        """A client that trusts exactly the test's certificate. The
+        hostname check is off because the pair names localhost and the
+        test speaks to 127.0.0.1; the chain check stays on."""
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cafile=str(self.cert))
+        context.check_hostname = False
+        return urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=context))
+
+    def test_cert_and_key_serve_tls_and_plain_http_is_refused(self):
+        proc = self.start("--cert", str(self.cert), "--key", str(self.key))
+        self.assertIn("TLS", proc.said)
+        self.assertNotIn("plain HTTP", proc.said)
+        self.assertTrue(proc.url.startswith("https://127.0.0.1:"), proc.url)
+
+        head = json.dumps({"head": "c" * 64, "n": 3}).encode("utf-8")
+        request = urllib.request.Request(
+            proc.url, data=head, method="POST",
+            headers={"Content-Type": "application/json"})
+        with self.trusting_opener().open(request, timeout=30) as response:
+            self.assertEqual(response.status, 200)
+        self.assertIn("heads.jsonl", self.stored())
+
+        # The same port spoken to in the clear gets no answer worth having.
+        with self.assertRaises((urllib.error.URLError, ConnectionError,
+                                http.client.HTTPException)):
+            post("http" + proc.url[len("https"):], head, "application/json")
 
 
 if __name__ == "__main__":
