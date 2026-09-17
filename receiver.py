@@ -75,6 +75,10 @@ CHAIN_NAME = re.compile(r"^receipts-[A-Za-z0-9_-]{1,200}\.jsonl$")
 # a body declared larger is refused before a byte of it is read.
 BODY_CAP = 8 * 1024 * 1024
 
+# The shape of a token this file mints (secrets.token_urlsafe), so a
+# hand-edited token file that would not make a clean URL is replaced.
+TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 # --- The data directory and the token ------------------------------------------
 
@@ -113,7 +117,7 @@ def current_token(data, rotate=False):
                 stored = f.read().strip()
         except OSError:
             stored = ""
-        if stored and all(c.isalnum() or c in "-_" for c in stored):
+        if TOKEN_SHAPE.match(stored):
             return stored
     return mint_token(data)
 
@@ -297,11 +301,13 @@ class Door(BaseHTTPRequestHandler):
             return
         # The chain's name is judged before the body is read: a batch
         # for a file this receiver would not write is not worth reading.
-        name = self.headers.get(CHAIN_HEADER) if kind == CHAIN_TYPE else None
-        if kind == CHAIN_TYPE and not CHAIN_NAME.match(name or ""):
-            self.answer(400, f"{CHAIN_HEADER} must be a receipt file name, "
-                             "receipts-<session>.jsonl")
-            return
+        name = None
+        if kind == CHAIN_TYPE:
+            name = self.headers.get(CHAIN_HEADER) or ""
+            if not CHAIN_NAME.match(name):
+                self.answer(400, f"{CHAIN_HEADER} must be a receipt file "
+                                 "name, receipts-<session>.jsonl")
+                return
         length = self.declared_length()
         if length is None:
             return
@@ -310,13 +316,20 @@ class Door(BaseHTTPRequestHandler):
             self.answer(400, "the body ended before its declared length")
             return
         if kind == HEAD_TYPE:
-            line = head_line(body)
-            if line is None:
-                self.answer(400, "a head is one JSON object")
-                return
-            append_durably(os.path.join(self.server.data, HEADS_FILE), [line])
-            self.answer(200, json.dumps({"appended": 1}))
+            self.keep_head(body)
+        else:
+            self.keep_batch(body, name)
+
+    def keep_head(self, body):
+        line = head_line(body)
+        if line is None:
+            self.answer(400, "a head is one JSON object")
             return
+        path = os.path.join(self.server.data, HEADS_FILE)
+        if self.kept(path, [line]):
+            self.answer(200, json.dumps({"appended": 1}))
+
+    def keep_batch(self, body, name):
         try:
             batch = chain_lines(body)
         except ValueError as why:
@@ -324,10 +337,22 @@ class Door(BaseHTTPRequestHandler):
             return
         path = os.path.join(self.server.data, name)
         lines = new_lines(batch, known_pairs(path))
-        if lines:
+        if self.kept(path, lines):
+            self.answer(200, json.dumps({"appended": len(lines),
+                                         "dropped": len(batch) - len(lines)}))
+
+    def kept(self, path, lines):
+        """True once the lines are on disk (nothing to write counts). A
+        disk that refuses is a 500 with the reason, so the sender's memo
+        never advances over bytes that did not land."""
+        if not lines:
+            return True
+        try:
             append_durably(path, lines)
-        self.answer(200, json.dumps({"appended": len(lines),
-                                     "dropped": len(batch) - len(lines)}))
+        except OSError as e:
+            self.answer(500, f"could not write: {e.strerror or e}")
+            return False
+        return True
 
     def answer(self, status, text, allow=None):
         body = (text + "\n").encode("utf-8")
@@ -366,8 +391,13 @@ def cmd_serve(args):
               file=sys.stderr)
         return EX_USAGE
     data = os.path.abspath(args.data or data_home())
-    os.makedirs(data, exist_ok=True)
-    token = current_token(data, rotate=args.new_token)
+    try:
+        os.makedirs(data, exist_ok=True)
+        token = current_token(data, rotate=args.new_token)
+    except OSError as e:
+        print(f"error: cannot write to {data}: {e.strerror or e}",
+              file=sys.stderr)
+        return 1
     try:
         server = Receiver((args.bind, args.port), Door)
     except OSError as e:
@@ -388,7 +418,7 @@ def cmd_serve(args):
             return 1
         scheme = "https"
     port = server.server_address[1]
-    everywhere = args.bind in ("", "0.0.0.0", "::")
+    everywhere = args.bind in ("", "0.0.0.0")
     host = socket.gethostname() if everywhere else args.bind
     print(f"receiver {TOOL_VERSION} keeping {data}")
     print(f"listening on {args.bind}:{port} "
