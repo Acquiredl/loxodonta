@@ -4911,6 +4911,137 @@ def cmd_drill(args):
     return code
 
 
+# --- Metrics ------------------------------------------------------------------
+# The metrics route (ADR-0033; GLOSSARY: Metrics route): the scan's
+# counts rendered in the Prometheus text format for whatever the
+# operator already runs — Prometheus, Grafana, Elastic through its
+# Prometheus module, a pager — none of which is named here. One pure
+# function over the report the status endpoint already serves, so no
+# number below can disagree with `scan --json`. Gauges only: the counts
+# are the reading, and the trend is the operator's time-series store's
+# job. Names say the mechanism (`loxodonta_chains{verdict="BROKEN"}`,
+# never "tampering detected"), and every help line ends with the grade
+# of evidence behind its number, so a reader of the scrape knows which
+# came from `loxodonta verify` (verdict), which the supervisor decided
+# from its own watching — the transcript paired with the chain, its own
+# diary of when heads moved (witness verdict) — and which count what
+# writer-stamped lines and writer-reachable files say (testimony).
+#
+# The names and their label sets are a public interface from the release
+# that first carries them: a metric scraped into someone's dashboard is
+# renamed by nobody. New metrics may be added; a state the scan grows
+# later is a new label value and a line in docs/METRICS.md, never a
+# renamed metric. Pull only: nothing is pushed anywhere, and the route
+# inherits serve's loopback bind and Host check.
+
+METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
+# The label values every scrape carries, at zero when nothing is in them,
+# so a panel never meets a missing series. Each is the scan's own string.
+# One the scan emits that is not listed here is rendered all the same.
+KNOWN_VERDICTS = ("VALID", "BROKEN", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
+                  "TRANSCRIPT-DIVERGED", "UNSUPPORTED-VERSION", "NO-VERDICT")
+KNOWN_COMPLETENESS = ("OK", "LAGGING", "SURPLUS", "QUIET", "ALARM-SILENT",
+                      "ALARM-DEFICIT", "IDLE-CLEAN", "IDLE-DEFICIT",
+                      "ENDED-CLEAN", "ENDED-DEFICIT", "ENDED-SURPLUS",
+                      "UNWITNESSED", "UNWATCHED", "ELSEWHERE", "BEFORE-MEMORY")
+KNOWN_LIFECYCLE = ("awake", "waning", "dormant")
+KNOWN_CONSUMPTION = ("RUNNING-HOT", "ENDED-HOT")
+KNOWN_STEPS = ("anchor", "publish-head")
+
+
+def tallied(values, known):
+    """{value: count} with every known value present, at zero when
+    nothing is in it, and any other value the scan produced kept: a
+    later state is a new label value, never a renamed metric."""
+    counts = {value: 0 for value in known}
+    for value in values:
+        if value is not None:
+            counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def metric_label(value):
+    """A label value escaped as the text format asks: backslash, quote,
+    newline. The scan's strings carry none of them; the rule holds
+    anyway."""
+    return (str(value).replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n"))
+
+
+def metrics_text(report, age_seconds):
+    """The metrics route's body: the scan report the status endpoint
+    serves, rendered as gauges. Pure — a report and an age in, text out,
+    nothing read from disk — which is what keeps every number equal to
+    `scan --json`'s. The list of names lives here and nowhere else in the
+    code; docs/METRICS.md restates it for the operator, and the two must
+    agree."""
+    lines = []
+
+    def gauge(name, words, grade, samples):
+        """One family: a HELP line ending in its grade, a TYPE line, and
+        one sample per (labels, value)."""
+        lines.append(f"# HELP {name} {words} ({grade})")
+        lines.append(f"# TYPE {name} gauge")
+        for labels, value in samples:
+            dressed = ("{" + ",".join(f'{key}="{metric_label(text)}"'
+                                      for key, text in labels) + "}"
+                       if labels else "")
+            lines.append(f"{name}{dressed} {int(value)}")
+
+    def by_label(label, counts):
+        return [(((label, value),), count) for value, count in counts.items()]
+
+    chains = [chain for repo in report.get("repos") or []
+              for session in repo.get("sessions") or []
+              for chain in session.get("chains") or []]
+
+    # The scan itself: what cron would shout about, and how old it is.
+    gauge("loxodonta_scan_exit_code",
+          "The last scan's exit code: 0 nothing demanding attention, 1 to "
+          "4 the worst verify exit among the chains, 5 the baseline saw a "
+          "change appends cannot explain, 6 a live session is behind its "
+          "witness, 7 a chain's transcript commitments contradict each "
+          "other", "verdict", [((), report.get("exit") or 0)])
+    gauge("loxodonta_scan_age_seconds",
+          "Seconds since the scan these numbers come from; a gauge is as "
+          "fresh as the last tick", "testimony",
+          [((), max(0, age_seconds))])
+
+    # The chains, by the verdict verify handed each. A torn tail a sibling
+    # continued is BROKEN by verify's word and stood down by the scan
+    # (ADR-0004): its own gauge, so the broken count says what the
+    # dashboard's strip and the day book say.
+    judged = [chain for chain in chains if not chain.get("superseded")]
+    gauge("loxodonta_chains",
+          "Chains by the verdict verify handed them on the last scan, torn "
+          "tails a sibling continued excluded", "verdict",
+          by_label("verdict", tallied((chain.get("verdict")
+                                       for chain in judged), KNOWN_VERDICTS)))
+    gauge("loxodonta_chains_superseded",
+          "Chains verify called BROKEN for a torn tail alone, stood down "
+          "because a sibling chain continued the recording", "verdict",
+          [((), len(chains) - len(judged))])
+
+    # The tally (GLOSSARY: Tally): the store's own scale, counted as the
+    # page's tally counts it — sessions per drawer, entries of every
+    # kind — and owning no verdicts.
+    gauge("loxodonta_store_drawers", "Drawers in the store, one per project",
+          "testimony", [((), len(report.get("repos") or []))])
+    gauge("loxodonta_store_sessions",
+          "Sessions in the store, counted per drawer, sibling chains "
+          "folded into one", "testimony",
+          [((), sum(len(repo.get("sessions") or [])
+                    for repo in report.get("repos") or []))])
+    gauge("loxodonta_store_chains", "Chains in the store, sidecars excluded",
+          "testimony", [((), len(chains))])
+    gauge("loxodonta_store_receipts",
+          "Entries across every chain, genesis and bookkeeping included",
+          "testimony", [((), sum(chain.get("entries") or 0
+                                 for chain in chains))])
+    return "\n".join(lines) + "\n"
+
+
 # --- Serve --------------------------------------------------------------------
 # The face. Serialization only, zero decisions (ADR-0005): requests are
 # answered from the newest scan no older than the tick, and the page
@@ -4952,7 +5083,10 @@ class Watchtower(ThreadingHTTPServer):
         return (self.root.parent / "views.json" if self.store
                 else self.root / VIEWS_NAME)
 
-    def fresh_status(self):
+    def fresh_scan(self):
+        """The newest scan no older than the tick, and its age in
+        seconds, read under one hold of the lock so the age belongs to
+        the body it comes with."""
         with self.scan_lock:
             if (self.scan_body is None
                     or time.monotonic() - self.scan_at >= SCAN_TTL_SECONDS):
@@ -4964,7 +5098,17 @@ class Watchtower(ThreadingHTTPServer):
                                    store=self.store)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
-            return self.scan_body
+            return self.scan_body, time.monotonic() - self.scan_at
+
+    def fresh_status(self):
+        return self.fresh_scan()[0]
+
+    def fresh_metrics(self):
+        """The metrics route (ADR-0033): the same held scan the status
+        endpoint serves, rendered by one pure function — never a walk
+        of the store on the scrape's own account."""
+        body, age = self.fresh_scan()
+        return metrics_text(json.loads(body.decode("utf-8")), age)
 
 
 class Face(BaseHTTPRequestHandler):
@@ -4997,6 +5141,11 @@ class Face(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/api/status":
             self.reply(self.server.fresh_status(), "application/json")
+        elif url.path == "/metrics":
+            # The same held scan, in the Prometheus text format
+            # (ADR-0033). Refused off-machine above, exactly as / is.
+            self.reply(self.server.fresh_metrics().encode("utf-8"),
+                       METRICS_CONTENT_TYPE)
         elif url.path == "/api/recall":
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
