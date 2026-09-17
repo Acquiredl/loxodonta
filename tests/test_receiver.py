@@ -287,6 +287,57 @@ class ContentTest(ReceiverFixture):
                 self.assertEqual(status, 400)
         self.assertEqual(self.stored(), ["token"])
 
+    def test_an_exact_duplicate_line_is_dropped(self):
+        # A batch the sender retried after a lost acknowledgement: every
+        # line is already there, n and entry_hash alike, so none lands.
+        self.send_chain(self.lines)
+        status, answer = self.send_chain(self.lines)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(answer), {"appended": 0, "dropped": 3})
+        self.assertEqual((self.data / CHAIN).read_bytes(), self.lines)
+        # And a resend that overlaps only partly lands only the new tail
+        # (the chain grows through the CLI, as the sender's would).
+        run_recorder("log", "--log", self.log, "--actor", "claude-code",
+                     "--action", "step 3", epoch=1700000000)
+        grown = self.log.read_bytes()
+        status, answer = self.send_chain(grown)
+        self.assertEqual(json.loads(answer), {"appended": 1, "dropped": 3})
+        self.assertEqual((self.data / CHAIN).read_bytes(), grown)
+
+    def test_a_known_n_with_a_different_hash_is_appended(self):
+        # A regenerated chain arriving after the original: the collision
+        # the copy exists to show, a second entry at the same n.
+        self.send_chain(self.lines)
+        other = self.root / "regenerated.jsonl"
+        regenerated = make_chain(other, ["step 1", "step 2"], epoch=1700009999)
+        status, answer = self.send_chain(regenerated)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(answer), {"appended": 3, "dropped": 0})
+        self.assertEqual((self.data / CHAIN).read_bytes(),
+                         self.lines + regenerated)
+        stored = [json.loads(l) for l in
+                  (self.data / CHAIN).read_text("utf-8").splitlines()]
+        self.assertEqual([e["n"] for e in stored], [0, 1, 2, 0, 1, 2])
+        self.assertNotEqual(stored[0]["entry_hash"], stored[3]["entry_hash"])
+
+    def test_a_batch_that_is_not_receipts_is_refused_whole(self):
+        good = self.lines.splitlines()[0]
+        not_receipts = (
+            b"",                                   # nothing to append
+            b"not json\n",
+            b"[1, 2]\n",                           # not an object
+            b'{"n": "0", "entry_hash": "ab"}\n',   # n is not an integer
+            b'{"n": 0}\n',                         # no entry_hash
+            b'{"n": true, "entry_hash": "ab"}\n',  # a bool is not a count
+            good + b"\n\n" + good + b"\n",         # a blank line inside
+            good + b"\nnot json\n",                # one bad line refuses all
+        )
+        for body in not_receipts:
+            with self.subTest(body=body):
+                status, _ = self.send_chain(body)
+                self.assertEqual(status, 400)
+        self.assertEqual(self.stored(), ["token"])
+
     def test_any_other_content_type_is_415(self):
         status, _ = post(self.proc.url, self.lines, "text/plain",
                          {"X-Loxodonta-Chain": CHAIN})

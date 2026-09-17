@@ -144,15 +144,80 @@ def head_line(body):
     return json.dumps(head, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def receipt_of(line):
+    """(n, entry_hash) when the line is shaped like an entry: one JSON
+    object carrying an integer n and a string entry_hash, the two fields
+    the append rule reads. None otherwise; the receiver judges nothing
+    else about a line, since judging is `loxodonta verify`'s job."""
+    try:
+        entry = json.loads(line.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(entry, dict):
+        return None
+    n, digest = entry.get("n"), entry.get("entry_hash")
+    if isinstance(n, bool) or not isinstance(n, int) or not isinstance(digest, str):
+        return None
+    return n, digest
+
+
 def chain_lines(body):
-    """A chain batch as the lines it holds, each without its newline (a
-    carriage return before it is dropped too, so a proxy that rewrote
-    the line endings changes nothing on disk). The sender's trailing
-    newline is not an empty last line."""
+    """A chain batch as [(line, n, entry_hash)], each line without its
+    newline (a carriage return before it is dropped too, so a proxy that
+    rewrote the line endings changes nothing on disk). The sender's
+    trailing newline is not an empty last line. A batch with no lines,
+    or with any line that is not shaped like an entry, raises ValueError
+    naming the line: the whole batch is refused, nothing of it written,
+    because a file that is a receipt log must hold entries and nothing
+    else."""
     lines = body.split(b"\n")
     if lines and lines[-1] == b"":
         lines.pop()
-    return [line[:-1] if line.endswith(b"\r") else line for line in lines]
+    if not lines:
+        raise ValueError("the batch holds no lines")
+    batch = []
+    for number, line in enumerate(lines, 1):
+        if line.endswith(b"\r"):
+            line = line[:-1]
+        receipt = receipt_of(line)
+        if receipt is None:
+            raise ValueError(f"line {number} is not an entry (a JSON object "
+                             "with an integer n and an entry_hash)")
+        batch.append((line, *receipt))
+    return batch
+
+
+def known_pairs(path):
+    """Every (n, entry_hash) the chain file already holds, so a resent
+    line is known and a rewritten one is not. A file that is not there
+    yet knows nothing."""
+    known = set()
+    try:
+        with open(path, "rb") as f:
+            for line in f:
+                receipt = receipt_of(line)
+                if receipt is not None:
+                    known.add(receipt)
+    except FileNotFoundError:
+        pass
+    return known
+
+
+def new_lines(batch, known):
+    """The append rule that keeps the file a receipt log (ADR-0031
+    ruling 4). A line whose n and entry_hash the file already holds is
+    an exact duplicate, the sender's retry after a lost acknowledgement,
+    and is dropped. A line whose n the file holds with a different hash
+    is a regenerated chain arriving after the original, and is appended:
+    that collision is what the copy exists to show, and verify reports
+    it. Everything else is appended in the order received."""
+    keep = []
+    for line, n, digest in batch:
+        if (n, digest) in known:
+            continue
+        known.add((n, digest))  # the same line twice in one batch lands once
+        keep.append(line)
+    return keep
 
 
 # --- The server ----------------------------------------------------------------
@@ -246,9 +311,17 @@ class Door(BaseHTTPRequestHandler):
             append_durably(os.path.join(self.server.data, HEADS_FILE), [line])
             self.answer(200, json.dumps({"appended": 1}))
             return
-        lines = chain_lines(body)
-        append_durably(os.path.join(self.server.data, name), lines)
-        self.answer(200, json.dumps({"appended": len(lines), "dropped": 0}))
+        try:
+            batch = chain_lines(body)
+        except ValueError as why:
+            self.answer(400, str(why))
+            return
+        path = os.path.join(self.server.data, name)
+        lines = new_lines(batch, known_pairs(path))
+        if lines:
+            append_durably(path, lines)
+        self.answer(200, json.dumps({"appended": len(lines),
+                                     "dropped": len(batch) - len(lines)}))
 
     def answer(self, status, text, allow=None):
         body = (text + "\n").encode("utf-8")
