@@ -245,6 +245,31 @@ class StampedPackageTest(StampedStoreCase):
         self.assertNotIn("STAMPED", lines[-1])
         self.assertIn("its authority timestamp was not judged", lines[-1])
 
+    def test_without_openssl_the_token_is_present_and_not_judged(self):
+        # The same posture as the sign suite's for a missing ssh-keygen:
+        # a machine without the tool is told so, the rung is neither
+        # earned nor failed, and the exit stays the rest of the ladder's.
+        # The child gets a PATH with nothing on it.
+        folder = self.stamped_folder()
+        chain_file = self.root / "authority.pem"
+        chain_file.write_text("not read: openssl is not there to read it\n",
+                              encoding="utf-8")
+        nowhere = self.root / "empty-path"
+        nowhere.mkdir()
+
+        judged = run(LOXODONTA, "verify-package", str(folder),
+                     "--authority-chain", str(chain_file),
+                     env={**self.env, "PATH": str(nowhere)},
+                     cwd=str(self.work))
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        self.assertIn("seal stamp: not judged: openssl is not on PATH", out)
+        lines = out.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT:"), lines[-1])
+        self.assertNotIn("STAMPED", lines[-1])
+        self.assertIn("its authority timestamp was not judged", lines[-1])
+
     def test_a_chains_own_token_travels_into_the_package(self):
         # The stamps sidecar rides as the anchors sidecar does
         # (ADR-0032 ruling 4): it is listed as an artifact, its bytes are
