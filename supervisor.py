@@ -647,10 +647,25 @@ def sidecar_records(sidecar):
         return
 
 
+def is_attempt(record):
+    """True for a row of kind `attempt` (#240): the recorder's note on how
+    a session-end step went, written in the sidecar the step owns. The
+    recorder's rule, twice over, since the two files never import each
+    other: a note is never a proof and never a sent head, so every
+    reader that judges or schedules skips it by its kind, and only the
+    readers that report (`left`, `last_failed`, the page) use it."""
+    return isinstance(record, dict) and record.get("kind") == "attempt"
+
+
+# The outcomes that mean the step landed; anything else is a failure line.
+SENT_OUTCOMES = ("sent", "submitted")
+
+
 def sidecar_heads(sidecar):
     """Heads that already have a record, for scheduling only."""
     return {record["head"] for record in sidecar_records(sidecar)
-            if isinstance(record.get("head"), str)}
+            if isinstance(record.get("head"), str)
+            and not is_attempt(record)}
 
 
 def ripe_head(entries, now, cadence):
@@ -788,7 +803,9 @@ def last_departure(log):
     departures = []   # (when, ts, via)
     for record in sidecar_records(Path(str(log) + ".published.jsonl")):
         when = parse_when(record.get("ts"))
-        if when is not None:
+        # A head row is a head that left; an attempt row is a note that
+        # a step was tried (#240), and a refused POST never left.
+        if when is not None and not is_attempt(record):
             departures.append((when, record["ts"], "published"))
     # An upgrade appends a second record for the same head, stamped
     # when the proof completed, so a head's departure is its first
@@ -798,7 +815,7 @@ def last_departure(log):
     for record in sidecar_records(Path(str(log) + ".anchors.jsonl")):
         when = parse_when(record.get("ts"))
         head = record.get("head")
-        if when is not None and head is not None \
+        if when is not None and head is not None and not is_attempt(record) \
                 and (head not in first or when < first[head][0]):
             first[head] = (when, record["ts"])
     departures += [(when, ts, "anchored") for when, ts in first.values()]
@@ -806,6 +823,27 @@ def last_departure(log):
         return {"ts": None, "via": None}
     _, ts, via = max(departures, key=lambda d: d[0])
     return {"ts": ts, "via": via}
+
+
+def last_failed(log):
+    """The newest session-end step that failed, read from the attempt
+    rows in both sidecars (#240): the step, the time, and the recorder's
+    one line on what happened, or None when no attempt has failed. Read
+    whether or not a keeper cadence is set, so a posture wired in name
+    only is visible within a session rather than a week. Testimony like
+    the rows themselves: a reason to look, never the exit."""
+    newest = None
+    for suffix in SIDECAR_SUFFIXES:
+        for record in sidecar_records(Path(str(log) + suffix)):
+            if not is_attempt(record) \
+                    or record.get("outcome") in SENT_OUTCOMES:
+                continue
+            when = parse_when(record.get("ts"))
+            if when is not None and (newest is None or when > newest[0]):
+                newest = (when, {"step": record.get("step"),
+                                 "ts": record["ts"],
+                                 "outcome": record.get("outcome")})
+    return newest[1] if newest else None
 
 
 def assess_anchors(detail, entries):
@@ -937,24 +975,61 @@ def hook_matchers(witness):
     return matchers
 
 
-def sessionend_wired(witness):
-    """True when a recorder SessionEnd hook is observably wired beside
-    the witness layout — the exit commitment's precondition, and the
-    uncommitted-tail annotation's gate (ADR-0018)."""
+def sessionend_commands(witness):
+    """The recorder's SessionEnd command lines wired beside the witness
+    layout, read from the harness settings: the one place the session-end
+    choices live (ADR-0024 ruling 1). Either era's name (ADR-0010)."""
     try:
         settings = json.loads((witness.parent / "settings.json")
                               .read_text(encoding="utf-8"))
         rules = settings["hooks"]["SessionEnd"]
     except (OSError, ValueError, KeyError, TypeError):
-        return False
-    return any(
-        isinstance(rule, dict)
-        and any(isinstance(hook, dict)
-                and any(marker in str(hook.get("command", ""))
-                        for marker in ("receipts", "loxodonta"))
-                for hook in rule.get("hooks", [])
-                if isinstance(rule.get("hooks"), list))
-        for rule in (rules if isinstance(rules, list) else []))
+        return []
+    commands = []
+    for rule in rules if isinstance(rules, list) else []:
+        hooks = rule.get("hooks") if isinstance(rule, dict) else None
+        for hook in hooks if isinstance(hooks, list) else []:
+            command = str(hook.get("command", "")) if isinstance(hook, dict) \
+                else ""
+            if any(marker in command for marker in ("receipts", "loxodonta")):
+                commands.append(command)
+    return commands
+
+
+def sessionend_wired(witness):
+    """True when a recorder SessionEnd hook is observably wired beside
+    the witness layout — the exit commitment's precondition, and the
+    uncommitted-tail annotation's gate (ADR-0018)."""
+    return bool(sessionend_commands(witness))
+
+
+def sessionend_publishes(witness):
+    """True when the wired SessionEnd command carries a publish flag
+    (`--publish URL` today; a later flag that starts the same way counts
+    too), so the scan can say when publishing is wired in name only
+    (#240 part 3). The URL on that line is a credential and is never
+    read past the flag."""
+    return any(re.search(r"(?:^|\s)--publish\b", command)
+               for command in sessionend_commands(witness))
+
+
+def published_reading(witness, logs):
+    """#240 part 3: whether the wired SessionEnd command publishes the
+    head, whether any chain here holds a head that was sent, and the one
+    sentence for the case that should not outlast a morning: wired, and
+    nothing ever sent. A receiver that was never listening looks exactly
+    like a hook that never fired until someone reads the memos; this
+    reads them. Never the URL, and never the exit."""
+    wired = sessionend_publishes(witness)
+    sent = any(sidecar_heads(Path(str(log) + ".published.jsonl"))
+               for log in logs)
+    note = None
+    if wired and not sent:
+        note = ("publishing is wired on the SessionEnd command and no chain "
+                "here holds a sent head: either no session has ended since "
+                "the wiring, or the remote has never taken one — each "
+                "chain's last failed attempt says which")
+    return {"wired": wired, "sent": sent, "note": note}
 
 
 def sessionend_epoch(remembered, witness, now):
@@ -1943,6 +2018,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             # (ADR-0025): staleness evidence beside the anchor panel,
             # aged by the reader, never raising the exit.
             "left": last_departure(log),
+            # The last session-end step that failed, from the recorder's
+            # own attempt rows (#240): step, time, outcome, or None.
+            "last_failed": last_failed(log),
         }
         if keeper_note:
             chain["anchors"]["note"] = keeper_note
@@ -2151,6 +2229,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         # Which recorder is actually running. Never raises the exit:
         # drift is a reason to look, and the operator's to resolve.
         "recorder": recorder_drift(witness),
+        # Whether publishing is wired and whether any head ever left by
+        # that door (#240 part 3): one sentence when it is wired in name
+        # only, never the exit.
+        "published": published_reading(witness, [log for _, log in census]),
         "repos": [
             {"repo": repo,
              "sessions": [{"session": session, "chains": chains}
@@ -6336,6 +6418,22 @@ function renderTiles() {
       chains.length + " chain(s)" +
       (span && span.ended ? " · last activity " + since(span.ended) +
                             " ago" : "")));
+    // When a head of this drawer last left the machine by any route,
+    // and the last session-end step that failed, newest across its
+    // chains (#240): read from `left` and `last_failed`, worded as
+    // ages, in the anchor panel's staleness voice. A reason to look,
+    // never an alarm.
+    const newest = rows => rows.filter(r => r && r.ts)
+      .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0];
+    const left = newest(chains.map(c => c.left));
+    const failed = newest(chains.map(c => c.last_failed));
+    tile.appendChild(el("span", "meta",
+      (left ? "a head last left " + since(left.ts) + " ago (" + left.via +
+              ")"
+            : "no head has left this machine") +
+      (failed ? " · last failed: " + failed.step + " " + since(failed.ts) +
+                " ago, " + failed.outcome
+              : "")));
     tile.appendChild(renderSpark(repo.repo));
     tile.addEventListener("click", () => openDrawer(repo.repo));
     tiles.appendChild(tile);
@@ -6852,6 +6950,14 @@ function renderAnchors(report) {
             row.appendChild(el("p", "claim" + (left.failed ? " shout" : ""),
                                left.note));
           }
+        }
+        // The last session-end step that failed, in the recorder's own
+        // line (#240): the same staleness voice, per chain.
+        if (chain.last_failed) {
+          row.appendChild(el("span", "bare stale",
+            "last failed: " + chain.last_failed.step + " " +
+            since(chain.last_failed.ts) + " ago, " +
+            chain.last_failed.outcome));
         }
         if (a.note) {
           row.appendChild(el("p", "claim" + (a.failed ? " shout" : ""),

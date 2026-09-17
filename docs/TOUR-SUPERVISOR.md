@@ -111,7 +111,12 @@ the report adds is `left`, per chain: when a head last left this machine
 and by which door, published or anchored, aged by the reader and painted
 in the anchor row with the unanchored head's own stale class. Never an
 alarm, never the exit code: a dead remote is a note in `left`, and the
-keeper tries again next turn. Off by default, like everything that
+keeper tries again next turn. Beside `left` sits `last_failed` (#240):
+the last session-end step that failed, as step, time and the recorder's
+own line, read from the attempt rows the hook leaves in the sidecars,
+cadence or no cadence; and the report's `published` block says in one
+sentence when publishing is wired on the SessionEnd command and no
+chain holds a sent head. Off by default, like everything that
 leaves. A head reported unpublished may still land late, since the wait is bounded; the memo records confirmed departures only, so such a head is posted again, and a repeat in the channel is the honest cost of never standing the keeper down on a POST that may not have arrived.
 
 **The completeness witness** is the flagship claim (issue #22): pair

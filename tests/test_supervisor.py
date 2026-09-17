@@ -84,6 +84,18 @@ def write_completed_anchor(log, head, height=850000, append=False):
         sidecar.write_text(line, encoding="utf-8")
 
 
+def write_attempt_row(log, step, outcome, when, budget=12.0):
+    """An attempt row (#240) in the sidecar the step owns, as the hook
+    writes it after a session-end step: the anchors sidecar for the
+    anchor, the publish memo for the head. Appended, so a proof or a
+    head row already there stays where it was."""
+    suffix = ".anchors.jsonl" if step == "anchor" else ".published.jsonl"
+    row = {"kind": "attempt", "step": step, "ts": when, "budget": budget,
+           "outcome": outcome}
+    with open(str(log) + suffix, "a", encoding="utf-8") as out:
+        out.write(json.dumps(row) + "\n")
+
+
 def run_scan(root, *extra, env=None):
     # Pin both ends of the pipe to UTF-8 (PYTHONIOENCODING for the child,
     # encoding= for this parent): `text=True` alone decodes with the locale
@@ -2358,6 +2370,28 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertEqual(len(calendar.submitted), 1,
                          "a head already submitted is not resubmitted")
         self.assertEqual(again.returncode, 0, again.stderr)
+
+    def test_an_attempt_row_is_not_a_proof_so_the_keeper_still_anchors(self):
+        # #240: a session end that no calendar answered leaves a note
+        # in the sidecar and no proof. The keeper reads the note as a
+        # note: the head is still unanchored, so it is anchored on the
+        # tick, and the sidecar holding only notes owes no upgrade.
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-noted")
+        head = chain_head(log)
+        write_attempt_row(log, "anchor",
+                          "no calendar answered within 12 seconds",
+                          when=ago(600))
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [bytes.fromhex(head)])
+        chain = self.chain_report(result, "alpha", "sess-noted")
+        self.assertEqual(len(chain["anchors"]["pending"]), 1)
+        self.assertNotIn("note", chain["anchors"],
+                         "a sidecar of notes alone owes no upgrade")
 
     def test_default_is_off_and_nothing_is_submitted_without_opt_in(self):
         calendar = self.start_calendar()

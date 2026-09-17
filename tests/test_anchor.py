@@ -138,6 +138,20 @@ class FakeCalendarHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class StallingCalendar(FakeCalendar):
+    def handle_error(self, request, client_address):
+        pass  # a client that gave up waiting is the point of one test
+
+
+class StallingCalendarHandler(FakeCalendarHandler):
+    """A calendar that takes the digest and sits on it past the hook's
+    per-call bound, then answers a client that has already left."""
+
+    def do_POST(self):
+        time.sleep(self.server.stall)
+        super().do_POST()
+
+
 class SessionEndAnchorTest(unittest.TestCase):
     """ADR-0024: a hook wired with --anchor anchors the session's chain
     head at SessionEnd, quietly and best-effort, and spends what is left
@@ -193,6 +207,15 @@ class SessionEndAnchorTest(unittest.TestCase):
         return [json.loads(line) for line in
                 self.sidecar.read_text(encoding="utf-8").splitlines()]
 
+    def proofs(self):
+        """The sidecar's anchor records: the rows that carry a proof."""
+        return [r for r in self.records() if "proof" in r]
+
+    def attempts(self):
+        """The sidecar's attempt rows (#240): how each session-end
+        anchor went, beside the proofs and never one of them."""
+        return [r for r in self.records() if r.get("kind") == "attempt"]
+
     def test_session_end_with_anchor_writes_a_sidecar_for_the_head(self):
         self.tool_call()
         head = run_receipts("head", "--log", str(self.chain),
@@ -201,10 +224,43 @@ class SessionEndAnchorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout + result.stderr, "")  # quiet
         self.assertTrue(self.sidecar.exists(), "no sidecar written")
-        records = self.records()
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["head"], head)
+        proofs = self.proofs()
+        self.assertEqual(len(proofs), 1)
+        self.assertEqual(proofs[0]["head"], head)
         self.assertEqual(len(self.server.submitted), 1)
+
+    def test_a_submitted_anchor_leaves_an_attempt_row_beside_the_proof(self):
+        # #240, the sidecar form: after the step, one row of kind
+        # `attempt` saying how it went. Beside the proof record, never
+        # a proof itself: the step, the time, the budget, the outcome.
+        self.tool_call()
+        self.session_end("--anchor", "--calendar", self.server.url)
+        (row,) = self.attempts()
+        self.assertEqual(set(row), {"kind", "step", "ts", "budget", "outcome"})
+        self.assertEqual(row["step"], "anchor")
+        self.assertEqual(row["outcome"], "submitted")
+        self.assertRegex(row["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertAlmostEqual(row["budget"], 12, delta=1)
+        self.assertEqual(len(self.proofs()), 1)
+
+    def test_an_unanswered_anchor_leaves_an_attempt_row_and_no_proof(self):
+        # The store now says why nothing anchored, in the recorder's
+        # own line, so the supervisor can tell a hook that never fired
+        # from one that fired and got no answer (#240). The calendar's
+        # URL is not in the row: what is written is the outcome, not
+        # where it was tried.
+        self.tool_call()
+        closed = "http://127.0.0.1:9"  # discard port: nothing listens
+        result = self.session_end("--anchor", "--calendar", closed)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertEqual(self.proofs(), [])
+        (row,) = self.attempts()
+        self.assertEqual(row["step"], "anchor")
+        self.assertTrue(row["outcome"].startswith("no calendar answered"),
+                        row["outcome"])
+        self.assertAlmostEqual(row["budget"], 12, delta=1)
+        self.assertNotIn("127.0.0.1", self.sidecar.read_text("utf-8"))
 
     def test_session_end_without_anchor_leaves_no_sidecar(self):
         self.tool_call()
@@ -221,14 +277,47 @@ class SessionEndAnchorTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout + result.stderr, "")
-        self.assertFalse(self.sidecar.exists())
+        self.assertEqual(self.proofs(), [])
+
+    def test_a_calendar_that_never_answers_leaves_the_attempt_row(self):
+        # The other way a session-end anchor fails: a calendar that takes
+        # the connection and never answers inside the hook's per-call
+        # bound. No proof, and the row says no calendar answered inside
+        # the budget (#240), so the store can tell this from a hook
+        # that never fired.
+        stalling = StallingCalendar(("127.0.0.1", 0), StallingCalendarHandler)
+        stalling.stall = 7  # seconds; past the five the hook waits per calendar
+        stalling.nonce = b"fake-nonce"
+        stalling.submitted = []
+        stalling.url = f"http://127.0.0.1:{stalling.server_address[1]}"
+        threading.Thread(target=stalling.serve_forever, daemon=True).start()
+        self.addCleanup(stalling.server_close)
+        self.addCleanup(stalling.shutdown)
+        self.tool_call()
+
+        started = time.monotonic()
+        result = self.session_end("--anchor", "--calendar", stalling.url)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertLess(elapsed, 12, "the per-call bound, not the budget")
+        self.assertEqual(self.proofs(), [])
+        (row,) = self.attempts()
+        self.assertEqual(row["step"], "anchor")
+        self.assertEqual(row["outcome"],
+                         "no calendar answered within 12 seconds")
 
     def test_an_already_anchored_head_is_not_anchored_twice(self):
         self.tool_call()
         self.session_end("--anchor", "--calendar", self.server.url)
         self.session_end("--anchor", "--calendar", self.server.url)
         self.assertEqual(len(self.server.submitted), 1)
-        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(len(self.proofs()), 1)
+        # Nothing was tried the second time, so nothing is written
+        # down: an attempt row says how a step went, and a head that
+        # is already anchored is not a step.
+        self.assertEqual(len(self.attempts()), 1)
 
     def test_a_later_session_end_upgrades_the_pending_proof(self):
         self.tool_call()
@@ -464,6 +553,26 @@ class AnchorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("NO-ANCHORS", result.stdout)
         self.assertIn("VALID", result.stdout)
+
+    def test_a_sidecar_of_attempt_rows_only_verifies_as_an_empty_one(self):
+        # #240: an attempt row is a note on how a session-end step went,
+        # never evidence for or against the chain, so the verifier
+        # reads a sidecar holding only notes exactly as it reads one
+        # holding nothing: same words, same exit code.
+        self.sidecar.write_text("", encoding="utf-8")
+        empty = run_receipts("verify", "--anchors", cwd=self.workdir)
+        self.sidecar.write_text(json.dumps({
+            "kind": "attempt", "step": "anchor", "ts": "2026-09-16T05:35:42Z",
+            "budget": 12.0,
+            "outcome": "no calendar answered within 12 seconds"}) + "\n",
+            encoding="utf-8")
+
+        noted = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertEqual(empty.returncode, 0, empty.stdout + empty.stderr)
+        self.assertEqual((noted.returncode, noted.stdout, noted.stderr),
+                         (empty.returncode, empty.stdout, empty.stderr))
+        self.assertNotIn("ANCHOR-INVALID", noted.stdout)
 
     def test_anchor_grows_sidecar_as_chain_grows(self):
         self.anchor()
