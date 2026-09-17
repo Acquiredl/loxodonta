@@ -51,7 +51,7 @@ receipts verify --anchors [...]                    # judge proofs, offline
    - `ANCHOR-PENDING: submitted <ts> via <calendar> — run receipts anchor --upgrade` — not a failure; exit unchanged.
    - `ANCHOR-UNANSWERED: head <h>… submitted <ts> via <calendar> never came back, and another calendar settled this head — no upgrade is owed` — the record stays in the sidecar as evidence of where the submission went, and the line stops advising a command that cannot help. Calendars disagreeing is ordinary, and four of them is the default (#199).
 
-A missing or empty sidecar under `--anchors` prints `NO-ANCHORS` and leaves the exit code to the other checks — anchoring is optional, and absence of local evidence is a fact for the operator (who knows whether they anchor) rather than a verdict. Verdict precedence is unchanged from SPEC §6: `BROKEN` (1) short-circuits; exit-3 findings (head or anchor) outrank `FILES-DIVERGED` (2).
+A missing sidecar under `--anchors` prints `NO-ANCHORS` and leaves the exit code to the other checks — anchoring is optional, and absence of local evidence is a fact for the operator (who knows whether they anchor) rather than a verdict. Verdict precedence is unchanged from SPEC §6: `BROKEN` (1) short-circuits; exit-3 findings (head or anchor) outrank `FILES-DIVERGED` (2).
 
 ## 4. The OTS subset (wire format)
 
