@@ -519,6 +519,105 @@ def parse_cadence(text):
                                   "h": 3600, "d": 86400}[match.group(2)]
 
 
+def cadence_words(seconds):
+    """A cadence the way the operator would say it back: 6h, 1d, 30m,
+    45s. The inverse of parse_cadence, for the startup line that says
+    which cadence the keeper follows and why (ADR-0031 ruling 1)."""
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds and seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+# --- The keeper follows the profile -------------------------------------------
+# ADR-0031 ruling 1 (#246). The operator chose once, at install-hook,
+# what leaves the machine, and the recorder wrote the choice into the
+# coverage marker beside the matchers (ADR-0030). `serve` reads that
+# choice so the keeper's cadences follow it without the flags being
+# typed again; a flag typed anyway still wins. Read once, when `serve`
+# starts, because the startup line announces what is in force: a
+# re-install at another profile takes effect at the next start.
+
+PROFILE_ANCHOR_EVERY = 6 * 3600   # seconds: the timestamped tier's default
+
+# The tiers in ascending order; `full` joins when the published chain
+# lands. `custom` is the raw flags and declares no tier, so it ranks
+# with `local` here: whatever it wired at session end, it asked the
+# keeper for nothing.
+TIERS = ("local", "timestamped")
+
+
+def marker_profile():
+    """The strongest profile any harness declares in the coverage
+    marker, as (profile, harness), or None when no epoch names one (a
+    marker from before profiles existed, or no marker at all). Each
+    harness's newest epoch speaks for that harness, and the highest
+    tier among them speaks for the keeper (ADR-0031 ruling 1, #246).
+    Not simply the newest epoch of all: a flagless install for a
+    second harness would then read as the first harness's choice
+    withdrawn, and the keeper would stand down with nothing saying a
+    Codex install did it, which is the end claim ADR-0030 ruling 2
+    refuses arriving by another door."""
+    try:
+        with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    declared = {}   # harness -> its newest epoch that names a profile
+    # Sorted is stable, so two epochs stamped the same second keep the
+    # order the recorder appended them in, and the newest is the last.
+    for epoch in sorted((epoch for epoch in (data.get("epochs") or [])
+                         if isinstance(epoch, dict)
+                         and isinstance(epoch.get("since"), str)
+                         and isinstance(epoch.get("harness"), str)
+                         and isinstance(epoch.get("profile"), str)),
+                        key=lambda epoch: epoch["since"]):
+        declared[epoch["harness"]] = epoch
+    if not declared:
+        return None
+
+    def tier(epoch):
+        return (TIERS.index(epoch["profile"])
+                if epoch["profile"] in TIERS else 0)
+
+    strongest = sorted(declared.values(),
+                       key=lambda epoch: (tier(epoch), epoch["since"]))[-1]
+    return strongest["profile"], strongest["harness"]
+
+
+def keeper_cadences(anchor_every, declared):
+    """The anchor cadence in force and where it came from (ADR-0031
+    ruling 1, #246): an explicit `--anchor-every` wins; with none, a
+    `timestamped` profile puts the anchor keeper on its six-hour
+    default; `local`, `custom` without a flag, or no profile at all
+    runs no anchor keeper. `declared` is marker_profile's (profile,
+    harness) or None, and the harness is named in the source so the
+    operator can see which install set the cadence. Returns (seconds
+    or None, the source in words)."""
+    if anchor_every is not None:
+        return anchor_every, "flag --anchor-every"
+    if declared is None:
+        return None, "no profile on record; no flag"
+    profile, harness = declared
+    if profile == "timestamped":
+        return PROFILE_ANCHOR_EVERY, f"profile {profile}, {harness}"
+    return None, f"profile {profile}, {harness}; no flag"
+
+
+def keeper_words(anchor_every, anchor_source, publish_every):
+    """The startup line's second half: each keeper's cadence and its
+    source, so the operator reads back what `serve` will send and why
+    (ADR-0031 ruling 1, #246). Publishing follows flags alone in this
+    release; the tier that publishes on a cadence arrives with the
+    published chain."""
+    anchor = (f"anchor every {cadence_words(anchor_every)} ({anchor_source})"
+              if anchor_every is not None else f"anchor off ({anchor_source})")
+    publish = (f"publish every {cadence_words(publish_every)} "
+               "(flag --publish-every)"
+               if publish_every is not None else "publish off (no flag)")
+    return f"keeper: {anchor}; {publish}"
+
+
 def upgrade_due(last_attempt, now):
     attempted = parse_when(last_attempt)
     # A memory from the future is nonsense and reads as no memory: the
@@ -950,13 +1049,21 @@ def coverage_epochs(harness="claude-code"):
             data = json.load(f)
     except (OSError, ValueError):
         return []
-    epochs = [{"since": epoch["since"], "matchers": epoch["matchers"],
-               "source": "recorder"}
-              for epoch in (data.get("epochs") or [])
-              if isinstance(epoch, dict)
-              and isinstance(epoch.get("since"), str)
-              and isinstance(epoch.get("matchers"), list)
-              and epoch.get("harness") == harness]
+    epochs = []
+    for epoch in (data.get("epochs") or []):
+        if not (isinstance(epoch, dict)
+                and isinstance(epoch.get("since"), str)
+                and isinstance(epoch.get("matchers"), list)
+                and epoch.get("harness") == harness):
+            continue
+        told = {"since": epoch["since"], "matchers": epoch["matchers"],
+                "source": "recorder"}
+        # The profile rides beside the matchers (ADR-0031 ruling 1) so
+        # a change to it is as visible here as a matcher change; a
+        # marker from before profiles existed simply has none.
+        if isinstance(epoch.get("profile"), str):
+            told["profile"] = epoch["profile"]
+        epochs.append(told)
     return sorted(epochs, key=lambda epoch: epoch["since"])
 
 
@@ -4952,7 +5059,11 @@ def cmd_serve(args):
     server.root = root
     server.store = store
     server.witness = Path(args.witness)
-    server.anchor_every = args.anchor_every
+    # The keeper follows the profile the operator chose at install-hook
+    # (ADR-0031 ruling 1); a flag typed here still wins.
+    anchor_every, anchor_source = keeper_cadences(args.anchor_every,
+                                                  marker_profile())
+    server.anchor_every = anchor_every
     server.calendars = args.calendar or ()
     server.publish_every = args.publish_every
     server.publish_url = args.publish_url
@@ -4963,6 +5074,8 @@ def cmd_serve(args):
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
+    print(keeper_words(anchor_every, anchor_source, args.publish_every),
+          flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
