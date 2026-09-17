@@ -817,19 +817,32 @@ class InstallPublishChainTest(unittest.TestCase):
             self.assertFalse((self.home / ".claude" / "settings.json").exists(),
                              bad)
 
-    def test_codex_refuses_the_chain_at_session_end_and_names_the_keeper(self):
-        # Codex caps the whole SessionEnd hook at three seconds and the
-        # head's POST already takes half of it (#183); the chain's send
-        # is not measured there, so the installer refuses it with the
-        # way out, the keeper's cadence, as ADR-0024 refuses the anchor.
+    def test_codex_wires_the_chain_on_its_shorter_clock(self):
+        # Codex caps the whole SessionEnd hook at three seconds, so the
+        # send gets half of it, as the head's POST does (#183). A short
+        # clock costs batches and never entries: what did not fit stays
+        # at the cursor for the keeper, which is what the cursor is for.
+        # (The anchor stays refused there because a calendar round trip
+        # has nothing to resume from.)
         (self.home / ".codex").mkdir()
 
-        result = self.install("--codex", "--publish-chain", self.URL)
+        result = self.install("--codex", "--profile", "custom",
+                              "--publish-chain", self.URL)
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("--publish-chain", result.stderr)
-        self.assertIn("--publish-every", result.stderr)
-        self.assertFalse((self.home / ".codex" / "hooks.json").exists())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hooks = json.loads((self.home / ".codex" / "hooks.json")
+                           .read_text(encoding="utf-8"))["hooks"]
+        [block] = hooks["SessionEnd"]
+        [wired] = block["hooks"]
+        self.assertTrue(
+            wired["command"].endswith(f' --publish-chain "{self.URL}"'),
+            wired["command"])
+        self.assertEqual(wired["timeout"], 3)
+        self.assertIn("publishes the chain to " + self.URL, result.stdout)
+        self.assertIn("every entry", result.stdout)
+        (epoch,) = self.epochs()
+        self.assertEqual((epoch["harness"], epoch["remote"]),
+                         ("codex", self.URL))
 
 
 class PublishChainKeeperTest(unittest.TestCase):

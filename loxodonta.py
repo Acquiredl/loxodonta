@@ -3160,7 +3160,8 @@ def codex_hooks_path():
     return os.path.join(home, "hooks.json")
 
 
-def install_codex_hooks(publish=None, profile="local"):
+def install_codex_hooks(publish=None, profile="local",
+                        publish_chain=None):
     """The Codex half of install-hook (ADR-0020): the same PostToolUse,
     SessionEnd, and SessionStart blocks, in Codex's hooks.json, with the
     actor named so recall rows say which harness acted. Codex's matcher
@@ -3168,18 +3169,27 @@ def install_codex_hooks(publish=None, profile="local"):
     plain-text stdout to the model's context, so the digest ships
     unchanged — told to take the repo from the payload, since Codex
     sets no CLAUDE_PROJECT_DIR. `publish` is the published-head opt-in
-    (ADR-0025), riding on the SessionEnd command as it does for Claude
-    Code; the hook cuts its POST off at half Codex's cap (#183).
-    `profile` is written to the coverage marker (ADR-0031 ruling 1);
-    the session-end anchor it would wire stays refused here (ADR-0024),
-    so the supervisor's keeper anchors on its cadence instead."""
+    (ADR-0025) and `publish_chain` the published-chain one (ADR-0031),
+    both riding on the SessionEnd command as they do for Claude Code
+    and both cut off at half Codex's cap (#183): the chain send stops
+    at its budget and leaves the rest at the cursor, which is what the
+    budget rule and the cursor are for. `profile` is written to the
+    coverage marker (ADR-0031 ruling 1); the session-end anchor it
+    would wire stays refused here (ADR-0024), since a calendar round
+    trip has no cursor to resume from, so the supervisor's keeper
+    anchors on its cadence instead."""
     path = codex_hooks_path()
     settings = load_settings(path)
     if settings is None:
         return 1
+    if publish_chain:
+        # Said before anything is written (ADR-0031): what leaves, and
+        # that action lines are command lines.
+        print(chain_notice(publish_chain))
     had_backup = backup_settings(path)
     record = recorder_command(CODEX_ACTOR)
-    record_end = recorder_command(CODEX_ACTOR, publish=publish)
+    record_end = recorder_command(CODEX_ACTOR, publish=publish,
+                                  publish_chain=publish_chain)
     hooks = settings.setdefault("hooks", {})
     installed = []
 
@@ -3192,10 +3202,10 @@ def install_codex_hooks(publish=None, profile="local"):
         installed.append(f"PostToolUse: {record}")
     end = hooks.setdefault("SessionEnd", [])
     healed += heal_hooks(end, RECORDER_MARKERS, record_end)
-    # The published head rides on this command, and the install command
-    # states the choice each time: a re-run without the flag turns it
-    # off and says so (ADR-0025 ruling 3), as on Claude Code.
-    choices = session_end_choices(False, publish)
+    # The two publishes ride on this command, and the install command
+    # states the choice each time: a re-run without a flag turns that
+    # step off and says so (ADR-0025 ruling 3), as on Claude Code.
+    choices = session_end_choices(False, publish, publish_chain)
     for block in end:
         for wired in block.get("hooks", []):
             old = wired.get("command", "")
@@ -3224,7 +3234,8 @@ def install_codex_hooks(publish=None, profile="local"):
     # first time a recorder that knows how walks past.
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
-    marked = record_coverage(CODEX_ACTOR, wired, profile)
+    marked = record_coverage(CODEX_ACTOR, wired, profile,
+                             remote=publish_chain)
     tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -3349,21 +3360,12 @@ def cmd_install_hook(args):
                   "short to reach a calendar with margin. Use the "
                   "supervisor's --anchor-every instead.", file=sys.stderr)
             return 1
-        if args.publish_chain:
-            # The head's one POST was measured inside Codex's cap and
-            # takes half of it (#183); the chain's send was not, and
-            # the two together would leave the seal no margin. Refused
-            # with the way out, as the anchor is (ADR-0024): the
-            # supervisor's keeper sends the chain on its cadence.
-            print("error: --publish-chain is not wired for Codex: its "
-                  "SessionEnd hook is capped at three seconds and the "
-                  "head's POST already takes half of it. Use the "
-                  "supervisor's --publish-every with --publish-chain "
-                  "instead.", file=sys.stderr)
-            return 1
-        # --publish-head is wired: #183 measured one POST inside the same
-        # three seconds, and the hook cuts it off at half the cap.
-        return install_codex_hooks(args.publish_head, args.profile)
+        # Both publishes are wired: #183 measured one POST inside the
+        # same three seconds, and the hook cuts each off at half the
+        # cap. The chain send is bounded the same way and resumes from
+        # its cursor, so a short clock costs batches, never entries.
+        return install_codex_hooks(args.publish_head, args.profile,
+                                   args.publish_chain)
     supervisor = supervisor_path()
     record = recorder_command()
     digest = digest_command()
