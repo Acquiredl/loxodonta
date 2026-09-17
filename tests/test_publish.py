@@ -479,6 +479,52 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("already installed", by_flag.stdout)
         self.assertEqual(self.commands("SessionEnd"), [end])
 
+    def test_a_raw_flag_beside_a_named_profile_is_refused_naming_custom(self):
+        # A profile already says what leaves the machine; a raw flag
+        # beside it is a command spoken wrong (exit 64, ADR-0026 ruling
+        # 7), and the refusal names the way out.
+        for spoken_wrong in (("--profile", "timestamped",
+                              "--anchor-at-session-end"),
+                             ("--profile", "local",
+                              "--publish-head", self.URL),
+                             ("--profile", "timestamped",
+                              "--publish-head", self.URL)):
+            result = self.install(*spoken_wrong)
+            self.assertEqual(result.returncode, 64, result.stderr)
+            self.assertIn("--profile custom", result.stderr)
+            self.assertFalse((self.home / ".claude" / "settings.json").exists(),
+                             "a refusal writes nothing")
+
+    def test_profile_custom_is_the_raw_flags_exactly_as_before(self):
+        result = self.install("--profile", "custom", "--anchor-at-session-end",
+                              "--publish-head", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertTrue(end.endswith(f' --anchor --publish "{self.URL}"'), end)
+        self.assertIn("anchors at session end", result.stdout)
+        self.assertIn(self.URL, result.stdout)
+        # The same flags with the word left off are the same install.
+        again = self.install("--anchor-at-session-end",
+                             "--publish-head", self.URL)
+        self.assertIn("already installed", again.stdout)
+        # `custom` with no raw flag at all wires nothing that leaves.
+        bare = self.install("--profile", "custom")
+        self.assertEqual(bare.returncode, 0, bare.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertNotIn("--anchor", end)
+        self.assertNotIn("--publish", end)
+
+    def test_profile_full_is_not_a_choice_in_this_release(self):
+        # The strongest tier arrives with the published chain (ADR-0031
+        # rulings 2 to 4); until then the word is a usage error, so no
+        # install lands at a tier it did not reach.
+        result = self.install("--profile", "full")
+
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("--profile", result.stderr)
+        self.assertFalse((self.home / ".claude" / "settings.json").exists())
+
     def test_publish_head_rides_on_the_session_end_command(self):
         result = self.install("--publish-head", self.URL)
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -888,6 +888,18 @@ class CoverageMarkerTest(unittest.TestCase):
         self.assertEqual({e["matchers"][0] for e in epochs}, {"*"},
                          "a profile widens no coverage")
 
+    def test_the_raw_flags_are_written_down_as_custom(self):
+        # With no profile named, the raw flags speak for themselves and
+        # the marker says so; naming `custom` says the same thing.
+        self.run_tool("install-hook", "--anchor-at-session-end")
+        self.assertEqual(self.marker()["epochs"][-1]["profile"], "custom")
+
+        self.run_tool("install-hook", "--profile", "custom",
+                      "--anchor-at-session-end")
+
+        self.assertEqual([e["profile"] for e in self.marker()["epochs"]],
+                         ["custom"], "the same choice appends nothing")
+
     def test_a_second_install_appends_nothing(self):
         # The heal rule applied to matchers: re-running the installer is
         # the documented way to fix a moved script, and it must not grow
