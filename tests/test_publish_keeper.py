@@ -398,6 +398,7 @@ class ProfileKeeperTest(unittest.TestCase):
         self.witness.mkdir()
         self.calendar = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
         self.calendar.mode = "pending"
+        self.calendar.nonce = b"fake-nonce"
         self.calendar.submitted = []
         self.calendar.polled = []
         self.calendar.url = (
@@ -466,10 +467,16 @@ class ProfileKeeperTest(unittest.TestCase):
             return json.loads(response.read().decode("utf-8"))
 
     def said_at_startup(self):
-        """Everything `serve` printed after the URL line."""
+        """The keeper line: what `serve` prints right after the URL line.
+
+        Read it before stopping the process. `serve` writes the two lines
+        as two flushes, and a kill sent the instant the first arrives can
+        land before the second is written, which is what CI on Linux and
+        macOS showed; the line is deterministic, the race was the test's."""
+        line = self.proc.stdout.readline()
         self.proc.kill()
-        out, _ = self.proc.communicate()
-        return out
+        self.proc.communicate()
+        return line
 
     def test_a_timestamped_marker_puts_the_anchor_keeper_on_six_hours(self):
         self.install("--profile", "timestamped")
