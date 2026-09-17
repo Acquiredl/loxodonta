@@ -1478,10 +1478,15 @@ def append_stamp_record(log, head, n, authority, reply):
     base64, the token inside it untouched. The URL is written down
     because it is not a credential, unlike a webhook's: it says whom the
     operator chose to trust, which is the one thing a reader of the
-    token needs to know (ADR-0032 ruling 4)."""
-    append_sidecar_record(stamps_path(log), {
-        "head": head, "n": n, "ts": now_ts(), "authority": authority,
-        "response": base64.b64encode(reply).decode("ascii")})
+    token needs to know (ADR-0032 ruling 4). `n` is the stamped entry's
+    number; a package manifest's stamp has none (ADR-0026 ruling 4), and
+    its record then carries no `n` at all rather than a null, exactly as
+    the manifest's anchor record does."""
+    record = {"head": head, "ts": now_ts(), "authority": authority,
+              "response": base64.b64encode(reply).decode("ascii")}
+    if n is not None:
+        record["n"] = n
+    append_sidecar_record(stamps_path(log), record)
 
 
 def stamped_heads(log):
@@ -1566,6 +1571,22 @@ def stamp_head(log, url, timeout=SESSION_END_PUBLISH):
 
 
 def cmd_stamp(args):
+    if args.manifest and args.log != DEFAULT_LOG:
+        print("error: --manifest stamps a file's digest and --log a chain's "
+              "head; give one of them", file=sys.stderr)
+        return EX_USAGE
+    if args.manifest:
+        # A package manifest (ADR-0026 ruling 4, ADR-0032 ruling 4): the
+        # digest stamped is the file's sha256, the token lands beside the
+        # manifest, and the record has no entry number, because a
+        # manifest has no entries. The same shape `anchor --manifest`
+        # has, so `supervisor package` drives the two seals alike.
+        try:
+            head = sha256_file(args.manifest)
+        except OSError as e:
+            print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
+            return 1
+        return stamp_digest(args.manifest, head, None, args.authority)
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -1579,8 +1600,15 @@ def cmd_stamp(args):
         print(f"error: {args.log} has a damaged final line — run "
               "`loxodonta verify` before stamping", file=sys.stderr)
         return 1
-    head, n = last["entry_hash"], last["n"]
-    if head in stamped_heads(args.log):
+    return stamp_digest(args.log, last["entry_hash"], last["n"],
+                        args.authority)
+
+
+def stamp_digest(target, head, n, url):
+    """Ask `url` for a token over `head` and keep the reply beside
+    `target`: a chain (`n` is the entry number) or a package manifest
+    (`n` is None). One query, one record, and the note on how it went."""
+    if head in stamped_heads(target):
         # The same rule the session-end step follows, and for a sharper
         # reason here: #251 puts this verb on the keeper's cadence, and
         # a cadence that re-stamped the same head every tick would ask
@@ -1588,7 +1616,7 @@ def cmd_stamp(args):
         # and fill the sidecar with them. Nothing to do is exit 0.
         print(f"already stamped {record_label(head, n)}")
         return 0
-    reply, failure = ask_authority(args.authority, head, STAMP_TIMEOUT)
+    reply, failure = ask_authority(url, head, STAMP_TIMEOUT)
     if failure:
         # A query that was refused leaves the note and no token row:
         # nothing was granted, so there is nobody's word to keep, and
@@ -1597,22 +1625,22 @@ def cmd_stamp(args):
         # hook, unlike the anchor's and the publish's notes, because a
         # head this verb failed to stamp is a head the supervisor should
         # still be able to read as unstamped and lately tried.
-        append_attempt_record(stamps_path(args.log), STEP_STAMP,
+        append_attempt_record(stamps_path(target), STEP_STAMP,
                               STAMP_TIMEOUT, failure)
         print(f"error: the head was not stamped: {failure}", file=sys.stderr)
         return 1
     try:
-        append_stamp_record(args.log, head, n, args.authority, reply)
+        append_stamp_record(target, head, n, url, reply)
     except OSError as e:
         # A token granted and not kept is not a stamp, and the note says
         # so rather than `granted` (which the supervisor reads as a head
         # that left).
-        append_attempt_record(stamps_path(args.log), STEP_STAMP,
+        append_attempt_record(stamps_path(target), STEP_STAMP,
                               STAMP_TIMEOUT, "the token could not be written")
         print(f"error: the authority granted a token and it could not be "
               f"written: {e.strerror or e}", file=sys.stderr)
         return 1
-    print(f"stamped {record_label(head, n)} via {args.authority}")
+    print(f"stamped {record_label(head, n)} via {url}")
     return 0
 
 
@@ -2120,7 +2148,13 @@ def check_transcript(entries, transcript_path):
     return diverged
 
 
-def cmd_verify(args):
+def cmd_verify(args, mechanisms=None):
+    """`verify PATH`: the walk, then whatever the flags add, then the
+    verdict as the exit code. `mechanisms` is the package judge's out-
+    parameter and nobody else's: it collects the exit-3 findings' words,
+    because a package names the mechanism in its own verdict line and
+    "anchor" is never the word for an authority timestamp (ADR-0032
+    ruling 1)."""
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -2194,6 +2228,9 @@ def cmd_verify(args):
     anchors_bad = args.anchors and check_anchors(args.log, entries)
     stamps_bad = args.stamps and check_stamps(args.log, entries,
                                               args.authority_chain)
+    if mechanisms is not None:
+        mechanisms += (["ANCHOR-MISMATCH"] if anchors_bad else []) \
+            + (["STAMP-INVALID"] if stamps_bad else [])
 
     if transcript_diverged:
         # Printed after the anchor chatter so that when this verdict
@@ -2253,6 +2290,8 @@ PACKAGE_WORDS = {
                     "above say where)",
     "ANCHOR-MISMATCH": "an anchor packaged with a chain is not evidence for "
                        "that chain (its lines above say which)",
+    "STAMP-INVALID": "an authority timestamp packaged with a chain is not "
+                     "evidence for that chain (its lines above say which)",
     "SEAL-INVALID": "a seal this package carries does not hold for its "
                     "manifest (the seal line above says why)",
     "SEAL-MISSING": "a seal the manifest declares is not in this package "
@@ -2266,6 +2305,10 @@ PACKAGE_WORDS = {
     "SELF-CONSISTENT": "every chain walks clean and every artifact matches "
                        "the manifest",
 }
+# The exit-3 tier holds two mechanisms now, the anchor's and the
+# authority timestamp's, and a chain's verify exit alone cannot say which
+# fired; `cmd_verify` hands the word back through `mechanisms`, and this
+# table is the fallback for an exit with no word beside it.
 CHAIN_WORDS = {1: "CHAIN-BROKEN", 3: "ANCHOR-MISMATCH",
                4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED"}
 # The issuer signature (ADR-0008, ADR-0026 ruling 4) is made and judged
@@ -2392,11 +2435,14 @@ def walked_listing(log):
     return head, len(lines), references, commitments
 
 
-def judge_chain(folder, listing):
-    """One chain of the package: the recorder's own verify, anchors
-    included, verbatim; then its walked head and length against the
-    manifest's. Returns (findings, file references counted); a finding
-    is (exit code, verdict word)."""
+def judge_chain(folder, listing, chain_file=None):
+    """One chain of the package: the recorder's own verify, anchors and
+    authority timestamps included, verbatim; then its walked head and
+    length against the manifest's. `chain_file` is the authority's
+    certificate chain the recipient saved, which `--authority-chain`
+    gives and without which a packaged token is present and not judged.
+    Returns (findings, file references counted); a finding is (exit code,
+    verdict word)."""
     name, head = listing["path"], listing["head"]
     print(f"chain: {name} (manifest: head {head[:12]}…, "
           f"{listing['entries']} entries)")
@@ -2418,15 +2464,22 @@ def judge_chain(folder, listing):
     # Every flag `cmd_verify` reads is named here, the package judge
     # being the one caller that builds its own arguments: a flag left
     # out is an attribute error mid-verdict rather than a default. The
-    # packaged stamps sidecar is judged when the package carries the
-    # authority's chain file to judge it against, which is the next
-    # slice (ADR-0032 ruling 5); until then a package is judged exactly
-    # as before.
+    # packaged stamps sidecar is judged exactly as `verify --stamps`
+    # judges one (ADR-0032 ruling 5): through openssl against the chain
+    # file the recipient named, or as an honest note when they named
+    # none. `mechanisms` carries back which of the two exit-3 findings
+    # fired, since the package names it.
+    mechanisms = []
     code = cmd_verify(argparse.Namespace(log=log, files=False,
                                          expect_head=None,
                                          transcript=transcript, anchors=True,
-                                         stamps=False, authority_chain=None))
-    findings = [(code, CHAIN_WORDS[code])] if code in CHAIN_WORDS else []
+                                         stamps=True,
+                                         authority_chain=chain_file),
+                      mechanisms)
+    if mechanisms:
+        findings = [(3, word) for word in mechanisms]
+    else:
+        findings = [(code, CHAIN_WORDS[code])] if code in CHAIN_WORDS else []
     walked, count, references, commitments = walked_listing(log)
     if transcript is None and commitments and code != 5:
         # The chain committed a transcript this package does not carry:
@@ -2540,6 +2593,71 @@ def judge_manifest_anchor(folder):
     return findings, height
 
 
+def judge_manifest_stamp(folder, chain_file):
+    """The stamp seal (ADR-0032 rulings 4 and 5, in ADR-0026 ruling 6's
+    shape): every record of manifest.json.stamps.jsonl must be a token
+    over this manifest's sha256, and openssl must accept it against the
+    certificate chain the recipient saved. Returns (findings, stamped,
+    why): whether the rung is earned, and why nobody judged the seal
+    when nobody did. A token this machine cannot judge is a note and
+    never a verdict, the issuer signature's exact posture — the rung is
+    neither earned nor failed. Only the manifest's own token can earn
+    the package rung; the chains' tokens printed above are detail, since
+    they stamp a different object."""
+    manifest = os.path.join(folder, "manifest.json")
+    digest = sha256_file(manifest)
+    records = read_stamp_records(manifest)
+    if records:
+        # Attempt rows are notes, never tokens (#240).
+        records = [r for r in records if not is_attempt(r)]
+    if not records:
+        what = "is not in this package" if records is None else "holds no record"
+        print(f"seal stamp: SEAL-MISSING: {stamps_path('manifest.json')} "
+              f"{what} — the manifest declares an authority timestamp it "
+              "does not carry")
+        return [(3, "SEAL-MISSING")], False, None
+    findings = []
+    stamped = False
+    why = None
+    for record in records:
+        head = record.get("head") if record else None
+        if not isinstance(head, str) or \
+                not isinstance(record.get("response"), str):
+            reason = "sidecar line is not a stamp record"
+        elif head != digest:
+            reason = (f"the token is over digest {head[:12]}…, and this "
+                      f"manifest's sha256 is {digest[:12]}…")
+        else:
+            try:
+                reply = base64.b64decode(record["response"], validate=True)
+            except ValueError:
+                reason = "the response is not base64"
+            else:
+                verdict, detail = judge_stamp(head, reply, chain_file)
+                if verdict == "stamped":
+                    print(f"seal stamp: STAMPED: {record.get('authority')} "
+                          "signed this manifest's sha256 — openssl accepted "
+                          f"the token against {chain_file}; the time inside "
+                          "it is the authority's word, not this machine's "
+                          "(`openssl ts -reply -text` prints it)")
+                    stamped = True
+                    continue
+                if verdict == "not judged":
+                    why = detail
+                    print(f"seal stamp: not judged: {detail} — the rung is "
+                          "neither earned nor failed; openssl and the "
+                          "certificate chain you saved from that authority "
+                          "judge this seal, and `verify-package "
+                          "--authority-chain FILE` judges it once it has "
+                          "both")
+                    continue
+                reason = detail
+        print(f"seal stamp: SEAL-INVALID: {reason} — evidence that does "
+              "not verify is not evidence")
+        findings.append((3, "SEAL-INVALID"))
+    return findings, stamped, why
+
+
 def key_fingerprint(public_key):
     """The SHA256 fingerprint of a public key file, as ssh-keygen prints
     it (`ssh-keygen -lf`), or None when the file is not a key it reads.
@@ -2625,19 +2743,25 @@ def judge_manifest_signature(folder):
     return [], fingerprint, None
 
 
-def judge_seals(folder, manifest):
+def judge_seals(folder, manifest, chain_file=None):
     """Each declared seal against what the package carries, in the
-    declared order: the anchor and the signature are judged; a kind this
-    verifier does not know is named as such and adds nothing to the
-    verdict, so the recipient is never told a seal was checked when it
-    was not. Returns (findings, earned): what the seals earned toward
-    the rungs, as ceiling_lines reads it."""
+    declared order: the anchor, the authority timestamp and the
+    signature are judged; a kind this verifier does not know is named as
+    such and adds nothing to the verdict, so the recipient is never told
+    a seal was checked when it was not. Returns (findings, earned): what
+    the seals earned toward the rungs, as ceiling_lines reads it."""
     findings = []
-    earned = {"height": None, "key": None, "unjudged": []}
+    earned = {"height": None, "key": None, "stamped": False, "unjudged": []}
     for kind in manifest["seals"]:
         found = []
         if kind == "anchor":
             found, earned["height"] = judge_manifest_anchor(folder)
+        elif kind == "stamp":
+            found, earned["stamped"], why = judge_manifest_stamp(folder,
+                                                                 chain_file)
+            if why:
+                earned["unjudged"].append(
+                    f"its authority timestamp was not judged, since {why}")
         elif kind == "signature":
             found, earned["key"], why = judge_manifest_signature(folder)
             if why:
@@ -2656,6 +2780,8 @@ def seal_files(manifest):
     files = set()
     if "anchor" in manifest["seals"]:
         files.add(anchors_path("manifest.json"))
+    if "stamp" in manifest["seals"]:
+        files.add(stamps_path("manifest.json"))
     if "signature" in manifest["seals"]:
         files.update(("manifest.json.sig", "manifest.json.pub"))
     return files
@@ -2693,15 +2819,20 @@ def series(items):
 def ceiling_lines(manifest, earned):
     """The two closing lines of a package with no finding, the residual
     trust and then the verdict, built from what the declared seals
-    earned: `height`, the block the manifest anchor reached; `key`, the
-    fingerprint the signature verified under; `unjudged`, the seals this
-    machine could not judge. Each rung adds its words in ADR-0007's
-    order, the anchor (when) before the signature (which key), the
-    signature's in ADR-0008's caged sentence and no other; what no seal
-    earned is named as resting on the issuer's word (ADR-0026 ruling 6).
-    The ceiling verdict carries its limit: what a regeneration would
-    also produce, and why the rung is unearned."""
+    earned: `height`, the block the manifest anchor reached; `stamped`,
+    whether openssl accepted the authority's token over the manifest;
+    `key`, the fingerprint the signature verified under; `unjudged`, the
+    seals this machine could not judge. Each rung adds its words in
+    ADR-0007's order, the two *when* seals before the signature (which
+    key), and the anchor before the authority timestamp, because an
+    anchor's proof is nobody's product where a token is somebody's
+    signed word (ADR-0032 ruling 1); the signature's words are
+    ADR-0008's caged sentence and no other. What no seal earned is named
+    as resting on the issuer's word (ADR-0026 ruling 6). The ceiling
+    verdict carries its limit: what a regeneration would also produce,
+    and why the rung is unearned."""
     height, key, seals = earned["height"], earned["key"], manifest["seals"]
+    stamped = earned.get("stamped", False)
     rungs, given, trusted = "", "", ""
     unsaid = ["the record inside is true and complete"]
     if height is not None:
@@ -2709,8 +2840,19 @@ def ceiling_lines(manifest, earned):
         given += f", and the manifest existed by Bitcoin block {height}"
         trusted += (f", and it existed by Bitcoin block {height} if the "
                     "merkle root printed beside that block is the block's")
-    else:
+    elif not stamped:
         unsaid.append("that it existed before today")
+    if stamped:
+        # With a token and no anchor, when is not unsaid: it is said by
+        # the authority, and what it rests on is the authority's word,
+        # which the residual trust states as the condition it is rather
+        # than letting the rung sound like the anchor's.
+        rungs += " + STAMPED"
+        given += (", and the authority the manifest names signed its sha256 "
+                  "under that authority's own clock")
+        trusted += (", and it existed by the time inside that token if the "
+                    "authority's clock and key custody are what the "
+                    "authority says")
     if key is not None:
         rungs += f" + SIGNED (key: {key})"
         given += (", and the manifest, and transitively every artifact it "
@@ -2745,12 +2887,15 @@ def ceiling_lines(manifest, earned):
     return trust, verdict
 
 
-def judge_package(shown, folder):
+def judge_package(shown, folder, chain_file=None):
     """The ladder, in ADR-0026 ruling 5's order: the manifest's summary,
     each chain, the file references, each artifact, each declared seal,
     the unlisted files, one line of residual trust when the ladder allows
     it, and the package verdict last, so the last line is the verdict as
-    it is for `verify`."""
+    it is for `verify`. `chain_file` is `--authority-chain`: the
+    certificate chain the recipient saved from the authority, which every
+    token in this package is judged against and without which each is a
+    note (ADR-0032 ruling 5)."""
     manifest, refusal = read_manifest(folder)
     if refusal:
         print(refusal)
@@ -2759,7 +2904,7 @@ def judge_package(shown, folder):
     findings = []
     references = 0
     for listing in manifest["chains"]:
-        found, counted = judge_chain(folder, listing)
+        found, counted = judge_chain(folder, listing, chain_file)
         findings += found
         references += counted
     # Off the machine the project record points nowhere and FILES-
@@ -2769,7 +2914,7 @@ def judge_package(shown, folder):
           "machine")
     if any([judge_artifact(folder, a) for a in manifest["artifacts"]]):
         findings.append((2, "ARTIFACT-DIVERGED"))
-    found, earned = judge_seals(folder, manifest)
+    found, earned = judge_seals(folder, manifest, chain_file)
     findings += found
     print_unlisted(folder, manifest)
     code, word = gravest(findings)
@@ -2795,7 +2940,7 @@ def cmd_verify_package(args):
     import zipfile  # only this command reads zips; the hook never pays for it
     path = args.path
     if os.path.isdir(path):
-        return judge_package(path, path)
+        return judge_package(path, path, args.authority_chain)
     if not os.path.isfile(path):
         print(f"error: {path} not found", file=sys.stderr)
         return 1
@@ -2817,7 +2962,7 @@ def cmd_verify_package(args):
             print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked ({e}); "
                   "not a loxodonta package")
             return 4
-        return judge_package(path, unpacked)
+        return judge_package(path, unpacked, args.authority_chain)
 
 
 def timeline_lines(entries, breaks, warns):
@@ -3437,6 +3582,15 @@ def recorder_command(actor=None, anchor=False, publish=None,
 
 PROFILES = ("local", "timestamped", "custom")
 
+# The tiers `--authority` composes with (ADR-0032 ruling 2). Every other
+# raw flag is refused beside a tier, because the tier already says what
+# leaves the machine; the authority is the exception because a tier can
+# name the mechanism and never the authority — whom to trust is the whole
+# choice, so no tier bakes one in and the URL stays the operator's to
+# type. `full` is here for the day it is accepted; until then only the
+# tiers in PROFILES can be typed.
+AUTHORITY_TIERS = ("timestamped", "full")
+
 
 def resolve_profile(profile, anchor, publish, publish_chain=None,
                     authority=None):
@@ -3449,21 +3603,32 @@ def resolve_profile(profile, anchor, publish, publish_chain=None,
     works and is written down as `custom` — and none at all is `local`.
     A raw flag beside `local` or `timestamped` is a command spoken wrong,
     because the profile already says what leaves the machine: refused
-    with the way out, `custom`. Returns (profile, anchor, publish,
-    publish_chain, authority)."""
+    with the way out, `custom`. The one exception is `--authority`, which
+    composes with a tier that commits the head (ADR-0032 ruling 2) and is
+    still refused beside `local`, where nothing leaves at all. Returns
+    (profile, anchor, publish, publish_chain, authority)."""
     raw = bool(anchor or publish or publish_chain or authority)
     if profile is None:
         return (("custom" if raw else "local"), anchor, publish,
                 publish_chain, authority)
     if profile == "custom":
         return profile, anchor, publish, publish_chain, authority
+    compose = ("to compose --anchor-at-session-end, --publish-head, "
+               "--publish-chain and --authority yourself, choose "
+               "--profile custom")
+    if profile in AUTHORITY_TIERS:
+        if anchor or publish or publish_chain:
+            raise ValueError(
+                f"--profile {profile} already says what leaves the machine, "
+                f"and --authority is the one flag that composes with it; "
+                f"{compose}")
+        return profile, profile == "timestamped", None, None, authority
     if raw:
         raise ValueError(
-            f"--profile {profile} already says what leaves the machine; "
-            "to compose --anchor-at-session-end, --publish-head, "
-            "--publish-chain and --authority yourself, choose "
-            "--profile custom")
-    return profile, profile == "timestamped", None, None, None
+            f"--profile {profile} already says what leaves the machine, "
+            "--authority included, since nothing leaves at all there; "
+            + compose)
+    return profile, False, None, None, None
 
 
 def session_end_choices(anchor, publish, publish_chain=None, authority=None):
@@ -3604,7 +3769,7 @@ def codex_hooks_path():
 
 
 def install_codex_hooks(publish=None, profile="local",
-                        publish_chain=None):
+                        publish_chain=None, authority=None):
     """The Codex half of install-hook (ADR-0020): the same PostToolUse,
     SessionEnd, and SessionStart blocks, in Codex's hooks.json, with the
     actor named so recall rows say which harness acted. Codex's matcher
@@ -3616,11 +3781,13 @@ def install_codex_hooks(publish=None, profile="local",
     both riding on the SessionEnd command as they do for Claude Code
     and both cut off at half Codex's cap (#183): the chain send stops
     at its budget and leaves the rest at the cursor, which is what the
-    budget rule and the cursor are for. `profile` is written to the
-    coverage marker (ADR-0031 ruling 1); the session-end anchor it
-    would wire stays refused here (ADR-0024), since a calendar round
-    trip has no cursor to resume from, so the supervisor's keeper
-    anchors on its cadence instead."""
+    budget rule and the cursor are for. `authority` is the session-end
+    stamp (ADR-0032), on that same clock and measured on it before the
+    flag was granted here (#251; the numbers are in docs/HOOK.md).
+    `profile` is written to the coverage marker (ADR-0031 ruling 1); the
+    session-end anchor it would wire stays refused here (ADR-0024),
+    since a calendar round trip has no cursor to resume from, so the
+    supervisor's keeper anchors on its cadence instead."""
     path = codex_hooks_path()
     settings = load_settings(path)
     if settings is None:
@@ -3632,7 +3799,8 @@ def install_codex_hooks(publish=None, profile="local",
     had_backup = backup_settings(path)
     record = recorder_command(CODEX_ACTOR)
     record_end = recorder_command(CODEX_ACTOR, publish=publish,
-                                  publish_chain=publish_chain)
+                                  publish_chain=publish_chain,
+                                  stamp=authority)
     hooks = settings.setdefault("hooks", {})
     installed = []
 
@@ -3648,7 +3816,8 @@ def install_codex_hooks(publish=None, profile="local",
     # The two publishes ride on this command, and the install command
     # states the choice each time: a re-run without a flag turns that
     # step off and says so (ADR-0025 ruling 3), as on Claude Code.
-    choices = session_end_choices(False, publish, publish_chain)
+    choices = session_end_choices(False, publish, publish_chain,
+                                  authority)
     for block in end:
         for wired in block.get("hooks", []):
             old = wired.get("command", "")
@@ -3678,7 +3847,7 @@ def install_codex_hooks(publish=None, profile="local",
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
     marked = record_coverage(CODEX_ACTOR, wired, profile,
-                             remote=publish_chain)
+                             remote=publish_chain, authority=authority)
     tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -3808,22 +3977,13 @@ def cmd_install_hook(args):
                   "short to reach a calendar with margin. Use the "
                   "supervisor's --anchor-every instead.", file=sys.stderr)
             return 1
-        if args.authority:
-            # The head publish was measured inside Codex's cap before it
-            # got the flag (#183); the stamp's one POST has not been, and
-            # the two together would spend the whole cap on waiting.
-            print("error: --authority is not wired for Codex yet: its "
-                  "SessionEnd hook is capped at three seconds, and the "
-                  "stamp's one POST has not been measured inside it. Run "
-                  "`loxodonta stamp --authority URL` on a cadence of your "
-                  "own instead.", file=sys.stderr)
-            return 1
-        # Both publishes are wired: #183 measured one POST inside the
-        # same three seconds, and the hook cuts each off at half the
-        # cap. The chain send is bounded the same way and resumes from
-        # its cursor, so a short clock costs batches, never entries.
+        # All three quick steps are wired: #183 measured one POST
+        # inside the same three seconds for the head, and #251 measured
+        # the stamp's (docs/HOOK.md, under Codex CLI). The hook cuts
+        # each off at half the cap; the chain send resumes from its
+        # cursor, so a short clock costs batches, never entries.
         return install_codex_hooks(args.publish_head, args.profile,
-                                   args.publish_chain)
+                                   args.publish_chain, args.authority)
     supervisor = supervisor_path()
     record = recorder_command()
     digest = digest_command()
@@ -4132,6 +4292,13 @@ def main(argv=None):
     package_parser.add_argument("path", metavar="PATH",
                                 help="the package: a zip, or its unpacked "
                                      "folder")
+    package_parser.add_argument("--authority-chain", metavar="FILE",
+                                default=None,
+                                help="the certificate chain (PEM) you saved "
+                                     "from the authority, for the tokens "
+                                     "this package carries (ADR-0032); "
+                                     "without it a token is present and not "
+                                     "judged, and the seal earns no rung")
     package_parser.set_defaults(func=cmd_verify_package)
     anchor_parser = sub.add_parser(
         "anchor", parents=[common],
@@ -4177,6 +4344,13 @@ def main(argv=None):
                               help="the authority's http or https URL; no "
                                    "default, since whom to trust is the "
                                    "choice")
+    stamp_parser.add_argument("--manifest", default=None, metavar="PATH",
+                              help="stamp a package manifest's sha256 "
+                                   "instead of a chain head, the token "
+                                   "beside it in PATH.stamps.jsonl "
+                                   "(ADR-0026 ruling 4, ADR-0032; "
+                                   "`supervisor package --stamp` drives "
+                                   "this)")
     stamp_parser.set_defaults(func=cmd_stamp)
     hook_parser = sub.add_parser(
         "hook",
@@ -4267,7 +4441,9 @@ def main(argv=None):
              "(ADR-0032). A second commitment beside the anchor, never "
              "instead of it; the token is the authority's signed word, "
              "judged by `verify --stamps` through openssl. No default: "
-             "whom to trust is the choice")
+             "whom to trust is the choice, which is why this flag also "
+             "composes with --profile timestamped, where every other raw "
+             "flag is refused")
     install_parser.set_defaults(func=cmd_install_hook)
     uninstall_parser = sub.add_parser(
         "uninstall-hook",

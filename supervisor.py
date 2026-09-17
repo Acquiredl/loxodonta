@@ -548,17 +548,19 @@ PROFILE_ANCHOR_EVERY = 6 * 3600   # seconds: the timestamped tier's default
 TIERS = ("local", "timestamped")
 
 
-def marker_profile():
-    """The strongest profile any harness declares in the coverage
-    marker, as (profile, harness), or None when no epoch names one (a
-    marker from before profiles existed, or no marker at all). Each
-    harness's newest epoch speaks for that harness, and the highest
-    tier among them speaks for the keeper (ADR-0031 ruling 1, #246).
-    Not simply the newest epoch of all: a flagless install for a
-    second harness would then read as the first harness's choice
-    withdrawn, and the keeper would stand down with nothing saying a
-    Codex install did it, which is the end claim ADR-0030 ruling 2
-    refuses arriving by another door."""
+def marker_epoch():
+    """The one epoch of the coverage marker that speaks for the keeper,
+    or None when no epoch names a profile (a marker from before profiles
+    existed, or no marker at all). Each harness's newest epoch speaks for
+    that harness, and the highest tier among them speaks for the keeper
+    (ADR-0031 ruling 1, #246). Not simply the newest epoch of all: a
+    flagless install for a second harness would then read as the first
+    harness's choice withdrawn, and the keeper would stand down with
+    nothing saying a Codex install did it, which is the end claim
+    ADR-0030 ruling 2 refuses arriving by another door.
+
+    One epoch answers for both cadence and authority, so the keeper never
+    anchors on one install's word and stamps on another's."""
     try:
         with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
             data = json.load(f)
@@ -581,9 +583,26 @@ def marker_profile():
         return (TIERS.index(epoch["profile"])
                 if epoch["profile"] in TIERS else 0)
 
-    strongest = sorted(declared.values(),
-                       key=lambda epoch: (tier(epoch), epoch["since"]))[-1]
-    return strongest["profile"], strongest["harness"]
+    return sorted(declared.values(),
+                  key=lambda epoch: (tier(epoch), epoch["since"]))[-1]
+
+
+def marker_profile():
+    """The profile the keeper follows and the harness that declared it,
+    as (profile, harness), or None when the marker names none."""
+    epoch = marker_epoch()
+    return None if epoch is None else (epoch["profile"], epoch["harness"])
+
+
+def marker_authority(epoch):
+    """The authority that epoch names, or None: whom the operator chose
+    to trust at install (ADR-0032 ruling 2), which puts the stamp on the
+    anchor keeper's turn. An epoch that names none withdraws it, the way
+    a re-install without the flag turns the session-end stamp off."""
+    if not isinstance(epoch, dict):
+        return None
+    named = epoch.get("authority")
+    return named if isinstance(named, str) and named else None
 
 
 def keeper_cadences(anchor_every, declared):
@@ -606,14 +625,24 @@ def keeper_cadences(anchor_every, declared):
 
 
 def keeper_words(anchor_every, anchor_source, publish_every,
-                 publish_url=None, publish_chain=None):
+                 publish_url=None, publish_chain=None, authority=None):
     """The startup line's second half: each keeper's cadence and its
     source, so the operator reads back what `serve` will send and why
     (ADR-0031 ruling 1, #246). Publishing follows flags alone in this
     release, and names its routes: the head, the chain, or both; the
-    tier that publishes on a cadence arrives with `full`."""
+    tier that publishes on a cadence arrives with `full`. An authority
+    on the marker rides the anchor keeper's turn and has no cadence of
+    its own (ADR-0032 ruling 3), so it is said on the anchor's clause and
+    only when that clause has a cadence to ride: an authority with no
+    anchor cadence sends nothing, and a line claiming otherwise would be
+    the one thing this line exists to prevent. The URL is printed because
+    an authority URL is not a credential — it says whom the operator
+    chose to trust (ADR-0032 ruling 4) — where a webhook URL is, which is
+    why the publish clause names routes and never URLs."""
     anchor = (f"anchor every {cadence_words(anchor_every)} ({anchor_source})"
               if anchor_every is not None else f"anchor off ({anchor_source})")
+    if anchor_every is not None and authority:
+        anchor += f", stamping the same head with {authority} on that turn"
     routes = " and ".join(name for name, url in (("head", publish_url),
                                                  ("chain", publish_chain))
                           if url)
@@ -708,13 +737,23 @@ def ripe_head(entries, now, cadence):
     return entries[-1].get("entry_hash") or None
 
 
-def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
+def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
+                 authority=None):
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
     --upgrade` (the record's own calendar; judgment stays with verify),
     and — only when the operator opted in with a cadence — a fresh head
-    that has aged past it is anchored. Off by default: nothing leaves
-    the machine without the say-so. Returns (attempted, note, failed)."""
+    that has aged past it is anchored, and stamped by the authority the
+    marker names, on this same turn. Off by default: nothing leaves the
+    machine without the say-so. Returns (attempted, note, failed).
+
+    Two commitments of one head, one cadence (ADR-0032 ruling 3): there
+    is no second clock to tune, and a head that already holds a token is
+    not asked about again — the guard here saves the process, and the
+    recorder's own dedupe is what makes the guard safe to get wrong.
+    `failed` stays the anchor's: a query the authority refused is not an
+    anchor that failed, and it is already written down as this chain's
+    last failed attempt, in the stamps sidecar, by the verb itself."""
     sidecar = Path(str(log) + ".anchors.jsonl")
     if not upgrade_due(last_attempt, now):
         return False, None, False
@@ -746,6 +785,16 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
                              "keeper will try again")
+        if head and authority and                 head not in sidecar_heads(Path(str(log) + ".stamps.jsonl")):
+            finished = subprocess.run(
+                [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
+                 "--authority", authority],
+                capture_output=True, encoding="utf-8", env=env)
+            attempted = True
+            if finished.returncode != 0:
+                notes.append("stamping failed — the authority did not "
+                             "grant a token for this head; it stays "
+                             "unstamped and the keeper will try again")
     return attempted, "; ".join(notes) or None, failed
 
 
