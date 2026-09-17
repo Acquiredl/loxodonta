@@ -252,8 +252,10 @@ class Door(BaseHTTPRequestHandler):
     timeout = 30  # a sender that stalls mid-body is dropped, not waited on
 
     def at_the_token(self):
+        # A token is ASCII, so a path that is not is never the token's;
+        # asked first, because compare_digest refuses non-ASCII text.
         path = urlsplit(self.path).path
-        return hmac.compare_digest(path, "/" + self.server.token)
+        return path.isascii() and hmac.compare_digest(path, "/" + self.server.token)
 
     def refuse_method(self):
         """Every verb but POST: 405 at the token's path, so an operator

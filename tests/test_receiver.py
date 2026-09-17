@@ -212,6 +212,15 @@ class RefusalTest(ReceiverFixture):
                 self.assertEqual(status, 404)
         self.assertEqual(self.stored(), ["token"])
 
+    def test_a_path_that_is_not_ascii_is_404_not_a_dropped_connection(self):
+        # urllib cannot send this path; the bytes go on a socket. A token
+        # is ASCII, so a path that is not can never be the token's.
+        answered = raw_request(
+            self.proc.url,
+            b"POST /caf\xc3\xa9 HTTP/1.0\r\nHost: receiver\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+        self.assertTrue(answered.startswith(b"HTTP/1.0 404 "), answered)
+
     def test_a_body_over_the_cap_is_413_and_nothing_is_written(self):
         # A declared length far past any cap, and no body behind it: the
         # receiver must refuse on the declaration, before reading a byte.
