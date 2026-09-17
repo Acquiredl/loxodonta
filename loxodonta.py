@@ -947,15 +947,20 @@ def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
         return
     body = published_head(last["entry_hash"], last["n"], session)
     failure = post_bounded(url, json.dumps(body).encode("utf-8"), timeout)
-    if failure is not None:
-        return  # an exit hook that complains is noise
-    # The memo says one was sent, the same note the publish command
-    # leaves, so the keeper never posts this head again.
-    try:
-        append_published_record(log, body["head"], body["n"], body["ts"],
-                                body["event"])
-    except OSError:
-        return
+    if failure is None:
+        # The memo says one was sent, the same note the publish command
+        # leaves, so the keeper never posts this head again.
+        try:
+            append_published_record(log, body["head"], body["n"], body["ts"],
+                                    body["event"])
+        except OSError:
+            pass
+    # How it went, written down in the same memo (#240): `sent`, or the
+    # one line the bounded POST produced. An exit hook that complains
+    # is noise; a record that stays silent is a gap the supervisor
+    # cannot read.
+    append_attempt_record(published_path(log), STEP_PUBLISH_HEAD, timeout,
+                          failure or "sent")
 
 
 # --- The publish command (ADR-0025 ruling 3, the keeper's half) --------------
