@@ -260,8 +260,12 @@ class Receiver(HTTPServer):
 
     def handle_error(self, request, client_address):
         # A sender that stalled past the timeout, or spoke plain HTTP to
-        # a TLS door: one line, never the stdlib's traceback.
-        print(f"{client_address[0]} dropped: {sys.exc_info()[1]}", flush=True)
+        # a TLS door, is dropped silently: a stalling stranger must not
+        # be able to fill the operator's log. Anything that is not a
+        # socket or TLS error is a bug in this file, and those still
+        # print the stdlib's traceback.
+        if not isinstance(sys.exc_info()[1], OSError):
+            super().handle_error(request, client_address)
 
 
 class Door(BaseHTTPRequestHandler):
@@ -269,7 +273,20 @@ class Door(BaseHTTPRequestHandler):
     away with a status and one short line, and the request path is
     never written anywhere, because the path is the credential."""
 
-    timeout = 30  # a sender that stalls mid-body is dropped, not waited on
+    # A sender that stalls this long, mid-body or before a TLS handshake it
+    # never starts, is dropped, not waited on: the door is one thread, and
+    # one idle socket must not hold it against every honest sender behind
+    # it. The env knob is the test suite's handle.
+    timeout = float(os.environ.get("RECEIVER_TIMEOUT_SECONDS", 30))
+
+    def setup(self):
+        # The stdlib sets the timeout here, so the TLS handshake runs
+        # after it and under it: wrapped with do_handshake_on_connect
+        # left on, the handshake would run inside accept() on a socket
+        # with no timeout at all.
+        super().setup()
+        if isinstance(self.connection, ssl.SSLSocket):
+            self.connection.do_handshake()
 
     def at_the_token(self):
         # A token is ASCII, so a path that is not is never the token's;
@@ -431,8 +448,10 @@ def cmd_serve(args):
     scheme = "http"
     if args.cert:
         try:
+            # No handshake in accept(): the door does it once its
+            # timeout is set (Door.setup), so an idle stranger is bounded.
             server.socket = tls_context(args.cert, args.key).wrap_socket(
-                server.socket, server_side=True)
+                server.socket, server_side=True, do_handshake_on_connect=False)
         except (OSError, ssl.SSLError) as e:
             print(f"error: cannot serve TLS from {args.cert} and {args.key}: "
                   f"{e}", file=sys.stderr)

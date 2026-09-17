@@ -20,6 +20,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -120,7 +121,7 @@ class ReceiverFixture(unittest.TestCase):
         self.root = Path(self._tmp.name).resolve()
         self.data = self.root / "receiver"
 
-    def start(self, *extra, port=0, bind="127.0.0.1"):
+    def start(self, *extra, port=0, bind="127.0.0.1", env=None):
         """Start the receiver and read what it printed up to the URL.
         Returns the process, with `.url` and `.said` set on it."""
         argv = [sys.executable, str(RECEIVER), "serve",
@@ -129,7 +130,8 @@ class ReceiverFixture(unittest.TestCase):
             argv += ["--bind", bind]
         proc = subprocess.Popen(
             argv + list(extra), stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, encoding="utf-8", env=clean_env())
+            stderr=subprocess.PIPE, encoding="utf-8",
+            env={**clean_env(), **(env or {})})
         self.addCleanup(self.stop, proc)
         said = []
         while True:
@@ -508,6 +510,27 @@ class TlsTest(ReceiverFixture):
         with self.assertRaises((urllib.error.URLError, ConnectionError,
                                 http.client.HTTPException)):
             post("http" + proc.url[len("https"):], head, "application/json")
+
+    def test_an_idle_connection_does_not_hold_the_door(self):
+        # A stranger that connects and sends nothing: the handshake it
+        # never starts must be bounded by the door's timeout, or one idle
+        # socket stops every honest sender behind it for as long as it
+        # likes. The timeout is shortened through the suite's handle.
+        proc = self.start("--cert", str(self.cert), "--key", str(self.key),
+                          env={"RECEIVER_TIMEOUT_SECONDS": "2"})
+        parts = urllib.parse.urlsplit(proc.url)
+        idle = socket.create_connection((parts.hostname, parts.port))
+        self.addCleanup(idle.close)
+
+        head = json.dumps({"head": "d" * 64, "n": 4}).encode("utf-8")
+        request = urllib.request.Request(
+            proc.url, data=head, method="POST",
+            headers={"Content-Type": "application/json"})
+        started = time.monotonic()
+        with self.trusting_opener().open(request, timeout=30) as response:
+            self.assertEqual(response.status, 200)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertIn("heads.jsonl", self.stored())
 
 
 if __name__ == "__main__":
