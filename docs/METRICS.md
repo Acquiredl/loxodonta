@@ -9,7 +9,7 @@ The supervisor's alarm band lives on a page, and a page has one failure mode tha
 Three things it is not.
 
 - **It is not a push.** Nothing leaves the machine on the route's account. A push would want a vendor's wire in the supervisor and a credential for a monitoring service sitting on the writer's machine, and this repo puts neither there (ADR-0033 ruling 3). The route answers when something on this machine asks.
-- **It is not a second reading.** The body is one pure function over the scan report the status endpoint already holds. A scrape starts no walk of the store, so scraping every fifteen seconds costs what the poll already costs and no more. The hook still records nothing new (`.out-of-scope/001`); the reader still counts only what the chain holds (ADR-0027).
+- **It is not a second reading.** The body is one pure function over the scan report the status endpoint already holds. A scrape starts no walk of its own: it is answered from the newest scan no older than the tick, exactly as the dashboard's poll is, so a scraper and a browser watching the same supervisor share one walk rather than causing two. The hook still records nothing new (`.out-of-scope/001`); the reader still counts only what the chain holds (ADR-0027).
 - **It is not the verdict.** `verify` owns those, as it did before. A gauge is the supervisor's reading of `verify`'s output, rendered for a pager.
 
 ## 2. Turning it on
@@ -21,7 +21,7 @@ python supervisor.py serve
 ```
 
 ```
-curl http://127.0.0.1:8787/metrics
+curl http://127.0.0.1:7717/metrics
 ```
 
 The response is `text/plain; version=0.0.4; charset=utf-8`, and every family on it is a gauge: the counts are the reading, and the trend over time is your time-series store's job, which is exactly where ADR-0013 declined to grow one.
@@ -90,7 +90,7 @@ scrape_configs:
   - job_name: loxodonta
     scrape_interval: 30s
     static_configs:
-      - targets: ['127.0.0.1:8787']
+      - targets: ['127.0.0.1:7717']
 ```
 
 Reaching it from another box is your tunnel or your reverse proxy, the same as the dashboard: an SSH forward, or a proxy that presents the route under a name this machine answers to. The supervisor offers no way to do that for you, deliberately.
