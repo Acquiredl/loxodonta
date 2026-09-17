@@ -5055,6 +5055,48 @@ def metrics_text(report, age_seconds):
           by_label("state", tallied((row.get("state") for row in hot),
                                     KNOWN_CONSUMPTION)))
 
+    # The heads, and what has ever been done about them. Whether an
+    # anchor covers a head is verify's own word, read from the verdict
+    # lines it prints (ADR-0005); whether a head has left the machine at
+    # all is what the two sidecars beside the chain say, and those the
+    # writer can reach — so a fresh reading here is worth nothing and a
+    # stale one is the reason to look. There is deliberately no per-chain
+    # "unpublished" gauge: the scan's departure reading names the newest
+    # door a head went out of, not every door it ever used, and a metric
+    # that can be wrong about which is worse than one that is narrower.
+    # The store-wide condition the scan says in one sentence — publishing
+    # wired and nothing ever sent — is the gauge instead (#240 part 3).
+    gauge("loxodonta_heads_unanchored",
+          "Chains whose head no anchor covers yet, from the spans verify "
+          "replayed on the last scan", "verdict",
+          [((), sum(1 for chain in chains
+                    if (chain.get("anchors") or {}).get("head")
+                    and not chain["anchors"]["head"].get("anchored")))])
+    gauge("loxodonta_heads_unsent",
+          "Chains no head of which has left this machine yet, by the "
+          "publish door or the anchor door, as the writer-reachable "
+          "sidecars beside them say", "testimony",
+          [((), sum(1 for chain in chains
+                    if not (chain.get("left") or {}).get("ts")))])
+    published = report.get("published") or {}
+    gauge("loxodonta_publishing_wired_nothing_sent",
+          "1 when publishing is wired on the session-end command and no "
+          "chain in the store holds a sent head, else 0", "testimony",
+          [((), 1 if published.get("wired") and not published.get("sent")
+            else 0)])
+
+    # The session-end steps, from the rows the recorder writes after each
+    # one (#240): which step some chain's newest failure was. A note on
+    # network luck, never a verdict, never the exit — and one gauge per
+    # step, so a pager can name the door that stopped working.
+    failures = tallied((chain["last_failed"].get("step") for chain in chains
+                        if chain.get("last_failed")), KNOWN_STEPS)
+    gauge("loxodonta_last_attempt_failed",
+          "1 when some chain's newest failed session-end attempt is this "
+          "step, else 0", "testimony",
+          by_label("step", {step: 1 if seen else 0
+                            for step, seen in failures.items()}))
+
     # The tally (GLOSSARY: Tally): the store's own scale, counted as the
     # page's tally counts it — sessions per drawer, entries of every
     # kind — and owning no verdicts.

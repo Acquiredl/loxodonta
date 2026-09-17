@@ -367,5 +367,194 @@ class SessionsByStateTest(MetricsFixture):
             0)
 
 
+class HeadsTest(MetricsFixture):
+    """Heads not yet anchored and not yet out of reach: the anchor
+    panel's own readings, counted. Whether an anchor covers a head is
+    verify's word; whether a head has left the machine is what the
+    sidecars beside the chain say, and those the writer can reach."""
+
+    def setUp(self):
+        super().setUp()
+        self.receiver = FakeReceiver(("127.0.0.1", 0), FakeReceiverHandler)
+        self.receiver.received = []
+        self.receiver.delay = 0
+        self.receiver.url = (
+            "http://127.0.0.1:%d/hook" % self.receiver.server_address[1])
+        threading.Thread(target=self.receiver.serve_forever,
+                         daemon=True).start()
+        self.addCleanup(self.receiver.server_close)
+        self.addCleanup(self.receiver.shutdown)
+
+    def publish_by_hand(self, log):
+        """One head through the public `publish`, to the fake receiver:
+        a real memo row, written the way the recorder writes it."""
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
+             self.receiver.url],
+            capture_output=True, check=True, env=clean_env())
+
+    def test_unanchored_and_unsent_heads_are_the_anchor_panels_counts(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-bare")
+        anchored = make_chain(self.root / "beta" / "receipts", "sess-anch")
+        write_completed_anchor(anchored, chain_head(anchored))
+        published = make_chain(self.root / "gamma" / "receipts", "sess-pub")
+        self.publish_by_hand(published)
+        self.serve()
+
+        _, _, scrape = self.scrape()
+        report = self.scan()
+
+        chains = chains_of(report)
+        self.assertEqual(
+            scrape.value("loxodonta_heads_unanchored"),
+            sum(1 for c in chains if c["anchors"]["head"]
+                and not c["anchors"]["head"]["anchored"]))
+        self.assertEqual(scrape.value("loxodonta_heads_unanchored"), 2,
+                         "the bare chain and the published one")
+        self.assertEqual(
+            scrape.value("loxodonta_heads_unsent"),
+            sum(1 for c in chains if not c["left"]["ts"]))
+        self.assertEqual(scrape.value("loxodonta_heads_unsent"), 1,
+                         "only the bare chain has sent nothing anywhere")
+        # Publishing is not wired on this witness, so the sentence the
+        # scan would print is not the case and the gauge says so.
+        self.assertFalse(report["published"]["wired"])
+        self.assertIsNone(report["published"]["note"])
+        self.assertEqual(
+            scrape.value("loxodonta_publishing_wired_nothing_sent"), 0)
+
+    def test_publishing_wired_with_nothing_sent_is_the_scans_sentence(self):
+        # #240 part 3: the posture wired in name only. The scan says it
+        # in one sentence; the same condition is one gauge.
+        install_witness_hook(
+            self.witness, sessionend=True,
+            command="python loxodonta.py hook --publish "
+                    "https://receipts.example.test/hook")
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        _, _, scrape = self.scrape()
+        report = self.scan()
+
+        self.assertTrue(report["published"]["wired"])
+        self.assertFalse(report["published"]["sent"])
+        self.assertIsNotNone(report["published"]["note"])
+        self.assertEqual(
+            scrape.value("loxodonta_publishing_wired_nothing_sent"), 1)
+
+
+class LastAttemptFailedTest(MetricsFixture):
+    """`loxodonta_last_attempt_failed{step}`: one gauge per session-end
+    step, 1 when some chain's newest failed attempt is that step. Read
+    from the rows the recorder writes after each step (#240), which are
+    testimony about network luck and never a verdict."""
+
+    def test_the_last_failed_attempt_is_one_gauge_per_step(self):
+        refused = make_chain(self.root / "alpha" / "receipts",
+                             "sess-refused")
+        write_attempt_row(refused, "publish-head",
+                          "the remote answered 404", when=ago(600),
+                          budget=3.0)
+        quiet = make_chain(self.root / "beta" / "receipts", "sess-quiet")
+        self.serve(extra_env={"SUPERVISOR_SCAN_TTL_SECONDS": "0"})
+
+        _, _, first = self.scrape()
+        report = self.scan()
+
+        failed = [c["last_failed"] for c in chains_of(report)
+                  if c["last_failed"]]
+        self.assertEqual([f["step"] for f in failed], ["publish-head"])
+        for step in ("anchor", "publish-head"):
+            self.assertEqual(
+                first.value("loxodonta_last_attempt_failed", step=step),
+                1 if any(f["step"] == step for f in failed) else 0, step)
+        self.assertEqual(
+            first.value("loxodonta_last_attempt_failed",
+                        step="publish-head"), 1)
+        self.assertEqual(
+            first.value("loxodonta_last_attempt_failed", step="anchor"), 0)
+
+        # No calendar answered for the other chain: the anchor step's own
+        # gauge moves off zero and no metric name changes.
+        write_attempt_row(quiet, "anchor",
+                          "no calendar answered within 12 seconds",
+                          when=ago(60))
+        _, _, second = self.scrape()
+
+        self.assertEqual(second.names(), first.names())
+        self.assertEqual(
+            second.value("loxodonta_last_attempt_failed", step="anchor"), 1)
+        self.assertEqual(
+            second.value("loxodonta_last_attempt_failed",
+                         step="publish-head"), 1)
+
+
+class OffMachineMetricsTest(MetricsFixture):
+    """The route inherits the face's posture (ADR-0033 ruling 3): a
+    browser lied to by DNS reads as same-origin, so the Host header is
+    the only witness left, and the scrape is refused on it exactly as
+    the page is."""
+
+    def test_a_rebound_host_header_is_refused_on_the_metrics_route(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        request = urllib.request.Request(
+            self.url + "/metrics", headers={"Host": "attacker.example"})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            OPENER.open(request, timeout=30)
+
+        self.assertEqual(caught.exception.code, 403)
+        # The same refusal the page gets, not a softer one of its own.
+        page = urllib.request.Request(
+            self.url + "/", headers={"Host": "attacker.example"})
+        with self.assertRaises(urllib.error.HTTPError) as also:
+            OPENER.open(page, timeout=30)
+        self.assertEqual(also.exception.code, caught.exception.code)
+
+    def test_the_machine_itself_is_still_scraped(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        status, ctype, _ = self.get("/metrics")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(ctype, "text/plain; version=0.0.4; charset=utf-8")
+
+
+class NoExtraWalkTest(MetricsFixture):
+    """A scrape is not a tick. The route renders the scan the server
+    already holds, so the day book's count of the supervisor's own looks
+    is unchanged by a scrape and a chain that lands after the tick is
+    not on it (ADR-0033: the route adds no reading)."""
+
+    def ticks(self):
+        """The supervisor's own count of its walks, from the day book it
+        keeps beside the store."""
+        book = json.loads((self.root / ".supervisor-daybook.json")
+                          .read_text(encoding="utf-8"))
+        return sum(row.get("scans", 0) for row in book["days"].values())
+
+    def test_a_scrape_reads_the_held_scan_and_walks_nothing(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve(extra_env={"SUPERVISOR_SCAN_TTL_SECONDS": "300"})
+
+        _, _, first = self.scrape()
+        walked = self.ticks()
+        # A chain that arrives after the tick: a scrape must not see it,
+        # because a scrape must not walk the store to find it.
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        _, _, second = self.scrape()
+
+        self.assertEqual(self.ticks(), walked, "a scrape ticked the scan")
+        self.assertEqual(first.value("loxodonta_store_chains"), 1)
+        self.assertEqual(second.value("loxodonta_store_chains"),
+                         first.value("loxodonta_store_chains"))
+        self.assertEqual(second.value("loxodonta_store_drawers"),
+                         first.value("loxodonta_store_drawers"))
+        self.assertGreaterEqual(second.value("loxodonta_scan_age_seconds"),
+                                first.value("loxodonta_scan_age_seconds"))
+
+
 if __name__ == "__main__":
     unittest.main()
