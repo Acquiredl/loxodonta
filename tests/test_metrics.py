@@ -556,5 +556,54 @@ class NoExtraWalkTest(MetricsFixture):
                                 first.value("loxodonta_scan_age_seconds"))
 
 
+class DocumentedNamesTest(MetricsFixture):
+    """ADR-0033 ruling 4: the list lives in one place in the code beside
+    its help text, and `docs/METRICS.md` restates it for the operator.
+    The two must agree, name for name and help line for help line, or
+    the page an operator freezes a dashboard against is already wrong."""
+
+    def page(self):
+        return (REPO_ROOT / "docs" / "METRICS.md").read_text(encoding="utf-8")
+
+    def documented(self):
+        """The page's table, as {name: (labels, grade, help words)}."""
+        rows = {}
+        for line in self.page().splitlines():
+            cells = [cell.strip()
+                     for cell in line.strip().strip("|").split("|")]
+            if len(cells) != 4 or not cells[0].startswith("`loxodonta_"):
+                continue
+            name = cells[0].strip("`")
+            labels = tuple(sorted(cell.strip().strip("`")
+                                  for cell in cells[1].split(",")
+                                  if cell.strip() and cell.strip() != "none"))
+            rows[name] = (labels, cells[2], cells[3])
+        return rows
+
+    def test_the_page_lists_every_name_with_its_help_line_and_grade(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+
+        _, body, scrape = self.scrape()
+
+        listed = self.documented()
+        self.assertEqual(sorted(listed), scrape.names())
+        for name, (labels, grade, words) in listed.items():
+            self.assertEqual(scrape.help[name],
+                             words + " (" + grade + ")", name)
+            self.assertEqual(
+                labels,
+                tuple(sorted({key for metric, pairs in scrape.samples
+                              if metric == name for key, _ in pairs})), name)
+        # What the operator needs beside the list: the loopback scrape
+        # config, the one line about reaching it from another box, and
+        # the freeze rule the names are worth nothing without.
+        self.assertIn("scrape_configs", self.page())
+        self.assertIn("127.0.0.1", self.page())
+        self.assertIn("tunnel", self.page())
+        self.assertIn("frozen", self.page())
+        self.assertNotIn("push", body)
+
+
 if __name__ == "__main__":
     unittest.main()
