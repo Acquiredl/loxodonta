@@ -551,43 +551,73 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("no longer", result.stdout)
         self.assertIn("publish", result.stdout)
 
-    def test_a_flagless_install_says_no_head_record_is_wired(self):
-        # ADR-0002's tiers: an edit, a deletion, or a reorder is caught
-        # unconditionally; a regenerated chain only against a head kept
-        # off the machine. A plain install is the lower tier, and the
-        # installer says so, on first install and on every re-run (#221).
+    def ladder(self, stdout):
+        """The tier rows the installer printed, keyed by tier name."""
+        rows = [line for line in stdout.splitlines()
+                if line.startswith("  local ")
+                or line.startswith("  timestamped ")]
+        return {row.split()[0]: row for row in rows}
+
+    def test_a_flagless_install_prints_the_ladder(self):
+        # ADR-0031 ruling 1: the flagless install is `local`, and the
+        # installer prints the ladder in place of #221's note, one row
+        # per tier the operator can reach, each naming its flag and
+        # what leaves. The `local` row keeps #221's sentence: a
+        # regenerated chain is caught only against a head kept off the
+        # machine. Printed on first install and on every re-run.
         first = self.install()
+
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertIn("no head record", first.stdout)
-        self.assertIn("--publish-head", first.stdout)
+        self.assertIn("wired: Claude Code, every tool call, profile local",
+                      first.stdout)
+        ladder = self.ladder(first.stdout)
+        self.assertEqual(sorted(ladder), ["local", "timestamped"])
+        self.assertIn("a regenerated chain only against a head you keep "
+                      "(`head`, then `verify --expect-head`)",
+                      ladder["local"])
+        self.assertIn("--profile timestamped", ladder["timestamped"])
+        self.assertIn("a 32-byte digest leaves at each session end",
+                      ladder["timestamped"])
+        self.assertIn("once the anchor matures", ladder["timestamped"])
+        # The ladder is the only notice: #221's line is gone.
+        self.assertNotIn("no head record", first.stdout)
+        self.assertNotIn("note:", first.stdout)
 
         again = self.install()
         self.assertIn("already installed", again.stdout)
-        self.assertIn("no head record", again.stdout)
+        self.assertEqual(self.ladder(again.stdout), ladder)
 
-    def test_an_install_with_an_opt_in_says_nothing_about_the_tier(self):
-        # Either opt-in is a rememberer off the machine: the published
-        # head (ADR-0025) or the anchor (ADR-0024). The line is for the
-        # install that has neither.
+    def test_an_install_above_local_reads_its_profile_back_without_the_ladder(self):
+        # The ladder is for the install that reached no tier above
+        # `local`; any other install states its profile in one line.
         with_publish = self.install("--publish-head", self.URL)
         self.assertEqual(with_publish.returncode, 0, with_publish.stderr)
-        self.assertNotIn("no head record", with_publish.stdout)
+        self.assertIn("profile custom", with_publish.stdout)
+        self.assertEqual(self.ladder(with_publish.stdout), {})
 
-        with_anchor = self.install("--anchor-at-session-end")
-        self.assertEqual(with_anchor.returncode, 0, with_anchor.stderr)
-        self.assertNotIn("no head record", with_anchor.stdout)
+        timestamped = self.install("--profile", "timestamped")
+        self.assertEqual(timestamped.returncode, 0, timestamped.stderr)
+        self.assertIn("profile timestamped", timestamped.stdout)
+        self.assertEqual(self.ladder(timestamped.stdout), {})
 
-    def test_a_flagless_codex_install_names_only_the_opt_in_codex_has(self):
-        # Codex refuses the session-end anchor (ADR-0024), so its line
-        # names --publish-head alone.
+    def test_a_flagless_codex_install_prints_the_ladder_in_codexs_terms(self):
+        # Codex refuses the session-end anchor (ADR-0024), so its
+        # `timestamped` row says the digest leaves on the supervisor's
+        # cadence and never names the flag Codex cannot take.
         (self.home / ".codex").mkdir()
 
         result = self.install("--codex")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("no head record", result.stdout)
-        self.assertIn("--publish-head", result.stdout)
+        self.assertIn("wired: Codex, every tool call, profile local",
+                      result.stdout)
+        ladder = self.ladder(result.stdout)
+        self.assertEqual(sorted(ladder), ["local", "timestamped"])
+        self.assertIn("--profile timestamped", ladder["timestamped"])
+        self.assertIn("supervisor", ladder["timestamped"])
+        self.assertIn("cadence", ladder["timestamped"])
         self.assertNotIn("--anchor-at-session-end", result.stdout)
+        self.assertNotIn("no head record", result.stdout)
 
     def test_both_opt_ins_ride_on_the_one_command(self):
         result = self.install("--anchor-at-session-end",

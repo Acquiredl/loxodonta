@@ -2712,22 +2712,40 @@ def session_end_notice(old, new, choices):
     return f" ({'; '.join(parts)})" if parts else ""
 
 
-def head_record_notice(anchor, publish, codex=False):
-    """The line a flagless install prints, on first install and on every
-    re-run. A chain with no head record wired is the lower tier of
+def profile_notice(profile, matchers, codex=False):
+    """What the installer prints last, on first install and on every
+    re-run: one line reading the choice back (the harness, the coverage,
+    the profile) and, at `local`, the ladder — one row per tier the
+    operator can reach from here, each naming its flag and what leaves
+    the machine (ADR-0031 ruling 1). `local` is the lower tier of
     ADR-0002: an edit, a deletion, or a reorder is caught unconditionally,
-    a regenerated chain only against a head kept off the machine. Nothing
-    leaves the machine without the opt-in (ADR-0024), so the installer
-    says which tier this is rather than defaulting the other (#221).
-    Codex has no session-end anchor (ADR-0024), so its line names the one
-    opt-in it has."""
-    if anchor or publish:
-        return ""
-    opt_ins = ("--publish-head URL" if codex
-               else "--publish-head URL or --anchor-at-session-end")
-    return ("note: no head record wired — a regenerated chain is caught only "
-            "against a head you keep (`head`, then `verify --expect-head`). "
-            f"Opt in with {opt_ins}; docs/HOOK.md says which remotes count.")
+    a regenerated chain only against a head kept off the machine (#221's
+    sentence, kept). `timestamped` is the anchor at each session end. On
+    Codex the session-end anchor stays refused (ADR-0024), so its row,
+    and its line once chosen, say the supervisor anchors on its cadence
+    instead. Never a prompt: the installer reads no stdin."""
+    harness = "Codex" if codex else "Claude Code"
+    coverage = ("every tool call" if all(m in ("*", ".*") for m in matchers)
+                else "matcher " + ", ".join(f'"{m}"' for m in matchers))
+    wired = f"wired: {harness}, {coverage}, profile {profile}"
+    if profile == "timestamped" and codex:
+        return (wired + " (the session-end anchor stays refused for Codex, "
+                "ADR-0024, so the supervisor anchors on its cadence: "
+                "`supervisor serve` reads the profile and anchors every "
+                "six hours)")
+    if profile != "local":
+        return wired
+    leaves = ("a 32-byte digest leaves on the supervisor's cadence, never "
+              "at session end, since Codex caps its SessionEnd hook (ADR-0024)"
+              if codex else "a 32-byte digest leaves at each session end")
+    return "\n".join([
+        wired,
+        "  local        receipts stay on this machine. Edits to history are "
+        "caught; a regenerated chain only against a head you keep (`head`, "
+        "then `verify --expect-head`).",
+        f"  timestamped  --profile timestamped   {leaves}; regeneration is "
+        "caught once the anchor matures.",
+    ])
 
 
 def supervisor_path():
@@ -2823,7 +2841,6 @@ def install_codex_hooks(publish=None, profile="local"):
     # states the choice each time: a re-run without the flag turns it
     # off and says so (ADR-0025 ruling 3), as on Claude Code.
     choices = session_end_choices(False, publish)
-    tier = head_record_notice(False, publish, codex=True)
     for block in end:
         for wired in block.get("hooks", []):
             old = wired.get("command", "")
@@ -2853,6 +2870,7 @@ def install_codex_hooks(publish=None, profile="local"):
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
     marked = record_coverage(CODEX_ACTOR, wired, profile)
+    tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
         if marked:
@@ -3030,7 +3048,6 @@ def cmd_install_hook(args):
     # step off, and says so.
     choices = session_end_choices(args.anchor_at_session_end,
                                   args.publish_head)
-    tier = head_record_notice(args.anchor_at_session_end, args.publish_head)
     for block in end:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
@@ -3065,6 +3082,7 @@ def cmd_install_hook(args):
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
     marked = record_coverage("claude-code", wired, args.profile)
+    tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
         if marked:
