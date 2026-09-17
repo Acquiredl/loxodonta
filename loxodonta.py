@@ -655,11 +655,11 @@ def calendar_request(url, data=None, timeout=15):
 # anchor, the publish memo for the head. One row of kind `attempt`,
 # carrying the step, the time, the budget it had, and the outcome, which
 # is `submitted` or `sent`, or the one line the bounded call produced.
-# Never the URL: a webhook URL is a credential. The row is testimony like
-# the rest of the sidecar and proves nothing; every reader that judges
-# (`verify --anchors`, the keeper, `verify-package`) skips it by its kind,
-# and the supervisor reads it to say when a head last left the machine
-# and when the last attempt failed. The chain's schema is untouched.
+# Never the URL: a webhook URL is a credential. The row is testimony and
+# never a proof: every reader that judges (`verify --anchors`, the
+# keeper, `verify-package`) skips it by its kind, and the supervisor
+# reads it to say when a head last left the machine and when the last
+# attempt failed. The chain's schema is untouched.
 
 ATTEMPT_KIND = "attempt"
 STEP_ANCHOR = "anchor"
@@ -896,7 +896,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def post_once(url, body, timeout):
     """One POST. Returns None when the remote took it, else one line
     naming what went wrong; never raises. The line never carries the
-    URL: a webhook URL is a credential, and this line reaches stderr."""
+    URL: a webhook URL is a credential, and this line reaches stderr
+    and the publish memo, which rides in every package. A URLError's
+    reason is socket-level text (refused, timed out, a certificate that
+    does not match the public hostname); any other exception is named
+    by its type alone, because http.client quotes the request path in
+    its own messages and the path is where a token lives."""
     try:
         request = urllib.request.Request(
             url, data=body,
@@ -908,8 +913,10 @@ def post_once(url, body, timeout):
     except urllib.error.HTTPError as e:
         # A refused redirect lands here too, as its 3xx status.
         return f"the remote answered {e.code}"
+    except urllib.error.URLError as e:
+        return str(e.reason) or type(e.reason).__name__
     except Exception as e:  # noqa: BLE001 - what failed is reported, not raised
-        return str(e) or type(e).__name__
+        return type(e).__name__
 
 
 def post_bounded(url, body, timeout):

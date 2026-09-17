@@ -274,6 +274,30 @@ class PublishAtSessionEndTest(PublishBase):
         self.assertNotIn("127.0.0.1", memo.read_text("utf-8"))
         self.assertNotIn("/hook", memo.read_text("utf-8"))
 
+    def test_a_url_the_client_refuses_leaves_its_name_and_never_its_path(self):
+        # http.client refuses a request path holding a control character
+        # and quotes the whole path in its message. The memo rides in
+        # every package and in the raw export, and a webhook's path is
+        # where its token lives, so the row holds the exception's bare
+        # name and neither the host nor the path.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        port = self.receiver.server_address[1]
+        refused = f"http://127.0.0.1:{port}/secret\x01token"
+
+        result = self.session_end("--publish", refused)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.receiver.received, [])
+        self.assertEqual(self.memo_heads(), [])
+        (row,) = self.memo_attempts()
+        self.assertEqual(row["outcome"], "InvalidURL")
+        memo = self.chain().with_name(
+            self.chain().name + ".published.jsonl").read_text("utf-8")
+        for leak in ("127.0.0.1", str(port), "secret", "token", "u0001"):
+            self.assertNotIn(leak, memo)
+
     def test_a_chain_whose_memo_holds_only_attempt_rows_still_verifies(self):
         # The memo is beside the chain, not in it: a session whose every
         # publish failed leaves notes there and nothing on the chain, so
