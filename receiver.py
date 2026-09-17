@@ -124,11 +124,31 @@ def current_token(data, rotate=False):
 
 # --- Appending, durably --------------------------------------------------------
 
+def ends_mid_line(path):
+    """True when the file is there, not empty, and its last byte is not
+    a newline: a torn tail, the honest damage a crash mid-append leaves
+    (GLOSSARY: torn tail)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell() == 0:
+                return False
+            f.seek(-1, os.SEEK_END)
+            return f.read(1) != b"\n"
+    except FileNotFoundError:
+        return False
+
+
 def append_durably(path, lines):
     """Append each line, then flush and fsync before returning: the 2xx
     that follows means the bytes are on the disk, not in a buffer a
-    power cut would lose."""
+    power cut would lose. A torn tail gets its newline first, so the
+    torn line stands alone as the one bad entry verify reports and the
+    sender's retry lands whole after it, never glued onto it."""
+    torn = ends_mid_line(path)
     with open(path, "ab") as f:
+        if torn:
+            f.write(b"\n")
         for line in lines:
             f.write(line + b"\n")
         f.flush()

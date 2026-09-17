@@ -316,6 +316,25 @@ class ContentTest(ReceiverFixture):
         self.assertEqual(json.loads(answer), {"appended": 1, "dropped": 3})
         self.assertEqual((self.data / CHAIN).read_bytes(), grown)
 
+    def test_a_torn_tail_never_glues_the_next_batch_onto_it(self):
+        # The receiver's box crashed mid-append and left the last line
+        # partial. The sender's retry must land as whole lines after it,
+        # so the torn line stands alone as the one bad entry verify
+        # reports, and nothing else is corrupted by the glue.
+        self.send_chain(self.lines)
+        kept = self.data / CHAIN
+        whole = kept.read_bytes()
+        kept.write_bytes(whole[:-20])            # mid-line, no newline
+        status, answer = self.send_chain(self.lines)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(answer), {"appended": 1, "dropped": 2})
+        lines = kept.read_bytes().split(b"\n")
+        self.assertEqual(lines[:2], self.lines.split(b"\n")[:2])
+        self.assertEqual(lines[2], whole[:-20].split(b"\n")[2])   # torn, alone
+        self.assertEqual(lines[3], self.lines.split(b"\n")[2])    # whole again
+        self.assertEqual(lines[4], b"")
+        self.assertEqual(json.loads(lines[3])["n"], 2)
+
     def test_a_known_n_with_a_different_hash_is_appended(self):
         # A regenerated chain arriving after the original: the collision
         # the copy exists to show, a second entry at the same n.
