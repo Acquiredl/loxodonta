@@ -96,6 +96,16 @@ def write_attempt_row(log, step, outcome, when, budget=12.0):
         out.write(json.dumps(row) + "\n")
 
 
+def write_chain_row(log, first, last, head, when):
+    """A chain row (ADR-0031 ruling 2) in the publish memo, as the
+    recorder writes it once a remote has acknowledged a batch of the
+    entries. Appended, like the attempt row above."""
+    row = {"kind": "chain", "first": first, "last": last, "head": head,
+           "ts": when, "event": "session-end"}
+    with open(str(log) + ".published.jsonl", "a", encoding="utf-8") as out:
+        out.write(json.dumps(row) + "\n")
+
+
 def run_scan(root, *extra, env=None):
     # Pin both ends of the pipe to UTF-8 (PYTHONIOENCODING for the child,
     # encoding= for this parent): `text=True` alone decodes with the locale

@@ -30,7 +30,7 @@ from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
 from test_supervisor import (ago, chain_head, chains_by_session,
                              install_witness_hook, keeper_env, make_chain,
-                             run_scan, write_attempt_row,
+                             run_scan, write_attempt_row, write_chain_row,
                              write_completed_anchor, write_pending_anchor)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -268,10 +268,11 @@ class PublishKeeperTest(ReceiverFixture):
 
 
 class LeftReadingTest(ReceiverFixture):
-    """The scan report says, per chain, when a head last left the machine
-    and by which door, published or anchored: `left` beside `anchors`, a
-    timestamp the reader ages. Quiet staleness evidence in the keeper's
-    voice: never an alarm, never the exit code."""
+    """The scan report says, per chain, when something last left the
+    machine and by which door — `published` for a head, `published-chain`
+    for a batch of the entries, `anchored` for a digest: `left` beside
+    `anchors`, a timestamp the reader ages. Quiet staleness evidence in
+    the keeper's voice: never an alarm, never the exit code."""
 
     def publish_by_hand(self, log):
         subprocess.run(
@@ -300,6 +301,37 @@ class LeftReadingTest(ReceiverFixture):
         (chain,) = sessions[("beta", "sess-never")]
         self.assertEqual(chain["left"], {"ts": None, "via": None})
         self.assertEqual(memo_of(never), [])
+
+    def test_left_names_the_route_the_entries_or_the_head_left_by(self):
+        # #248: an acknowledged batch of entries is a departure, and a
+        # larger one than a head's — the work itself is off the machine,
+        # not just its fingerprint — but it is not the head route's, so
+        # `via` names the route. A chain route alive beside a head route
+        # that has been refused all week then reads as what it is, with
+        # the refusal in `last_failed` where it belongs.
+        chain_only = make_chain(self.root / "alpha" / "receipts", "sess-only")
+        batch_at = ago(600)
+        write_chain_row(chain_only, 0, 2, chain_head(chain_only),
+                        when=batch_at)
+        write_attempt_row(chain_only, "publish-head",
+                          "the remote answered 404", when=ago(300),
+                          budget=3.0)
+        both = make_chain(self.root / "alpha" / "receipts", "sess-doors")
+        write_chain_row(both, 0, 2, chain_head(both), when=ago(90000))
+        self.publish_by_hand(both)   # a head row, newer by a day
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (chain,) = sessions[("alpha", "sess-only")]
+        self.assertEqual(chain["left"],
+                         {"ts": batch_at, "via": "published-chain"})
+        self.assertEqual(chain["last_failed"]["step"], "publish-head")
+        (chain,) = sessions[("alpha", "sess-doors")]
+        head_row = [row for row in memo_of(both) if "kind" not in row]
+        self.assertEqual(chain["left"],
+                         {"ts": head_row[0]["ts"], "via": "published"})
 
     def test_an_anchored_heads_departure_is_its_first_record(self):
         # An upgrade appends a second record for the same head, stamped
@@ -448,6 +480,51 @@ class NeverPublishedTest(ReceiverFixture):
 
         self.assertEqual(published, {"wired": False, "sent": False,
                                      "note": None})
+
+    def test_sent_is_measured_per_route_so_a_chain_wired_alone_is_read_as_its_own(self):
+        # #248: the chain route (`--publish-chain`) is wired in name only
+        # until a batch lands, whatever the head route did. A chain-only
+        # wiring, then a batch sent by hand, then the sentence is gone.
+        self.wire('python loxodonta.py hook --publish-chain '
+                  '"http://127.0.0.1:9/hook"')
+        log = make_chain(self.root / "alpha" / "receipts", "sess-chain")
+
+        published = json.loads(self.scan().stdout)["published"]
+
+        self.assertTrue(published["wired"])
+        self.assertFalse(published["sent"])
+        self.assertIn("--publish-chain", published["note"])
+        self.assertIn("a sent chain", published["note"])
+        self.assertNotIn("sent head", published["note"])
+
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", "--chain", "--log",
+             str(log), self.receiver.url],
+            capture_output=True, check=True, env=clean_env())
+
+        published = json.loads(self.scan().stdout)["published"]
+
+        self.assertEqual(published, {"wired": True, "sent": True,
+                                     "note": None})
+
+    def test_a_head_that_left_does_not_answer_for_a_chain_that_never_did(self):
+        # Both routes wired, the head sent, the chain never: the sentence
+        # names the chain route alone, and `sent` says something left.
+        self.wire('python loxodonta.py hook --publish "http://127.0.0.1:9/h" '
+                  '--publish-chain "http://127.0.0.1:9/c"')
+        log = make_chain(self.root / "alpha" / "receipts", "sess-both")
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
+             self.receiver.url],
+            capture_output=True, check=True, env=clean_env())
+
+        published = json.loads(self.scan().stdout)["published"]
+
+        self.assertEqual((published["wired"], published["sent"]), (True, True))
+        self.assertIn("--publish-chain", published["note"])
+        self.assertIn("a sent chain", published["note"])
+        self.assertNotIn("sent head", published["note"])
+        self.assertNotIn("127.0.0.1", json.dumps(published))
 
 
 class DashboardLeftTest(ReceiverFixture):

@@ -690,8 +690,10 @@ class StampAwareCalendarHandler(FakeCalendarHandler):
 
 class SessionEndStampTest(PublishBase):
     """`hook --stamp URL`: at SessionEnd, one query of the sealed head,
-    after the published head and before the anchor, quiet and
-    best-effort, written down either way (#240)."""
+    after the published head and the published chain and before the
+    anchor, quiet and best-effort, written down either way (#240). The
+    whole run of five is here too, since this is where the servers can
+    all watch each other."""
 
     def setUp(self):
         super().setUp()
@@ -856,6 +858,59 @@ class SessionEndStampTest(PublishBase):
         self.assertEqual([d.hex() for d in calendar.submitted], [sealed])
         (row,) = token_rows(self.stamps())
         self.assertEqual(row["head"], sealed)
+
+    def test_the_five_steps_run_in_order_and_the_anchor_keeps_its_slice(self):
+        # ADR-0031 beside ADR-0032, the whole session end at once:
+        # commitment, publish head, publish chain, stamp, anchor. Each
+        # arrival says what had already happened, so the order is read
+        # off the servers rather than off the code, and the anchor's own
+        # attempt row says how much of the twelve seconds three POSTs
+        # before it had left.
+        calendar = self.watched_calendar()
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        self.receiver.chain = self.chain()
+
+        result = self.session_end("--publish", self.receiver.url,
+                                  "--publish-chain", self.receiver.url,
+                                  "--stamp", self.authority.url,
+                                  "--anchor", "--calendar", calendar.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")   # quiet, every step of it
+        head, batch = self.receiver.received
+        self.assertEqual(head["content_type"], "application/json")
+        self.assertEqual(batch["content_type"], "application/x-ndjson")
+        # Neither publish waited on the stamp or on the calendar.
+        self.assertEqual([(sent["stamps_seen"], sent["calendar_asks"])
+                          for sent in (head, batch)], [(0, 0), (0, 0)])
+        # The batch ends in the seal, so the commitment came first, and
+        # what the remote holds is the chain as it sits on disk.
+        sealed = json.loads(batch["chain_tail"])
+        self.assertTrue(sealed["action"].startswith("transcript-commitment:"),
+                        sealed)
+        self.assertEqual(batch["raw"], self.chain().read_bytes())
+        # The query came after both publishes and before any digest.
+        (query,) = self.authority.received
+        self.assertEqual((query["publishes_seen"], query["calendar_asks"]),
+                         (2, 0))
+        # And the calendar last of all, of the same sealed head.
+        self.assertEqual(calendar.seen_before, [(2, 1)])
+        self.assertEqual([d.hex() for d in calendar.submitted],
+                         [sealed["entry_hash"]])
+        self.assertEqual(self.body()["head"], sealed["entry_hash"])
+        (row,) = token_rows(self.stamps())
+        self.assertEqual(row["head"], sealed["entry_hash"])
+        # Three POSTs ahead of it, and the anchor still has a workable
+        # slice of the budget: each of the three is capped at three
+        # seconds, and none of them spent it.
+        anchors = self.chain().with_name(self.chain().name + ".anchors.jsonl")
+        (note,) = attempt_rows(anchors)
+        self.assertEqual((note["step"], note["outcome"]),
+                         ("anchor", "submitted"))
+        self.assertGreater(note["budget"], 6.0,
+                           "three quick POSTs must not eat the anchor's "
+                           "share of the twelve seconds")
 
     def test_an_already_stamped_head_is_not_stamped_twice(self):
         self.transcript.write_bytes(b"page one\n")

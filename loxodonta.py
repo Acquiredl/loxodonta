@@ -671,6 +671,7 @@ def calendar_request(url, data=None, timeout=15):
 ATTEMPT_KIND = "attempt"
 STEP_ANCHOR = "anchor"
 STEP_PUBLISH_HEAD = "publish-head"
+STEP_PUBLISH_CHAIN = "publish-chain"
 
 
 def is_attempt(record):
@@ -913,7 +914,8 @@ def no_answer(timeout):
     return f"no answer within {timeout:g} seconds"
 
 
-def post_for_reply(url, body, timeout, content_type, want_reply=False):
+def post_for_reply(url, body, timeout, content_type, want_reply=False,
+                   headers=None):
     """One POST, and what came back. Returns (the reply's bytes, None)
     when the remote took it, else (None, one line naming what went
     wrong); never raises. The line never carries the URL: a webhook URL
@@ -925,18 +927,24 @@ def post_for_reply(url, body, timeout, content_type, want_reply=False):
     quotes the request path in its own messages and the path is where a
     token lives.
 
-    `want_reply` is the difference between the two callers, and it has
+    `headers` is what a chain batch adds (ADR-0031): the four headers
+    named for the tool, beside a content type of its own.
+
+    `want_reply` is the difference between the callers, and it has
     to be a choice rather than a default. The head publish is done the
     moment the status line arrives: the body is a chat service's
     bookkeeping that nobody here reads, and waiting for it would let a
     remote that answers and then dawdles over its body spend the whole
-    timeout and be written down as a head that never left. The stamp is
-    the opposite: the body *is* the token, so it waits. Only
+    timeout and be written down as a head that never left. The chain send is the head
+    publish again: the receiver's `{"appended": k}` is bookkeeping this
+    end does not read, and the memo advances on the status line. The
+    stamp is the opposite: the body *is* the token, so it waits. Only
     `ask_authority` passes True."""
     try:
         request = urllib.request.Request(
             url, data=body,
-            headers={"Content-Type": content_type, "User-Agent": "loxodonta"})
+            headers={"Content-Type": content_type,
+                     "User-Agent": "loxodonta", **(headers or {})})
         with urllib.request.build_opener(NoRedirect).open(
                 request, timeout=timeout) as response:
             if not want_reply:
@@ -961,10 +969,14 @@ def post_for_reply(url, body, timeout, content_type, want_reply=False):
         return None, type(e).__name__
 
 
-def post_once(url, body, timeout):
-    """One JSON POST whose reply nobody reads: None when the remote took
-    it, else `post_for_reply`'s line."""
-    return post_for_reply(url, body, timeout, "application/json")[1]
+def post_once(url, body, timeout, content_type="application/json",
+              headers=None):
+    """One POST whose reply nobody reads: None when the remote took it,
+    else `post_for_reply`'s line. The head publish sends JSON and the
+    chain send NDJSON with the four tool headers; both are done when
+    the status line arrives."""
+    return post_for_reply(url, body, timeout, content_type,
+                          headers=headers)[1]
 
 
 def bounded(work, timeout, late):
@@ -984,10 +996,12 @@ def bounded(work, timeout, late):
     return outcome[0]
 
 
-def post_bounded(url, body, timeout):
+def post_bounded(url, body, timeout, content_type="application/json",
+                 headers=None):
     """`post_once`, bounded: its line, or the abandonment's."""
-    return bounded(lambda: post_once(url, body, timeout), timeout,
-                   no_answer(timeout))
+    return bounded(lambda: post_once(url, body, timeout, content_type,
+                                     headers),
+                   timeout, no_answer(timeout))
 
 
 def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
@@ -1065,7 +1079,260 @@ def chain_session(log):
     return stem
 
 
+# --- The published chain (ADR-0031 rulings 2 and 3) --------------------------
+# Where the published head says a chain of that length existed, the
+# published chain holds what it held: the chain's lines exactly as they
+# sit on disk, newline-delimited, sent to a remote that can only add,
+# never delete (the receiver, docs/RECEIVER.md). The first send starts at
+# genesis; every later one starts after the last entry the remote
+# acknowledged, which the memo beside the chain remembers as a row of
+# kind `chain` carrying the range. The session id, the chain's file name,
+# the n range and the head ride in request headers named for the tool,
+# so what the receiver appends is chain bytes and nothing else. One
+# batch stays under the receiver's cap; a longer tail goes in several,
+# each acknowledged on its own, and whatever a budget cuts off is the
+# keeper's on its next turn, resumed from the cursor.
+
+CHAIN_TYPE = "application/x-ndjson"
+CHAIN_KIND = "chain"
+# Bytes per batch: the receiver's cap (docs/RECEIVER.md section 4),
+# which refuses a longer body on its Content-Length before reading any
+# of it. The env knob is the test suite's handle -- a batching rule that
+# only runs above 8 MiB is a contract no test could reach.
+CHAIN_BATCH_CAP = int(os.environ.get("LOXODONTA_CHAIN_BATCH_BYTES",
+                                     8 * 1024 * 1024))
+
+
+def is_chain_record(record):
+    """True for a row of kind `chain`: a batch of entries the remote
+    acknowledged, with its range. Not a head row, so the head keeper's
+    ripeness test ignores it; not a proof of anything, like every row
+    in the memo."""
+    return isinstance(record, dict) and record.get("kind") == CHAIN_KIND
+
+
+def entries_on_disk(log):
+    """The chain's complete lines as (n, entry_hash, bytes), read raw so
+    what is sent is what sits on disk. Reading stops at the first line
+    that is not an entry, a torn tail or damage, because the receiver
+    refuses a batch whole when any line is not one: the torn line stays
+    here as the damage `verify` reports."""
+    with open(log, "rb") as f:
+        raw = f.read()
+    entries = []
+    for line in raw.splitlines(keepends=True):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            break
+        n, digest = (entry.get("n"), entry.get("entry_hash")) \
+            if isinstance(entry, dict) else (None, None)
+        if isinstance(n, bool) or not isinstance(n, int) \
+                or not isinstance(digest, str):
+            break
+        entries.append((n, digest, line))
+    return entries
+
+
+def chain_cursor(log):
+    """The last entry number the remote acknowledged, from the memo's
+    chain rows; -1 when it holds none, so the send starts at genesis
+    (entry 0). Read tolerantly: the memo is bookkeeping, and a torn line
+    in it means a resend the receiver drops, never a stuck keeper. A
+    memo that exists and cannot be read at all is the caller's to
+    handle: raised, not guessed at, because guessing -1 would send the
+    whole chain again on every session end."""
+    try:
+        lines = read_log(published_path(log))
+    except FileNotFoundError:
+        return -1
+    cursor = -1
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if is_chain_record(record) and isinstance(record.get("last"), int):
+            cursor = max(cursor, record["last"])
+    return cursor
+
+
+def chain_batch(entries, cursor, cap=CHAIN_BATCH_CAP):
+    """The next batch after `cursor`: (body, first, last, head), or None
+    when nothing is left to send. Lines are taken in order while the
+    body stays under the cap. The first line goes in whatever its size,
+    because a batch of nothing would read as a chain fully sent; the
+    caller refuses an oversized first line before it ever gets here
+    (`oversized_entry`)."""
+    body, first, last, head = b"", None, None, None
+    for n, digest, line in entries:
+        if n <= cursor:
+            continue
+        if body and len(body) + len(line) > cap:
+            break
+        body += line
+        first = n if first is None else first
+        last, head = n, digest
+    if not body:
+        return None
+    return body, first, last, head
+
+
+def chain_headers(log, session, first, last, head):
+    """The four headers a chain batch carries (docs/RECEIVER.md section
+    4): the chain's file name, which the receiver reads to name the
+    file, and the session, the range and the head, which ride along.
+    The content type rides beside them, as the POST helper's own
+    argument."""
+    return {"X-Loxodonta-Chain": os.path.basename(log),
+            "X-Loxodonta-Session": str(session),
+            "X-Loxodonta-Range": f"{first}-{last}",
+            "X-Loxodonta-Head": head}
+
+
+def oversized_entry(entries, cursor, cap):
+    """The first entry after `cursor` whose own line is longer than the
+    cap, or None. It can never be sent: the receiver refuses a body past
+    its cap on the Content-Length and closes, which reaches the sender
+    as a bare connection error, and since the cursor cannot advance past
+    a line that never landed, every later send would retry that same
+    line forever. Named here instead, so the operator reads which entry
+    it is rather than an opaque socket word."""
+    for n, _, line in entries:
+        if n > cursor:
+            return n if len(line) > cap else None
+    return None
+
+
+def append_chain_record(log, first, last, head, event):
+    """The memo's chain row: what left and up to which entry, the head
+    after that entry, the time, the event kind. Never the URL. Written
+    only once the remote has acknowledged the batch, so the cursor never
+    passes an entry that did not land."""
+    append_sidecar_record(published_path(log),
+                          {"kind": CHAIN_KIND, "first": first, "last": last,
+                           "head": head, "ts": now_ts(), "event": event})
+
+
+def publish_chain(log, url, session, timeout, event):
+    """Send the chain's entries after the memo's cursor to `url`, one
+    bounded POST per batch, each waiting at most `timeout` seconds and
+    none begun once `timeout` seconds have passed in all. Returns
+    (sent, failure): `sent` is the (first, last) range the remote
+    acknowledged in this call, or None when nothing was; `failure` is
+    the one line the bounded POST produced for the batch that did not
+    land, or None. Both None means there was nothing after the cursor.
+    Never raises, never prints: the callers say what they will."""
+    try:
+        entries = entries_on_disk(log)
+    except OSError:
+        return None, None
+    try:
+        cursor = chain_cursor(log)
+    except (OSError, ValueError):
+        # A memo that exists and cannot be read — a directory in its
+        # place, a permission, bytes that are not UTF-8 — must not turn
+        # the quiet session-end path into a traceback and a failed
+        # hook. Without the cursor there is no send: say so, and the
+        # attempt row carries it (the head route guards its read the
+        # same way).
+        return None, "the memo could not be read"
+    cap = CHAIN_BATCH_CAP
+    deadline = time.monotonic() + timeout
+    sent = None
+    while True:
+        too_big = oversized_entry(entries, cursor, cap)
+        if too_big is not None:
+            return sent, f"entry {too_big} is larger than the receiver's cap"
+        batch = chain_batch(entries, cursor, cap)
+        if batch is None:
+            return sent, None
+        body, first, last, head = batch
+        if time.monotonic() >= deadline:
+            return sent, (f"the budget of {timeout:g} seconds ran out "
+                          f"before entry {first}")
+        failure = post_bounded(
+            url, body, timeout, CHAIN_TYPE,
+            chain_headers(log, session, first, last, head))
+        if failure:
+            return sent, failure
+        try:
+            append_chain_record(log, first, last, head, event)
+        except OSError:
+            # Sent and not written down: the next send carries these
+            # lines again and the receiver drops them as duplicates.
+            return sent, "the memo could not be written"
+        sent = (sent[0] if sent else first, last)
+        cursor = last
+
+
+def session_end_publish_chain(log, url, session, timeout):
+    """The hook's chain send: quiet, best-effort, under the head's
+    budget rule, and written down in the memo as an attempt row of step
+    `publish-chain` (#240): `sent`, or the one line the bounded POST
+    produced. A chain with nothing after the cursor was not a step and
+    leaves no row."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        return  # the installer refuses these; a hand-edited file skips
+    sent, failure = publish_chain(log, url, session, timeout, "session-end")
+    if sent is None and failure is None:
+        return
+    append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN, timeout,
+                          failure or "sent")
+
+
+def damaged_tail_after(log, entries):
+    """The `n` of the last entry before a damaged tail, or None when the
+    file ends cleanly: anything on disk past the last complete entry is
+    the tear. Said out loud by the command, because an operator sending
+    a chain by hand should not learn from a byte count that part of it
+    is gone."""
+    intact = sum(len(line) for _, _, line in entries)
+    try:
+        return entries[-1][0] if os.path.getsize(log) > intact else None
+    except OSError:
+        return None
+
+
+def publish_chain_command(args):
+    """`publish --chain`: the operator's, and the keeper's, send of the
+    chain by hand. Speaks, because the answer can be acted on: what was
+    published, or that nothing was left to send, or why the batch was
+    refused, and whether the file ends in damage. A damaged tail is not
+    a refusal here, as it is for the head (the head after a tear is not
+    the chain's): the intact prefix is exactly what a remote that can
+    only add should be holding, and the line says where the tear is.
+    Exit 1 only when a batch did not land."""
+    try:
+        entries = entries_on_disk(args.log)
+    except FileNotFoundError:
+        return missing_log(args.log)
+    if not entries:
+        print(f"error: {args.log} holds no entry — run `loxodonta init` "
+              "first", file=sys.stderr)
+        return 1
+    torn = damaged_tail_after(args.log, entries)
+    damage = f"; the tail after {torn} is damaged" if torn is not None else ""
+    sent, failure = publish_chain(args.log, args.url, chain_session(args.log),
+                                  PUBLISH_TIMEOUT, "cadence")
+    if sent:
+        first, last = sent
+        head = next(digest for n, digest, _ in entries if n == last)
+        print(f"published chain entries {first}-{last} "
+              f"(head {head[:12]}…){damage}")
+    elif failure is None:
+        print(f"nothing to send: the remote has every entry through entry "
+              f"{chain_cursor(args.log)}{damage}")
+    if failure:
+        print(f"error: the chain was not published: {failure}",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_publish(args):
+    if args.chain:
+        return publish_chain_command(args)
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -3005,15 +3272,22 @@ def cmd_hook(args):
         if not os.path.exists(log):
             return 0
         code = seal_session(log, payload.get("transcript_path"))
-        # The commitment first, then the published head, then the stamp,
-        # then the anchor (ADR-0024, ADR-0025, ADR-0032): the head that
-        # leaves the machine is the sealed one, and a slow calendar can
-        # never cost the commitment nor the fast POSTs, so the anchor
-        # takes what is left of the budget.
+        # Five steps, in this order: the commitment, the published
+        # head, the published chain, the stamp, the anchor (ADR-0024,
+        # ADR-0025, ADR-0031, ADR-0032). What leaves the machine is the
+        # sealed head and the sealed chain, each opt-in bounded by the
+        # same budget rule, and a slow calendar can never cost the
+        # commitment nor the three quick steps, so the anchor takes
+        # what is left of the budget.
         deadline = time.monotonic() + SESSION_END_BUDGET
         if args.publish:
             publish_head(log, args.publish, session,
                          timeout=publish_budget(args.actor))
+        if args.publish_chain:
+            # The entries after the cursor, under the head's budget
+            # (ADR-0031 ruling 3); what does not fit is the keeper's.
+            session_end_publish_chain(log, args.publish_chain, session,
+                                      timeout=publish_budget(args.actor))
         if args.stamp:
             stamp_head(log, args.stamp, timeout=publish_budget(args.actor))
         if args.anchor:
@@ -3140,28 +3414,32 @@ DIGEST_MARKER = "supervisor.py"
 # the fingerprint the widening below keys on.
 PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 
-def recorder_command(actor=None, anchor=False, publish=None, stamp=None):
+def recorder_command(actor=None, anchor=False, publish=None,
+                     publish_chain=None, stamp=None):
     """The hook command the installers write: this interpreter, this
     file, no shell expansion — the hook resolves the project itself, so
     one command works on every platform. `actor` names the harness the
     receipts will say acted (ADR-0020); `anchor` is the session-end
-    anchor opt-in, `publish` the URL the session's head is published to,
-    and `stamp` the authority the head is stamped by, all carried on the
-    SessionEnd command so the choice is readable in the settings file
-    (ADR-0024, ADR-0025, ADR-0032)."""
+    anchor opt-in, `publish` the URL the session's head is published
+    to, `publish_chain` the URL its entries go to, and `stamp` the
+    authority the head is stamped by, all carried on the SessionEnd
+    command so the choice is readable in the settings file (ADR-0024,
+    ADR-0025, ADR-0031, ADR-0032)."""
     python = sys.executable.replace(os.sep, "/")
     self_path = os.path.abspath(__file__).replace(os.sep, "/")
     command = f'"{python}" "{self_path}" hook'
     command += f" --actor {actor}" if actor else ""
     command += " --anchor" if anchor else ""
     command += f' --publish "{publish}"' if publish else ""
+    command += f' --publish-chain "{publish_chain}"' if publish_chain else ""
     return command + (f' --stamp "{stamp}"' if stamp else "")
 
 
 PROFILES = ("local", "timestamped", "custom")
 
 
-def resolve_profile(profile, anchor, publish, authority):
+def resolve_profile(profile, anchor, publish, publish_chain=None,
+                    authority=None):
     """The profile an install asks for, and the session-end opt-ins it
     resolves to (ADR-0031 ruling 1). A profile is a bundle of the raw
     flags and nothing else: `local` wires none, `timestamped` is the
@@ -3172,21 +3450,23 @@ def resolve_profile(profile, anchor, publish, authority):
     A raw flag beside `local` or `timestamped` is a command spoken wrong,
     because the profile already says what leaves the machine: refused
     with the way out, `custom`. Returns (profile, anchor, publish,
-    authority)."""
-    raw = bool(anchor or publish or authority)
+    publish_chain, authority)."""
+    raw = bool(anchor or publish or publish_chain or authority)
     if profile is None:
-        return ("custom" if raw else "local"), anchor, publish, authority
+        return (("custom" if raw else "local"), anchor, publish,
+                publish_chain, authority)
     if profile == "custom":
-        return profile, anchor, publish, authority
+        return profile, anchor, publish, publish_chain, authority
     if raw:
         raise ValueError(
             f"--profile {profile} already says what leaves the machine; "
-            "to compose --anchor-at-session-end, --publish-head and "
-            "--authority yourself, choose --profile custom")
-    return profile, profile == "timestamped", None, None
+            "to compose --anchor-at-session-end, --publish-head, "
+            "--publish-chain and --authority yourself, choose "
+            "--profile custom")
+    return profile, profile == "timestamped", None, None, None
 
 
-def session_end_choices(anchor, publish, authority=None):
+def session_end_choices(anchor, publish, publish_chain=None, authority=None):
     """What the wired SessionEnd command does beyond the seal, for the
     installer's notice, so the operator reads their choice back."""
     choices = []
@@ -3194,8 +3474,12 @@ def session_end_choices(anchor, publish, authority=None):
         choices.append("anchors at session end")
     if publish:
         choices.append(f"publishes the head to {publish}")
+    if publish_chain:
+        choices.append(f"publishes the chain to {publish_chain}")
     if authority:
         choices.append(f"stamps the head with {authority}")
+    if len(choices) > 2:
+        return ", ".join(choices[:-1]) + " and " + choices[-1]
     return " and ".join(choices)
 
 
@@ -3206,11 +3490,24 @@ def session_end_notice(old, new, choices):
     ADR-0025: the install command states the choice each time)."""
     dropped = [name for flag, name in ((" --anchor", "anchors at session end"),
                                        (" --publish ", "publishes the head"),
+                                       (" --publish-chain ",
+                                        "publishes the chain"),
                                        (" --stamp ", "stamps the head"))
                if flag in old and flag not in new]
     parts = ([f"now {choices}"] if choices else []) + \
             (["no longer " + " or ".join(dropped)] if dropped else [])
     return f" ({'; '.join(parts)})" if parts else ""
+
+
+def chain_notice(url):
+    """What leaves at every session end once the chain is wired, said
+    before anything is written (ADR-0031): every entry, and action lines
+    are command lines. The export's `--raw` stance (ADR-0021), told to
+    the operator in the same breath as the choice."""
+    return ("every entry will leave this machine at session end, to "
+            f"{url}: the timestamp, the actor, the action line and the "
+            "file references. Action lines are command lines and can "
+            "carry anything the agent typed, a pasted secret included.")
 
 
 def profile_notice(profile, matchers, codex=False):
@@ -3306,7 +3603,8 @@ def codex_hooks_path():
     return os.path.join(home, "hooks.json")
 
 
-def install_codex_hooks(publish=None, profile="local"):
+def install_codex_hooks(publish=None, profile="local",
+                        publish_chain=None):
     """The Codex half of install-hook (ADR-0020): the same PostToolUse,
     SessionEnd, and SessionStart blocks, in Codex's hooks.json, with the
     actor named so recall rows say which harness acted. Codex's matcher
@@ -3314,18 +3612,27 @@ def install_codex_hooks(publish=None, profile="local"):
     plain-text stdout to the model's context, so the digest ships
     unchanged — told to take the repo from the payload, since Codex
     sets no CLAUDE_PROJECT_DIR. `publish` is the published-head opt-in
-    (ADR-0025), riding on the SessionEnd command as it does for Claude
-    Code; the hook cuts its POST off at half Codex's cap (#183).
-    `profile` is written to the coverage marker (ADR-0031 ruling 1);
-    the session-end anchor it would wire stays refused here (ADR-0024),
-    so the supervisor's keeper anchors on its cadence instead."""
+    (ADR-0025) and `publish_chain` the published-chain one (ADR-0031),
+    both riding on the SessionEnd command as they do for Claude Code
+    and both cut off at half Codex's cap (#183): the chain send stops
+    at its budget and leaves the rest at the cursor, which is what the
+    budget rule and the cursor are for. `profile` is written to the
+    coverage marker (ADR-0031 ruling 1); the session-end anchor it
+    would wire stays refused here (ADR-0024), since a calendar round
+    trip has no cursor to resume from, so the supervisor's keeper
+    anchors on its cadence instead."""
     path = codex_hooks_path()
     settings = load_settings(path)
     if settings is None:
         return 1
+    if publish_chain:
+        # Said before anything is written (ADR-0031): what leaves, and
+        # that action lines are command lines.
+        print(chain_notice(publish_chain))
     had_backup = backup_settings(path)
     record = recorder_command(CODEX_ACTOR)
-    record_end = recorder_command(CODEX_ACTOR, publish=publish)
+    record_end = recorder_command(CODEX_ACTOR, publish=publish,
+                                  publish_chain=publish_chain)
     hooks = settings.setdefault("hooks", {})
     installed = []
 
@@ -3338,10 +3645,10 @@ def install_codex_hooks(publish=None, profile="local"):
         installed.append(f"PostToolUse: {record}")
     end = hooks.setdefault("SessionEnd", [])
     healed += heal_hooks(end, RECORDER_MARKERS, record_end)
-    # The published head rides on this command, and the install command
-    # states the choice each time: a re-run without the flag turns it
-    # off and says so (ADR-0025 ruling 3), as on Claude Code.
-    choices = session_end_choices(False, publish)
+    # The two publishes ride on this command, and the install command
+    # states the choice each time: a re-run without a flag turns that
+    # step off and says so (ADR-0025 ruling 3), as on Claude Code.
+    choices = session_end_choices(False, publish, publish_chain)
     for block in end:
         for wired in block.get("hooks", []):
             old = wired.get("command", "")
@@ -3370,7 +3677,8 @@ def install_codex_hooks(publish=None, profile="local"):
     # first time a recorder that knows how walks past.
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
-    marked = record_coverage(CODEX_ACTOR, wired, profile)
+    marked = record_coverage(CODEX_ACTOR, wired, profile,
+                             remote=publish_chain)
     tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -3426,17 +3734,21 @@ def coverage_path():
     return os.path.join(store_home(), COVERAGE_NAME)
 
 
-def record_coverage(harness, matchers, profile, authority=None):
+def record_coverage(harness, matchers, profile, remote=None,
+                    authority=None):
     """Append what this install just wired, unless it wired what the
     last one did — the `heal()` rule, applied to matchers, to the
-    profile and to the authority, so re-running the installer never
+    profile and to both remotes, so re-running the installer never
     grows the file (ADR-0030 ruling 1). Scoped by harness because
     `--codex` wires `.*` into a different settings file and must never
     speak for the Claude Code witness. The profile is written beside the
     matchers (ADR-0031 ruling 1) so a profile that changes is as visible
     to the supervisor as a matcher change, and so `serve` can follow its
-    cadences; the authority beside it (ADR-0032), when one is named. The
-    marker never travels, so unlike the publish memo it may hold a URL.
+    cadences; `remote` is where the entries go when the chain is wired
+    (ADR-0031) and `authority` who stamps the head when one is named
+    (ADR-0032), each written only then. The marker never travels (the
+    export allowlists it out, the package does not carry it), so unlike
+    the publish memo it may hold a URL.
 
     Every failure is a silent skip. An installer that refused to finish
     over a bookkeeping file would be a worse trade than a memory that
@@ -3444,6 +3756,8 @@ def record_coverage(harness, matchers, profile, authority=None):
     unwritable. Returns whether an entry was appended."""
     entry = {"since": now_ts(), "matchers": list(matchers),
              "harness": harness, "profile": profile}
+    if remote:
+        entry["remote"] = remote
     if authority:
         entry["authority"] = authority
     try:
@@ -3460,6 +3774,7 @@ def record_coverage(harness, matchers, profile, authority=None):
                      if epoch.get("harness") == harness), None)
         if last and last.get("matchers") == entry["matchers"] \
                 and last.get("profile") == profile \
+                and last.get("remote") == entry.get("remote") \
                 and last.get("authority") == entry.get("authority"):
             return False
         body = json.dumps({"purpose": COVERAGE_PURPOSE,
@@ -3503,9 +3818,12 @@ def cmd_install_hook(args):
                   "`loxodonta stamp --authority URL` on a cadence of your "
                   "own instead.", file=sys.stderr)
             return 1
-        # --publish-head is wired: #183 measured one POST inside the same
-        # three seconds, and the hook cuts it off at half the cap.
-        return install_codex_hooks(args.publish_head, args.profile)
+        # Both publishes are wired: #183 measured one POST inside the
+        # same three seconds, and the hook cuts each off at half the
+        # cap. The chain send is bounded the same way and resumes from
+        # its cursor, so a short clock costs batches, never entries.
+        return install_codex_hooks(args.publish_head, args.profile,
+                                   args.publish_chain)
     supervisor = supervisor_path()
     record = recorder_command()
     digest = digest_command()
@@ -3514,6 +3832,10 @@ def cmd_install_hook(args):
     settings = load_settings(path)
     if settings is None:
         return 1
+    if args.publish_chain:
+        # Said before anything is written (ADR-0031): what leaves, and
+        # that action lines are command lines.
+        print(chain_notice(args.publish_chain))
     had_backup = backup_settings(path)
 
     hooks = settings.setdefault("hooks", {})
@@ -3561,14 +3883,17 @@ def cmd_install_hook(args):
     end = hooks.setdefault("SessionEnd", [])
     record_end = recorder_command(anchor=args.anchor_at_session_end,
                                   publish=args.publish_head,
+                                  publish_chain=args.publish_chain,
                                   stamp=args.authority)
     healed += heal(end, RECORDER_MARKERS, record_end)
     # The session-end opt-ins ride on this command: the anchor
-    # (ADR-0024), the published head (ADR-0025) and the authority
-    # timestamp (ADR-0032). The install command states the choice each
-    # time: a re-run without a flag turns that step off, and says so.
+    # (ADR-0024), the published head (ADR-0025), the published chain
+    # (ADR-0031) and the authority timestamp (ADR-0032). The install
+    # command states the choice each time: a re-run without a flag
+    # turns that step off, and says so.
     choices = session_end_choices(args.anchor_at_session_end,
-                                  args.publish_head, args.authority)
+                                  args.publish_head, args.publish_chain,
+                                  args.authority)
     for block in end:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
@@ -3603,7 +3928,8 @@ def cmd_install_hook(args):
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
     marked = record_coverage("claude-code", wired, args.profile,
-                             args.authority)
+                             remote=args.publish_chain,
+                             authority=args.authority)
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -3832,6 +4158,14 @@ def main(argv=None):
     publish_parser.add_argument("url", metavar="URL", type=publish_url,
                                 help="a plain http or https URL, such as a "
                                      "chat incoming webhook")
+    publish_parser.add_argument("--chain", action="store_true",
+                                help="send the chain's entries instead of "
+                                     "its head: the lines after the last "
+                                     "one the remote acknowledged, from "
+                                     "genesis the first time, to a remote "
+                                     "that can only add, never delete, such "
+                                     "as the receiver (ADR-0031, "
+                                     "docs/RECEIVER.md)")
     publish_parser.set_defaults(func=cmd_publish)
     stamp_parser = sub.add_parser(
         "stamp", parents=[common],
@@ -3867,10 +4201,16 @@ def main(argv=None):
                                   "this URL after the tail commitment and "
                                   "before the anchor, quietly (ADR-0025; "
                                   "install-hook --publish-head wires this)")
+    hook_parser.add_argument("--publish-chain", default=None, metavar="URL",
+                             help="at SessionEnd, POST the chain's entries "
+                                  "since the last acknowledged one to this "
+                                  "URL, after the head and before the "
+                                  "stamp and the anchor, quietly (ADR-0031; "
+                                  "install-hook --publish-chain wires this)")
     hook_parser.add_argument("--stamp", default=None, metavar="URL",
                              help="at SessionEnd, ask this timestamp "
                                   "authority for a token over the chain "
-                                  "head, after the published head and "
+                                  "head, after the two publishes and "
                                   "before the anchor, quietly (ADR-0032; "
                                   "install-hook --authority wires this)")
     hook_parser.set_defaults(func=cmd_hook)
@@ -3911,14 +4251,23 @@ def main(argv=None):
              "from, such as a chat incoming webhook. No path, project "
              "name, or action line leaves")
     install_parser.add_argument(
+        "--publish-chain", default=None, metavar="URL", type=publish_url,
+        help="opt in: every session end POSTs the chain's entries since "
+             "the last acknowledged one to this URL, after the head and "
+             "before the stamp and the anchor, quietly and best-effort "
+             "(ADR-0031). Pick a remote that can only add, never delete, "
+             "such as the receiver (docs/RECEIVER.md). Every entry "
+             "leaves: action lines are command lines, and the installer "
+             "says so")
+    install_parser.add_argument(
         "--authority", default=None, metavar="URL", type=publish_url,
         help="opt in: every session end asks this RFC 3161 timestamp "
-             "authority for a token over the chain head, after the "
-             "published head and before the anchor, quietly and "
-             "best-effort (ADR-0032). A second commitment beside the "
-             "anchor, never instead of it; the token is the authority's "
-             "signed word, judged by `verify --stamps` through openssl. "
-             "No default: whom to trust is the choice")
+             "authority for a token over the chain head, after the two "
+             "publishes and before the anchor, quietly and best-effort "
+             "(ADR-0032). A second commitment beside the anchor, never "
+             "instead of it; the token is the authority's signed word, "
+             "judged by `verify --stamps` through openssl. No default: "
+             "whom to trust is the choice")
     install_parser.set_defaults(func=cmd_install_hook)
     uninstall_parser = sub.add_parser(
         "uninstall-hook",
@@ -3957,9 +4306,9 @@ def main(argv=None):
         # 1); a contradiction between them is a usage error, exit 64.
         try:
             (args.profile, args.anchor_at_session_end, args.publish_head,
-             args.authority) = resolve_profile(
+             args.publish_chain, args.authority) = resolve_profile(
                 args.profile, args.anchor_at_session_end, args.publish_head,
-                args.authority)
+                args.publish_chain, args.authority)
         except ValueError as e:
             install_parser.error(str(e))
     return args.func(args)
