@@ -2832,7 +2832,7 @@ def ceiling_lines(manifest, earned):
     verdict carries its limit: what a regeneration would also produce,
     and why the rung is unearned."""
     height, key, seals = earned["height"], earned["key"], manifest["seals"]
-    stamped = earned.get("stamped", False)
+    stamped = earned["stamped"]
     rungs, given, trusted = "", "", ""
     unsaid = ["the record inside is true and complete"]
     if height is not None:
@@ -3613,22 +3613,21 @@ def resolve_profile(profile, anchor, publish, publish_chain=None,
                 publish_chain, authority)
     if profile == "custom":
         return profile, anchor, publish, publish_chain, authority
-    compose = ("to compose --anchor-at-session-end, --publish-head, "
-               "--publish-chain and --authority yourself, choose "
-               "--profile custom")
     if profile in AUTHORITY_TIERS:
-        if anchor or publish or publish_chain:
-            raise ValueError(
-                f"--profile {profile} already says what leaves the machine, "
-                f"and --authority is the one flag that composes with it; "
-                f"{compose}")
-        return profile, profile == "timestamped", None, None, authority
+        # The authority is the one raw flag a tier takes beside its own
+        # (ADR-0032 ruling 2), so it drops out of what is refused here.
+        # Every other raw flag beside a tier is still a command spoken
+        # wrong, and beside `local`, where nothing leaves at all, this
+        # one is refused with the rest.
+        raw = bool(anchor or publish or publish_chain)
     if raw:
         raise ValueError(
-            f"--profile {profile} already says what leaves the machine, "
-            "--authority included, since nothing leaves at all there; "
-            + compose)
-    return profile, False, None, None, None
+            f"--profile {profile} already says what leaves the machine; "
+            "to compose --anchor-at-session-end, --publish-head, "
+            "--publish-chain and --authority yourself, choose "
+            "--profile custom (--authority alone also composes with "
+            "--profile timestamped)")
+    return profile, profile == "timestamped", None, None, authority
 
 
 def session_end_choices(anchor, publish, publish_chain=None, authority=None):

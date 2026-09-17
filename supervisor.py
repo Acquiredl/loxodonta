@@ -758,6 +758,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     anchor that failed, and it is already written down as this chain's
     last failed attempt, in the stamps sidecar, by the verb itself."""
     sidecar = Path(str(log) + ".anchors.jsonl")
+    stamps = Path(str(log) + ".stamps.jsonl")
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
@@ -788,7 +789,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
                              "keeper will try again")
-        if head and authority and                 head not in sidecar_heads(Path(str(log) + ".stamps.jsonl")):
+        if head and authority and head not in sidecar_heads(stamps):
             finished = subprocess.run(
                 [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
                  "--authority", authority],
@@ -4930,7 +4931,9 @@ def cmd_package(args):
     # is the order the verifier judges and prints them; applied the
     # other way round (seal_package), since none depends on another and
     # only the two commitments leave the machine.
-    seals = ([SEAL_ANCHOR] if args.anchor else [])         + ([SEAL_STAMP] if args.stamp else [])         + ([SEAL_SIGNATURE] if args.sign else [])
+    seals = (([SEAL_ANCHOR] if args.anchor else [])
+             + ([SEAL_STAMP] if args.stamp else [])
+             + ([SEAL_SIGNATURE] if args.sign else []))
     # `~` reaches argv unexpanded from PowerShell and cmd, and
     # ssh-keygen does not expand it either; the docs' own example
     # starts with it, so it means home on every shell here.
