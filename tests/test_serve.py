@@ -99,11 +99,13 @@ class ServerFixture(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
 
-    def serve(self, extra_env=None):
-        """Start `serve` on an ephemeral port and read the announced URL."""
+    def serve(self, extra_env=None, extra_args=()):
+        """Start `serve` on an ephemeral port and read the announced URL.
+        `extra_args` ride on the command line after the fixed ones (a
+        `--witness`, for a suite that needs the completeness watch)."""
         self.proc = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--root",
-             str(self.root), "--port", "0"],
+             str(self.root), "--port", "0", *extra_args],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env={**os.environ, "PYTHONIOENCODING": "utf-8",
                  **(extra_env or {})})
