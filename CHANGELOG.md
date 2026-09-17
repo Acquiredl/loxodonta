@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `install-hook` takes a profile, one word for what leaves the machine (#246, ADR-0031). `--profile local` is the flagless install and wires nothing that leaves; `--profile timestamped` is `--anchor-at-session-end` under the beginner's word, a 32-byte digest of the chain head at each session end; `--profile custom` is the raw flags as before, and the raw flags typed with no profile are the same thing. A raw flag beside `local` or `timestamped` is refused, exit 64, naming `custom`; `full` arrives with the published chain. The flagless install prints the ladder in place of the tier line #221 added: the profile it left you on, then one row per tier, the row above naming the flag that reaches it. The coverage marker's epoch gains `profile` beside the matchers, a re-run with the same choice appends nothing, and `supervisor serve` follows the strongest tier any harness declares: a `timestamped` marker runs the anchor keeper every six hours with no flag typed, an explicit `--anchor-every` still wins, and the startup line says which cadence is in force and where it came from. On Codex, `--profile timestamped` records the tier and wires no anchor, since its session-end anchor stays refused (ADR-0024), and the supervisor anchors on its cadence.
+
 ### Changed
 
 - The README is rewritten from scratch at a third of its length, 135 lines in place of 334, by a reader who met the repo cold and reproduced every claim before writing one (#233). The wordmark, tagline and badges stay, and so do the three pinned command blocks the suite runs. Four wordings were tightened on the way: the install sentence names both files, `install-hook` is described as hook entries in the harness settings file rather than one entry, exit codes 4 and 5 are listed with the rest, and the recorded-task excerpt that carried a machine-specific drawer hash is gone. What the front door no longer says, it links to.
