@@ -11,6 +11,8 @@ only channel; there is no email address.
 - The recorder, `loxodonta.py`: the chain writer, `verify`, anchoring.
 - The supervisor, `supervisor.py`: `scan`, `serve`, the recall surface,
   `mcp`, `export`.
+- The receiver, `receiver.py`: `serve`, the token path, and the files it
+  keeps (`docs/RECEIVER.md`).
 - The adapters under `adapters/`.
 - The hook wiring: `install-hook` and the settings files it writes
   (`~/.claude/settings.json`, `~/.codex/hooks.json`).
@@ -54,6 +56,9 @@ These are vulnerabilities, and reports of them are wanted:
   fingerprints, never file contents, so a secret in one is a bug in whatever
   wrote it ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
 - `serve` reachable from off the machine, or `mcp` gaining a write path.
+- The receiver answering anything but a POST at its token's path, a header
+  reaching its disk as a path, or any route that returns, lists or deletes
+  what it holds.
 - `install-hook` writing anything into the harness settings beyond the
   documented hook entries.
 - A redaction the export states in its `redaction` block and does not

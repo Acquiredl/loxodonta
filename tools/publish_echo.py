@@ -27,8 +27,10 @@ process running as you could use (GLOSSARY *Head record*, ADR-0025).
 An address on this machine fails both halves of that, so a head sent
 here has not left, and nothing here would survive the writer. Read what
 the body holds, then wire the hook at a real remote: a chat incoming
-webhook, or an object store under a put-only credential with a
-retention lock. Stdlib only, like everything here.
+webhook, an object store under a put-only credential with a retention
+lock, or the receiver the repo ships, `receiver.py`, on a second machine
+(docs/RECEIVER.md). This echo is not the receiver and not a smaller one:
+it keeps nothing. Stdlib only, like everything here.
 """
 
 import argparse
