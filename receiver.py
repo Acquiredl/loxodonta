@@ -68,7 +68,7 @@ CHAIN_HEADER = "X-Loxodonta-Chain"
 # made of the same, so one class covers both; the length keeps the name
 # inside what every filesystem takes. Nothing else in a header ever
 # becomes a path: no separator, no dot, no other extension.
-CHAIN_NAME = re.compile(r"^receipts-[A-Za-z0-9_-]{1,200}\.jsonl$")
+CHAIN_NAME = re.compile(r"receipts-[A-Za-z0-9_-]{1,200}\.jsonl")
 
 # The most one POST may carry. A session's chain runs to a few hundred
 # bytes per entry, so this holds many thousands of entries in one batch;
@@ -77,7 +77,9 @@ BODY_CAP = 8 * 1024 * 1024
 
 # The shape of a token this file mints (secrets.token_urlsafe), so a
 # hand-edited token file that would not make a clean URL is replaced.
-TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9_-]+$")
+TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+")
+
+EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 
 
 # --- The data directory and the token ------------------------------------------
@@ -117,7 +119,7 @@ def current_token(data, rotate=False):
                 stored = f.read().strip()
         except OSError:
             stored = ""
-        if TOKEN_SHAPE.match(stored):
+        if TOKEN_SHAPE.fullmatch(stored):
             return stored
     return mint_token(data)
 
@@ -245,7 +247,7 @@ def new_lines(batch, known):
     return keep
 
 
-# --- The server ----------------------------------------------------------------
+# --- The door ------------------------------------------------------------------
 
 class Receiver(HTTPServer):
     """One request at a time: every append ends in an fsync, and a single
@@ -343,7 +345,7 @@ class Door(BaseHTTPRequestHandler):
         name = None
         if kind == CHAIN_TYPE:
             name = self.headers.get(CHAIN_HEADER) or ""
-            if not CHAIN_NAME.match(name):
+            if not CHAIN_NAME.fullmatch(name):
                 self.answer(400, f"{CHAIN_HEADER} must be a receipt file "
                                  "name, receipts-<session>.jsonl")
                 return
@@ -511,9 +513,6 @@ class VersionAction(argparse.Action):
         print(f"{parser.prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
               f"commit {checkout_commit(home)})")
         parser.exit()
-
-
-EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 
 
 class UsageParser(argparse.ArgumentParser):
