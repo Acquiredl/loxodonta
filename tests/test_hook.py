@@ -872,6 +872,22 @@ class CoverageMarkerTest(unittest.TestCase):
         self.assertRegex(epoch["since"],
                          r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")
 
+    def test_the_marker_says_which_profile_was_chosen(self):
+        # ADR-0031 ruling 1: the profile is written beside the matchers,
+        # so a profile that later changes is as visible to the supervisor
+        # as a matcher change. The flagless install is `local`.
+        self.run_tool("install-hook")
+        self.assertEqual(self.marker()["epochs"][-1]["profile"], "local")
+
+        result = self.run_tool("install-hook", "--profile", "timestamped")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        epochs = self.marker()["epochs"]
+        self.assertEqual([e["profile"] for e in epochs],
+                         ["local", "timestamped"])
+        self.assertEqual({e["matchers"][0] for e in epochs}, {"*"},
+                         "a profile widens no coverage")
+
     def test_a_second_install_appends_nothing(self):
         # The heal rule applied to matchers: re-running the installer is
         # the documented way to fix a moved script, and it must not grow

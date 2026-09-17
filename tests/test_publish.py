@@ -442,7 +442,11 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.root = Path(self._tmp.name).resolve()
         self.home = self.root / "home"
         (self.home / ".claude").mkdir(parents=True)
-        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home)}
+        # A private store, so the coverage marker the installer writes
+        # (ADR-0030) lands here and never in the developer's own.
+        self.store = self.root / "store"
+        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
+                    "LOXODONTA_HOME": str(self.store)}
 
     def install(self, *args):
         return run_receipts("install-hook", *args, cwd=self.root,
@@ -455,6 +459,25 @@ class InstallPublishHeadTest(unittest.TestCase):
     def commands(self, event):
         return [h["command"] for b in self.settings()["hooks"][event]
                 for h in b["hooks"]]
+
+    def test_profile_timestamped_is_the_session_end_anchor_under_one_word(self):
+        # ADR-0031 ruling 1: the tier name is the beginner's word and the
+        # mechanism keeps its own. `--profile timestamped` wires exactly
+        # the SessionEnd command `--anchor-at-session-end` wires, and the
+        # installer states the choice in the mechanism's words.
+        result = self.install("--profile", "timestamped")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertTrue(end.endswith(" --anchor"), end)
+        self.assertNotIn("--anchor", json.dumps(self.commands("PostToolUse")))
+        self.assertIn("anchors at session end", result.stdout)
+
+        # The raw flag finds nothing to rewire: same command, same install.
+        by_flag = self.install("--anchor-at-session-end")
+        self.assertEqual(by_flag.returncode, 0, by_flag.stderr)
+        self.assertIn("already installed", by_flag.stdout)
+        self.assertEqual(self.commands("SessionEnd"), [end])
 
     def test_publish_head_rides_on_the_session_end_command(self):
         result = self.install("--publish-head", self.URL)

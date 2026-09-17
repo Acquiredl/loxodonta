@@ -2661,6 +2661,33 @@ def recorder_command(actor=None, anchor=False, publish=None):
     return command + (f' --publish "{publish}"' if publish else "")
 
 
+PROFILES = ("local", "timestamped", "custom")
+
+
+def resolve_profile(profile, anchor, publish):
+    """The profile an install asks for, and the session-end opt-ins it
+    resolves to (ADR-0031 ruling 1). A profile is a bundle of the raw
+    flags and nothing else: `local` wires neither, `timestamped` is the
+    session-end anchor under the beginner's word, `custom` is the raw
+    flags exactly as given. With no profile named, the raw flags speak
+    for themselves — an install scripted before profiles existed still
+    works and is written down as `custom` — and none at all is `local`.
+    A raw flag beside `local` or `timestamped` is a command spoken wrong,
+    because the profile already says what leaves the machine: refused
+    with the way out, `custom`. Returns (profile, anchor, publish)."""
+    raw = bool(anchor or publish)
+    if profile is None:
+        return ("custom" if raw else "local"), anchor, publish
+    if profile == "custom":
+        return profile, anchor, publish
+    if raw:
+        raise ValueError(
+            f"--profile {profile} already says what leaves the machine; "
+            "to compose --anchor-at-session-end and --publish-head "
+            "yourself, choose --profile custom")
+    return profile, profile == "timestamped", None
+
+
 def session_end_choices(anchor, publish):
     """What the wired SessionEnd command does beyond the seal, for the
     installer's notice, so the operator reads their choice back."""
@@ -2760,7 +2787,7 @@ def codex_hooks_path():
     return os.path.join(home, "hooks.json")
 
 
-def install_codex_hooks(publish=None):
+def install_codex_hooks(publish=None, profile="local"):
     """The Codex half of install-hook (ADR-0020): the same PostToolUse,
     SessionEnd, and SessionStart blocks, in Codex's hooks.json, with the
     actor named so recall rows say which harness acted. Codex's matcher
@@ -2769,7 +2796,10 @@ def install_codex_hooks(publish=None):
     unchanged — told to take the repo from the payload, since Codex
     sets no CLAUDE_PROJECT_DIR. `publish` is the published-head opt-in
     (ADR-0025), riding on the SessionEnd command as it does for Claude
-    Code; the hook cuts its POST off at half Codex's cap (#183)."""
+    Code; the hook cuts its POST off at half Codex's cap (#183).
+    `profile` is written to the coverage marker (ADR-0031 ruling 1);
+    the session-end anchor it would wire stays refused here (ADR-0024),
+    so the supervisor's keeper anchors on its cadence instead."""
     path = codex_hooks_path()
     settings = load_settings(path)
     if settings is None:
@@ -2822,7 +2852,7 @@ def install_codex_hooks(publish=None):
     # first time a recorder that knows how walks past.
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
-    marked = record_coverage(CODEX_ACTOR, wired)
+    marked = record_coverage(CODEX_ACTOR, wired, profile)
     if not installed and not healed:
         print(f"already installed in {path}")
         if marked:
@@ -2877,19 +2907,22 @@ def coverage_path():
     return os.path.join(store_home(), COVERAGE_NAME)
 
 
-def record_coverage(harness, matchers):
+def record_coverage(harness, matchers, profile):
     """Append what this install just wired, unless it wired what the
-    last one did — the `heal()` rule, applied to matchers, so re-running
-    the installer never grows the file (ADR-0030 ruling 1). Scoped by
-    harness because `--codex` wires `.*` into a different settings file
-    and must never speak for the Claude Code witness.
+    last one did — the `heal()` rule, applied to matchers and to the
+    profile, so re-running the installer never grows the file (ADR-0030
+    ruling 1). Scoped by harness because `--codex` wires `.*` into a
+    different settings file and must never speak for the Claude Code
+    witness. The profile is written beside the matchers (ADR-0031
+    ruling 1) so a profile that changes is as visible to the supervisor
+    as a matcher change, and so `serve` can follow its cadences.
 
     Every failure is a silent skip. An installer that refused to finish
     over a bookkeeping file would be a worse trade than a memory that
     starts late, and the operator has louder ways to learn the store is
     unwritable. Returns whether an entry was appended."""
     entry = {"since": now_ts(), "matchers": list(matchers),
-             "harness": harness}
+             "harness": harness, "profile": profile}
     try:
         os.makedirs(store_home(), exist_ok=True)
         try:
@@ -2902,7 +2935,8 @@ def record_coverage(harness, matchers):
                   and isinstance(epoch.get("matchers"), list)]
         last = next((epoch for epoch in reversed(epochs)
                      if epoch.get("harness") == harness), None)
-        if last and last.get("matchers") == entry["matchers"]:
+        if last and last.get("matchers") == entry["matchers"] \
+                and last.get("profile") == profile:
             return False
         body = json.dumps({"purpose": COVERAGE_PURPOSE,
                            "epochs": epochs + [entry]}, indent=2)
@@ -2933,7 +2967,7 @@ def cmd_install_hook(args):
             return 1
         # --publish-head is wired: #183 measured one POST inside the same
         # three seconds, and the hook cuts it off at half the cap.
-        return install_codex_hooks(args.publish_head)
+        return install_codex_hooks(args.publish_head, args.profile)
     supervisor = supervisor_path()
     record = recorder_command()
     digest = digest_command()
@@ -3030,7 +3064,7 @@ def cmd_install_hook(args):
 
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
-    marked = record_coverage("claude-code", wired)
+    marked = record_coverage("claude-code", wired, args.profile)
     if not installed and not healed:
         print(f"already installed in {path}")
         if marked:
@@ -3290,6 +3324,13 @@ def main(argv=None):
         help="wire Codex CLI instead: PostToolUse, SessionEnd, and the "
              "SessionStart digest into $CODEX_HOME/hooks.json (ADR-0020)")
     install_parser.add_argument(
+        "--profile", choices=PROFILES, default=None,
+        help="what leaves the machine, in one word (ADR-0031): local "
+             "(nothing; the default), timestamped (a 32-byte digest of "
+             "the chain head at each session end, the anchor), or custom "
+             "(compose the raw flags below yourself). Written to the "
+             "coverage marker; `supervisor serve` follows its cadences")
+    install_parser.add_argument(
         "--anchor-at-session-end", action="store_true",
         help="opt in: every session end anchors the chain head to Bitcoin "
              "via OpenTimestamps, quietly and best-effort, and upgrades "
@@ -3327,6 +3368,15 @@ def main(argv=None):
         if not command_argv:
             parser.error("run requires `-- <command> [args...]` after its flags")
         args.command_argv = command_argv
+    if args.command == "install-hook":
+        # The profile and the raw flags are one choice (ADR-0031 ruling
+        # 1); a contradiction between them is a usage error, exit 64.
+        try:
+            (args.profile, args.anchor_at_session_end,
+             args.publish_head) = resolve_profile(
+                args.profile, args.anchor_at_session_end, args.publish_head)
+        except ValueError as e:
+            install_parser.error(str(e))
     return args.func(args)
 
 
