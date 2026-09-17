@@ -913,7 +913,7 @@ def no_answer(timeout):
     return f"no answer within {timeout:g} seconds"
 
 
-def post_for_reply(url, body, timeout, content_type):
+def post_for_reply(url, body, timeout, content_type, want_reply=False):
     """One POST, and what came back. Returns (the reply's bytes, None)
     when the remote took it, else (None, one line naming what went
     wrong); never raises. The line never carries the URL: a webhook URL
@@ -923,14 +923,31 @@ def post_for_reply(url, body, timeout, content_type):
     hostname); a timeout is `no_answer`'s line however it surfaced; any
     other exception is named by its type alone, because http.client
     quotes the request path in its own messages and the path is where a
-    token lives."""
+    token lives.
+
+    `want_reply` is the difference between the two callers, and it has
+    to be a choice rather than a default. The head publish is done the
+    moment the status line arrives: the body is a chat service's
+    bookkeeping that nobody here reads, and waiting for it would let a
+    remote that answers and then dawdles over its body spend the whole
+    timeout and be written down as a head that never left. The stamp is
+    the opposite: the body *is* the token, so it waits. Only
+    `ask_authority` passes True."""
     try:
         request = urllib.request.Request(
             url, data=body,
             headers={"Content-Type": content_type, "User-Agent": "loxodonta"})
         with urllib.request.build_opener(NoRedirect).open(
                 request, timeout=timeout) as response:
-            return response.read(MAX_REPLY_BYTES), None
+            if not want_reply:
+                return b"", None
+            reply = response.read(MAX_REPLY_BYTES + 1)
+            if len(reply) > MAX_REPLY_BYTES:
+                # Our cap, not the authority's fault: say whose it is, so
+                # the operator looks here rather than at the token.
+                return None, (f"the reply is larger than "
+                              f"{MAX_REPLY_BYTES // 1024} KiB")
+            return reply, None
     except urllib.error.HTTPError as e:
         # A refused redirect lands here too, as its 3xx status.
         return None, f"the remote answered {e.code}"
@@ -1200,6 +1217,25 @@ def append_stamp_record(log, head, n, authority, reply):
         "response": base64.b64encode(reply).decode("ascii")})
 
 
+def stamped_heads(log):
+    """The heads this log's sidecar already holds a token for. An
+    attempt row is a note on how a query went and never a token, so it
+    says nothing about whether a head was stamped.
+
+    A sidecar this machine cannot open at all answers "none known": the
+    dedupe then asks the authority again rather than skipping a head on
+    the word of a file nobody could read, which is the safe direction,
+    and the write that follows is what reports the real trouble, in the
+    outcome and on stderr. It matters that this never raises, because
+    the session-end step promises the same."""
+    try:
+        records = read_stamp_records(log) or []
+    except OSError:
+        return set()
+    return {record.get("head") for record in records
+            if isinstance(record, dict) and not is_attempt(record)}
+
+
 def ask_authority(url, head, timeout):
     """One timestamp query for `head` to the authority at `url`, bounded
     like a head publish, name lookup included. Returns (the reply's
@@ -1213,7 +1249,8 @@ def ask_authority(url, head, timeout):
         return None, "the authority URL is not http or https"
     body = stamp_request(head, int.from_bytes(os.urandom(8), "big"))
     reply, failure = bounded(
-        lambda: post_for_reply(url, body, timeout, STAMP_QUERY_TYPE),
+        lambda: post_for_reply(url, body, timeout, STAMP_QUERY_TYPE,
+                               want_reply=True),
         timeout, (None, no_answer(timeout)))
     if failure:
         return None, failure
@@ -1241,18 +1278,22 @@ def stamp_head(log, url, timeout=SESSION_END_PUBLISH):
     if last is None:
         return  # a damaged tail cannot be stamped
     head, n = last["entry_hash"], last["n"]
-    stamped = {r.get("head") for r in (read_stamp_records(log) or [])
-               if isinstance(r, dict) and not is_attempt(r)}
-    if head in stamped:
+    if head in stamped_heads(log):
         return
     reply, failure = ask_authority(url, head, timeout)
     if reply is not None:
         try:
             append_stamp_record(log, head, n, url, reply)
         except OSError:
-            pass
+            # A token the authority granted and this machine could not
+            # keep is not a granted stamp: `granted` is an outcome the
+            # supervisor reads as the head having left (SENT_OUTCOMES),
+            # and a full or read-only disk would then be written down as
+            # success while the sidecar holds nothing.
+            failure = "the token could not be written"
     # How it went, written down beside the tokens (#240): `granted`, or
-    # the one line the bounded POST or the authority's status produced.
+    # the one line the bounded POST, the authority's status, or the
+    # write produced.
     append_attempt_record(stamps_path(log), STEP_STAMP, timeout,
                           failure or "granted")
 
@@ -1272,6 +1313,14 @@ def cmd_stamp(args):
               "`loxodonta verify` before stamping", file=sys.stderr)
         return 1
     head, n = last["entry_hash"], last["n"]
+    if head in stamped_heads(args.log):
+        # The same rule the session-end step follows, and for a sharper
+        # reason here: #251 puts this verb on the keeper's cadence, and
+        # a cadence that re-stamped the same head every tick would ask
+        # the authority for a fresh token over an unchanged head all day
+        # and fill the sidecar with them. Nothing to do is exit 0.
+        print(f"already stamped {record_label(head, n)}")
+        return 0
     reply, failure = ask_authority(args.authority, head, STAMP_TIMEOUT)
     if failure:
         # A query that was refused leaves the note and no token row:
@@ -1285,7 +1334,17 @@ def cmd_stamp(args):
                               STAMP_TIMEOUT, failure)
         print(f"error: the head was not stamped: {failure}", file=sys.stderr)
         return 1
-    append_stamp_record(args.log, head, n, args.authority, reply)
+    try:
+        append_stamp_record(args.log, head, n, args.authority, reply)
+    except OSError as e:
+        # A token granted and not kept is not a stamp, and the note says
+        # so rather than `granted` (which the supervisor reads as a head
+        # that left).
+        append_attempt_record(stamps_path(args.log), STEP_STAMP,
+                              STAMP_TIMEOUT, "the token could not be written")
+        print(f"error: the authority granted a token and it could not be "
+              f"written: {e.strerror or e}", file=sys.stderr)
+        return 1
     print(f"stamped {record_label(head, n)} via {args.authority}")
     return 0
 
@@ -3884,6 +3943,15 @@ def main(argv=None):
         if not command_argv:
             parser.error("run requires `-- <command> [args...]` after its flags")
         args.command_argv = command_argv
+    if args.command == "verify" and args.authority_chain and not args.stamps:
+        # The operator who names a chain file named it in order to have
+        # the tokens judged against it. Ignoring the flag would print
+        # `VALID` with nothing judged, which is the one outcome ADR-0032
+        # ruling 5 exists to prevent: a verdict that sounds like the
+        # tokens passed. A command spoken wrong is told so, exit 64, as
+        # a raw flag beside a named profile is.
+        verify_parser.error("--authority-chain is the file --stamps judges "
+                            "tokens against; add --stamps, or drop it")
     if args.command == "install-hook":
         # The profile and the raw flags are one choice (ADR-0031 ruling
         # 1); a contradiction between them is a usage error, exit 64.

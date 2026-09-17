@@ -280,7 +280,12 @@ class StampCommandTest(unittest.TestCase):
         self.assertEqual(request["cert_req"], b"\xff")
 
     def test_every_query_carries_a_fresh_nonce(self):
+        # Two heads, so two queries: the same head twice is the dedupe's
+        # case below, not this one.
         self.stamp()
+        run_receipts("log", "--actor", "agent", "--action", "step 3",
+                     cwd=self.workdir)
+
         self.stamp()
 
         nonces = [parse_request(q["body"])["nonce"]
@@ -288,6 +293,79 @@ class StampCommandTest(unittest.TestCase):
         self.assertEqual(len(nonces), 2)
         self.assertNotEqual(nonces[0], nonces[1])
         self.assertEqual(len(token_rows(self.sidecar)), 2)
+
+    def test_a_head_that_already_holds_a_token_is_not_asked_again(self):
+        # The session-end step's rule, and the verb's for a sharper
+        # reason: #251 puts `stamp` on the keeper's cadence, and a
+        # cadence that asked again every tick would collect tokens for
+        # one unchanged head all day. Nothing to do is exit 0.
+        first = self.stamp()
+
+        again = self.stamp()
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(again.stdout.strip(),
+                         f"already stamped head {self.head[:12]}… (entry 2)")
+        self.assertEqual(len(self.authority.received), 1,
+                         "the authority was asked about one head twice")
+        self.assertEqual(len(token_rows(self.sidecar)), 1)
+        self.assertEqual(attempt_rows(self.sidecar), [],
+                         "nothing was tried, so nothing is written down")
+
+    def test_a_new_head_is_stamped_although_the_old_one_holds_a_token(self):
+        self.stamp()
+        run_receipts("log", "--actor", "agent", "--action", "step 3",
+                     cwd=self.workdir)
+        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+
+        result = self.stamp()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([row["head"] for row in token_rows(self.sidecar)],
+                         [self.head, newer])
+
+    def test_a_token_that_cannot_be_written_is_not_a_granted_stamp(self):
+        # A token the authority granted and this machine could not keep
+        # is not a stamp. `granted` is an outcome the supervisor reads as
+        # a head that left, so a full or read-only disk must never
+        # produce it: the note names the write, and no token row exists
+        # to back a claim the sidecar cannot hold.
+        unwritable = self.workdir / "sealed"
+        unwritable.mkdir()
+        log = unwritable / "receipts.jsonl"
+        run_receipts("init", "--log", str(log), cwd=self.workdir)
+        run_receipts("log", "--log", str(log), "--actor", "agent",
+                     "--action", "step 1", cwd=self.workdir)
+        sidecar = unwritable / "receipts.jsonl.stamps.jsonl"
+        # A directory where the sidecar's file belongs: every open for
+        # append raises, on every platform, without touching permissions.
+        sidecar.mkdir()
+
+        result = run_receipts("stamp", "--log", str(log),
+                              "--authority", self.authority.url,
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("the authority granted a token and it could not be "
+                      "written", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(self.authority.received), 1)
+
+    def test_a_reply_past_our_own_cap_says_whose_cap_it_is(self):
+        # 64 KiB is this file's limit, not the authority's, and a token
+        # with a long certificate chain could meet it. The line points
+        # the operator here rather than at the token.
+        self.authority.answer = reply(0, der(0x30, b"x" * (1 << 17)))
+
+        result = self.stamp()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the reply is larger than 64 KiB", result.stderr)
+        self.assertNotIn("not a timestamp response", result.stderr)
+        self.assertEqual(token_rows(self.sidecar), [])
+        (note,) = attempt_rows(self.sidecar)
+        self.assertEqual(note["outcome"], "the reply is larger than 64 KiB")
 
     def test_granted_with_modifications_is_granted(self):
         # PKIStatus 1 comes with a token too (RFC 3161 §2.4.2).
@@ -377,6 +455,24 @@ class StampCommandTest(unittest.TestCase):
         self.assertRegex(result.stdout, r"(?m)^VALID$")
         self.assertNotIn("STAMPED", result.stdout)
         self.assertNotIn("STAMP-INVALID", result.stdout)
+
+    def test_a_chain_file_without_stamps_is_a_usage_error(self):
+        # ADR-0032 ruling 5 exists to stop a verdict that sounds like the
+        # tokens passed. An operator who names a chain file named it to
+        # have them judged; ignoring the flag would answer `VALID` with
+        # nothing judged, so the command is told it was spoken wrong.
+        self.stamp()
+        chain_file = self.workdir / "authority.pem"
+        chain_file.write_text("not read: the flag is refused first\n",
+                              encoding="utf-8")
+
+        result = run_receipts("verify", "--authority-chain", str(chain_file),
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 64, result.stdout)
+        self.assertIn("--authority-chain", result.stderr)
+        self.assertIn("--stamps", result.stderr)
+        self.assertNotIn("VALID", result.stdout)
 
     def test_a_chain_file_that_is_not_there_is_named_not_judged(self):
         self.stamp()
@@ -477,6 +573,96 @@ class StampCommandTest(unittest.TestCase):
                      self.sidecar.read_text(encoding="utf-8")):
             self.assertNotIn("anchor", text.lower())
         self.assertNotIn("anchor", self.sidecar.name)
+
+
+# --- Who waits for the reply's body ------------------------------------------
+
+class SlowBodyHandler(BaseHTTPRequestHandler):
+    """A remote that answers at once and then dawdles over its body: the
+    status line and the headers go out immediately, the body `delay`
+    seconds later. Real ones exist (a proxy that buffers, a service that
+    streams its own bookkeeping), and the two POSTs this file makes want
+    opposite things from one."""
+
+    def log_message(self, *args):
+        pass  # keep test output clean
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.received.append(time.monotonic())
+        body = self.server.body
+        self.send_response(200)
+        self.send_header("Content-Type", self.server.content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.flush()
+        time.sleep(self.server.delay)
+        self.wfile.write(body)
+
+
+def start_slow_body(case, body, content_type):
+    server = FakeAuthority(("127.0.0.1", 0), SlowBodyHandler)
+    server.received = []
+    server.body = body
+    server.content_type = content_type
+    server.delay = 20
+    server.url = f"http://127.0.0.1:{server.server_address[1]}/slow"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    case.addCleanup(server.server_close)
+    case.addCleanup(server.shutdown)
+    return server
+
+
+class ReplyBodyTest(unittest.TestCase):
+    """The head publish is done when the status line arrives: its body is
+    a chat service's bookkeeping nobody here reads, and waiting for one
+    would let a remote that took the head be written down as a remote
+    that never answered. The stamp is the opposite, because the body is
+    the token. One parameter, `want_reply`, and this is the test that
+    holds the two apart."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+
+    def test_the_head_publish_returns_on_the_status_not_the_body(self):
+        remote = start_slow_body(self, b"ok", "application/json")
+
+        started = time.monotonic()
+        result = run_receipts("publish", remote.url, cwd=self.workdir)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("published head", result.stdout)
+        self.assertLess(elapsed, remote.delay,
+                        "the publish waited for a body it never reads")
+        self.assertEqual(len(remote.received), 1)
+        memo = self.workdir / "receipts.jsonl.published.jsonl"
+        (row,) = [r for r in rows_of(memo) if r.get("kind") != "attempt"]
+        self.assertEqual(row["head"],
+                         run_receipts("head", cwd=self.workdir).stdout.strip())
+
+    def test_the_stamp_waits_for_the_body_because_it_is_the_token(self):
+        remote = start_slow_body(self, GRANTED, "application/timestamp-reply")
+
+        started = time.monotonic()
+        result = run_receipts("stamp", "--authority", remote.url,
+                              cwd=self.workdir)
+        elapsed = time.monotonic() - started
+
+        # 15 seconds is the verb's own bound, well under the 20 the
+        # remote sits on: it waited, and then gave up on its own clock.
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no answer within 15 seconds", result.stderr)
+        self.assertGreater(elapsed, 5, "the stamp did not wait for the token")
+        self.assertFalse(
+            (self.workdir / "receipts.jsonl.stamps.jsonl").exists()
+            and token_rows(self.workdir / "receipts.jsonl.stamps.jsonl"),
+            "no token arrived, so no token row")
 
 
 # --- The session-end step ----------------------------------------------------
@@ -682,6 +868,32 @@ class SessionEndStampTest(PublishBase):
         self.assertEqual(len(token_rows(self.stamps())), 1)
         # Nothing was tried the second time, so nothing is written down.
         self.assertEqual(len(attempt_rows(self.stamps())), 1)
+
+    def test_a_sidecar_that_cannot_be_written_keeps_the_hook_quiet(self):
+        # The other half of the write-failure ruling. A token granted and
+        # not kept is not a stamp, so `stamp_head` replaces `granted`
+        # with the write's own outcome; what is portable to assert
+        # through the CLI is the rest of the promise: the hook stays
+        # quiet, exits 0, and nothing in the drawer says this head left.
+        # The wording itself is asserted on the verb, which can report
+        # it on stderr (StampCommandTest above), because a sidecar that
+        # refuses the token row refuses the note beside it too.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        self.stamps().mkdir()  # a directory where the sidecar's file goes
+
+        result = self.session_end("--stamp", self.authority.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(len(self.authority.received), 1)
+        self.assertTrue(self.stamps().is_dir(), "the sidecar was replaced")
+        # The sidecar itself is the directory this test made, and it
+        # ends in .jsonl like the files beside it.
+        self.assertNotIn("granted", "".join(
+            p.read_text(encoding="utf-8")
+            for p in self.chain().parent.glob("*.jsonl")
+            if p.is_file()))
 
     def test_a_session_without_receipts_stamps_nothing(self):
         result = self.session_end("--stamp", self.authority.url)
