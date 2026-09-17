@@ -860,5 +860,70 @@ class PublishChainKeeperTest(unittest.TestCase):
                          [None, "chain"])
 
 
+class ChainRowsTravelNowhereTest(unittest.TestCase):
+    """What a chain row does to the two things that leave a machine on
+    purpose: nothing. The field-data export is the allowlisted shape it
+    always was (ADR-0021), and a package carries each chain with its
+    anchors sidecar and never the publish memo (ADR-0026) — a proof
+    travels, a note about network luck does not."""
+
+    SESSION = "c4c4c4c4-aaaa-bbbb-cccc-000000000001"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.home = self.root / "home"
+        self.work = self.root / "work"
+        self.witness = self.root / "no-witness"
+        for folder in (self.home, self.work, self.witness):
+            folder.mkdir()
+        self.env = {**clean_env(),
+                    "LOXODONTA_HOME": str(self.home / ".loxodonta"),
+                    "HOME": str(self.home),
+                    "USERPROFILE": str(self.home)}
+        self.env.pop("CLAUDE_PROJECT_DIR", None)
+        self.receiver = serve_fake(self)
+        self.log = make_store_chain(
+            self.home / ".loxodonta" / "receipts" / "proj-1", self.SESSION)
+        sent = run_recorder("publish", "--chain", "--log", self.log,
+                            self.receiver.url)
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+        self.assertEqual(len(chain_rows(self.log)), 1)
+
+    def supervise(self, *args):
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), *map(str, args),
+             "--witness", str(self.witness)],
+            capture_output=True, encoding="utf-8", cwd=str(self.work),
+            env=self.env)
+
+    def test_the_export_keeps_its_shape_and_never_sees_the_memo(self):
+        result = self.supervise("export")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (written,) = list(self.work.glob("loxodonta-export-*.json"))
+        body = written.read_text("utf-8")
+        self.assertEqual(list(json.loads(body)),
+                         ["redaction", "export", "machine", "sessions"])
+        for absent in ("publish", "127.0.0.1", "/hook", "x-loxodonta"):
+            self.assertNotIn(absent, body.lower(), absent)
+
+    def test_a_package_carries_the_chain_and_not_the_memo(self):
+        folder = self.work / "package"
+
+        result = self.supervise("package", self.SESSION, "--folder",
+                                "--out", folder)
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        packed = sorted(path.name for path in folder.iterdir())
+        self.assertIn(self.log.name, packed)
+        self.assertEqual([name for name in packed
+                          if name.endswith(".published.jsonl")], [])
+        # And the memo is still where it was written, unpacked.
+        self.assertEqual(len(chain_rows(self.log)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
