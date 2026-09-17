@@ -2100,6 +2100,34 @@ class CoverageMarkerTest(unittest.TestCase):
         self.assertEqual(watch["before_memory"]["count"], 1,
                          "a late marker never re-dates observed time")
 
+    def test_a_changed_profile_is_a_recorder_epoch_like_a_changed_matcher(self):
+        # ADR-0031 ruling 1: the profile is written beside the matchers
+        # so a change to it is as visible here as a matcher change. The
+        # real installer writes both epochs, into the past, and the scan
+        # reads them as ADR-0030 already reads a matcher epoch: told by
+        # install-hook, never observed.
+        home = Path(self._tmp.name).resolve() / "home"
+        (home / ".claude").mkdir(parents=True)
+        for age, profile in ((7200, "local"), (5400, "timestamped")):
+            stamp = str(int(datetime.datetime.now(
+                datetime.timezone.utc).timestamp()) - age)
+            subprocess.run(
+                [sys.executable, str(LOXODONTA), "install-hook",
+                 "--profile", profile],
+                capture_output=True, check=True,
+                env={**self.env, "HOME": str(home), "USERPROFILE": str(home),
+                     "SOURCE_DATE_EPOCH": stamp})
+        self.a_session("sess-week", ago(3600))
+
+        watch = self.watch(self.scan())
+
+        told = [(epoch["profile"], epoch["matchers"])
+                for epoch in watch["calibration"]["epochs"]
+                if epoch.get("source") == "recorder"]
+        self.assertEqual(told, [("local", ["*"]), ("timestamped", ["*"])])
+        self.assertEqual(self.states(self.scan())["sess-week"]["state"],
+                         "ENDED-CLEAN", "the profile changed no coverage")
+
     def test_a_codex_marker_never_speaks_for_the_claude_code_witness(self):
         self.mark(ago(7200), matchers=(".*",), harness="codex")
         self.a_session("sess-week", ago(3600))

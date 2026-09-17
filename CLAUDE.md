@@ -1,6 +1,6 @@
 # loxodonta — repo map
 
-**loxodonta**: a tamper-evident, hash-chained receipt log ("flight recorder") for AI agent pipelines. `loxodonta.py` is the recorder, and what it writes are *receipts* (ADR-0010); `supervisor.py` is the reader that scans, serves, and recalls. Both are stdlib-only, single-file Python. The elephant never forgets.
+**loxodonta**: a tamper-evident, hash-chained receipt log ("flight recorder") for AI agent pipelines. `loxodonta.py` is the recorder, and what it writes are *receipts* (ADR-0010); `supervisor.py` is the reader that scans, serves, and recalls; `receiver.py` is the far end of the published chain and the published head, run on a machine the writer cannot reach (ADR-0031). All three are stdlib-only, single-file Python. The elephant never forgets.
 
 **Phase: public**, under the Acquiredl identity. `main` is the stable branch and every claim in the README must stay true of it; work happens on `dev` (see *Branching model*). The stage history (stages, dates, PR numbers) lives in `docs/HISTORY.md`; the changelog starts at `v0.1.0`, no backfill (ADR-0022).
 
@@ -16,10 +16,11 @@
 
 - `loxodonta.py` — the recorder: `init` / `log` / `run` / `head` / `verify` / `verify-package` / `report` / `anchor` / `publish` / `hook` / `explain` / `install-hook` / `uninstall-hook`.
 - `supervisor.py` — the reader: `scan` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `verify` / `mcp` / `export` / `package`.
+- `receiver.py` — the receiver: `serve`, one verb; the URL that can only add, never delete (ADR-0031, `docs/RECEIVER.md`).
 - `adapters/` — per-harness recorder adapters (ADR-0020).
 - `tools/` — repo tooling; `house_check.py` enforces the vocabulary.
 - `tests/` — the suite, through the public CLI: `python -m unittest discover -s tests`.
-- `docs/` — SPEC, HOOK, ANCHORING, MCP, OWASP, the tours, HISTORY.
+- `docs/` — SPEC, HOOK, ANCHORING, RECEIVER, MCP, OWASP, the tours, HISTORY.
 - `adrs/` — decisions that are hard to reverse; `.out-of-scope/` — what was deliberately not built.
 - The store: `~/.loxodonta/receipts/<project-slug>/`, one drawer per project (ADR-0011, `docs/HOOK.md`).
 

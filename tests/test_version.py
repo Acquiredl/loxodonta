@@ -19,6 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 SUPERVISOR = REPO_ROOT / "supervisor.py"
+RECEIVER = REPO_ROOT / "receiver.py"
 
 # `<prog> <semver> (format <format>, commit <short-hash|unknown>)`
 VERSION_LINE = re.compile(
@@ -83,17 +84,34 @@ class VersionTest(unittest.TestCase):
         self.assertEqual(said["format"], "0.1")
         self.assertEqual(said["commit"], checkout_commit())
 
-    def test_the_two_files_carry_one_tool_version_and_agree(self):
-        # ADR-0022: tagged together, so a bump to one is a bump to both.
+    def test_receiver_prints_the_same_three_identities(self):
+        result = run_version(RECEIVER)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 1, result.stdout)
+        said = VERSION_LINE.match(lines[0])
+        self.assertIsNotNone(said, lines[0])
+        self.assertEqual(said["prog"], "receiver")
+        self.assertEqual(said["format"], "0.1")
+        self.assertEqual(said["commit"], checkout_commit())
+
+    def test_the_three_files_carry_one_tool_version_and_agree(self):
+        # ADR-0022: tagged together, so a bump to one is a bump to all
+        # three (the receiver joined with ADR-0031).
         recorder = VERSION_LINE.match(run_version(LOXODONTA).stdout.strip())
         supervisor = VERSION_LINE.match(run_version(SUPERVISOR).stdout.strip())
+        receiver = VERSION_LINE.match(run_version(RECEIVER).stdout.strip())
         self.assertEqual(recorder["tool"], supervisor["tool"])
+        self.assertEqual(recorder["tool"], receiver["tool"])
         self.assertEqual(recorder["format"], supervisor["format"])
+        self.assertEqual(recorder["format"], receiver["format"])
 
         # And each version lives in exactly one constant per file — the
         # place a release bump edits, and the only place.
         one_constant = re.compile(r'^TOOL_VERSION = "(\d+\.\d+\.\d+)"$', re.M)
-        for script, said in ((LOXODONTA, recorder), (SUPERVISOR, supervisor)):
+        for script, said in ((LOXODONTA, recorder), (SUPERVISOR, supervisor),
+                             (RECEIVER, receiver)):
             declared = one_constant.findall(script.read_text(encoding="utf-8"))
             self.assertEqual(declared, [said["tool"]], script.name)
 
