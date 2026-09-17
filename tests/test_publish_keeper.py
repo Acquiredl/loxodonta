@@ -27,9 +27,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_anchor import clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
-from test_supervisor import (ago, chain_head, chains_by_session, keeper_env,
-                             make_chain, run_scan, write_completed_anchor,
-                             write_pending_anchor)
+from test_supervisor import (ago, chain_head, chains_by_session,
+                             install_witness_hook, keeper_env, make_chain,
+                             run_scan, write_attempt_row,
+                             write_completed_anchor, write_pending_anchor)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -214,6 +215,23 @@ class PublishKeeperTest(ReceiverFixture):
                          [(first, 2), (second, 3)],
                          "the memo is appended to, never rewritten")
 
+    def test_an_attempt_row_never_stands_the_keeper_down(self):
+        # #240: a session end whose POST was refused leaves a note in
+        # the memo and no head row. The keeper reads the note as a
+        # note: the head was never sent, so it is posted on the tick.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-noted")
+        head = chain_head(log)
+        write_attempt_row(log, "publish-head", "the remote answered 404",
+                          when=ago(600), budget=3.0)
+
+        result = self.publishing()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.receiver.received), 1)
+        self.assertEqual(self.body()["head"], head)
+        self.assertEqual([m["head"] for m in memo_of(log) if "head" in m],
+                         [head])
+
     def test_default_is_off_and_nothing_is_posted_without_the_flags(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-off")
 
@@ -301,6 +319,41 @@ class LeftReadingTest(ReceiverFixture):
             ("alpha", "sess-upgraded")]
         self.assertEqual(chain["left"], {"ts": first, "via": "anchored"})
 
+    def test_an_attempt_row_is_never_a_departure_and_the_last_failure_is_read(self):
+        # #240 part 3, with no keeper cadence set: `left` reads the
+        # head rows and the proofs, never a note that a step was tried,
+        # and `last_failed` reads the newest note that a step failed,
+        # across both sidecars, as step, time and outcome.
+        refused = make_chain(self.root / "alpha" / "receipts", "sess-refused")
+        refused_at = ago(600)
+        write_attempt_row(refused, "publish-head", "the remote answered 404",
+                          when=refused_at, budget=3.0)
+        mixed = make_chain(self.root / "alpha" / "receipts", "sess-mixed")
+        self.publish_by_hand(mixed)
+        write_attempt_row(mixed, "anchor",
+                          "no calendar answered within 12 seconds",
+                          when=ago(60))
+        quiet = make_chain(self.root / "beta" / "receipts", "sess-quiet")
+
+        result = run_scan(self.root, env=keeper_env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (chain,) = sessions[("alpha", "sess-refused")]
+        self.assertEqual(chain["left"], {"ts": None, "via": None})
+        self.assertEqual(chain["last_failed"],
+                         {"step": "publish-head", "ts": refused_at,
+                          "outcome": "the remote answered 404"})
+        (chain,) = sessions[("alpha", "sess-mixed")]
+        self.assertEqual(chain["left"],
+                         {"ts": memo_of(mixed)[0]["ts"], "via": "published"})
+        self.assertEqual(chain["last_failed"]["step"], "anchor")
+        self.assertEqual(chain["last_failed"]["outcome"],
+                         "no calendar answered within 12 seconds")
+        (chain,) = sessions[("beta", "sess-quiet")]
+        self.assertIsNone(chain["last_failed"])
+        self.assertEqual(memo_of(quiet), [])
+
     def test_a_dead_remote_is_a_note_in_left_and_never_the_exit(self):
         # The keeper's existing voice for aging heads: the failure is said
         # in the report, the exit code stays the chains' own, and no memo
@@ -322,6 +375,78 @@ class LeftReadingTest(ReceiverFixture):
         self.assertNotIn("127.0.0.1:9", result.stdout,
                          "the URL is a credential; the report never holds it")
         self.assertEqual(memo_of(log), [])
+
+
+class NeverPublishedTest(ReceiverFixture):
+    """#240 part 3: when the wired SessionEnd command carries a publish
+    flag and no chain holds a sent head, the scan says so in one
+    sentence. Publishing wired in name only, with a remote that was
+    never listening, is otherwise invisible for as long as nobody
+    reads the memos; this catches it the first morning."""
+
+    def setUp(self):
+        super().setUp()
+        self.witness = self.root / "witness"
+
+    def wire(self, command):
+        install_witness_hook(self.witness, sessionend=True, command=command)
+
+    def scan(self, *extra):
+        return run_scan(self.root, "--witness", str(self.witness), *extra,
+                        env=keeper_env())
+
+    def test_a_wired_publish_that_never_sent_is_one_sentence(self):
+        self.wire('python loxodonta.py hook --publish "http://127.0.0.1:9/hook"')
+        log = make_chain(self.root / "alpha" / "receipts", "sess-never")
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        published = report["published"]
+        self.assertTrue(published["wired"])
+        self.assertFalse(published["sent"])
+        self.assertIn("no chain", published["note"])
+        self.assertNotIn("127.0.0.1", result.stdout,
+                         "the URL is a credential; the report never holds it")
+        self.assertEqual(report["exit"], 0, "a sentence, never the exit")
+
+        # Once any head has left by that door, the sentence is gone.
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
+             self.receiver.url],
+            capture_output=True, check=True, env=clean_env())
+
+        published = json.loads(self.scan().stdout)["published"]
+
+        self.assertEqual(published, {"wired": True, "sent": True,
+                                     "note": None})
+
+    def test_the_plain_scan_prints_the_same_sentence(self):
+        # One shape, two dressings: the plain scan is the same report,
+        # pretty-printed, so the sentence is on the operator's screen.
+        self.wire('python loxodonta.py hook --publish "http://127.0.0.1:9/hook"')
+        make_chain(self.root / "alpha" / "receipts", "sess-never")
+
+        plain = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "scan", "--root",
+             str(self.root), "--witness", str(self.witness)],
+            capture_output=True, encoding="utf-8",
+            env={**keeper_env(), "PYTHONIOENCODING": "utf-8"})
+
+        self.assertEqual(plain.returncode, 0, plain.stdout + plain.stderr)
+        self.assertEqual(json.loads(plain.stdout)["published"]["note"],
+                         json.loads(self.scan().stdout)["published"]["note"])
+        self.assertIn("no chain", plain.stdout)
+
+    def test_without_a_publish_flag_wired_there_is_no_sentence(self):
+        self.wire("python loxodonta.py hook --anchor")
+        make_chain(self.root / "alpha" / "receipts", "sess-anchors")
+
+        published = json.loads(self.scan().stdout)["published"]
+
+        self.assertEqual(published, {"wired": False, "sent": False,
+                                     "note": None})
 
 
 class DashboardLeftTest(ReceiverFixture):
@@ -374,6 +499,32 @@ class DashboardLeftTest(ReceiverFixture):
         self.assertIn("chain.left", page)
         self.assertIn("last left", page)
         self.assertIn("has left this machine", page)
+
+    def test_the_tile_reads_the_departure_and_the_last_failed_attempt(self):
+        # #240 part 3 on the page: the project tile says when a head
+        # last left this drawer by any route and which session-end
+        # step last failed, read from the same fields `scan --json`
+        # carries, with no keeper cadence set.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-tile")
+        write_attempt_row(log, "publish-head", "no answer within 3 seconds",
+                          when=ago(120), budget=3.0)
+        url = self.serve()
+
+        status = json.loads(self.get(url, "/api/status"))
+        page = self.get(url, "/")
+
+        (chain,) = chains_by_session(status)[("alpha", "sess-tile")]
+        self.assertEqual(chain["last_failed"]["step"], "publish-head")
+        self.assertEqual(chain["last_failed"]["outcome"],
+                         "no answer within 3 seconds")
+        self.assertIn("published", status)
+        # The tile is built from `left` and `last_failed`, worded as ages.
+        tiles = page[page.index("function renderTiles"):
+                     page.index("function renderSpark")]
+        self.assertIn("c.left", tiles)
+        self.assertIn("c.last_failed", tiles)
+        self.assertIn("last left", tiles)
+        self.assertIn("last failed", tiles)
 
 
 if __name__ == "__main__":
