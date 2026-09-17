@@ -85,10 +85,11 @@ BOOKKEEPING_ACTOR = "receipts"
 # --- Census -------------------------------------------------------------------
 
 # What sits beside a chain and is not one: the anchor sidecar (proofs
-# about the chain) and the publish memo (which heads left, ADR-0025).
-# Both end in .jsonl and share the chain's name, so every census that
-# globs for chains must set them aside by suffix.
-SIDECAR_SUFFIXES = (".anchors.jsonl", ".published.jsonl")
+# about the chain), the publish memo (which heads left, ADR-0025) and the
+# stamps sidecar (the authority's tokens, ADR-0032). All end in .jsonl
+# and share the chain's name, so every census that globs for chains must
+# set them aside by suffix.
+SIDECAR_SUFFIXES = (".anchors.jsonl", ".published.jsonl", ".stamps.jsonl")
 
 
 def find_chains(root):
@@ -657,8 +658,9 @@ def is_attempt(record):
     return isinstance(record, dict) and record.get("kind") == "attempt"
 
 
-# The outcomes that mean the step landed; anything else is a failure line.
-SENT_OUTCOMES = ("sent", "submitted")
+# The outcomes that mean the step landed (the head sent, the digest
+# submitted, the token granted); anything else is a failure line.
+SENT_OUTCOMES = ("sent", "submitted", "granted")
 
 
 def sidecar_heads(sidecar):
@@ -819,6 +821,12 @@ def last_departure(log):
                 and (head not in first or when < first[head][0]):
             first[head] = (when, record["ts"])
     departures += [(when, ts, "anchored") for when, ts in first.values()]
+    # A stamp record is a token the authority granted for a head that
+    # reached it (ADR-0032): the third door, read like the memo's rows.
+    for record in sidecar_records(Path(str(log) + ".stamps.jsonl")):
+        when = parse_when(record.get("ts"))
+        if when is not None and not is_attempt(record):
+            departures.append((when, record["ts"], "stamped"))
     if not departures:
         return {"ts": None, "via": None}
     _, ts, via = max(departures, key=lambda d: d[0])
