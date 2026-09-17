@@ -1223,11 +1223,28 @@ def session_end_publish_chain(log, url, session, timeout):
                           failure or "sent")
 
 
+def damaged_tail_after(log, entries):
+    """The `n` of the last entry before a damaged tail, or None when the
+    file ends cleanly: anything on disk past the last complete entry is
+    the tear. Said out loud by the command, because an operator sending
+    a chain by hand should not learn from a byte count that part of it
+    is gone."""
+    intact = sum(len(line) for _, _, line in entries)
+    try:
+        return entries[-1][0] if os.path.getsize(log) > intact else None
+    except OSError:
+        return None
+
+
 def publish_chain_command(args):
     """`publish --chain`: the operator's, and the keeper's, send of the
     chain by hand. Speaks, because the answer can be acted on: what was
     published, or that nothing was left to send, or why the batch was
-    refused. Exit 1 only when a batch did not land."""
+    refused, and whether the file ends in damage. A damaged tail is not
+    a refusal here, as it is for the head (the head after a tear is not
+    the chain's): the intact prefix is exactly what a remote that can
+    only add should be holding, and the line says where the tear is.
+    Exit 1 only when a batch did not land."""
     try:
         entries = entries_on_disk(args.log)
     except FileNotFoundError:
@@ -1236,15 +1253,18 @@ def publish_chain_command(args):
         print(f"error: {args.log} holds no entry — run `loxodonta init` "
               "first", file=sys.stderr)
         return 1
+    torn = damaged_tail_after(args.log, entries)
+    damage = f"; the tail after {torn} is damaged" if torn is not None else ""
     sent, failure = publish_chain(args.log, args.url, chain_session(args.log),
                                   PUBLISH_TIMEOUT, "cadence")
     if sent:
         first, last = sent
         head = next(digest for n, digest, _ in entries if n == last)
-        print(f"published chain entries {first}-{last} (head {head[:12]}…)")
+        print(f"published chain entries {first}-{last} "
+              f"(head {head[:12]}…){damage}")
     elif failure is None:
         print(f"nothing to send: the remote has every entry through entry "
-              f"{chain_cursor(args.log)}")
+              f"{chain_cursor(args.log)}{damage}")
     if failure:
         print(f"error: the chain was not published: {failure}",
               file=sys.stderr)

@@ -371,10 +371,13 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertEqual(memo_of(self.log), [])
 
-    def test_a_torn_tail_is_never_sent(self):
+    def test_a_torn_tail_is_never_sent_and_the_line_says_where_it_tore(self):
         # The receiver refuses a batch whole when a line is not an entry,
         # so the sender stops at the last complete line: the torn line
         # stays on the writer's machine as the damage verify reports.
+        # The intact prefix still goes — a remote that can only add is
+        # exactly where the evidence up to the tear belongs — and the
+        # command says so rather than reading like an ordinary success.
         fake = serve_fake(self)
         lines = make_chain(self.log, ["step 1"], epoch=1700000000)
         with open(self.log, "ab") as f:
@@ -383,9 +386,18 @@ class PublishChainCommandTest(unittest.TestCase):
         result = self.publish_chain(fake.url)
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("published chain entries 0-1", result.stdout)
+        self.assertIn("the tail after 1 is damaged", result.stdout)
         (sent,) = fake.received
         self.assertEqual(sent["raw"], lines)
         self.assertEqual(sent["headers"]["x-loxodonta-range"], "0-1")
+        # And again with nothing left to send: the damage is still said.
+        again = self.publish_chain(fake.url)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("nothing to send", again.stdout)
+        self.assertIn("the tail after 1 is damaged", again.stdout)
+        self.assertEqual(len(fake.received), 1)
 
 
 class PublishChainAtSessionEndTest(PublishBase):
