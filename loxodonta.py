@@ -665,6 +665,7 @@ def calendar_request(url, data=None, timeout=15):
 ATTEMPT_KIND = "attempt"
 STEP_ANCHOR = "anchor"
 STEP_PUBLISH_HEAD = "publish-head"
+STEP_PUBLISH_CHAIN = "publish-chain"
 
 
 def is_attempt(record):
@@ -894,7 +895,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def post_once(url, body, timeout):
+def post_once(url, body, timeout, headers=None):
     """One POST. Returns None when the remote took it, else one line
     naming what went wrong; never raises. The line never carries the
     URL: a webhook URL is a credential, and this line reaches stderr
@@ -906,12 +907,13 @@ def post_once(url, body, timeout):
     timer fired first (CI on macOS showed the socket's winning); any
     other exception is named by its type alone, because http.client
     quotes the request path in its own messages and the path is where a
-    token lives."""
+    token lives. `headers` is what a chain batch adds to the JSON head's
+    default: its content type and the four tool headers."""
     try:
         request = urllib.request.Request(
             url, data=body,
             headers={"Content-Type": "application/json",
-                     "User-Agent": "loxodonta"})
+                     "User-Agent": "loxodonta", **(headers or {})})
         with urllib.request.build_opener(NoRedirect).open(
                 request, timeout=timeout):
             return None
@@ -928,7 +930,7 @@ def post_once(url, body, timeout):
         return type(e).__name__
 
 
-def post_bounded(url, body, timeout):
+def post_bounded(url, body, timeout, headers=None):
     """`post_once`, bounded by `timeout` seconds with name lookup
     included. urlopen's timeout starts once the name has resolved, and a
     stalled resolver has no timeout of its own, so the POST runs on a
@@ -937,7 +939,7 @@ def post_bounded(url, body, timeout):
     what `post_once` returned, or the abandonment when time ran out."""
     outcome = []
     worker = threading.Thread(
-        target=lambda: outcome.append(post_once(url, body, timeout)),
+        target=lambda: outcome.append(post_once(url, body, timeout, headers)),
         daemon=True)
     worker.start()
     worker.join(timeout)
@@ -1021,7 +1023,201 @@ def chain_session(log):
     return stem
 
 
+# --- The published chain (ADR-0031 rulings 2 and 3) --------------------------
+# Where the published head says a chain of that length existed, the
+# published chain holds what it held: the chain's lines exactly as they
+# sit on disk, newline-delimited, sent to a remote that can only add,
+# never delete (the receiver, docs/RECEIVER.md). The first send starts at
+# genesis; every later one starts after the last entry the remote
+# acknowledged, which the memo beside the chain remembers as a row of
+# kind `chain` carrying the range. The session id, the chain's file name,
+# the n range and the head ride in request headers named for the tool,
+# so what the receiver appends is chain bytes and nothing else. One
+# batch stays under the receiver's cap; a longer tail goes in several,
+# each acknowledged on its own, and whatever a budget cuts off is the
+# keeper's on its next turn, resumed from the cursor.
+
+CHAIN_TYPE = "application/x-ndjson"
+CHAIN_KIND = "chain"
+CHAIN_BATCH_CAP = 8 * 1024 * 1024   # bytes per batch, the receiver's cap
+
+
+def is_chain_record(record):
+    """True for a row of kind `chain`: a batch of entries the remote
+    acknowledged, with its range. Not a head row, so the head keeper's
+    ripeness test ignores it; not a proof of anything, like every row
+    in the memo."""
+    return isinstance(record, dict) and record.get("kind") == CHAIN_KIND
+
+
+def entries_on_disk(log):
+    """The chain's complete lines as (n, entry_hash, bytes), read raw so
+    what is sent is what sits on disk. Reading stops at the first line
+    that is not an entry, a torn tail or damage, because the receiver
+    refuses a batch whole when any line is not one: the torn line stays
+    here as the damage `verify` reports."""
+    with open(log, "rb") as f:
+        raw = f.read()
+    entries = []
+    for line in raw.splitlines(keepends=True):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            break
+        n, digest = (entry.get("n"), entry.get("entry_hash")) \
+            if isinstance(entry, dict) else (None, None)
+        if isinstance(n, bool) or not isinstance(n, int) \
+                or not isinstance(digest, str):
+            break
+        entries.append((n, digest, line))
+    return entries
+
+
+def chain_cursor(log):
+    """The last entry number the remote acknowledged, from the memo's
+    chain rows; -1 when it holds none, so the send starts at genesis
+    (entry 0). Read tolerantly: the memo is bookkeeping, and a torn line
+    in it means a resend the receiver drops, never a stuck keeper."""
+    try:
+        lines = read_log(published_path(log))
+    except FileNotFoundError:
+        return -1
+    cursor = -1
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if is_chain_record(record) and isinstance(record.get("last"), int):
+            cursor = max(cursor, record["last"])
+    return cursor
+
+
+def chain_batch(entries, cursor, cap=CHAIN_BATCH_CAP):
+    """The next batch after `cursor`: (body, first, last, head), or None
+    when nothing is left to send. Lines are taken in order while the
+    body stays under the cap; a single line past it goes alone, and the
+    remote says what it makes of it."""
+    body, first, last, head = b"", None, None, None
+    for n, digest, line in entries:
+        if n <= cursor:
+            continue
+        if body and len(body) + len(line) > cap:
+            break
+        body += line
+        first = n if first is None else first
+        last, head = n, digest
+    if not body:
+        return None
+    return body, first, last, head
+
+
+def chain_headers(log, session, first, last, head):
+    """The four headers a chain batch carries (docs/RECEIVER.md section
+    4): the chain's file name, which the receiver reads to name the
+    file, and the session, the range and the head, which ride along."""
+    return {"Content-Type": CHAIN_TYPE,
+            "X-Loxodonta-Chain": os.path.basename(log),
+            "X-Loxodonta-Session": str(session),
+            "X-Loxodonta-Range": f"{first}-{last}",
+            "X-Loxodonta-Head": head}
+
+
+def append_chain_record(log, first, last, head, event):
+    """The memo's chain row: what left and up to which entry, the head
+    after that entry, the time, the event kind. Never the URL. Written
+    only once the remote has acknowledged the batch, so the cursor never
+    passes an entry that did not land."""
+    append_sidecar_record(published_path(log),
+                          {"kind": CHAIN_KIND, "first": first, "last": last,
+                           "head": head, "ts": now_ts(), "event": event})
+
+
+def publish_chain(log, url, session, timeout, event):
+    """Send the chain's entries after the memo's cursor to `url`, one
+    bounded POST per batch, each waiting at most `timeout` seconds and
+    none begun once `timeout` seconds have passed in all. Returns
+    (sent, failure): `sent` is the (first, last) range the remote
+    acknowledged in this call, or None when nothing was; `failure` is
+    the one line the bounded POST produced for the batch that did not
+    land, or None. Both None means there was nothing after the cursor.
+    Never raises, never prints: the callers say what they will."""
+    try:
+        entries = entries_on_disk(log)
+    except OSError:
+        return None, None
+    cursor = chain_cursor(log)
+    deadline = time.monotonic() + timeout
+    sent = None
+    while True:
+        batch = chain_batch(entries, cursor)
+        if batch is None:
+            return sent, None
+        body, first, last, head = batch
+        if time.monotonic() >= deadline:
+            return sent, (f"the budget of {timeout:g} seconds ran out "
+                          f"before entry {first}")
+        failure = post_bounded(url, body, timeout,
+                               chain_headers(log, session, first, last, head))
+        if failure:
+            return sent, failure
+        try:
+            append_chain_record(log, first, last, head, event)
+        except OSError:
+            # Sent and not written down: the next send carries these
+            # lines again and the receiver drops them as duplicates.
+            return sent, "the memo could not be written"
+        sent = (sent[0] if sent else first, last)
+        cursor = last
+
+
+def session_end_publish_chain(log, url, session, timeout):
+    """The hook's chain send: quiet, best-effort, under the head's
+    budget rule, and written down in the memo as an attempt row of step
+    `publish-chain` (#240): `sent`, or the one line the bounded POST
+    produced. A chain with nothing after the cursor was not a step and
+    leaves no row."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        return  # the installer refuses these; a hand-edited file skips
+    sent, failure = publish_chain(log, url, session, timeout, "session-end")
+    if sent is None and failure is None:
+        return
+    append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN, timeout,
+                          failure or "sent")
+
+
+def publish_chain_command(args):
+    """`publish --chain`: the operator's, and the keeper's, send of the
+    chain by hand. Speaks, because the answer can be acted on: what was
+    published, or that nothing was left to send, or why the batch was
+    refused. Exit 1 only when a batch did not land."""
+    try:
+        entries = entries_on_disk(args.log)
+    except FileNotFoundError:
+        return missing_log(args.log)
+    if not entries:
+        print(f"error: {args.log} holds no entry — run `loxodonta init` "
+              "first", file=sys.stderr)
+        return 1
+    sent, failure = publish_chain(args.log, args.url, chain_session(args.log),
+                                  PUBLISH_TIMEOUT, "cadence")
+    if sent:
+        first, last = sent
+        head = next(digest for n, digest, _ in entries if n == last)
+        print(f"published chain entries {first}-{last} (head {head[:12]}…)")
+    elif failure is None:
+        print(f"nothing to send: the remote has every entry through entry "
+              f"{chain_cursor(args.log)}")
+    if failure:
+        print(f"error: the chain was not published: {failure}",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_publish(args):
+    if args.chain:
+        return publish_chain_command(args)
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -3380,6 +3576,14 @@ def main(argv=None):
     publish_parser.add_argument("url", metavar="URL", type=publish_url,
                                 help="a plain http or https URL, such as a "
                                      "chat incoming webhook")
+    publish_parser.add_argument("--chain", action="store_true",
+                                help="send the chain's entries instead of "
+                                     "its head: the lines after the last "
+                                     "one the remote acknowledged, from "
+                                     "genesis the first time, to a remote "
+                                     "that can only add, never delete, such "
+                                     "as the receiver (ADR-0031, "
+                                     "docs/RECEIVER.md)")
     publish_parser.set_defaults(func=cmd_publish)
     hook_parser = sub.add_parser(
         "hook",
