@@ -589,7 +589,10 @@ def marker_epoch():
 
 def marker_profile():
     """The profile the keeper follows and the harness that declared it,
-    as (profile, harness), or None when the marker names none."""
+    as (profile, harness), or None when the marker names none. `serve`
+    reads the epoch itself and converts it there, so that one epoch
+    answers for both the cadence and the authority; this is the reading
+    for a caller that wants the profile alone."""
     epoch = marker_epoch()
     return None if epoch is None else (epoch["profile"], epoch["harness"])
 
@@ -2086,7 +2089,8 @@ def watch_consumption(families, now):
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
               publish_every=None, publish_url=None, publish_chain=None,
-              store=False, tick=True, show_before_memory=False):
+              store=False, tick=True, show_before_memory=False,
+              authority=None):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
@@ -2139,7 +2143,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         # nothing off the machine.
         attempted, keeper_note, anchor_failed = (
             keep_anchors(log, keeper.get(relpath), now, entries,
-                         anchor_every, calendars)
+                         anchor_every, calendars, authority)
             if tick else (False, None, False))
         posted, publish_note, publish_failed = (
             keep_published(log, keeper.get("publish:" + relpath), now, entries,
@@ -4273,8 +4277,10 @@ PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
 # order they are declared and applied: the anchor (--anchor) says when,
 # the issuer signature (--sign) says which key (ADR-0026 ruling 4).
 SEAL_ANCHOR = "anchor"
+SEAL_STAMP = "stamp"
 SEAL_SIGNATURE = "signature"
 MANIFEST_SIDECAR = "manifest.json.anchors.jsonl"   # the anchor's proof
+MANIFEST_STAMPS = "manifest.json.stamps.jsonl"   # the authority's token
 MANIFEST_SIGNATURE = "manifest.json.sig"   # ssh-keygen's detached signature
 MANIFEST_PUBLIC_KEY = "manifest.json.pub"  # the key that made it: testimony
 # The ssh-keygen signature namespace, the verifier's and the signer's
@@ -4338,9 +4344,14 @@ def chain_listing(log):
             continue
         if isinstance(entry, dict) and isinstance(entry.get("entry_hash"), str):
             head = entry["entry_hash"]
-    sidecar = log.with_name(log.name + ".anchors.jsonl")
+    anchors = log.with_name(log.name + ".anchors.jsonl")
+    stamps = log.with_name(log.name + ".stamps.jsonl")
     return {"path": log.name, "head": head, "entries": len(lines),
-            "anchors": sidecar.name if sidecar.exists() else None}
+            "anchors": anchors.name if anchors.exists() else None,
+            # The stamps sidecar travels as the anchors sidecar does
+            # (ADR-0032 ruling 4): both are evidence about this chain,
+            # and `verify-package` judges each with the chain it names.
+            "stamps": stamps.name if stamps.exists() else None}
 
 
 def artifact_listing(path):
@@ -4444,15 +4455,18 @@ def transcript_words(session, transcripts):
 
 
 def package_readme(unit, packed, sessions, witness, record, notes,
-                   transcripts=None):
+                   seals=(), transcripts=None):
     """The plain-words page a recipient reads first: what is inside, how
     to verify it, what each layer shows and does not. `sessions` is
     {session: [chain listings]} in the package's order; `notes` says, per
-    session that needs it, where it was recorded; `transcripts` is None
-    when none was requested, else {session: the packaged transcript's
-    name, or None when it was gone}. The page may print the chain heads,
-    which exist before it is written; it never prints the manifest's
-    hash, which does not exist yet (ADR-0007 ruling 2)."""
+    session that needs it, where it was recorded; `seals` is the set the
+    manifest declares, named here because a page saying a sealed package
+    declares none is the kind of stale sentence a recipient would read
+    as the truth; `transcripts` is None when none was requested, else
+    {session: the packaged transcript's name, or None when it was gone}.
+    The page may print the chain heads, which exist before it is
+    written; it never prints the manifest's hash, which does not exist
+    yet (ADR-0007 ruling 2)."""
     project = unit["project"]
     count = sum(len(listings) for listings in sessions.values())
     if unit["kind"] == "session":
@@ -4496,6 +4510,14 @@ def package_readme(unit, packed, sessions, witness, record, notes,
                 lines.append(f"{indent}- `{chain['anchors']}`: its anchor "
                              "sidecar, the OpenTimestamps proofs the recorder "
                              "collected for this chain's heads.")
+            if chain["stamps"]:
+                lines.append(f"{indent}- `{chain['stamps']}`: its stamps "
+                             "sidecar, the tokens an authority signed over "
+                             "this chain's heads. A token is that "
+                             "authority's signed word and not an anchor; "
+                             "judging one needs `openssl` and that "
+                             "authority's certificate chain, which this "
+                             "package does not carry.")
         lines.append(f"{indent}- {transcript_words(session, transcripts)}")
     if record:
         lines.append(
@@ -4509,7 +4531,8 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "- `manifest.json`: the list of everything above, written last. "
         "Chains are listed by head and entry count, the other files by "
         "sha256 and byte count. Its hash is the only surface a seal "
-        "applies to, and this package declares no seals.",
+        "applies to, and this package declares "
+        + (", ".join(seals) if seals else "no seals") + ".",
         "",
         "The transcript ships only on request (ADR-0026 ruling 2). The "
         "chain holds `Read: .env` with a fingerprint; the transcript holds "
@@ -4599,11 +4622,13 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
             listings[session].append(listing)
             shutil.copyfile(log, stage / log.name)
             written.append(log.name)
-            if listing["anchors"]:
-                shutil.copyfile(log.with_name(listing["anchors"]),
-                                stage / listing["anchors"])
-                written.append(listing["anchors"])
-                artifacts.append(artifact_listing(stage / listing["anchors"]))
+            for beside in ("anchors", "stamps"):
+                if not listing[beside]:
+                    continue
+                shutil.copyfile(log.with_name(listing[beside]),
+                                stage / listing[beside])
+                written.append(listing[beside])
+                artifacts.append(artifact_listing(stage / listing[beside]))
         if transcripts is not None:
             # The transcript travels under a bare name that names the
             # session (the layout is flat), listed by sha256 like any
@@ -4648,7 +4673,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     artifacts.append(artifact_listing(stage / "witness.json"))
     write_lf(stage / "README.md",
              package_readme(unit, packed, listings, witness, record.exists(),
-                            notes, shipped))
+                            notes, seals, shipped))
     written.append("README.md")
     artifacts.append(artifact_listing(stage / "README.md"))
     manifest = {
@@ -4741,15 +4766,20 @@ def sign_manifest(stage, keyfile):
     return key_fingerprint(stage / MANIFEST_PUBLIC_KEY), None
 
 
-def seal_package(stage, seals, calendars, keyfile):
+def seal_package(stage, seals, calendars, keyfile, authority=None):
     """Apply the declared seals to the manifest, the last step of
-    ADR-0007's write order: the signature first, then the anchor, since
-    signing can fail on a passphrase or a touch and the anchor is the
-    one step that leaves the machine, so a signing that fails costs no
-    calendar submission. The signature: sign_manifest. The anchor
+    ADR-0007's write order: the signature first, then the authority
+    timestamp, then the anchor. Signing can fail on a passphrase or a
+    touch, and the other two are the steps that leave the machine, so a
+    signing that fails costs neither; between those two the quick round
+    trip goes before the slow one, which is the order ADR-0032 ruling 3
+    put them in at session end. The signature: sign_manifest. The anchor
     (ADR-0026 ruling 4): the recorder posts the manifest's sha256 to the
     calendars once and writes the proof beside it as
     manifest.json.anchors.jsonl; the supervisor never speaks OTS itself.
+    The authority timestamp: the recorder asks `authority` for a token
+    over that same sha256 and writes it as manifest.json.stamps.jsonl;
+    the supervisor never speaks RFC 3161 itself either.
     Returns (the seal files written, in order; the signing key's
     fingerprint, or None; and the problem when a seal could not be
     applied, the tool's own words already on stderr)."""
@@ -4764,6 +4794,18 @@ def seal_package(stage, seals, calendars, keyfile):
         if problem:
             return [], None, problem
         written += [MANIFEST_SIGNATURE, MANIFEST_PUBLIC_KEY]
+    if SEAL_STAMP in seals:
+        finished = subprocess.run(
+            [sys.executable, str(LOXODONTA), "stamp",
+             f"--manifest={stage / 'manifest.json'}",
+             "--authority", authority],
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        if finished.returncode != 0:
+            print(finished.stderr.strip() or "the recorder gave no reason",
+                  file=sys.stderr)
+            return [], None, "the manifest was not stamped"
+        written.append(MANIFEST_STAMPS)
     if SEAL_ANCHOR in seals:
         command = [sys.executable, str(LOXODONTA), "anchor",
                    f"--manifest={stage / 'manifest.json'}"]
@@ -4883,12 +4925,12 @@ def cmd_package(args):
     # seal step sends anything, and only with --anchor.
     report = scan_root(store_receipts(), witness=Path(args.witness),
                        store=True, tick=False)
-    # Declared in ADR-0007's ladder order, the anchor before the
-    # signature, which is the order the verifier judges and prints
-    # them; applied the other way round (seal_package), since neither
-    # depends on the other and only the anchor leaves the machine.
-    seals = ([SEAL_ANCHOR] if args.anchor else []) + (
-        [SEAL_SIGNATURE] if args.sign else [])
+    # Declared in ADR-0007's ladder order, the two *when* seals before
+    # the signature and the anchor before the authority timestamp, which
+    # is the order the verifier judges and prints them; applied the
+    # other way round (seal_package), since none depends on another and
+    # only the two commitments leave the machine.
+    seals = ([SEAL_ANCHOR] if args.anchor else [])         + ([SEAL_STAMP] if args.stamp else [])         + ([SEAL_SIGNATURE] if args.sign else [])
     # `~` reaches argv unexpanded from PowerShell and cmd, and
     # ssh-keygen does not expand it either; the docs' own example
     # starts with it, so it means home on every shell here.
@@ -4922,7 +4964,7 @@ def cmd_package(args):
             shutil.rmtree(out)
             return 1
         sealed, fingerprint, problem = seal_package(out, seals, calendars,
-                                                    keyfile)
+                                                    keyfile, args.stamp)
         if problem:
             # A package declaring a seal it does not carry would verify
             # SEAL-MISSING; better nothing than that.
@@ -4934,7 +4976,7 @@ def cmd_package(args):
             if package_too_large(Path(staging), written):
                 return 1
             sealed, fingerprint, problem = seal_package(
-                Path(staging), seals, calendars, keyfile)
+                Path(staging), seals, calendars, keyfile, args.stamp)
             if not problem:
                 zip_package(Path(staging), written + sealed, out)
     if problem:
@@ -4954,6 +4996,15 @@ def cmd_package(args):
               "proof is pending until Bitcoin has it, a few hours")
         print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
               f'--manifest="{(where / "manifest.json").as_posix()}"')
+    if args.stamp:
+        # The token is the authority's word about a moment, and the
+        # recipient can only judge it with that authority's certificate
+        # chain, which this package does not carry and must not: a chain
+        # shipped by the issuer is the issuer's word about whom to trust.
+        print(f"stamped: the manifest's sha256 went to {args.stamp}; send "
+              "the recipient that authority's certificate chain by another "
+              "route, since `verify-package --authority-chain FILE` judges "
+              "the token against it")
     if fingerprint:
         # The issuer's one job past signing (ADR-0008 ruling 4): the
         # fingerprint is what the recipient compares, so it is printed
@@ -5339,6 +5390,7 @@ class Watchtower(ThreadingHTTPServer):
                                    publish_every=self.publish_every,
                                    publish_url=self.publish_url,
                                    publish_chain=self.publish_chain,
+                                   authority=self.authority,
                                    store=self.store)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
@@ -5536,13 +5588,19 @@ def cmd_serve(args):
     server.witness = Path(args.witness)
     # The keeper follows the profile the operator chose at install-hook
     # (ADR-0031 ruling 1); a flag typed here still wins.
-    anchor_every, anchor_source = keeper_cadences(args.anchor_every,
-                                                  marker_profile())
+    epoch = marker_epoch()
+    anchor_every, anchor_source = keeper_cadences(
+        args.anchor_every,
+        None if epoch is None else (epoch["profile"], epoch["harness"]))
     server.anchor_every = anchor_every
     server.calendars = args.calendar or ()
     server.publish_every = args.publish_every
     server.publish_url = args.publish_url
     server.publish_chain = args.publish_chain
+    # The authority rides the anchor keeper's turn and has no cadence of
+    # its own (ADR-0032 ruling 3), so it comes from the same epoch that
+    # set the cadence and from no flag here.
+    server.authority = marker_authority(epoch)
     server.scan_lock = threading.Lock()
     server.views_lock = threading.Lock()
     server.scan_body = None
@@ -5551,7 +5609,8 @@ def cmd_serve(args):
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
     print(keeper_words(anchor_every, anchor_source, args.publish_every,
-                       args.publish_url, args.publish_chain),
+                       args.publish_url, args.publish_chain,
+                       server.authority),
           flush=True)
     try:
         server.serve_forever()
@@ -8242,8 +8301,9 @@ def main(argv):
     export.set_defaults(func=cmd_export)
     package = sub.add_parser(
         "package",
-        help="a session or a drawer as a package: its chains and anchor "
-             "sidecars, the project record, a witness snapshot labelled "
+        help="a session or a drawer as a package: its chains and the "
+             "sidecars beside them, the project record, a witness "
+             "snapshot labelled "
              "testimony, a README, and a manifest written last; verified "
              "by `loxodonta verify-package` alone (ADR-0026)")
     # One unit or the other: argparse refuses both with a usage error.
@@ -8282,6 +8342,20 @@ def main(argv):
                          metavar="URL",
                          help="calendar for --anchor (repeatable; default: "
                               "the public pools)")
+    package.add_argument("--stamp", default=None, metavar="URL",
+                         type=publish_url,
+                         help="seal the package with an authority "
+                              "timestamp: the recorder asks this RFC 3161 "
+                              "timestamp authority for a token over the "
+                              "manifest's sha256 and ships it beside the "
+                              "manifest, so verify-package can earn "
+                              "+ STAMPED (ADR-0032, ADR-0026 ruling 4). A "
+                              "second commitment beside --anchor, never "
+                              "instead of it: the token is the authority's "
+                              "signed word, and the recipient judges it "
+                              "with openssl and the certificate chain you "
+                              "saved from that authority. No default: whom "
+                              "to trust is the choice")
     package.add_argument("--sign", default=None, metavar="KEYFILE",
                          help="seal the package with the issuer signature: "
                               "ssh-keygen signs the manifest with this SSH "
