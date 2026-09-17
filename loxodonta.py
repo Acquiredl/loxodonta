@@ -1039,7 +1039,12 @@ def chain_session(log):
 
 CHAIN_TYPE = "application/x-ndjson"
 CHAIN_KIND = "chain"
-CHAIN_BATCH_CAP = 8 * 1024 * 1024   # bytes per batch, the receiver's cap
+# Bytes per batch: the receiver's cap (docs/RECEIVER.md section 4),
+# which refuses a longer body on its Content-Length before reading any
+# of it. The env knob is the test suite's handle -- a batching rule that
+# only runs above 8 MiB is a contract no test could reach.
+CHAIN_BATCH_CAP = int(os.environ.get("LOXODONTA_CHAIN_BATCH_BYTES",
+                                     8 * 1024 * 1024))
 
 
 def is_chain_record(record):
@@ -1099,8 +1104,10 @@ def chain_cursor(log):
 def chain_batch(entries, cursor, cap=CHAIN_BATCH_CAP):
     """The next batch after `cursor`: (body, first, last, head), or None
     when nothing is left to send. Lines are taken in order while the
-    body stays under the cap; a single line past it goes alone, and the
-    remote says what it makes of it."""
+    body stays under the cap. The first line goes in whatever its size,
+    because a batch of nothing would read as a chain fully sent; the
+    caller refuses an oversized first line before it ever gets here
+    (`oversized_entry`)."""
     body, first, last, head = b"", None, None, None
     for n, digest, line in entries:
         if n <= cursor:
@@ -1124,6 +1131,20 @@ def chain_headers(log, session, first, last, head):
             "X-Loxodonta-Session": str(session),
             "X-Loxodonta-Range": f"{first}-{last}",
             "X-Loxodonta-Head": head}
+
+
+def oversized_entry(entries, cursor, cap):
+    """The first entry after `cursor` whose own line is longer than the
+    cap, or None. It can never be sent: the receiver refuses a body past
+    its cap on the Content-Length and closes, which reaches the sender
+    as a bare connection error, and since the cursor cannot advance past
+    a line that never landed, every later send would retry that same
+    line forever. Named here instead, so the operator reads which entry
+    it is rather than an opaque socket word."""
+    for n, _, line in entries:
+        if n > cursor:
+            return n if len(line) > cap else None
+    return None
 
 
 def append_chain_record(log, first, last, head, event):
@@ -1159,10 +1180,14 @@ def publish_chain(log, url, session, timeout, event):
         # attempt row carries it (the head route guards its read the
         # same way).
         return None, "the memo could not be read"
+    cap = CHAIN_BATCH_CAP
     deadline = time.monotonic() + timeout
     sent = None
     while True:
-        batch = chain_batch(entries, cursor)
+        too_big = oversized_entry(entries, cursor, cap)
+        if too_big is not None:
+            return sent, f"entry {too_big} is larger than the receiver's cap"
+        batch = chain_batch(entries, cursor, cap)
         if batch is None:
             return sent, None
         body, first, last, head = batch

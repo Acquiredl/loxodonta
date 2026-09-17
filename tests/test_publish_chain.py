@@ -12,6 +12,7 @@ what was refused is the point. No network, ever, and never internals.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -72,6 +73,17 @@ def start_receiver(case, data):
             break
     proc.url = found.group(1)
     return proc
+
+
+def run_capped(cap, *args):
+    """The recorder with the batch cap set to `cap` bytes. The cap in
+    the field is the receiver's 8 MiB, which no test can reach in a
+    reasonable chain, so the batching rule is exercised through the
+    env knob the recorder reads (LOXODONTA_CHAIN_BATCH_BYTES)."""
+    env = clean_env()
+    env["LOXODONTA_CHAIN_BATCH_BYTES"] = str(cap)
+    return subprocess.run([sys.executable, str(LOXODONTA), *map(str, args)],
+                          capture_output=True, encoding="utf-8", env=env)
 
 
 def memo_of(log):
@@ -296,6 +308,60 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertEqual([(r["first"], r["last"]) for r in chain_rows(self.log)],
                          [(0, 1)])
 
+    def test_a_tail_past_the_cap_goes_in_several_batches_each_written_down(self):
+        # docs/RECEIVER.md section 4: one body stays under the cap, so a
+        # longer tail is several POSTs, each acknowledged and written
+        # down on its own. What the receiver ends up holding is the
+        # chain, byte for byte, whatever the batching did on the way.
+        receiver = start_receiver(self, self.data)
+        lines = make_chain(self.log, ["step 1", "step 2"], epoch=1700000000)
+        on_disk = lines.splitlines(True)
+        cap = len(on_disk[0]) + len(on_disk[1])
+
+        result = run_capped(cap, "publish", "--chain", "--log", self.log,
+                            receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("published chain entries 0-2", result.stdout)
+        self.assertEqual([(row["first"], row["last"])
+                          for row in chain_rows(self.log)],
+                         [(0, 1), (2, 2)])
+        self.assertEqual((self.data / self.log.name).read_bytes(), lines)
+        judged = self.verify_receivers_file()
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(judged.stdout.strip(), "VALID")
+
+    def test_an_entry_larger_than_the_cap_is_named_and_never_sent(self):
+        # The receiver refuses a body past its cap on the Content-Length
+        # and closes, which would reach the sender as a bare connection
+        # word and stall this chain on this line forever, since the
+        # cursor cannot pass what never landed. Refused here instead,
+        # by name, with everything before it already sent.
+        fake = serve_fake(self)
+        make_chain(self.log, ["step 1", "x" * 150], epoch=1700000000)
+        on_disk = self.log.read_bytes().splitlines(True)
+        cap = max(len(on_disk[0]), len(on_disk[1]))
+        self.assertGreater(len(on_disk[2]), cap, "entry 2 must be the big one")
+
+        result = run_capped(cap, "publish", "--chain", "--log", self.log,
+                            fake.url)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("entry 2 is larger than the receiver's cap",
+                      result.stderr)
+        # Everything before it left, and the cursor stops where it did.
+        self.assertEqual([(row["first"], row["last"])
+                          for row in chain_rows(self.log)], [(0, 0), (1, 1)])
+        self.assertEqual(b"".join(sent["raw"] for sent in fake.received),
+                         b"".join(on_disk[:2]))
+        # And it stays refused rather than stalling on a socket word.
+        again = run_capped(cap, "publish", "--chain", "--log", self.log,
+                           fake.url)
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("entry 2 is larger than the receiver's cap",
+                      again.stderr)
+        self.assertEqual(len(fake.received), 2)
+
     def test_a_url_that_is_not_http_is_a_usage_error_and_nothing_moves(self):
         make_chain(self.log, ["step 1"], epoch=1700000000)
         target = self.root / "never-opened.txt"
@@ -476,6 +542,58 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.assertEqual(len(self.receiver.received), 1)
         self.assertEqual(len(chain_rows(self.chain())), 1)
         self.assertEqual(len(attempt_rows(self.chain())), 1)
+
+    def one_entry_per_batch(self):
+        """The batch cap set to the longest line this chain holds, so
+        every batch is one entry and the loop above `post_bounded` is
+        something a test can watch. Restored when the test ends."""
+        cap = max(len(line) for line
+                  in self.chain().read_bytes().splitlines(True))
+        os.environ["LOXODONTA_CHAIN_BATCH_BYTES"] = str(cap)
+        self.addCleanup(os.environ.pop, "LOXODONTA_CHAIN_BATCH_BYTES", None)
+
+    def test_a_budget_that_runs_out_between_batches_keeps_what_landed(self):
+        # Each batch is acknowledged on its own, so a budget spent
+        # part-way through a tail leaves the batches that landed, their
+        # rows, and a cursor: one attempt row names the entry the budget
+        # stopped short of, and the next send starts exactly there.
+        self.transcript.write_bytes(b"page one\n")
+        # The first call is deliberately the longest line this chain
+        # will hold, so the cap taken from it also fits the commitment
+        # the session end is about to seal in.
+        self.tool_call("x" * 150)
+        for step in range(3):
+            self.tool_call(f"step {step}")
+        self.one_entry_per_batch()
+        self.receiver.chain_delay = 0.6   # of the Codex budget's 1.5
+
+        result = self.session_end("--publish-chain", self.receiver.url,
+                                  "--actor", "codex")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        rows = chain_rows(self.chain())
+        self.assertTrue(rows, "the batches that landed keep their rows")
+        self.assertEqual([(row["first"], row["last"]) for row in rows],
+                         [(n, n) for n in range(len(rows))])
+        (attempt,) = attempt_rows(self.chain())
+        stopped = re.fullmatch(
+            r"the budget of 1\.5 seconds ran out before entry (\d+)",
+            attempt["outcome"])
+        self.assertTrue(stopped, attempt["outcome"])
+        self.assertEqual(int(stopped.group(1)), rows[-1]["last"] + 1,
+                         "the budget stops at the entry after the cursor")
+
+        # The rest is the next turn's, resumed from the same cursor.
+        self.receiver.chain_delay = 0
+        rest = run_recorder("publish", "--chain", "--log", self.chain(),
+                            self.receiver.url)
+
+        self.assertEqual(rest.returncode, 0, rest.stderr)
+        self.assertEqual(b"".join(sent["raw"] for sent in
+                                  self.receiver.received),
+                         self.chain_lines(),
+                         "every line, once, in order, across both turns")
 
     def test_a_codex_hook_gives_the_chain_half_the_cap(self):
         # The same budget rule as the head (#183): a Codex hook waits
