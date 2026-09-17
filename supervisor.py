@@ -5023,6 +5023,38 @@ def metrics_text(report, age_seconds):
           "because a sibling chain continued the recording", "verdict",
           [((), len(chains) - len(judged))])
 
+    # The sessions, by each watch's reading. Completeness is the chain
+    # paired with the transcript that witnessed it (the flagship, #22);
+    # a session older than the memory takes no row and is counted in
+    # one block (ADR-0029), so the block's count is that label's value.
+    # The lifecycle tier is decided by the supervisor's own diary of when
+    # it saw each head move, never the writer's timestamps (ADR-0018),
+    # and a session the watch never paired has no tier. The consumption
+    # watch names only the sessions past the store's norm (#67).
+    watch = report.get("completeness") or {}
+    watched = [row for row in watch.get("sessions") or []
+               if isinstance(row, dict)]
+    states = tallied((row.get("state") for row in watched),
+                     KNOWN_COMPLETENESS)
+    states["BEFORE-MEMORY"] += ((watch.get("before_memory") or {})
+                                .get("count") or 0)
+    gauge("loxodonta_completeness_sessions",
+          "Sessions by completeness state, the chain paired with the "
+          "harness transcript that witnessed it", "witness verdict",
+          by_label("state", states))
+    gauge("loxodonta_lifecycle_sessions",
+          "Sessions by dormancy tier, decided by when the supervisor's own "
+          "scans last saw the chain's head move", "witness verdict",
+          by_label("state", tallied(((row.get("dormancy") or {}).get("tier")
+                                     for row in watched), KNOWN_LIFECYCLE)))
+    hot = [row for row in (report.get("consumption") or {}).get("sessions")
+           or [] if isinstance(row, dict)]
+    gauge("loxodonta_consumption_sessions",
+          "Sessions whose busiest hour ran past the store's own norm, "
+          "still receiving or gone quiet", "testimony",
+          by_label("state", tallied((row.get("state") for row in hot),
+                                    KNOWN_CONSUMPTION)))
+
     # The tally (GLOSSARY: Tally): the store's own scale, counted as the
     # page's tally counts it — sessions per drawer, entries of every
     # kind — and owning no verdicts.

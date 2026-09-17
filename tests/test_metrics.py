@@ -264,5 +264,108 @@ class ScanAndTallyTest(MetricsFixture):
         self.assertEqual(scrape.value("loxodonta_store_chains"), 4)
 
 
+class SessionsByStateTest(MetricsFixture):
+    """Sessions by completeness state and by lifecycle tier, and the
+    consumption watch's hot sessions: labelled gauges, one sample per
+    state the scan knows, zero included. A later state is a new label
+    value and never a renamed metric."""
+
+    def test_completeness_and_lifecycle_states_are_label_values(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-ok", entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-ok",
+                         event_times=[ago(300), ago(290), ago(280)])
+        make_chain(self.root / "beta" / "receipts", "sess-ended")
+        write_transcript(self.witness, self.root / "beta", "sess-ended",
+                         event_times=[ago(4000), ago(3990)])
+        write_transcript(self.witness, self.root / "gamma", "sess-ghost",
+                         event_times=[ago(120), ago(110), ago(100)])
+        make_chain(self.root / "delta" / "receipts", "sess-unwitnessed")
+        self.serve(extra_env={"SUPERVISOR_SCAN_TTL_SECONDS": "0"})
+
+        _, _, first = self.scrape()
+        report = self.scan()
+
+        rows = report["completeness"]["sessions"]
+        for state in ("OK", "ENDED-CLEAN", "ALARM-SILENT", "UNWITNESSED",
+                      "ENDED-DEFICIT", "LAGGING", "IDLE-CLEAN", "ELSEWHERE"):
+            self.assertEqual(
+                first.value("loxodonta_completeness_sessions", state=state),
+                sum(1 for row in rows if row["state"] == state), state)
+        by_state = {row["session"]: row["state"] for row in rows}
+        self.assertEqual(by_state, {"sess-ok": "OK",
+                                    "sess-ended": "ENDED-CLEAN",
+                                    "sess-ghost": "ALARM-SILENT",
+                                    "sess-unwitnessed": "UNWITNESSED"})
+        self.assertEqual(first.value("loxodonta_scan_exit_code"), 6)
+        for tier in ("awake", "waning", "dormant"):
+            self.assertEqual(
+                first.value("loxodonta_lifecycle_sessions", state=tier),
+                sum(1 for row in rows
+                    if (row.get("dormancy") or {}).get("tier") == tier), tier)
+        self.assertEqual(
+            first.value("loxodonta_lifecycle_sessions", state="awake"), 2,
+            "the two witnessed, chained sessions were just seen to grow")
+
+        # A session in a state nothing above was in: its label value
+        # moves off zero and no metric name changes.
+        make_chain(self.root / "epsilon" / "receipts", "sess-short",
+                   entries=1)
+        write_transcript(self.witness, self.root / "epsilon", "sess-short",
+                         event_times=[ago(4000), ago(3990), ago(3980)])
+        _, _, second = self.scrape()
+
+        self.assertEqual(second.names(), first.names())
+        self.assertEqual(
+            first.value("loxodonta_completeness_sessions",
+                        state="ENDED-DEFICIT"), 0)
+        self.assertEqual(
+            second.value("loxodonta_completeness_sessions",
+                         state="ENDED-DEFICIT"), 1)
+
+    def test_sessions_before_the_memory_are_the_blocks_count(self):
+        # ADR-0029: a session older than the supervisor's first look is
+        # counted in one block and never takes a row; the label carries
+        # the block's count, so the scrape says how much predates the
+        # memory instead of reading a clean bill.
+        (self.root / ".supervisor-baseline.json").unlink()
+        make_chain(self.root / "alpha" / "receipts", "sess-old")
+        write_transcript(self.witness, self.root / "alpha", "sess-old",
+                         event_times=[ago(6000), ago(5990)])
+        self.serve()
+
+        _, _, scrape = self.scrape()
+        report = self.scan()
+
+        block = report["completeness"]["before_memory"]
+        self.assertEqual(block["count"], 1)
+        self.assertEqual(
+            scrape.value("loxodonta_completeness_sessions",
+                         state="BEFORE-MEMORY"), block["count"])
+        self.assertEqual(report["completeness"]["sessions"], [])
+
+    def test_sessions_running_hot_are_counted_by_the_consumption_watch(self):
+        for name in ("aaaa", "bbbb", "cccc"):
+            make_chain(self.root / name / "receipts", "sess-" + name,
+                       entries=3)
+        make_chain(self.root / "delta" / "receipts", "sess-hot", entries=12)
+        knobs = {"SUPERVISOR_HOT_TIMES": "3", "SUPERVISOR_HOT_FLOOR": "10"}
+        self.serve(extra_env=knobs)
+
+        _, _, scrape = self.scrape()
+        report = self.scan(**knobs)
+
+        hot = report["consumption"]["sessions"]
+        for state in ("RUNNING-HOT", "ENDED-HOT"):
+            self.assertEqual(
+                scrape.value("loxodonta_consumption_sessions", state=state),
+                sum(1 for row in hot if row["state"] == state), state)
+        self.assertEqual(
+            scrape.value("loxodonta_consumption_sessions",
+                         state="RUNNING-HOT"), 1)
+        self.assertEqual(
+            scrape.value("loxodonta_consumption_sessions", state="ENDED-HOT"),
+            0)
+
+
 if __name__ == "__main__":
     unittest.main()
