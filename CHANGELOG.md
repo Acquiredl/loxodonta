@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- Every session-end step writes down how it went, and the scan reports it (#240; #245, slice one of PRD #244). After the anchor and the head publish, the hook appends one row of kind `attempt` to the sidecar that step already owns, carrying the step, the time, the budget and the outcome, never the URL. Readers that judge (`verify --anchors`, the keeper, `verify-package`) skip the row by its kind. `scan --json` and the dashboard's project tile gain, per chain, when a head last left by any route and the last failed attempt, whether or not a keeper cadence is set, and the scan says in one sentence when publishing is wired on the SessionEnd command and no chain holds a sent head. The chain's schema and the SPEC are untouched.
+
 ### Changed
 
 - The README is rewritten from scratch at a third of its length, 135 lines in place of 334, by a reader who met the repo cold and reproduced every claim before writing one (#233). The wordmark, tagline and badges stay, and so do the three pinned command blocks the suite runs. Four wordings were tightened on the way: the install sentence names both files, `install-hook` is described as hook entries in the harness settings file rather than one entry, exit codes 4 and 5 are listed with the rest, and the recorded-task excerpt that carried a machine-specific drawer hash is gone. What the front door no longer says, it links to.

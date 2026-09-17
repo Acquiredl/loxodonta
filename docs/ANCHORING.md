@@ -24,6 +24,8 @@ Anchors for `<log>` live in `<log>.anchors.jsonl` (e.g. `receipts.jsonl.anchors.
 
 The sidecar is *evidence, not a chain*: a forged proof fails replay; a deleted proof destroys evidence but forges nothing. Copy the sidecar somewhere the writer can't reach — proofs are self-authenticating, so an out-of-reach copy is strictly stronger than a head record.
 
+Beside the proofs, the session-end anchor leaves one more kind of row (#240). After each attempt the hook appends `{"kind": "attempt", "step": "anchor", "ts": "…", "budget": 12.0, "outcome": "submitted"}`, or the same row with the outcome `no calendar answered within 12 seconds` when nothing answered inside the budget. It is the recorder's note on how the step went, written so the store can tell a hook that never fired from one that fired and got no answer; it is testimony and never a proof. `verify --anchors`, `anchor --upgrade`, the supervisor's keeper and `verify-package` skip attempt rows by their kind, so a sidecar holding only notes reads exactly as an empty one. The supervisor reads them: `scan --json` says per chain when a head last left the machine and which session-end step last failed, with the outcome line as the reason. The publish memo carries the same row for the published head (docs/HOOK.md), and there it names no URL at all.
+
 ## 3. Commands
 
 ```
