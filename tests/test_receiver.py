@@ -301,6 +301,17 @@ class ContentTest(ReceiverFixture):
                 self.assertEqual(status, 400)
         self.assertEqual(self.stored(), ["token"])
 
+    def test_the_200_answer_says_it_is_json(self):
+        request = urllib.request.Request(
+            self.proc.url, data=self.lines, method="POST",
+            headers={"Content-Type": NDJSON, "X-Loxodonta-Chain": CHAIN})
+        with OPENER.open(request, timeout=30) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get("Content-Type"),
+                             "application/json")
+            self.assertEqual(json.loads(response.read()),
+                             {"appended": 3, "dropped": 0})
+
     def test_an_exact_duplicate_line_is_dropped(self):
         # A batch the sender retried after a lost acknowledgement: every
         # line is already there, n and entry_hash alike, so none lands.

@@ -366,7 +366,7 @@ class Door(BaseHTTPRequestHandler):
             return
         path = os.path.join(self.server.data, HEADS_FILE)
         if self.kept(path, [line]):
-            self.answer(200, json.dumps({"appended": 1}))
+            self.ok({"appended": 1})
 
     def keep_batch(self, body, name):
         try:
@@ -377,8 +377,7 @@ class Door(BaseHTTPRequestHandler):
         path = os.path.join(self.server.data, name)
         lines = new_lines(batch, known_pairs(path))
         if self.kept(path, lines):
-            self.answer(200, json.dumps({"appended": len(lines),
-                                         "dropped": len(batch) - len(lines)}))
+            self.ok({"appended": len(lines), "dropped": len(batch) - len(lines)})
 
     def kept(self, path, lines):
         """True once the lines are on disk (nothing to write counts). A
@@ -393,10 +392,14 @@ class Door(BaseHTTPRequestHandler):
             return False
         return True
 
-    def answer(self, status, text, allow=None):
+    def ok(self, counts):
+        """The 200: what landed, as JSON, and said to be JSON."""
+        self.answer(200, json.dumps(counts), kind="application/json")
+
+    def answer(self, status, text, allow=None, kind="text/plain; charset=utf-8"):
         body = (text + "\n").encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
         if allow:
             self.send_header("Allow", allow)
