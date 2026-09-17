@@ -102,13 +102,18 @@ The attempt row of §2 is kept here too, under the step `stamp`. After each sess
 
 ```
 loxodonta stamp --authority URL [--log PATH]              # a token over the current head
-loxodonta install-hook --profile custom --authority URL   # ... at every session end
+loxodonta stamp --authority URL --manifest PATH           # ... over a package manifest's sha256
+loxodonta install-hook --profile timestamped --authority URL   # ... at every session end
 loxodonta verify --stamps [--authority-chain FILE]        # judge tokens, offline
+supervisor package ... --stamp URL                        # seal a package with one
+loxodonta verify-package PATH --authority-chain FILE      # judge a package's tokens
 ```
 
 **`stamp`** reads the current head and POSTs a DER `TimeStampReq` to the authority as `application/timestamp-query`: version 1, a SHA-256 imprint of the head, a nonce, and `certReq` true, so the token carries the certificate that signed it and can be judged later from the authority's chain file alone. The recorder reads only the response's status — granted (0), or granted with modifications (1), or not granted — and appends one record for a token it was granted. Exit 0 with a record written, or with `already stamped ...` when this head already holds a token and nothing was asked. Exit 1, one line on stderr naming which, and an attempt row in place of a token row when the authority refused, answered something that is not a timestamp response, could not be reached, sent more than this file reads back (64 KiB, and the line says the cap is ours), or granted a token this machine could not write down. That last one is never recorded as `granted`: a token nobody kept is not a stamp.
 
-**At session end**, once `install-hook --authority URL` has wired it (under `custom` in this release; `docs/HOOK.md`), the same query runs after the tail commitment and the published head and before the anchor, so a slow calendar can never cost the fast POST and the anchor takes what is left of the twelve-second budget. Quiet on failure like its neighbours, and written down either way.
+**`--manifest PATH`** stamps a file's sha256 instead of a chain head, the shape `anchor --manifest` has: the token lands in `PATH.stamps.jsonl` and its record carries no `n`, because a manifest has no entries. This is how `supervisor package --stamp URL` seals a package, and `verify-package --authority-chain FILE` is how the recipient judges what it sealed — the seal earns `+ STAMPED` beside `+ ANCHORED`, a declared token that is absent is `SEAL-MISSING`, and the package carries each chain's stamps sidecar as it carries the anchors sidecar, judged as detail under its chain. The certificate chain is the one thing the package must not carry, since a chain shipped by the issuer is the issuer's word about whom to trust (docs/PACKAGE.md §2).
+
+**At session end**, once `install-hook --authority URL` has wired it (`docs/HOOK.md`), the same query runs after the tail commitment and the published head and before the anchor, so a slow calendar can never cost the fast POST and the anchor takes what is left of the twelve-second budget. Quiet on failure like its neighbours, and written down either way. **On the keeper's cadence**, when the coverage marker names an authority, `supervisor serve` stamps each ripe head on the turn that anchors it — the anchor cadence and no second one — which is the cover for the session that never reached its end.
 
 **`verify --stamps [--authority-chain FILE]`** — offline, like all of verify. Nothing is fetched: the chain file is on disk, or the token is not judged. For each record:
 
