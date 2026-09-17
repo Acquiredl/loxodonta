@@ -96,6 +96,7 @@ The receiver reads the chain header and nothing else; the other three ride along
 | `411` | no `Content-Length` |
 | `413` | `Content-Length` past the cap |
 | `415` | a content type that is neither of the two |
+| `500` | the disk refused the write; nothing of the batch is acknowledged, and the sender's memo does not advance |
 | `501` | a verb the stdlib server does not know at all |
 
 A refusal carries one line of plain text saying why. The receiver's own log, on its stdout, is one line per request with the time, the client address, the verb and the status; the request path is on no line, because the path is the credential.
@@ -144,7 +145,7 @@ The walk judges the receiver's file the way it judges any chain, so what it says
 - A chain header that is not a receipt file name: `400`, nothing written, nothing from the header touching the disk.
 - A body with no declared length, or declared past the cap: `411`, `413`, before a byte is read.
 - A batch with a line that is not shaped like an entry: `400`, nothing written.
-- A sender that stalls for thirty seconds mid-body: dropped, one line on the receiver's log.
+- A sender that stalls for thirty seconds, mid-body or before a TLS handshake it never starts: dropped silently, with no line on the receiver's log, so a stalling stranger cannot fill it.
 - Every request for what it holds: there is no such request. The files are read on the box, by the operator, with the recorder.
 
 ## 8. The head-record test, restated

@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `receiver.py`, the third single file: the far end of the published chain and the published head, run on a machine the writer cannot reach (#247, ADR-0031). It mints one URL on first start, prints the same one on every start after, and retires it on `--new-token`. It answers only a POST at that path: a JSON head is appended to `heads.jsonl`, an NDJSON chain batch to the file the `X-Loxodonta-Chain` header names, and a header that is not a receipt file name is refused with nothing written. An exact duplicate line is dropped, a line with a known `n` and a different hash is kept beside the original, and the 200 comes only after the bytes are on disk. There is no route that returns, lists or deletes, which is what makes the URL a head record: a credential that can add and cannot take away. `--cert` and `--key` speak TLS through the stdlib; without them the startup line says plain HTTP. It never runs `verify`; the recorder's `verify --log` on its chain file is the acceptance test, `VALID` after honest batches and `BROKEN` at the first entry a regenerated chain replaced. The wire contract is `docs/RECEIVER.md`, and `--version` moves with the other two files.
+
 ### Changed
 
 - The README is rewritten from scratch at a third of its length, 135 lines in place of 334, by a reader who met the repo cold and reproduced every claim before writing one (#233). The wordmark, tagline and badges stay, and so do the three pinned command blocks the suite runs. Four wordings were tightened on the way: the install sentence names both files, `install-hook` is described as hook entries in the harness settings file rather than one entry, exit codes 4 and 5 are listed with the rest, and the recorded-task excerpt that carried a machine-specific drawer hash is gone. What the front door no longer says, it links to.
