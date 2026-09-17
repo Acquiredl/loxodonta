@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from pathlib import Path
@@ -24,7 +25,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_publish_keeper`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import clean_env
+from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
 from test_supervisor import (ago, chain_head, chains_by_session, keeper_env,
@@ -374,6 +375,144 @@ class DashboardLeftTest(ReceiverFixture):
         self.assertIn("chain.left", page)
         self.assertIn("last left", page)
         self.assertIn("has left this machine", page)
+
+
+class ProfileKeeperTest(unittest.TestCase):
+    """`serve` reads the coverage marker's newest epoch (ADR-0031 ruling
+    1): with no `--anchor-every` and a `timestamped` profile, the anchor
+    keeper runs on a six-hour default; an explicit flag wins; `local`,
+    or `custom` without a flag, runs no keeper. The startup line says
+    which cadence is in force and where it came from. The marker is the
+    real installer's, the chain is aged through the recorder's clock
+    override, and the calendar is a fake on a free port."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.root.mkdir()
+        self.home = Path(self._tmp.name).resolve() / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        self.store = Path(self._tmp.name).resolve() / "store"
+        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness.mkdir()
+        self.calendar = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
+        self.calendar.mode = "pending"
+        self.calendar.submitted = []
+        self.calendar.polled = []
+        self.calendar.url = (
+            f"http://127.0.0.1:{self.calendar.server_address[1]}")
+        threading.Thread(target=self.calendar.serve_forever,
+                         daemon=True).start()
+        self.addCleanup(self.calendar.server_close)
+        self.addCleanup(self.calendar.shutdown)
+
+    def install(self, *args):
+        """The real installer writes the marker the keeper reads, into
+        this test's store; its settings land in a throwaway home."""
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "install-hook", *args],
+            capture_output=True, check=True,
+            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+                           LOXODONTA_HOME=str(self.store)))
+
+    def aged_chain(self, session, age):
+        """A chain through the public CLI whose entries are `age`
+        seconds old (SOURCE_DATE_EPOCH, the recorder's clock override),
+        so a keeper cadence shorter than `age` finds its head ripe."""
+        env = keeper_env(SOURCE_DATE_EPOCH=str(int(time.time()) - age))
+        log_dir = self.root / "alpha" / "receipts"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log = log_dir / f"receipts-{session}.jsonl"
+        subprocess.run([sys.executable, str(LOXODONTA), "init",
+                        "--log", str(log)],
+                       capture_output=True, check=True, env=env)
+        subprocess.run([sys.executable, str(LOXODONTA), "log",
+                        "--log", str(log), "--actor", "claude-code",
+                        "--action", "step"],
+                       capture_output=True, check=True, env=env)
+        return log
+
+    def serve(self, *extra):
+        """Start `serve` against the store's marker and read the URL."""
+        self.proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--root",
+             str(self.root), "--port", "0", "--witness", str(self.witness),
+             "--calendar", self.calendar.url, *extra],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env=keeper_env(LOXODONTA_HOME=str(self.store),
+                           PYTHONIOENCODING="utf-8"))
+        self.addCleanup(self._stop)
+        line = self.proc.stdout.readline()
+        match = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if match is None:
+            self.proc.kill()
+            _, err = self.proc.communicate()
+            self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        self.url = match.group()
+
+    def _stop(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.communicate()
+
+    def tick(self):
+        """One request, which is one tick of the keeper."""
+        with OPENER.open(self.url + "/api/status", timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def said_at_startup(self):
+        """Everything `serve` printed after the URL line."""
+        self.proc.kill()
+        out, _ = self.proc.communicate()
+        return out
+
+    def test_a_timestamped_marker_puts_the_anchor_keeper_on_six_hours(self):
+        self.install("--profile", "timestamped")
+        log = self.aged_chain("sess-prof", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile timestamped)", said)
+        self.assertEqual(self.calendar.submitted,
+                         [bytes.fromhex(chain_head(log))],
+                         "the keeper anchored the ripe head on the "
+                         "profile's cadence, with no flag typed")
+
+    def test_an_explicit_flag_overrides_the_marker_and_says_so(self):
+        self.install("--profile", "timestamped")
+        self.aged_chain("sess-flag", age=7 * 3600)
+
+        self.serve("--anchor-every", "1h")
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 1h (flag --anchor-every)", said)
+        self.assertNotIn("6h", said)
+
+    def test_a_local_marker_runs_no_keeper(self):
+        self.install()
+        log = self.aged_chain("sess-local", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor off (profile local", said)
+        self.assertEqual(self.calendar.submitted, [])
+        self.assertFalse(Path(str(log) + ".anchors.jsonl").exists())
+
+    def test_custom_without_a_flag_runs_no_keeper(self):
+        self.install("--profile", "custom")
+        self.aged_chain("sess-custom", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor off (profile custom", said)
+        self.assertEqual(self.calendar.submitted, [])
 
 
 if __name__ == "__main__":
