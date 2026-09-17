@@ -540,7 +540,7 @@ def cadence_words(seconds):
 # re-install at another profile takes effect at the next start.
 
 PROFILE_ANCHOR_EVERY = 6 * 3600   # seconds: the timestamped tier's default
-PROFILE_PUBLISH_EVERY = 6 * 3600  # seconds: the full tier's, the same day
+PROFILE_PUBLISH_EVERY = 6 * 3600  # seconds: the full tier's, the same six
 
 # The tiers in ascending order. `custom` is the raw flags and declares
 # no tier, so it ranks with `local` here: whatever it wired at session
@@ -552,12 +552,12 @@ def marker_profile():
     """The strongest profile any harness declares in the coverage
     marker, as (profile, harness, remote), or None when no epoch names
     one (a marker from before profiles existed, or no marker at all).
-    The remote is where that install wired publishing and is the
-    keeper's target at `full` (#249); it is a URL the recorder already
-    refused if a shell could act on it, and anything but a string here
-    reads as none. Each
-    harness's newest epoch speaks for that harness, and the highest
-    tier among them speaks for the keeper (ADR-0031 ruling 1, #246).
+    The remote is where that install wired publishing, and is the
+    keeper's target at `full` (#249): a URL the recorder already
+    refused if a shell could act on it, and anything but a string
+    here reads as none. Each harness's newest epoch speaks for that
+    harness, and the highest tier among them speaks for the keeper
+    (ADR-0031 ruling 1, #246).
     Not simply the newest epoch of all: a flagless install for a
     second harness would then read as the first harness's choice
     withdrawn, and the keeper would stand down with nothing saying a
@@ -595,9 +595,10 @@ def marker_profile():
 def keeper_cadences(anchor_every, declared):
     """The anchor cadence in force and where it came from (ADR-0031
     ruling 1, #246): an explicit `--anchor-every` wins; with none, a
-    `timestamped` profile puts the anchor keeper on its six-hour
-    default; `local`, `custom` without a flag, or no profile at all
-    runs no anchor keeper. `declared` is marker_profile's (profile,
+    `timestamped` or `full` profile puts the anchor keeper on its
+    six-hour default, since both tiers wired the session-end anchor;
+    `local`, `custom` without a flag, or no profile at all runs no
+    anchor keeper. `declared` is marker_profile's (profile,
     harness, remote) or None, and the harness is named in the source so
     the operator can see which install set the cadence. Returns (seconds
     or None, the source in words)."""

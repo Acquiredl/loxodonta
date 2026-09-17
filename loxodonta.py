@@ -3965,8 +3965,8 @@ def cmd_install_hook(args):
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
     marked = record_coverage("claude-code", wired, args.profile,
-                             remote=args.publish_chain
-                             or args.publish_head,
+                             remote=(args.publish_chain
+                                     or args.publish_head),
                              authority=args.authority)
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
