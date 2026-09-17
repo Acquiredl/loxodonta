@@ -138,6 +138,20 @@ class FakeCalendarHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class StallingCalendar(FakeCalendar):
+    def handle_error(self, request, client_address):
+        pass  # a client that gave up waiting is the point of one test
+
+
+class StallingCalendarHandler(FakeCalendarHandler):
+    """A calendar that takes the digest and sits on it past the hook's
+    per-call bound, then answers a client that has already left."""
+
+    def do_POST(self):
+        time.sleep(self.server.stall)
+        super().do_POST()
+
+
 class SessionEndAnchorTest(unittest.TestCase):
     """ADR-0024: a hook wired with --anchor anchors the session's chain
     head at SessionEnd, quietly and best-effort, and spends what is left
@@ -264,6 +278,35 @@ class SessionEndAnchorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout + result.stderr, "")
         self.assertEqual(self.proofs(), [])
+
+    def test_a_calendar_that_never_answers_leaves_the_attempt_row(self):
+        # The other way a session-end anchor fails: a calendar that takes
+        # the connection and never answers inside the hook's per-call
+        # bound. No proof, and the row says no calendar answered inside
+        # the budget (#240), so the store can tell this from a hook
+        # that never fired.
+        stalling = StallingCalendar(("127.0.0.1", 0), StallingCalendarHandler)
+        stalling.stall = 7  # seconds; past the five the hook waits per calendar
+        stalling.nonce = b"fake-nonce"
+        stalling.submitted = []
+        stalling.url = f"http://127.0.0.1:{stalling.server_address[1]}"
+        threading.Thread(target=stalling.serve_forever, daemon=True).start()
+        self.addCleanup(stalling.server_close)
+        self.addCleanup(stalling.shutdown)
+        self.tool_call()
+
+        started = time.monotonic()
+        result = self.session_end("--anchor", "--calendar", stalling.url)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertLess(elapsed, 12, "the per-call bound, not the budget")
+        self.assertEqual(self.proofs(), [])
+        (row,) = self.attempts()
+        self.assertEqual(row["step"], "anchor")
+        self.assertEqual(row["outcome"],
+                         "no calendar answered within 12 seconds")
 
     def test_an_already_anchored_head_is_not_anchored_twice(self):
         self.tool_call()
