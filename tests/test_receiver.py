@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -57,6 +58,31 @@ def post(url, body, content_type, headers=None):
             return response.status, response.read()
     except urllib.error.HTTPError as refused:
         return refused.code, refused.read()
+
+
+def request(method, url):
+    """One bodiless request of any verb; (status, headers, body)."""
+    try:
+        with OPENER.open(urllib.request.Request(url, method=method),
+                         timeout=30) as response:
+            return response.status, response.headers, response.read()
+    except urllib.error.HTTPError as refused:
+        return refused.code, refused.headers, refused.read()
+
+
+def raw_request(url, request_bytes):
+    """Bytes on a socket, and every byte that came back: for the request
+    urllib would not send, such as a declared length with no body."""
+    parts = urllib.parse.urlsplit(url)
+    with socket.create_connection((parts.hostname, parts.port),
+                                  timeout=30) as sock:
+        sock.sendall(request_bytes)
+        answered = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return answered
+            answered += chunk
 
 
 class ReceiverFixture(unittest.TestCase):
@@ -130,6 +156,61 @@ class UrlTest(ReceiverFixture):
         self.assertEqual(status, 404)
         status, _ = post(rotated.url, head, "application/json")
         self.assertEqual(status, 200)
+
+
+class RefusalTest(ReceiverFixture):
+    """One door, POST at the token's path; everything else is turned
+    away, and nothing that arrived is ever handed back."""
+
+    def setUp(self):
+        super().setUp()
+        self.proc = self.start()
+        self.token = self.proc.url.rsplit("/", 1)[1]
+        self.base = self.proc.url[:-len(self.token)]  # http://127.0.0.1:P/
+
+    def test_every_verb_but_post_is_405_at_the_token_path(self):
+        for verb in ("GET", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"):
+            with self.subTest(verb=verb):
+                status, headers, _ = request(verb, self.proc.url)
+                self.assertEqual(status, 405)
+                self.assertEqual(headers.get("Allow"), "POST")
+
+    def test_any_other_path_is_404_whatever_the_verb(self):
+        elsewhere = ("", "heads.jsonl", "receipts-abc.jsonl",
+                     self.token + "/heads.jsonl", self.token[:-1],
+                     self.token.upper())
+        for path in elsewhere:
+            with self.subTest(path=path):
+                status, _, _ = request("GET", self.base + path)
+                self.assertEqual(status, 404)
+                status, _ = post(self.base + path, b"{}", "application/json")
+                self.assertEqual(status, 404)
+        self.assertEqual(self.stored(), ["token"])
+
+    def test_a_body_over_the_cap_is_413_and_nothing_is_written(self):
+        # A declared length far past any cap, and no body behind it: the
+        # receiver must refuse on the declaration, before reading a byte.
+        answered = raw_request(
+            self.proc.url,
+            ("POST /%s HTTP/1.0\r\nHost: receiver\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: 1000000000000\r\n\r\n" % self.token).encode())
+        self.assertTrue(answered.startswith(b"HTTP/1.0 413 "), answered)
+        self.assertEqual(self.stored(), ["token"])
+
+    def test_no_route_returns_what_the_receiver_holds(self):
+        digest = "f" * 64
+        head = json.dumps({"head": digest, "n": 7}).encode("utf-8")
+        status, _ = post(self.proc.url, head, "application/json")
+        self.assertEqual(status, 200)
+        self.assertIn("heads.jsonl", self.stored())
+        for path in ("", "heads.jsonl", self.token, self.token + "/",
+                     self.token + "/heads.jsonl", self.token + "?file=heads.jsonl",
+                     "receipts-abc.jsonl"):
+            with self.subTest(path=path):
+                status, _, body = request("GET", self.base + path)
+                self.assertIn(status, (404, 405))
+                self.assertNotIn(digest.encode(), body)
 
 
 if __name__ == "__main__":

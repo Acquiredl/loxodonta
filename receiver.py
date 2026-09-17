@@ -52,6 +52,11 @@ TOKEN_FILE = "token"
 HEADS_FILE = "heads.jsonl"
 HEAD_TYPE = "application/json"
 
+# The most one POST may carry. A session's chain runs to a few hundred
+# bytes per entry, so this holds many thousands of entries in one batch;
+# a body declared larger is refused before a byte of it is read.
+BODY_CAP = 8 * 1024 * 1024
+
 
 # --- The data directory and the token ------------------------------------------
 
@@ -147,11 +152,49 @@ class Door(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         return hmac.compare_digest(path, "/" + self.server.token)
 
+    def refuse_method(self):
+        """Every verb but POST: 405 at the token's path, so an operator
+        with the right URL learns it is the verb that is wrong, and 404
+        anywhere else. There is no verb that reads, lists or deletes."""
+        if self.at_the_token():
+            self.answer(405, "the receiver takes POST only", allow="POST")
+        else:
+            self.answer(404, "not the receiver's path")
+
+    do_GET = do_HEAD = do_PUT = do_DELETE = refuse_method
+    do_PATCH = do_OPTIONS = do_TRACE = do_CONNECT = refuse_method
+
+    def declared_length(self):
+        """The body length the sender declared, judged before any of it
+        is read: None with the refusal already sent when it is missing,
+        malformed, or past the cap."""
+        declared = self.headers.get("Content-Length")
+        if declared is None:
+            self.answer(411, "Content-Length is required")
+            return None
+        try:
+            length = int(declared)
+        except ValueError:
+            length = -1
+        if length < 0:
+            self.answer(400, "Content-Length is not a length")
+            return None
+        if length > BODY_CAP:
+            self.answer(413, f"the body cap is {BODY_CAP} bytes")
+            return None
+        return length
+
     def do_POST(self):
         if not self.at_the_token():
             self.answer(404, "not the receiver's path")
             return
-        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        length = self.declared_length()
+        if length is None:
+            return
+        body = self.rfile.read(length)
+        if len(body) != length:
+            self.answer(400, "the body ended before its declared length")
+            return
         line = head_line(body)
         if line is None:
             self.answer(400, "a head is one JSON object")
@@ -159,13 +202,16 @@ class Door(BaseHTTPRequestHandler):
         append_durably(os.path.join(self.server.data, HEADS_FILE), [line])
         self.answer(200, json.dumps({"appended": 1}))
 
-    def answer(self, status, text):
+    def answer(self, status, text, allow=None):
         body = (text + "\n").encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if allow:
+            self.send_header("Allow", allow)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         print(f"{stamp} {self.client_address[0]} {self.command} {status} "
               f"{text}", flush=True)
