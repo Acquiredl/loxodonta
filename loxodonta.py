@@ -2792,6 +2792,11 @@ def cmd_hook(args):
         if args.publish:
             publish_head(log, args.publish, session,
                          timeout=publish_budget(args.actor))
+        if args.publish_chain:
+            # The entries after the cursor, under the head's budget
+            # (ADR-0031 ruling 3); what does not fit is the keeper's.
+            session_end_publish_chain(log, args.publish_chain, session,
+                                      timeout=publish_budget(args.actor))
         if args.anchor:
             session_end_anchor(log, args.calendar or DEFAULT_CALENDARS,
                                budget=deadline - time.monotonic())
@@ -3608,6 +3613,12 @@ def main(argv=None):
                                   "this URL after the tail commitment and "
                                   "before the anchor, quietly (ADR-0025; "
                                   "install-hook --publish-head wires this)")
+    hook_parser.add_argument("--publish-chain", default=None, metavar="URL",
+                             help="at SessionEnd, POST the chain's entries "
+                                  "since the last acknowledged one to this "
+                                  "URL, after the head and before the "
+                                  "anchor, quietly (ADR-0031; install-hook "
+                                  "--publish-chain wires this)")
     hook_parser.set_defaults(func=cmd_hook)
     explain_parser = sub.add_parser(
         "explain", parents=[common],

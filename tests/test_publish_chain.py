@@ -318,5 +318,208 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertEqual(sent["headers"]["x-loxodonta-range"], "0-1")
 
 
+class PublishChainAtSessionEndTest(PublishBase):
+    """`hook --publish-chain URL`: at SessionEnd, after the tail
+    commitment and the published head, before the anchor, the chain's
+    lines since the cursor leave, quietly and under the head's budget."""
+
+    def setUp(self):
+        super().setUp()
+        # The publish suite's fake receiver, with the handler that keeps
+        # the tool headers and can sit on a chain batch alone.
+        self.receiver = serve_fake(self)
+
+    def chain_lines(self):
+        return self.chain().read_bytes()
+
+    def test_order_is_commitment_head_chain_then_anchor(self):
+        # ADR-0031 ruling 3, in ADR-0025's order: the seal is on the
+        # chain before anything leaves, the head goes first, the chain
+        # batch second and carries the seal as its last line, and the
+        # calendar is asked only after both.
+        calendar = self.calendar()
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        self.receiver.chain = self.chain()
+
+        result = self.session_end("--publish", self.receiver.url,
+                                  "--publish-chain", self.receiver.url,
+                                  "--anchor", "--calendar", calendar.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "logged entry 2")
+        self.assertEqual(result.stderr, "")
+        head, batch = self.receiver.received
+        self.assertEqual(head["content_type"], "application/json")
+        self.assertEqual(batch["content_type"], NDJSON)
+        self.assertEqual(batch["calendar_asks"], 0)
+        sealed = json.loads(batch["chain_tail"])
+        self.assertTrue(sealed["action"].startswith("transcript-commitment:"))
+        self.assertEqual(batch["raw"], self.chain_lines())
+        self.assertEqual(batch["raw"].splitlines()[-1],
+                         self.chain_lines().splitlines()[-1])
+        self.assertEqual(batch["headers"], {
+            "x-loxodonta-chain": self.chain().name,
+            "x-loxodonta-session": self.SESSION,
+            "x-loxodonta-range": "0-2",
+            "x-loxodonta-head": sealed["entry_hash"],
+        })
+        # The digest was asked after both POSTs, of the sealed head.
+        self.assertEqual(calendar.publishes_seen, [2])
+        self.assertEqual([d.hex() for d in calendar.submitted],
+                         [sealed["entry_hash"]])
+        # The memo: a head row, a chain row, and one attempt row per
+        # step, both `sent`, under the head's budget.
+        (row,) = chain_rows(self.chain())
+        self.assertEqual((row["first"], row["last"], row["head"],
+                          row["event"]),
+                         (0, 2, sealed["entry_hash"], "session-end"))
+        self.assertEqual(len(head_rows(self.chain())), 1)
+        self.assertEqual([(a["step"], a["outcome"], a["budget"])
+                          for a in attempt_rows(self.chain())],
+                         [("publish-head", "sent", 3.0),
+                          ("publish-chain", "sent", 3.0)])
+
+    def test_a_stalled_chain_send_costs_the_anchor_nothing_beyond_the_budget(self):
+        # The chain send shares the head's bound: a remote that sits on
+        # the batch is left behind on the hook's own clock, the calendar
+        # is still asked, and the memo says so with no chain row.
+        calendar = self.calendar()
+        self.receiver.chain_delay = 4  # just past the three the hook waits
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+
+        started = time.monotonic()
+        result = self.session_end("--publish", self.receiver.url,
+                                  "--publish-chain", self.receiver.url,
+                                  "--anchor", "--calendar", calendar.url)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertLess(elapsed, 12)
+        self.assertEqual([s["content_type"] for s in self.receiver.received],
+                         ["application/json", NDJSON])
+        self.assertEqual([d.hex() for d in calendar.submitted], [self.head()])
+        self.assertEqual(len(head_rows(self.chain())), 1)
+        self.assertEqual(chain_rows(self.chain()), [])
+        self.assertEqual([(a["step"], a["outcome"])
+                          for a in attempt_rows(self.chain())],
+                         [("publish-head", "sent"),
+                          ("publish-chain", "no answer within 3 seconds")])
+
+    def test_a_refused_chain_send_leaves_an_attempt_row_and_never_the_url(self):
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+
+        result = self.session_end("--publish-chain", "http://127.0.0.1:9/hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "logged entry 2")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(chain_rows(self.chain()), [])
+        (row,) = attempt_rows(self.chain())
+        self.assertEqual(set(row), {"kind", "step", "ts", "budget", "outcome"})
+        self.assertEqual(row["step"], "publish-chain")
+        self.assertEqual(row["budget"], 3.0)
+        self.assertNotEqual(row["outcome"], "sent")
+        self.assertTrue(row["outcome"], "the outcome must say what happened")
+        memo = self.chain().with_name(
+            self.chain().name + ".published.jsonl").read_text("utf-8")
+        self.assertNotIn("127.0.0.1", memo)
+        self.assertNotIn("/hook", memo)
+        # The next send resumes from the same cursor: genesis.
+        self.receiver.chain = self.chain()
+        self.session_end("--publish-chain", self.receiver.url)
+        (sent,) = self.receiver.received
+        self.assertEqual(sent["headers"]["x-loxodonta-range"], "0-2")
+        self.assertEqual(sent["raw"], self.chain_lines())
+
+    def test_a_second_session_end_with_nothing_new_sends_nothing_and_leaves_no_row(self):
+        # An unchanged transcript seals nothing, so the chain holds
+        # nothing after the cursor: the step did not run, and the memo
+        # gains neither a chain row nor a note.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        self.session_end("--publish-chain", self.receiver.url)
+        self.assertEqual(len(self.receiver.received), 1)
+
+        result = self.session_end("--publish-chain", self.receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.receiver.received), 1)
+        self.assertEqual(len(chain_rows(self.chain())), 1)
+        self.assertEqual(len(attempt_rows(self.chain())), 1)
+
+    def test_a_codex_hook_gives_the_chain_half_the_cap(self):
+        # The same budget rule as the head (#183): a Codex hook waits
+        # 1.5 seconds for its POST, and the attempt row says so.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+
+        result = self.session_end("--publish-chain", self.receiver.url,
+                                  "--actor", "codex")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (row,) = attempt_rows(self.chain())
+        self.assertEqual((row["step"], row["outcome"], row["budget"]),
+                         ("publish-chain", "sent", 1.5))
+
+    def test_a_non_http_url_publishes_nothing_and_still_seals(self):
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        target = self.root / "never-opened.txt"
+
+        result = self.session_end("--publish-chain",
+                                  f"file:///{target.as_posix()}")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(target.exists())
+        self.assertEqual(memo_of(self.chain()), [])
+        last = json.loads(self.chain_lines().splitlines()[-1])
+        self.assertTrue(last["action"].startswith("transcript-commitment:"))
+
+    def test_a_session_without_receipts_publishes_nothing(self):
+        result = self.hook({"session_id": "sess-chat-only",
+                            "hook_event_name": "SessionEnd",
+                            "reason": "prompt_input_exit",
+                            "transcript_path": str(self.transcript)},
+                           "--publish-chain", self.receiver.url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.receiver.received, [])
+
+    def test_the_receivers_file_verifies_valid_after_a_session_ends(self):
+        # The acceptance test, end to end: the hook at session end sends
+        # to the repo's own receiver, whose file is then a receipt log
+        # the recorder judges VALID; a second session end carries only
+        # what came after, and the file still verifies.
+        receiver = start_receiver(self, self.root / "receiver")
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call("echo one")
+        self.tool_call("echo two")
+
+        result = self.session_end("--publish", receiver.url,
+                                  "--publish-chain", receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        copy = self.root / "receiver" / self.chain().name
+        self.assertEqual(copy.read_bytes(), self.chain_lines())
+        heads = (self.root / "receiver" / "heads.jsonl").read_text("utf-8")
+        self.assertEqual(json.loads(heads)["head"], self.head())
+
+        self.transcript.write_bytes(b"page one\npage two\n")
+        self.tool_call("echo three")
+        self.session_end("--publish-chain", receiver.url)
+
+        self.assertEqual(copy.read_bytes(), self.chain_lines())
+        self.assertEqual([(r["first"], r["last"])
+                          for r in chain_rows(self.chain())],
+                         [(0, 3), (4, 5)])
+        judged = run_recorder("verify", "--log", copy)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(judged.stdout.strip(), "VALID")
+
+
 if __name__ == "__main__":
     unittest.main()
