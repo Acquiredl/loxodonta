@@ -347,5 +347,49 @@ class ContentTest(ReceiverFixture):
         self.assertEqual(self.stored(), ["token"])
 
 
+class VerifyTest(ReceiverFixture):
+    """The acceptance test is the recorder's (ADR-0031 ruling 4): the
+    receiver's file is a receipt log, and `loxodonta verify --log`
+    judges it with no new code."""
+
+    def verify(self):
+        return run_recorder("verify", "--log", self.data / CHAIN)
+
+    def test_honest_batches_verify_valid_and_a_regenerated_chain_breaks(self):
+        proc = self.start()
+        log = self.root / CHAIN
+        headers = {"X-Loxodonta-Chain": CHAIN}
+
+        # The genesis batch, from the first entry; the sender's retry of
+        # it; then the next batch, from the entry after the last one
+        # acknowledged, the way the cursor sends it.
+        genesis_batch = make_chain(log, ["step 1"], epoch=1700000000)
+        self.assertEqual(post(proc.url, genesis_batch, NDJSON, headers)[0], 200)
+        self.assertEqual(post(proc.url, genesis_batch, NDJSON, headers)[0], 200)
+        for action in ("step 2", "step 3"):
+            run_recorder("log", "--log", log, "--actor", "claude-code",
+                         "--action", action, epoch=1700000000)
+        next_batch = b"".join(log.read_bytes().splitlines(True)[2:])
+        self.assertEqual(post(proc.url, next_batch, NDJSON, headers)[0], 200)
+
+        judged = self.verify()
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(judged.stdout.strip(), "VALID")
+        self.assertEqual((self.data / CHAIN).read_bytes(), log.read_bytes())
+
+        # A regenerated chain, the writer's rewrite of history, sent after
+        # the original: it lands beside the entries it replaced, and the
+        # walk breaks at the first entry that differs.
+        regenerated = make_chain(self.root / "again.jsonl", ["step 1", "step 2"],
+                                 epoch=1700009999)
+        self.assertEqual(post(proc.url, regenerated, NDJSON, headers)[0], 200)
+
+        judged = self.verify()
+        self.assertEqual(judged.returncode, 1, judged.stdout + judged.stderr)
+        self.assertTrue(judged.stdout.startswith("BROKEN at entry 4"),
+                        judged.stdout)
+        self.assertNotIn("VALID", judged.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
