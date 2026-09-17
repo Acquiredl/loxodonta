@@ -646,6 +646,46 @@ def calendar_request(url, data=None, timeout=15):
         return response.read(MAX_PROOF_BYTES)
 
 
+# --- Attempt records (#240, PRD #244) ----------------------------------------
+# Every session-end step that reaches off the machine is quiet on failure
+# (ADR-0024 ruling 3, ADR-0025): an exit hook that complains is noise
+# nobody can act on. Quiet at the moment and silent in the record are
+# different choices, so after each step the recorder writes down how it
+# went, in the sidecar the step already owns: the anchors sidecar for the
+# anchor, the publish memo for the head. One row of kind `attempt`,
+# carrying the step, the time, the budget it had, and the outcome, which
+# is `submitted` or `sent`, or the one line the bounded call produced.
+# Never the URL: a webhook URL is a credential. The row is testimony like
+# the rest of the sidecar and proves nothing; every reader that judges
+# (`verify --anchors`, the keeper, `verify-package`) skips it by its kind,
+# and the supervisor reads it to say when a head last left the machine
+# and when the last attempt failed. The chain's schema is untouched.
+
+ATTEMPT_KIND = "attempt"
+STEP_ANCHOR = "anchor"
+STEP_PUBLISH_HEAD = "publish-head"
+
+
+def is_attempt(record):
+    """True for a row of kind `attempt`: a note on how a session-end
+    step went, never a proof and never a sent head. Readers that judge
+    skip these rows; readers that report use them."""
+    return isinstance(record, dict) and record.get("kind") == ATTEMPT_KIND
+
+
+def append_attempt_record(sidecar, step, budget, outcome):
+    """One attempt row in `sidecar`: the step, the time, the budget in
+    seconds, the outcome. Never raises: the row is the note after the
+    step, and an exit hook that fails over its own bookkeeping is noise."""
+    try:
+        append_sidecar_record(sidecar, {"kind": ATTEMPT_KIND, "step": step,
+                                        "ts": now_ts(),
+                                        "budget": round(budget, 1),
+                                        "outcome": outcome})
+    except OSError:
+        return
+
+
 # --- The session-end anchor (ADR-0024) ---------------------------------------
 # A hook wired with --anchor anchors the chain head when the session
 # ends: after the tail commitment, under a budget that fits inside the
@@ -708,8 +748,9 @@ def anchor_and_upgrade(log, calendars, budget):
         return  # a damaged tail cannot be anchored
     head, n = last["entry_hash"], last["n"]
     anchored = {r["head"] for r in (read_anchor_records(log) or [])
-                if isinstance(r, dict) and "head" in r}
+                if isinstance(r, dict) and "head" in r and not is_attempt(r)}
     if head not in anchored:
+        submitted = False
         for calendar in calendars:
             if remaining() <= 0:
                 break
@@ -720,8 +761,15 @@ def anchor_and_upgrade(log, calendars, budget):
                                          timeout=remaining())
                 judge_proof(head, proof)
                 append_anchor_record(log, head, n, url, proof)
+                submitted = True
             except (OSError, ProofError, ValueError):
                 continue
+        # How it went, written down beside the proofs (#240): a head
+        # already anchored was not a step, so it leaves no row.
+        append_attempt_record(
+            anchors_path(log), STEP_ANCHOR, budget,
+            "submitted" if submitted
+            else f"no calendar answered within {budget:.0f} seconds")
     upgrade_pending_proofs(os.path.dirname(os.path.abspath(log)), remaining,
                            deadline)
 
@@ -735,7 +783,7 @@ def upgrade_pending_proofs(folder, remaining, deadline):
         chain = os.path.join(folder, name[:-len(".anchors.jsonl")])
         completed, pending = set(), []
         for record in (read_anchor_records(chain) or []):
-            if not isinstance(record, dict):
+            if not isinstance(record, dict) or is_attempt(record):
                 continue
             try:
                 verdict = judge_proof(record["head"],
@@ -1060,7 +1108,7 @@ def upgrade_anchors(args):
     settled_heads = set()
     pending = []
     for record in records:
-        if record is None:
+        if record is None or is_attempt(record):
             continue
         try:
             verdict = judge_proof(record["head"],
@@ -1145,6 +1193,8 @@ def check_anchors(log, entries):
 
     judged = []
     for record in records:
+        if is_attempt(record):
+            continue  # a note on how a step went, not evidence (#240)
         if record is None:
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
@@ -1726,6 +1776,10 @@ def judge_manifest_anchor(folder):
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
     records = read_anchor_records(manifest)
+    if records:
+        # Attempt rows are notes, never proofs (#240): a sidecar holding
+        # only notes holds no record, the same as an empty one.
+        records = [r for r in records if not is_attempt(r)]
     if not records:
         what = "is not in this package" if records is None else "holds no record"
         print(f"seal anchor: SEAL-MISSING: {anchors_path('manifest.json')} "
