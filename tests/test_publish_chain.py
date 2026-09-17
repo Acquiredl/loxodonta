@@ -14,6 +14,7 @@ what was refused is the point. No network, ever, and never internals.
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_publish_chain`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import clean_env
+from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
 from test_receiver import make_chain, run_recorder
 from test_supervisor import (chain_head, chains_by_session, keeper_env,
@@ -1028,6 +1029,494 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.assertEqual(status["exit"], 0)
         self.assertEqual([row.get("kind") for row in memo_of(log)],
                          [None, "chain"])
+
+
+class InstallProfileFullTest(unittest.TestCase):
+    """`install-hook --profile full --remote URL` (ADR-0031 ruling 1,
+    issue #249): the tier that sends the entries themselves. One word
+    wires the session-end anchor, the head publish and the chain publish,
+    and all three go to the one URL the operator names, because the far
+    end tells a head from a batch by content type and a second URL would
+    only be a way to get it wrong. Without a remote there is no such
+    tier: refused, nothing written, and the two ways to get one printed.
+    `custom` keeps the raw flags."""
+
+    URL = "https://shelf.example.test:8790/7qpsWUkU86ML-NOuaGjSaetfYCGg"
+    OTHER = "https://hooks.example.test/services/T000/B000/XXXX"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.home = self.root / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        self.store = self.root / "store"
+        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
+                    "LOXODONTA_HOME": str(self.store)}
+
+    def install(self, *args):
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), "install-hook", *args],
+            cwd=self.root, capture_output=True, encoding="utf-8",
+            env={**clean_env(), **self.env})
+
+    def settings_text(self):
+        path = self.home / ".claude" / "settings.json"
+        return path.read_text(encoding="utf-8") if path.exists() else "{}"
+
+    def commands(self, event):
+        hooks = json.loads(self.settings_text())["hooks"]
+        return [h["command"] for b in hooks[event] for h in b["hooks"]]
+
+    def codex_hook(self):
+        hooks = json.loads((self.home / ".codex" / "hooks.json")
+                           .read_text(encoding="utf-8"))["hooks"]
+        [block] = hooks["SessionEnd"]
+        [wired] = block["hooks"]
+        return wired
+
+    def epochs(self):
+        marker = self.store / "coverage.json"
+        if not marker.exists():
+            return []
+        return json.loads(marker.read_text(encoding="utf-8"))["epochs"]
+
+    def test_full_wires_the_anchor_and_both_publishes_to_the_one_remote(self):
+        result = self.install("--profile", "full", "--remote", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertTrue(
+            end.endswith(f' --anchor --publish "{self.URL}"'
+                         f' --publish-chain "{self.URL}"'), end)
+        # No network call in the recording path (ADR-0024 ruling 1).
+        self.assertNotIn("--publish", json.dumps(self.commands("PostToolUse")))
+        # The installer reads all three choices back, in the mechanisms'
+        # own words, and the tier in one line.
+        self.assertIn("anchors at session end", result.stdout)
+        self.assertIn("publishes the head to " + self.URL, result.stdout)
+        self.assertIn("publishes the chain to " + self.URL, result.stdout)
+        self.assertIn("profile full", result.stdout)
+        # The marker's newest epoch carries the tier and the remote; it
+        # never travels, so unlike the memo it may hold the URL.
+        (epoch,) = self.epochs()
+        self.assertEqual((epoch["profile"], epoch["remote"]),
+                         ("full", self.URL))
+        # A re-run at the same tier rewires nothing and never grows the
+        # marker (ADR-0030 ruling 1).
+        again = self.install("--profile", "full", "--remote", self.URL)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("already installed", again.stdout)
+        self.assertEqual(len(self.commands("SessionEnd")), 1)
+        self.assertEqual(len(self.epochs()), 1)
+
+    def test_full_without_a_remote_writes_nothing_and_says_how_to_get_one(self):
+        # The tier is the two publishes to a URL the operator names, so
+        # there is no tier without one. A command spoken wrong is exit
+        # 64 (ADR-0026 ruling 7), and the refusal is where the beginner
+        # is standing, so it carries both ways to have a remote.
+        result = self.install("--profile", "full")
+
+        self.assertEqual(result.returncode, 64, result.stdout)
+        said = result.stderr
+        self.assertIn("--remote URL", said)
+        self.assertIn("receiver.py", said)
+        self.assertIn("docs/RECEIVER.md", said)
+        self.assertIn("appends", said)
+        self.assertIn("refuses delete", said)
+        self.assertFalse((self.home / ".claude" / "settings.json").exists(),
+                         "a refusal writes nothing")
+        self.assertEqual(self.epochs(), [], "and marks no coverage")
+
+    def test_a_remote_beside_any_other_profile_is_refused(self):
+        # A remote nothing sends to is worse than no remote: the operator
+        # would read their own command as the entries leaving.
+        for spoken_wrong in (("--remote", self.URL),
+                             ("--profile", "local", "--remote", self.URL),
+                             ("--profile", "timestamped", "--remote", self.URL),
+                             ("--profile", "custom", "--remote", self.URL)):
+            result = self.install(*spoken_wrong)
+            self.assertEqual(result.returncode, 64, result.stderr)
+            self.assertIn("--profile full", result.stderr)
+            self.assertFalse((self.home / ".claude" / "settings.json").exists(),
+                             " ".join(spoken_wrong))
+
+    def test_a_raw_flag_beside_full_is_refused_naming_custom(self):
+        result = self.install("--profile", "full", "--remote", self.URL,
+                              "--publish-head", self.OTHER)
+
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("--profile custom", result.stderr)
+        self.assertFalse((self.home / ".claude" / "settings.json").exists())
+
+    def test_the_what_leaves_text_is_said_once_before_the_settings_file(self):
+        # ADR-0031: at `full` every entry leaves, and the installer says
+        # so before it writes anything. Once, not once per route.
+        result = self.install("--profile", "full", "--remote", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        said = result.stdout
+        self.assertIn("every entry", said)
+        self.assertIn("the timestamp, the actor, the action line and the "
+                      "file references", said)
+        self.assertIn("command lines", said)
+        self.assertIn("anything the agent typed", said)
+        self.assertEqual(said.count("anything the agent typed"), 1)
+        self.assertLess(said.index("every entry"), said.index("installed in"))
+
+    def test_the_codex_half_says_it_once_before_its_settings_file_too(self):
+        (self.home / ".codex").mkdir()
+
+        result = self.install("--codex", "--profile", "full",
+                              "--remote", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        said = result.stdout
+        self.assertEqual(said.count("anything the agent typed"), 1)
+        self.assertLess(said.index("every entry"), said.index("installed in"))
+
+    def test_codex_wires_both_publishes_and_the_anchor_stays_refused(self):
+        # Codex caps the whole SessionEnd hook at three seconds, so each
+        # send gets half of it (#183), and a calendar round trip has no
+        # cursor to resume from, so the anchor stays refused there
+        # (ADR-0024) and the notice says who anchors instead.
+        (self.home / ".codex").mkdir()
+
+        result = self.install("--codex", "--profile", "full",
+                              "--remote", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wired = self.codex_hook()
+        self.assertTrue(
+            wired["command"].endswith(f' --publish "{self.URL}"'
+                                      f' --publish-chain "{self.URL}"'),
+            wired["command"])
+        self.assertNotIn("--anchor", wired["command"])
+        self.assertEqual(wired["timeout"], 3)
+        self.assertIn("profile full", result.stdout)
+        self.assertIn("the session-end anchor stays refused for Codex",
+                      result.stdout)
+        self.assertIn("anchors every six hours", result.stdout)
+        (epoch,) = self.epochs()
+        self.assertEqual((epoch["harness"], epoch["profile"], epoch["remote"]),
+                         ("codex", "full", self.URL))
+
+    def test_uninstall_after_full_leaves_no_flag_and_writes_no_epoch(self):
+        self.install("--profile", "full", "--remote", self.URL)
+        before = self.epochs()
+
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "uninstall-hook"],
+            cwd=self.root, capture_output=True, encoding="utf-8",
+            env={**clean_env(), **self.env})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        left = self.settings_text()
+        self.assertNotIn("loxodonta.py", left)
+        for flag in ("--anchor", "--publish", "--publish-chain"):
+            self.assertNotIn(flag, left)
+        self.assertNotIn(self.URL, left)
+        # ADR-0030's asymmetry: a start claim says more calls owe
+        # receipts and an end claim says fewer, and "nothing was owed
+        # from here" is the one sentence that could retire the
+        # completeness alarm. So uninstall writes nothing down.
+        self.assertEqual(self.epochs(), before)
+
+    def test_custom_writes_down_the_head_url_when_no_chain_is_wired(self):
+        # The marker's `remote` is where publishing goes: at `full` the
+        # one URL, and under `custom` the chain's when one was given,
+        # the head's otherwise (#249). `serve` follows it only at `full`.
+        head_only = self.install("--publish-head", self.OTHER)
+
+        self.assertEqual(head_only.returncode, 0, head_only.stderr)
+        self.assertEqual(self.epochs()[-1]["profile"], "custom")
+        self.assertEqual(self.epochs()[-1]["remote"], self.OTHER)
+
+        both = self.install("--publish-head", self.OTHER,
+                            "--publish-chain", self.URL)
+
+        self.assertEqual(both.returncode, 0, both.stderr)
+        self.assertEqual(self.epochs()[-1]["remote"], self.URL)
+
+
+class SessionEndUnderFullTest(PublishBase):
+    """The tier end to end (#249, ADR-0031 ruling 1). What `install-hook
+    --profile full --remote URL` wrote onto the SessionEnd command is the
+    command this test runs, and at the far end sits the repo's own
+    receiver as a subprocess. One URL takes both routes — the head as
+    ADR-0025's JSON body, the entries as their own bytes — and the file
+    the receiver wrote is then a receipt log the recorder judges on that
+    box, with no new code."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.root / "home"
+        (self.home / ".claude").mkdir(parents=True)
+
+    def install(self, *args):
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), "install-hook", *args],
+            cwd=self.root, capture_output=True, encoding="utf-8",
+            env={**clean_env(), "HOME": str(self.home),
+                 "USERPROFILE": str(self.home),
+                 "LOXODONTA_HOME": str(self.store)})
+
+    def wired_session_end(self):
+        """The argv the installer wrote, read back out of the settings
+        file: what the harness would run at a session end, run here."""
+        settings = json.loads((self.home / ".claude" / "settings.json")
+                              .read_text(encoding="utf-8"))
+        [command] = [hook["command"]
+                     for block in settings["hooks"]["SessionEnd"]
+                     for hook in block["hooks"]]
+        return shlex.split(command)
+
+    def test_a_session_that_ends_under_full_fills_the_one_remote(self):
+        receiver = start_receiver(self, self.root / "receiver")
+        # The wired command carries --anchor and names no calendar, so
+        # this one flag is appended to keep the digest on this machine.
+        # Every other word of the command is the installer's own.
+        calendar = self.calendar()
+        installed = self.install("--profile", "full", "--remote", receiver.url)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call("echo one")
+        self.tool_call("echo two")
+
+        env = clean_env()
+        env["CLAUDE_PROJECT_DIR"] = str(self.project)
+        env["LOXODONTA_HOME"] = str(self.store)
+        payload = {"session_id": self.SESSION,
+                   "hook_event_name": "SessionEnd",
+                   "reason": "prompt_input_exit",
+                   "transcript_path": str(self.transcript)}
+        ended = subprocess.run(
+            self.wired_session_end() + ["--calendar", calendar.url],
+            cwd=self.project, input=json.dumps(payload).encode("utf-8"),
+            capture_output=True, env=env)
+
+        self.assertEqual(ended.returncode, 0,
+                         ended.stderr.decode("utf-8", "replace"))
+        # The head is the sealed one, and it went as JSON to the heads file.
+        heads = (self.root / "receiver" / "heads.jsonl").read_text("utf-8")
+        self.assertEqual(json.loads(heads)["head"], self.head())
+        # The entries went to the same URL, as the chain's own bytes, into
+        # a file the receiver named from the header.
+        copy = self.root / "receiver" / self.chain().name
+        self.assertEqual(copy.read_bytes(), self.chain().read_bytes())
+        # And the digest reached a calendar: the third step `full` wired.
+        self.assertEqual([d.hex() for d in calendar.submitted], [self.head()])
+        # The acceptance test: the receiver's file is a receipt log, and
+        # the operator on that box judges it with the recorder they have.
+        judged = run_recorder("verify", "--log", copy)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(judged.stdout.strip(), "VALID")
+
+
+class FullProfileKeeperTest(unittest.TestCase):
+    """`serve` with a `full` marker and no publish flags (#249, ADR-0031
+    ruling 1, #246): the publish keeper runs on the six-hour default to
+    the remote the install wrote down, the head first and the chain
+    after it, beside the anchor keeper on the same default. The startup
+    line names both routes, the cadence and where the choice came from.
+    A flag typed at `serve` wins, and wins whole — the cadence and the
+    target — so the marker's remote is never a second place the entries
+    also go."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name).resolve()
+        self.root = base / "repos"
+        self.root.mkdir()
+        self.home = base / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        self.store = base / "store"
+        self.witness = base / "witness"
+        self.witness.mkdir()
+        self.receiver = serve_fake(self)
+        self.calendar = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
+        self.calendar.mode = "pending"
+        self.calendar.nonce = b"fake-nonce"
+        self.calendar.submitted = []
+        self.calendar.polled = []
+        self.calendar.url = (
+            f"http://127.0.0.1:{self.calendar.server_address[1]}")
+        threading.Thread(target=self.calendar.serve_forever,
+                         daemon=True).start()
+        self.addCleanup(self.calendar.server_close)
+        self.addCleanup(self.calendar.shutdown)
+
+    def install(self, *args):
+        """The real installer writes the marker the keeper reads, into
+        this test's store; its settings land in a throwaway home."""
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "install-hook", *args],
+            capture_output=True, check=True,
+            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+                           LOXODONTA_HOME=str(self.store)))
+
+    def aged_chain(self, session, age):
+        """A chain through the public CLI whose entries are `age` seconds
+        old (SOURCE_DATE_EPOCH, the recorder's clock override), so a
+        cadence shorter than `age` finds its head ripe."""
+        env = keeper_env(SOURCE_DATE_EPOCH=str(int(time.time()) - age))
+        log_dir = self.root / "alpha" / "receipts"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log = log_dir / f"receipts-{session}.jsonl"
+        subprocess.run([sys.executable, str(LOXODONTA), "init",
+                        "--log", str(log)],
+                       capture_output=True, check=True, env=env)
+        subprocess.run([sys.executable, str(LOXODONTA), "log",
+                        "--log", str(log), "--actor", "claude-code",
+                        "--action", "step"],
+                       capture_output=True, check=True, env=env)
+        return log
+
+    def serve(self, *extra):
+        self.proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--root",
+             str(self.root), "--port", "0", "--witness", str(self.witness),
+             "--calendar", self.calendar.url, *extra],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env=keeper_env(LOXODONTA_HOME=str(self.store),
+                           PYTHONIOENCODING="utf-8"))
+        self.addCleanup(self._stop)
+        line = self.proc.stdout.readline()
+        match = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if match is None:
+            self.proc.kill()
+            _, err = self.proc.communicate()
+            self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        self.url = match.group()
+        # The keeper line, read here rather than after the tick: `serve`
+        # writes the two lines as two flushes, and a kill sent the
+        # instant the first arrives can land before the second is
+        # written, which is what CI on Linux and macOS showed.
+        self.said = self.proc.stdout.readline()
+
+    def _stop(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.communicate()
+
+    def tick(self):
+        """One request, which is one tick of both keepers."""
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(self.url + "/api/status", timeout=30) as answer:
+            return json.loads(answer.read().decode("utf-8"))
+
+    def kinds(self, server=None):
+        return [sent["content_type"]
+                for sent in (server or self.receiver).received]
+
+    def test_a_full_marker_sends_both_routes_on_the_six_hour_default(self):
+        self.install("--profile", "full", "--remote", self.receiver.url)
+        log = self.aged_chain("sess-full", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        self._stop()
+
+        self.assertIn("anchor every 6h (profile full, claude-code)", self.said)
+        self.assertIn("publish head and chain every 6h "
+                      "(profile full, claude-code)", self.said)
+        self.assertEqual(self.kinds(), ["application/json", NDJSON])
+        self.assertEqual(json.loads(self.receiver.received[0]["raw"])["head"],
+                         chain_head(log))
+        self.assertEqual(self.receiver.received[1]["raw"], log.read_bytes())
+        self.assertEqual([row.get("kind") for row in memo_of(log)],
+                         [None, "chain"])
+        # The anchor keeper ran beside it, on the same default, with no
+        # flag typed for either.
+        self.assertEqual(self.calendar.submitted,
+                         [bytes.fromhex(chain_head(log))])
+
+    def test_explicit_flags_override_the_cadence_and_the_target(self):
+        elsewhere = serve_fake(self)
+        self.install("--profile", "full", "--remote", self.receiver.url)
+        self.aged_chain("sess-flagged", age=7 * 3600)
+
+        self.serve("--publish-every", "1h", "--publish-url", elsewhere.url)
+        self.tick()
+        self._stop()
+
+        self.assertIn("publish head every 1h (flag --publish-every)",
+                      self.said)
+        self.assertEqual(self.kinds(elsewhere), ["application/json"])
+        self.assertEqual(self.receiver.received, [],
+                         "a flag names the target, and names it alone")
+
+    def test_a_timestamped_marker_still_runs_no_publish_keeper(self):
+        # The publish cadence is `full`'s alone (ADR-0031 ruling 6): a
+        # tier that never asked for the entries to leave never has them
+        # leave because a release added a route.
+        self.install("--profile", "timestamped")
+        self.aged_chain("sess-ts", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        self._stop()
+
+        self.assertIn("publish off (profile timestamped, claude-code; no flag)",
+                      self.said)
+        self.assertEqual(self.receiver.received, [])
+
+
+class DrillUnderFullTest(unittest.TestCase):
+    """`drill` on a store wired at `full` (#249): the rehearsal plays
+    with sandbox copies, sends nothing to the remote — the fake receiver
+    sees no request at all — and its report names the tier it found, so
+    an operator reading a rehearsal knows which of their heads are
+    already somewhere else."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name).resolve()
+        self.root = base / "repos"
+        self.root.mkdir()
+        self.home = base / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        self.store = base / "store"
+        self.receiver = serve_fake(self)
+
+    def drill(self, log):
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), "drill", "--root",
+             str(self.root), "--log", log, "--json"],
+            capture_output=True, encoding="utf-8",
+            env=keeper_env(LOXODONTA_HOME=str(self.store),
+                           PYTHONIOENCODING="utf-8"))
+
+    def test_a_rehearsal_names_the_tier_and_sends_nothing(self):
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "install-hook", "--profile",
+             "full", "--remote", self.receiver.url],
+            capture_output=True, check=True,
+            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+                           LOXODONTA_HOME=str(self.store)))
+        make_store_chain(self.root / "alpha" / "receipts", "sess-drill",
+                         entries=3)
+
+        result = self.drill("alpha/receipts/receipts-sess-drill.jsonl")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["profile"], "full")
+        self.assertTrue(report["all_fired"])
+        self.assertEqual(self.receiver.received, [],
+                         "a rehearsal sends nothing to the remote")
+
+    def test_a_store_no_install_has_spoken_for_names_no_tier(self):
+        make_store_chain(self.root / "alpha" / "receipts", "sess-bare",
+                         entries=3)
+
+        result = self.drill("alpha/receipts/receipts-sess-bare.jsonl")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(json.loads(result.stdout)["profile"])
+
 
 
 class ChainRowsTravelNowhereTest(unittest.TestCase):
