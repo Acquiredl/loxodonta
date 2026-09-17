@@ -27,6 +27,14 @@ from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
+# The ladder's third rung, word for word as ADR-0031 ruling 1 ratified
+# it (#249). Shared so the two ladder tests read the same string and a
+# looser rewrite of the claim fails both.
+FULL_LADDER_ROW = (
+    "  full         --profile full --remote URL   head and receipts go "
+    "to a remote you name; a wiped log survives there as of the last "
+    "send.")
+
 
 def run_receipts(*args, cwd, env=None):
     return subprocess.run(
@@ -611,14 +619,15 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertNotIn("--anchor", end)
         self.assertNotIn("--publish", end)
 
-    def test_profile_full_is_not_a_choice_in_this_release(self):
-        # The strongest tier arrives with the published chain (ADR-0031
-        # rulings 2 to 4); until then the word is a usage error, so no
-        # install lands at a tier it did not reach.
+    def test_profile_full_without_a_remote_is_a_usage_error(self):
+        # The strongest tier is the two publishes to a URL the operator
+        # names (ADR-0031 ruling 1), so there is no such tier without
+        # one: refused, exit 64, nothing written. What the refusal says
+        # is pinned in test_publish_chain.InstallProfileFullTest.
         result = self.install("--profile", "full")
 
         self.assertEqual(result.returncode, 64, result.stderr)
-        self.assertIn("--profile", result.stderr)
+        self.assertIn("--remote", result.stderr)
         self.assertFalse((self.home / ".claude" / "settings.json").exists())
 
     def test_publish_head_rides_on_the_session_end_command(self):
@@ -651,7 +660,8 @@ class InstallPublishHeadTest(unittest.TestCase):
         """The tier rows the installer printed, keyed by tier name."""
         rows = [line for line in stdout.splitlines()
                 if line.startswith("  local ")
-                or line.startswith("  timestamped ")]
+                or line.startswith("  timestamped ")
+                or line.startswith("  full ")]
         return {row.split()[0]: row for row in rows}
 
     def test_a_flagless_install_prints_the_ladder(self):
@@ -660,14 +670,16 @@ class InstallPublishHeadTest(unittest.TestCase):
         # per tier the operator can reach, each naming its flag and
         # what leaves. The `local` row keeps #221's sentence: a
         # regenerated chain is caught only against a head kept off the
-        # machine. Printed on first install and on every re-run.
+        # machine, and the `full` row the phrase that says what the
+        # strongest tier does and does not promise (#249). Printed on
+        # first install and on every re-run.
         first = self.install()
 
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertIn("wired: Claude Code, every tool call, profile local",
                       first.stdout)
         ladder = self.ladder(first.stdout)
-        self.assertEqual(sorted(ladder), ["local", "timestamped"])
+        self.assertEqual(sorted(ladder), ["full", "local", "timestamped"])
         self.assertIn("a regenerated chain only against a head you keep "
                       "(`head`, then `verify --expect-head`)",
                       ladder["local"])
@@ -675,6 +687,11 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("a 32-byte digest leaves at each session end",
                       ladder["timestamped"])
         self.assertIn("once the anchor matures", ladder["timestamped"])
+        # The third rung, word for word as ADR-0031 ruling 1 ratified
+        # it: the flag that reaches the tier, and the claim in the
+        # phrase the PRD fixed so it is never rewritten looser.
+        self.assertEqual(ladder["full"], FULL_LADDER_ROW)
+        self.assertIn("as of the last send", ladder["full"])
         # The ladder is the only notice: #221's line is gone.
         self.assertNotIn("no head record", first.stdout)
         self.assertNotIn("note:", first.stdout)
@@ -708,10 +725,14 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("wired: Codex, every tool call, profile local",
                       result.stdout)
         ladder = self.ladder(result.stdout)
-        self.assertEqual(sorted(ladder), ["local", "timestamped"])
+        self.assertEqual(sorted(ladder), ["full", "local", "timestamped"])
         self.assertIn("--profile timestamped", ladder["timestamped"])
         self.assertIn("supervisor", ladder["timestamped"])
         self.assertIn("cadence", ladder["timestamped"])
+        # The `full` row is the same on both harnesses: what it
+        # promises is the two publishes, which Codex does wire, and it
+        # names no anchor, which Codex does not.
+        self.assertEqual(ladder["full"], FULL_LADDER_ROW)
         self.assertNotIn("--anchor-at-session-end", result.stdout)
         self.assertNotIn("no head record", result.stdout)
 

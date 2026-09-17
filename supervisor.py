@@ -540,18 +540,22 @@ def cadence_words(seconds):
 # re-install at another profile takes effect at the next start.
 
 PROFILE_ANCHOR_EVERY = 6 * 3600   # seconds: the timestamped tier's default
+PROFILE_PUBLISH_EVERY = 6 * 3600  # seconds: the full tier's, the same day
 
-# The tiers in ascending order; `full` joins when the published chain
-# lands. `custom` is the raw flags and declares no tier, so it ranks
-# with `local` here: whatever it wired at session end, it asked the
-# keeper for nothing.
-TIERS = ("local", "timestamped")
+# The tiers in ascending order. `custom` is the raw flags and declares
+# no tier, so it ranks with `local` here: whatever it wired at session
+# end, it asked the keeper for nothing.
+TIERS = ("local", "timestamped", "full")
 
 
 def marker_profile():
     """The strongest profile any harness declares in the coverage
-    marker, as (profile, harness), or None when no epoch names one (a
-    marker from before profiles existed, or no marker at all). Each
+    marker, as (profile, harness, remote), or None when no epoch names
+    one (a marker from before profiles existed, or no marker at all).
+    The remote is where that install wired publishing and is the
+    keeper's target at `full` (#249); it is a URL the recorder already
+    refused if a shell could act on it, and anything but a string here
+    reads as none. Each
     harness's newest epoch speaks for that harness, and the highest
     tier among them speaks for the keeper (ADR-0031 ruling 1, #246).
     Not simply the newest epoch of all: a flagless install for a
@@ -583,7 +587,9 @@ def marker_profile():
 
     strongest = sorted(declared.values(),
                        key=lambda epoch: (tier(epoch), epoch["since"]))[-1]
-    return strongest["profile"], strongest["harness"]
+    remote = strongest.get("remote")
+    return (strongest["profile"], strongest["harness"],
+            remote if isinstance(remote, str) else None)
 
 
 def keeper_cadences(anchor_every, declared):
@@ -592,34 +598,62 @@ def keeper_cadences(anchor_every, declared):
     `timestamped` profile puts the anchor keeper on its six-hour
     default; `local`, `custom` without a flag, or no profile at all
     runs no anchor keeper. `declared` is marker_profile's (profile,
-    harness) or None, and the harness is named in the source so the
-    operator can see which install set the cadence. Returns (seconds
+    harness, remote) or None, and the harness is named in the source so
+    the operator can see which install set the cadence. Returns (seconds
     or None, the source in words)."""
     if anchor_every is not None:
         return anchor_every, "flag --anchor-every"
     if declared is None:
         return None, "no profile on record; no flag"
-    profile, harness = declared
-    if profile == "timestamped":
+    profile, harness, _ = declared
+    if profile in ("timestamped", "full"):
         return PROFILE_ANCHOR_EVERY, f"profile {profile}, {harness}"
     return None, f"profile {profile}, {harness}; no flag"
 
 
+def publish_cadences(publish_every, publish_url, publish_chain, declared):
+    """The publish cadence in force, where each route sends, and where
+    the choice came from (ADR-0031 ruling 1, #249): the anchor keeper's
+    rule, applied to the two publish routes. A flag typed here wins, and
+    wins whole — the cadence and both targets — so an operator who names
+    a remote on the command line never also sends to the marker's. With
+    no flag, a `full` profile that wrote down a remote puts the publish
+    keeper on its six-hour default and sends both routes there, the head
+    first and the chain after it, the far end telling them apart by
+    content type. Every other profile, and no profile at all, runs no
+    publish keeper: `custom` included, because `custom` wired its own
+    session end and asked the keeper for nothing (#246). Returns
+    (seconds or None, the head's URL, the chain's URL, the source in
+    words)."""
+    if publish_every is not None or publish_url or publish_chain:
+        return (publish_every, publish_url, publish_chain,
+                "flag --publish-every")
+    if declared is None:
+        return None, None, None, "no profile on record; no flag"
+    profile, harness, remote = declared
+    if profile == "full" and remote:
+        return (PROFILE_PUBLISH_EVERY, remote, remote,
+                f"profile {profile}, {harness}")
+    return None, None, None, f"profile {profile}, {harness}; no flag"
+
+
 def keeper_words(anchor_every, anchor_source, publish_every,
-                 publish_url=None, publish_chain=None):
+                 publish_url=None, publish_chain=None,
+                 publish_source="no flag"):
     """The startup line's second half: each keeper's cadence and its
     source, so the operator reads back what `serve` will send and why
-    (ADR-0031 ruling 1, #246). Publishing follows flags alone in this
-    release, and names its routes: the head, the chain, or both; the
-    tier that publishes on a cadence arrives with `full`."""
+    (ADR-0031 ruling 1, #246, #249). Publishing names its routes — the
+    head, the chain, or both — and its source the same way anchoring
+    does, since at `full` both routes run with no flag typed."""
     anchor = (f"anchor every {cadence_words(anchor_every)} ({anchor_source})"
               if anchor_every is not None else f"anchor off ({anchor_source})")
     routes = " and ".join(name for name, url in (("head", publish_url),
                                                  ("chain", publish_chain))
                           if url)
     publish = (f"publish {routes or 'head'} every "
-               f"{cadence_words(publish_every)} (flag --publish-every)"
-               if publish_every is not None else "publish off (no flag)")
+               f"{cadence_words(publish_every)} ({publish_source})"
+               if publish_every is not None
+               else f"publish off ({publish_source})")
     return f"keeper: {anchor}; {publish}"
 
 
@@ -5002,9 +5036,17 @@ def run_drill(root, asked):
         })
 
     all_fired = all(d["fired"] for d in drills)
+    # The tier this store is on (ADR-0031 ruling 1), read from the
+    # coverage marker and reported, never acted on: a rehearsal sends
+    # nothing anywhere, whatever the profile wired, so the operator who
+    # drills a `full` store can see which alarms are rehearsed here and
+    # which of their heads are somewhere else. None when no install has
+    # named a profile.
+    declared = marker_profile()
     report = {
         "log": log.relative_to(root.resolve()).as_posix(),
         "sandbox": sandbox.relative_to(root).as_posix(),
+        "profile": declared[0] if declared else None,
         "known_head": known_head,
         "rehearsal": REHEARSAL,
         "drills": drills,
@@ -5485,15 +5527,22 @@ def cmd_serve(args):
     server.root = root
     server.store = store
     server.witness = Path(args.witness)
-    # The keeper follows the profile the operator chose at install-hook
-    # (ADR-0031 ruling 1); a flag typed here still wins.
+    # Both keepers follow the profile the operator chose at install-hook
+    # (ADR-0031 ruling 1); a flag typed here still wins. One reading of
+    # the marker serves both, so the two cadences can never disagree
+    # about which install spoke.
+    declared = marker_profile()
     anchor_every, anchor_source = keeper_cadences(args.anchor_every,
-                                                  marker_profile())
+                                                  declared)
+    (publish_every, publish_head, publish_chain,
+     publish_source) = publish_cadences(args.publish_every,
+                                        args.publish_url,
+                                        args.publish_chain, declared)
     server.anchor_every = anchor_every
     server.calendars = args.calendar or ()
-    server.publish_every = args.publish_every
-    server.publish_url = args.publish_url
-    server.publish_chain = args.publish_chain
+    server.publish_every = publish_every
+    server.publish_url = publish_head
+    server.publish_chain = publish_chain
     server.scan_lock = threading.Lock()
     server.views_lock = threading.Lock()
     server.scan_body = None
@@ -5501,8 +5550,8 @@ def cmd_serve(args):
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
-    print(keeper_words(anchor_every, anchor_source, args.publish_every,
-                       args.publish_url, args.publish_chain),
+    print(keeper_words(anchor_every, anchor_source, publish_every,
+                       publish_head, publish_chain, publish_source),
           flush=True)
     try:
         server.serve_forever()

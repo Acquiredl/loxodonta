@@ -3435,11 +3435,23 @@ def recorder_command(actor=None, anchor=False, publish=None,
     return command + (f' --stamp "{stamp}"' if stamp else "")
 
 
-PROFILES = ("local", "timestamped", "custom")
+PROFILES = ("local", "timestamped", "full", "custom")
+
+# What `--profile full` says when it arrives without a remote
+# (ADR-0031 ruling 1): the tier is the two publishes to a URL the
+# operator names, so there is no such tier without one. The two ways
+# to get one, because "pick a remote" is the step a beginner stalls
+# on and the refusal is where they are standing.
+REMOTE_WAYS = (
+    "--profile full sends the head and the entries to a remote you "
+    "name: add --remote URL. Two ways to have one. Run `receiver.py "
+    "serve` on a second machine the credentials here cannot reach and "
+    "paste the URL it prints (docs/RECEIVER.md). Or name any URL that "
+    "appends what it is sent and refuses delete.")
 
 
 def resolve_profile(profile, anchor, publish, publish_chain=None,
-                    authority=None):
+                    authority=None, remote=None):
     """The profile an install asks for, and the session-end opt-ins it
     resolves to (ADR-0031 ruling 1). A profile is a bundle of the raw
     flags and nothing else: `local` wires none, `timestamped` is the
@@ -3447,11 +3459,22 @@ def resolve_profile(profile, anchor, publish, publish_chain=None,
     flags exactly as given. With no profile named, the raw flags speak
     for themselves — an install scripted before profiles existed still
     works and is written down as `custom` — and none at all is `local`.
-    A raw flag beside `local` or `timestamped` is a command spoken wrong,
-    because the profile already says what leaves the machine: refused
-    with the way out, `custom`. Returns (profile, anchor, publish,
-    publish_chain, authority)."""
+    `full` is the anchor and both publishes to the one URL `--remote`
+    names: the head record and the entries themselves, told apart at
+    the far end by content type, so one remote serves both and the
+    operator names it once. A raw flag beside `local`, `timestamped`
+    or `full` is a command spoken wrong, because the profile already
+    says what leaves the machine: refused with the way out, `custom`;
+    so is `--remote` beside any profile but `full`, which would
+    otherwise name a remote nothing sends to. `full` with no remote is
+    refused with the two ways to get one. Returns (profile, anchor,
+    publish, publish_chain, authority)."""
     raw = bool(anchor or publish or publish_chain or authority)
+    if remote and profile != "full":
+        raise ValueError(
+            "--remote is where --profile full sends; name that profile, "
+            "or compose --publish-head and --publish-chain yourself "
+            "under --profile custom")
     if profile is None:
         return (("custom" if raw else "local"), anchor, publish,
                 publish_chain, authority)
@@ -3463,6 +3486,10 @@ def resolve_profile(profile, anchor, publish, publish_chain=None,
             "to compose --anchor-at-session-end, --publish-head, "
             "--publish-chain and --authority yourself, choose "
             "--profile custom")
+    if profile == "full":
+        if not remote:
+            raise ValueError(REMOTE_WAYS)
+        return profile, True, remote, remote, None
     return profile, profile == "timestamped", None, None, None
 
 
@@ -3518,15 +3545,19 @@ def profile_notice(profile, matchers, codex=False):
     reaches it (ADR-0031 ruling 1). `local` is the lower tier of
     ADR-0002: an edit, a deletion, or a reorder is caught unconditionally,
     a regenerated chain only against a head kept off the machine (#221's
-    sentence, kept). `timestamped` is the anchor at each session end. On
-    Codex the session-end anchor stays refused (ADR-0024), so its row,
-    and its line once chosen, say the supervisor anchors on its cadence
-    instead. Never a prompt: the installer reads no stdin."""
+    sentence, kept). `timestamped` is the anchor at each session end, and
+    `full` the head and the entries themselves to a remote the operator
+    names, which is what makes a wiped log survive somewhere as of the
+    last send. On Codex the session-end anchor stays refused (ADR-0024),
+    so its row, and its line at either tier above `local`, say the
+    supervisor anchors on its cadence instead; the two publishes are
+    wired there all the same, on Codex's shorter clock. Never a prompt:
+    the installer reads no stdin."""
     harness = "Codex" if codex else "Claude Code"
     coverage = ("every tool call" if all(m in ("*", ".*") for m in matchers)
                 else "matcher " + ", ".join(f'"{m}"' for m in matchers))
     wired = f"wired: {harness}, {coverage}, profile {profile}"
-    if profile == "timestamped" and codex:
+    if profile in ("timestamped", "full") and codex:
         return (wired + " (the session-end anchor stays refused for Codex, "
                 "ADR-0024, so the supervisor anchors on its cadence: "
                 "`supervisor serve` reads the profile and anchors every "
@@ -3543,6 +3574,9 @@ def profile_notice(profile, matchers, codex=False):
         "then `verify --expect-head`).",
         f"  timestamped  --profile timestamped   {leaves}; regeneration is "
         "caught once the anchor matures.",
+        "  full         --profile full --remote URL   head and receipts "
+        "go to a remote you name; a wiped log survives there as of the "
+        "last send.",
     ])
 
 
@@ -3678,7 +3712,7 @@ def install_codex_hooks(publish=None, profile="local",
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
     marked = record_coverage(CODEX_ACTOR, wired, profile,
-                             remote=publish_chain)
+                             remote=publish_chain or publish)
     tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -3744,9 +3778,12 @@ def record_coverage(harness, matchers, profile, remote=None,
     speak for the Claude Code witness. The profile is written beside the
     matchers (ADR-0031 ruling 1) so a profile that changes is as visible
     to the supervisor as a matcher change, and so `serve` can follow its
-    cadences; `remote` is where the entries go when the chain is wired
-    (ADR-0031) and `authority` who stamps the head when one is named
-    (ADR-0032), each written only then. The marker never travels (the
+    cadences; `remote` is where publishing goes — at `full` the one URL
+    both routes were wired to, and under `custom` the chain's URL when
+    one was given, else the head's — and `authority` who stamps the head
+    when one is named (ADR-0032), each written only then. `serve`
+    follows the remote only at `full`, since that is the tier that asked
+    the keeper for a cadence (#246). The marker never travels (the
     export allowlists it out, the package does not carry it), so unlike
     the publish memo it may hold a URL.
 
@@ -3928,7 +3965,8 @@ def cmd_install_hook(args):
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
     marked = record_coverage("claude-code", wired, args.profile,
-                             remote=args.publish_chain,
+                             remote=args.publish_chain
+                             or args.publish_head,
                              authority=args.authority)
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
@@ -4233,9 +4271,20 @@ def main(argv=None):
         "--profile", choices=PROFILES, default=None,
         help="what leaves the machine, in one word (ADR-0031): local "
              "(nothing; the default), timestamped (a 32-byte digest of "
-             "the chain head at each session end, the anchor), or custom "
-             "(compose the raw flags below yourself). Written to the "
-             "coverage marker; `supervisor serve` follows its cadences")
+             "the chain head at each session end, the anchor), full "
+             "(that anchor, plus the head and every entry to the one "
+             "--remote URL), or custom (compose the raw flags below "
+             "yourself). Written to the coverage marker; `supervisor "
+             "serve` follows its cadences")
+    install_parser.add_argument(
+        "--remote", default=None, metavar="URL", type=publish_url,
+        help="where --profile full sends: one URL for both routes, the "
+             "head and the chain's entries, told apart at the far end "
+             "by content type (ADR-0031). Pick a remote that can only "
+             "add, never delete — `receiver.py` on a second machine is "
+             "the one this repo ships (docs/RECEIVER.md). Written to "
+             "the coverage marker, which never travels, so `supervisor "
+             "serve` publishes there on its cadence with no flag typed")
     install_parser.add_argument(
         "--anchor-at-session-end", action="store_true",
         help="opt in: every session end anchors the chain head to Bitcoin "
@@ -4308,7 +4357,7 @@ def main(argv=None):
             (args.profile, args.anchor_at_session_end, args.publish_head,
              args.publish_chain, args.authority) = resolve_profile(
                 args.profile, args.anchor_at_session_end, args.publish_head,
-                args.publish_chain, args.authority)
+                args.publish_chain, args.authority, args.remote)
         except ValueError as e:
             install_parser.error(str(e))
     return args.func(args)
