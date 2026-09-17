@@ -2921,50 +2921,55 @@ DIGEST_MARKER = "supervisor.py"
 # the fingerprint the widening below keys on.
 PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 
-def recorder_command(actor=None, anchor=False, publish=None):
+def recorder_command(actor=None, anchor=False, publish=None,
+                     publish_chain=None):
     """The hook command the installers write: this interpreter, this
     file, no shell expansion — the hook resolves the project itself, so
     one command works on every platform. `actor` names the harness the
     receipts will say acted (ADR-0020); `anchor` is the session-end
-    anchor opt-in and `publish` the URL the session's head is published
-    to, both carried on the SessionEnd command so the choice is readable
-    in the settings file (ADR-0024, ADR-0025)."""
+    anchor opt-in, `publish` the URL the session's head is published
+    to, and `publish_chain` the URL its entries go to, all carried on
+    the SessionEnd command so the choice is readable in the settings
+    file (ADR-0024, ADR-0025, ADR-0031)."""
     python = sys.executable.replace(os.sep, "/")
     self_path = os.path.abspath(__file__).replace(os.sep, "/")
     command = f'"{python}" "{self_path}" hook'
     command += f" --actor {actor}" if actor else ""
     command += " --anchor" if anchor else ""
-    return command + (f' --publish "{publish}"' if publish else "")
+    command += f' --publish "{publish}"' if publish else ""
+    return command + (f' --publish-chain "{publish_chain}"'
+                      if publish_chain else "")
 
 
 PROFILES = ("local", "timestamped", "custom")
 
 
-def resolve_profile(profile, anchor, publish):
+def resolve_profile(profile, anchor, publish, publish_chain=None):
     """The profile an install asks for, and the session-end opt-ins it
     resolves to (ADR-0031 ruling 1). A profile is a bundle of the raw
-    flags and nothing else: `local` wires neither, `timestamped` is the
+    flags and nothing else: `local` wires none, `timestamped` is the
     session-end anchor under the beginner's word, `custom` is the raw
     flags exactly as given. With no profile named, the raw flags speak
     for themselves — an install scripted before profiles existed still
     works and is written down as `custom` — and none at all is `local`.
     A raw flag beside `local` or `timestamped` is a command spoken wrong,
     because the profile already says what leaves the machine: refused
-    with the way out, `custom`. Returns (profile, anchor, publish)."""
-    raw = bool(anchor or publish)
+    with the way out, `custom`. Returns (profile, anchor, publish,
+    publish_chain)."""
+    raw = bool(anchor or publish or publish_chain)
     if profile is None:
-        return ("custom" if raw else "local"), anchor, publish
+        return ("custom" if raw else "local"), anchor, publish, publish_chain
     if profile == "custom":
-        return profile, anchor, publish
+        return profile, anchor, publish, publish_chain
     if raw:
         raise ValueError(
             f"--profile {profile} already says what leaves the machine; "
-            "to compose --anchor-at-session-end and --publish-head "
-            "yourself, choose --profile custom")
-    return profile, profile == "timestamped", None
+            "to compose --anchor-at-session-end, --publish-head and "
+            "--publish-chain yourself, choose --profile custom")
+    return profile, profile == "timestamped", None, None
 
 
-def session_end_choices(anchor, publish):
+def session_end_choices(anchor, publish, publish_chain=None):
     """What the wired SessionEnd command does beyond the seal, for the
     installer's notice, so the operator reads their choice back."""
     choices = []
@@ -2972,6 +2977,10 @@ def session_end_choices(anchor, publish):
         choices.append("anchors at session end")
     if publish:
         choices.append(f"publishes the head to {publish}")
+    if publish_chain:
+        choices.append(f"publishes the chain to {publish_chain}")
+    if len(choices) > 2:
+        return ", ".join(choices[:-1]) + " and " + choices[-1]
     return " and ".join(choices)
 
 
@@ -2981,11 +2990,24 @@ def session_end_notice(old, new, choices):
     flag left out of the install command never goes quiet (ADR-0024,
     ADR-0025: the install command states the choice each time)."""
     dropped = [name for flag, name in ((" --anchor", "anchors at session end"),
-                                       (" --publish ", "publishes the head"))
+                                       (" --publish ", "publishes the head"),
+                                       (" --publish-chain ",
+                                        "publishes the chain"))
                if flag in old and flag not in new]
     parts = ([f"now {choices}"] if choices else []) + \
             (["no longer " + " or ".join(dropped)] if dropped else [])
     return f" ({'; '.join(parts)})" if parts else ""
+
+
+def chain_notice(url):
+    """What leaves at every session end once the chain is wired, said
+    before anything is written (ADR-0031): every entry, and action lines
+    are command lines. The export's `--raw` stance (ADR-0021), told to
+    the operator in the same breath as the choice."""
+    return ("every entry will leave this machine at session end, to "
+            f"{url}: the timestamp, the actor, the action line and the "
+            "file references. Action lines are command lines and can "
+            "carry anything the agent typed, a pasted secret included.")
 
 
 def profile_notice(profile, matchers, codex=False):
@@ -3201,15 +3223,19 @@ def coverage_path():
     return os.path.join(store_home(), COVERAGE_NAME)
 
 
-def record_coverage(harness, matchers, profile):
+def record_coverage(harness, matchers, profile, remote=None):
     """Append what this install just wired, unless it wired what the
-    last one did — the `heal()` rule, applied to matchers and to the
-    profile, so re-running the installer never grows the file (ADR-0030
-    ruling 1). Scoped by harness because `--codex` wires `.*` into a
-    different settings file and must never speak for the Claude Code
-    witness. The profile is written beside the matchers (ADR-0031
-    ruling 1) so a profile that changes is as visible to the supervisor
-    as a matcher change, and so `serve` can follow its cadences.
+    last one did — the `heal()` rule, applied to matchers, to the
+    profile and to the remote, so re-running the installer never grows
+    the file (ADR-0030 ruling 1). Scoped by harness because `--codex`
+    wires `.*` into a different settings file and must never speak for
+    the Claude Code witness. The profile is written beside the matchers
+    (ADR-0031 ruling 1) so a profile that changes is as visible to the
+    supervisor as a matcher change, and so `serve` can follow its
+    cadences; `remote` is where the entries go when the chain is wired,
+    written only then. The marker never travels (the export allowlists
+    it out, the package does not carry it), so unlike the publish memo
+    it may hold a URL.
 
     Every failure is a silent skip. An installer that refused to finish
     over a bookkeeping file would be a worse trade than a memory that
@@ -3217,6 +3243,8 @@ def record_coverage(harness, matchers, profile):
     unwritable. Returns whether an entry was appended."""
     entry = {"since": now_ts(), "matchers": list(matchers),
              "harness": harness, "profile": profile}
+    if remote:
+        entry["remote"] = remote
     try:
         os.makedirs(store_home(), exist_ok=True)
         try:
@@ -3230,7 +3258,8 @@ def record_coverage(harness, matchers, profile):
         last = next((epoch for epoch in reversed(epochs)
                      if epoch.get("harness") == harness), None)
         if last and last.get("matchers") == entry["matchers"] \
-                and last.get("profile") == profile:
+                and last.get("profile") == profile \
+                and last.get("remote") == entry.get("remote"):
             return False
         body = json.dumps({"purpose": COVERAGE_PURPOSE,
                            "epochs": epochs + [entry]}, indent=2)
@@ -3263,6 +3292,18 @@ def cmd_install_hook(args):
                   "short to reach a calendar with margin. Use the "
                   "supervisor's --anchor-every instead.", file=sys.stderr)
             return 1
+        if args.publish_chain:
+            # The head's one POST was measured inside Codex's cap and
+            # takes half of it (#183); the chain's send was not, and
+            # the two together would leave the seal no margin. Refused
+            # with the way out, as the anchor is (ADR-0024): the
+            # supervisor's keeper sends the chain on its cadence.
+            print("error: --publish-chain is not wired for Codex: its "
+                  "SessionEnd hook is capped at three seconds and the "
+                  "head's POST already takes half of it. Use the "
+                  "supervisor's --publish-every with --publish-chain "
+                  "instead.", file=sys.stderr)
+            return 1
         # --publish-head is wired: #183 measured one POST inside the same
         # three seconds, and the hook cuts it off at half the cap.
         return install_codex_hooks(args.publish_head, args.profile)
@@ -3274,6 +3315,10 @@ def cmd_install_hook(args):
     settings = load_settings(path)
     if settings is None:
         return 1
+    if args.publish_chain:
+        # Said before anything is written (ADR-0031): what leaves, and
+        # that action lines are command lines.
+        print(chain_notice(args.publish_chain))
     had_backup = backup_settings(path)
 
     hooks = settings.setdefault("hooks", {})
@@ -3320,14 +3365,15 @@ def cmd_install_hook(args):
     # deserves the read.
     end = hooks.setdefault("SessionEnd", [])
     record_end = recorder_command(anchor=args.anchor_at_session_end,
-                                  publish=args.publish_head)
+                                  publish=args.publish_head,
+                                  publish_chain=args.publish_chain)
     healed += heal(end, RECORDER_MARKERS, record_end)
     # The session-end opt-ins ride on this command: the anchor
-    # (ADR-0024) and the published head (ADR-0025). The install command
-    # states the choice each time: a re-run without a flag turns that
-    # step off, and says so.
+    # (ADR-0024), the published head (ADR-0025) and the published chain
+    # (ADR-0031). The install command states the choice each time: a
+    # re-run without a flag turns that step off, and says so.
     choices = session_end_choices(args.anchor_at_session_end,
-                                  args.publish_head)
+                                  args.publish_head, args.publish_chain)
     for block in end:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
@@ -3361,7 +3407,8 @@ def cmd_install_hook(args):
 
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
-    marked = record_coverage("claude-code", wired, args.profile)
+    marked = record_coverage("claude-code", wired, args.profile,
+                             remote=args.publish_chain)
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -3656,6 +3703,14 @@ def main(argv=None):
              "a remote the credentials on this machine cannot delete "
              "from, such as a chat incoming webhook. No path, project "
              "name, or action line leaves")
+    install_parser.add_argument(
+        "--publish-chain", default=None, metavar="URL", type=publish_url,
+        help="opt in: every session end POSTs the chain's entries since "
+             "the last acknowledged one to this URL, after the head and "
+             "before the anchor, quietly and best-effort (ADR-0031). Pick "
+             "a remote that can only add, never delete, such as the "
+             "receiver (docs/RECEIVER.md). Every entry leaves: action "
+             "lines are command lines, and the installer says so")
     install_parser.set_defaults(func=cmd_install_hook)
     uninstall_parser = sub.add_parser(
         "uninstall-hook",
@@ -3684,9 +3739,10 @@ def main(argv=None):
         # The profile and the raw flags are one choice (ADR-0031 ruling
         # 1); a contradiction between them is a usage error, exit 64.
         try:
-            (args.profile, args.anchor_at_session_end,
-             args.publish_head) = resolve_profile(
-                args.profile, args.anchor_at_session_end, args.publish_head)
+            (args.profile, args.anchor_at_session_end, args.publish_head,
+             args.publish_chain) = resolve_profile(
+                args.profile, args.anchor_at_session_end, args.publish_head,
+                args.publish_chain)
         except ValueError as e:
             install_parser.error(str(e))
     return args.func(args)

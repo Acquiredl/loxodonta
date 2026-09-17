@@ -521,5 +521,160 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.assertEqual(judged.stdout.strip(), "VALID")
 
 
+class InstallPublishChainTest(unittest.TestCase):
+    """`install-hook --profile custom --publish-chain URL` writes
+    `--publish-chain URL` onto the wired SessionEnd command, the way
+    `--publish-head` writes `--publish` (ADR-0031 ruling 1, under
+    `custom` in this slice): readable in the settings file, recorded in
+    the coverage marker as the remote the entries go to, said before
+    anything is written, idempotent, removed by `uninstall-hook`."""
+
+    URL = "https://shelf.example.test:8790/7qpsWUkU86ML-NOuaGjSaetfYCGg"
+    HEAD_URL = "https://hooks.example.test/services/T000/B000/XXXX"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.home = self.root / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        self.store = self.root / "store"
+        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
+                    "LOXODONTA_HOME": str(self.store)}
+
+    def install(self, *args):
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), "install-hook", *args],
+            cwd=self.root, capture_output=True, encoding="utf-8",
+            env={**clean_env(), **self.env})
+
+    def settings_text(self):
+        path = self.home / ".claude" / "settings.json"
+        return path.read_text(encoding="utf-8") if path.exists() else "{}"
+
+    def commands(self, event):
+        hooks = json.loads(self.settings_text())["hooks"]
+        return [h["command"] for b in hooks[event] for h in b["hooks"]]
+
+    def epochs(self):
+        return json.loads((self.store / "coverage.json")
+                          .read_text(encoding="utf-8"))["epochs"]
+
+    def test_custom_with_publish_chain_wires_the_flag_and_records_the_remote(self):
+        result = self.install("--profile", "custom", "--publish-chain", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertTrue(end.endswith(f' --publish-chain "{self.URL}"'), end)
+        # No network call in the recording path (ADR-0024 ruling 1).
+        self.assertNotIn("--publish", json.dumps(self.commands("PostToolUse")))
+        # The installer states the choice, URL included.
+        self.assertIn("publishes the chain to " + self.URL, result.stdout)
+        self.assertIn("profile custom", result.stdout)
+        # The marker's epoch records the remote beside the profile: it
+        # never travels, so unlike the memo it may hold the URL.
+        (epoch,) = self.epochs()
+        self.assertEqual((epoch["profile"], epoch["remote"]),
+                         ("custom", self.URL))
+        # The flag with the word left off is the same install.
+        again = self.install("--publish-chain", self.URL)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("already installed", again.stdout)
+        self.assertEqual(len(self.commands("SessionEnd")), 1)
+        self.assertEqual(len(self.epochs()), 1, "a re-run never grows the marker")
+
+    def test_the_installer_says_what_leaves_before_it_writes(self):
+        # ADR-0031: the entries carry action lines, which are command
+        # lines, and file paths, and the install text says so before the
+        # first send. The what-leaves text comes before the write line.
+        result = self.install("--profile", "custom", "--publish-chain", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        said = result.stdout
+        self.assertIn("every entry", said)
+        self.assertIn("action line", said)
+        self.assertIn("command lines", said)
+        self.assertIn("anything the agent typed", said)
+        self.assertLess(said.index("every entry"), said.index("installed in"))
+        # A head-only install says nothing of the kind: only the head
+        # leaves, and ADR-0025 said what that is.
+        head_only = self.install("--publish-head", self.HEAD_URL)
+        self.assertNotIn("anything the agent typed", head_only.stdout)
+
+    def test_a_raw_flag_beside_a_named_profile_is_refused_naming_custom(self):
+        for profile in ("local", "timestamped"):
+            result = self.install("--profile", profile,
+                                  "--publish-chain", self.URL)
+            self.assertEqual(result.returncode, 64, result.stderr)
+            self.assertIn("--profile custom", result.stderr)
+            self.assertIn("--publish-chain", result.stderr)
+            self.assertFalse((self.home / ".claude" / "settings.json").exists(),
+                             "a refusal writes nothing")
+
+    def test_both_publishes_and_the_anchor_ride_on_the_one_command(self):
+        result = self.install("--anchor-at-session-end",
+                              "--publish-head", self.HEAD_URL,
+                              "--publish-chain", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertIn(" --anchor", end)
+        self.assertIn(f' --publish "{self.HEAD_URL}"', end)
+        self.assertTrue(end.endswith(f' --publish-chain "{self.URL}"'), end)
+        self.assertIn("anchors at session end", result.stdout)
+        self.assertIn(self.HEAD_URL, result.stdout)
+        self.assertIn(self.URL, result.stdout)
+
+    def test_a_rerun_without_the_flag_turns_the_chain_off_and_says_so(self):
+        self.install("--publish-chain", self.URL)
+
+        result = self.install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("--publish-chain", self.settings_text())
+        self.assertNotIn(self.URL, self.settings_text())
+        self.assertIn("no longer publishes the chain", result.stdout)
+        # The marker's newest epoch no longer names the remote.
+        self.assertEqual([e.get("remote") for e in self.epochs()],
+                         [self.URL, None])
+
+    def test_uninstall_removes_the_flag_with_the_hook(self):
+        self.install("--publish-chain", self.URL)
+
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "uninstall-hook"],
+            cwd=self.root, capture_output=True, encoding="utf-8",
+            env={**clean_env(), **self.env})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("loxodonta.py", self.settings_text())
+        self.assertNotIn("--publish-chain", self.settings_text())
+        self.assertNotIn(self.URL, self.settings_text())
+
+    def test_the_installer_refuses_a_url_a_shell_could_act_on(self):
+        for bad in ("file:///tmp/receipts.jsonl", "shelf.example.test/x",
+                    "https://shelf.example.test/$(id)",
+                    "https://shelf.example.test/a b"):
+            result = self.install("--publish-chain", bad)
+            self.assertEqual(result.returncode, 64, bad + ": " + result.stderr)
+            self.assertIn("--publish-chain", result.stderr)
+            self.assertFalse((self.home / ".claude" / "settings.json").exists(),
+                             bad)
+
+    def test_codex_refuses_the_chain_at_session_end_and_names_the_keeper(self):
+        # Codex caps the whole SessionEnd hook at three seconds and the
+        # head's POST already takes half of it (#183); the chain's send
+        # is not measured there, so the installer refuses it with the
+        # way out, the keeper's cadence, as ADR-0024 refuses the anchor.
+        (self.home / ".codex").mkdir()
+
+        result = self.install("--codex", "--publish-chain", self.URL)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--publish-chain", result.stderr)
+        self.assertIn("--publish-every", result.stderr)
+        self.assertFalse((self.home / ".codex" / "hooks.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
