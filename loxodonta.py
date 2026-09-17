@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -898,10 +899,14 @@ def post_once(url, body, timeout):
     naming what went wrong; never raises. The line never carries the
     URL: a webhook URL is a credential, and this line reaches stderr
     and the publish memo, which rides in every package. A URLError's
-    reason is socket-level text (refused, timed out, a certificate that
-    does not match the public hostname); any other exception is named
-    by its type alone, because http.client quotes the request path in
-    its own messages and the path is where a token lives."""
+    reason is socket-level text (refused, a certificate that does not
+    match the public hostname); a timeout, whether it surfaces as a
+    URLError's reason or as the socket's own exception, is the one line
+    `post_bounded` also prints, so the memo says the same thing whichever
+    timer fired first (CI on macOS showed the socket's winning); any
+    other exception is named by its type alone, because http.client
+    quotes the request path in its own messages and the path is where a
+    token lives."""
     try:
         request = urllib.request.Request(
             url, data=body,
@@ -914,7 +919,11 @@ def post_once(url, body, timeout):
         # A refused redirect lands here too, as its 3xx status.
         return f"the remote answered {e.code}"
     except urllib.error.URLError as e:
+        if isinstance(e.reason, socket.timeout):
+            return f"no answer within {timeout:g} seconds"
         return str(e.reason) or type(e.reason).__name__
+    except socket.timeout:  # TimeoutError on 3.10+, its own class on 3.9
+        return f"no answer within {timeout:g} seconds"
     except Exception as e:  # noqa: BLE001 - what failed is reported, not raised
         return type(e).__name__
 
