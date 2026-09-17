@@ -707,6 +707,36 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertEqual(len([h for b in self.codex_hooks()["SessionEnd"]
                               for h in b["hooks"]]), 1)
 
+    def test_codex_profile_timestamped_records_the_profile_and_wires_no_anchor(self):
+        # ADR-0031 ruling 1 on Codex: the profile is written down, the
+        # session-end anchor stays refused (ADR-0024: three seconds is a
+        # POST, not a calendar round trip), so nothing extra is wired and
+        # the notice says the supervisor anchors on its cadence.
+        (self.home / ".codex").mkdir()
+
+        result = self.install("--codex", "--profile", "timestamped")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hooks = self.codex_hooks()
+        [end] = [h for b in hooks["SessionEnd"] for h in b["hooks"]]
+        self.assertNotIn("--anchor", end["command"])
+        self.assertEqual(end["timeout"], 3)
+        marker = json.loads((self.store / "coverage.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual((marker["epochs"][-1]["harness"],
+                          marker["epochs"][-1]["profile"]),
+                         ("codex", "timestamped"))
+        self.assertIn("profile timestamped", result.stdout)
+        self.assertIn("supervisor", result.stdout)
+        self.assertIn("cadence", result.stdout)
+        self.assertNotIn("--anchor-at-session-end", result.stdout)
+        # Not a tier reached by a flag Codex refuses: the raw flag is
+        # still refused, profile or no profile.
+        refused = self.install("--codex", "--profile", "custom",
+                               "--anchor-at-session-end")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("--anchor-every", refused.stderr)
+
     def test_codex_still_refuses_the_session_end_anchor(self):
         # #183 measured a POST, not a calendar round trip: the anchor's
         # refusal (ADR-0024) stands, and names the supervisor instead.

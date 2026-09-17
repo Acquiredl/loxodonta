@@ -2975,9 +2975,13 @@ def cmd_install_hook(args):
     Restart open sessions afterwards: hooks load at start. With
     --codex, the Codex half runs instead (install_codex_hooks)."""
     if args.codex:
-        if args.anchor_at_session_end:
+        if args.anchor_at_session_end and args.profile == "custom":
             # Codex caps a SessionEnd hook at three seconds, too short
-            # for a calendar round trip with any margin (ADR-0024).
+            # for a calendar round trip with any margin (ADR-0024). The
+            # raw flag asked for it by name and is refused; `--profile
+            # timestamped` asked for the tier, which on Codex is the
+            # profile written down and the supervisor anchoring on its
+            # cadence, so it goes through with the anchor left unwired.
             print("error: --anchor-at-session-end is not wired for Codex: "
                   "its SessionEnd hook is capped at three seconds, too "
                   "short to reach a calendar with margin. Use the "
