@@ -521,6 +521,33 @@ class LastAttemptFailedTest(MetricsFixture):
                          step="publish-head"), 1)
 
 
+    def test_the_chain_send_and_the_stamp_have_gauges_of_their_own(self):
+        # The two steps later slices added (#248, #250) are label values
+        # like the first two: served at zero before they ever fail, and at
+        # one when some chain's newest failed attempt is theirs.
+        sent = make_chain(self.root / "alpha" / "receipts", "sess-chain")
+        write_attempt_row(sent, "publish-chain",
+                          "no answer within 3 seconds", when=ago(300),
+                          budget=3.0)
+        stamped = make_chain(self.root / "beta" / "receipts", "sess-stamp")
+        row = {"kind": "attempt", "step": "stamp", "ts": ago(120),
+               "budget": 3.0, "outcome": "the remote answered 503"}
+        with open(str(stamped) + ".stamps.jsonl", "a",
+                  encoding="utf-8") as out:
+            out.write(json.dumps(row) + "\n")
+        self.serve(extra_env={"SUPERVISOR_SCAN_TTL_SECONDS": "0"})
+
+        _, _, scraped = self.scrape()
+        report = self.scan()
+
+        failed = sorted(c["last_failed"]["step"] for c in chains_of(report)
+                        if c["last_failed"])
+        self.assertEqual(failed, ["publish-chain", "stamp"])
+        for step in ("anchor", "publish-head", "publish-chain", "stamp"):
+            self.assertEqual(
+                scraped.value("loxodonta_last_attempt_failed", step=step),
+                1 if step in failed else 0, step)
+
 class OffMachineMetricsTest(MetricsFixture):
     """The route inherits the face's posture (ADR-0033 ruling 3): a
     browser lied to by DNS reads as same-origin, so the Host header is

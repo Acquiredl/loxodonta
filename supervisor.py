@@ -5415,7 +5415,12 @@ KNOWN_COMPLETENESS = ("OK", "LAGGING", "SURPLUS", "QUIET", "ALARM-SILENT",
                       "UNWITNESSED", "UNWATCHED", "ELSEWHERE", "BEFORE-MEMORY")
 KNOWN_LIFECYCLE = ("awake", "waning", "dormant")
 KNOWN_CONSUMPTION = ("RUNNING-HOT", "ENDED-HOT")
-KNOWN_STEPS = ("anchor", "publish-head")
+# Every session-end step the recorder writes an attempt row for, in the
+# order the hook runs them apart from the anchor, which stays first for
+# the label order the first release already documented (#245, #248,
+# #250). A step missing here would never be served at zero, and a
+# panel would meet a missing series the first time it failed.
+KNOWN_STEPS = ("anchor", "publish-head", "publish-chain", "stamp")
 
 
 def tallied(values, known):
