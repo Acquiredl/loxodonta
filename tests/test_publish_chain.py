@@ -812,8 +812,11 @@ class InstallPublishChainTest(unittest.TestCase):
         self.home = self.root / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = self.root / "store"
+        # CODEX_HOME inside the temp home too: a machine that sets it
+        # would otherwise get this test's hooks in its real hooks.json.
         self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
-                    "LOXODONTA_HOME": str(self.store)}
+                    "LOXODONTA_HOME": str(self.store),
+                    "CODEX_HOME": str(self.home / ".codex")}
 
     def install(self, *args):
         return subprocess.run(
@@ -1172,8 +1175,11 @@ class InstallProfileFullTest(unittest.TestCase):
         self.home = self.root / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = self.root / "store"
+        # CODEX_HOME inside the temp home too: a machine that sets it
+        # would otherwise get this test's hooks in its real hooks.json.
         self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
-                    "LOXODONTA_HOME": str(self.store)}
+                    "LOXODONTA_HOME": str(self.store),
+                    "CODEX_HOME": str(self.home / ".codex")}
 
     def install(self, *args):
         return subprocess.run(
@@ -1387,7 +1393,8 @@ class SessionEndUnderFullTest(PublishBase):
             cwd=self.root, capture_output=True, encoding="utf-8",
             env={**clean_env(), "HOME": str(self.home),
                  "USERPROFILE": str(self.home),
-                 "LOXODONTA_HOME": str(self.store)})
+                 "LOXODONTA_HOME": str(self.store),
+                 "CODEX_HOME": str(self.home / ".codex")})
 
     def wired_session_end(self):
         """The argv the installer wrote, read back out of the settings
@@ -1460,7 +1467,9 @@ class FullProfileKeeperTest(unittest.TestCase):
         self.home = base / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = base / "store"
-        self.witness = base / "witness"
+        # Beside the settings the installer writes: the keeper follows
+        # a profile only while that harness's recorder is wired there.
+        self.witness = self.home / ".claude" / "projects"
         self.witness.mkdir()
         self.receiver = serve_fake(self)
         self.calendar = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
@@ -1482,7 +1491,8 @@ class FullProfileKeeperTest(unittest.TestCase):
             [sys.executable, str(LOXODONTA), "install-hook", *args],
             capture_output=True, check=True,
             env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
-                           LOXODONTA_HOME=str(self.store)))
+                           LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex")))
 
     def aged_chain(self, session, age):
         """A chain through the public CLI whose entries are `age` seconds
@@ -1508,6 +1518,7 @@ class FullProfileKeeperTest(unittest.TestCase):
              "--calendar", self.calendar.url, *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env=keeper_env(LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex"),
                            PYTHONIOENCODING="utf-8"))
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
@@ -1575,8 +1586,125 @@ class FullProfileKeeperTest(unittest.TestCase):
         self.assertEqual(self.receiver.received, [],
                          "a flag names the target, and names it alone")
 
+    def uninstall(self, *args):
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "uninstall-hook", *args],
+            capture_output=True, check=True,
+            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+                           LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex")))
+
+    def serve_refused(self, *extra):
+        """`serve` as a command that is refused before it binds a port."""
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), "serve", "--root",
+             str(self.root), "--port", "0", "--witness", str(self.witness),
+             *extra],
+            capture_output=True, encoding="utf-8", timeout=60,
+            env=keeper_env(LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex"),
+                           PYTHONIOENCODING="utf-8"))
+
+    def test_uninstall_stands_both_keepers_down(self):
+        # PRD #244 story 40: the receiver stops hearing from me when I say
+        # so. `uninstall-hook` writes nothing to the marker (ADR-0030), so
+        # the wired command is what says the operator stopped, and the
+        # keeper follows a profile only while its recorder is wired.
+        self.install("--profile", "full", "--remote", self.receiver.url)
+        self.uninstall()
+        self.aged_chain("sess-gone", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        self._stop()
+
+        self.assertIn("anchor off (profile full, claude-code; no recorder "
+                      "wired)", self.said)
+        self.assertIn("publish off (profile full, claude-code; no recorder "
+                      "wired)", self.said)
+        self.assertEqual(self.receiver.received, [])
+        self.assertEqual(self.calendar.submitted, [])
+
+    def test_the_keeper_reads_codexs_wiring_too(self):
+        # Both harnesses at `full`, then Claude Code uninstalled: Codex is
+        # still wired and its profile speaks. Then Codex uninstalled as
+        # well: nothing speaks, and nothing more is sent.
+        (self.home / ".codex").mkdir()
+        self.install("--profile", "full", "--remote", self.receiver.url)
+        self.install("--codex", "--profile", "full",
+                     "--remote", self.receiver.url)
+        self.uninstall()
+        self.aged_chain("sess-codex", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        self._stop()
+
+        self.assertIn("publish head and chain every 6h (profile full, codex)",
+                      self.said)
+        sent = len(self.receiver.received)
+        self.assertEqual(sent, 2)
+
+        self.uninstall("--codex")
+        self.serve()
+        self.tick()
+        self._stop()
+
+        self.assertIn("publish off (profile full, codex; no recorder wired)",
+                      self.said)
+        self.assertEqual(len(self.receiver.received), sent)
+
+    def test_a_lone_cadence_at_full_keeps_the_markers_remote(self):
+        # As `--anchor-every` alone keeps the profile's anchor, a cadence
+        # typed alone at `full` keeps the marker's remote for both routes;
+        # only a URL flag replaces the target.
+        self.install("--profile", "full", "--remote", self.receiver.url)
+        self.aged_chain("sess-lone", age=7 * 3600)
+
+        self.serve("--publish-every", "1h")
+        self.tick()
+        self._stop()
+
+        self.assertIn("publish head and chain every 1h (flag --publish-every, "
+                      "to the remote of profile full, claude-code)", self.said)
+        self.assertEqual(self.kinds(), ["application/json", NDJSON])
+
+    def test_a_lone_cadence_below_full_is_still_a_command_spoken_wrong(self):
+        self.install("--profile", "timestamped")
+
+        refused = self.serve_refused("--publish-every", "1h")
+
+        self.assertEqual(refused.returncode, 64, refused.stderr)
+        self.assertIn("--publish-every goes with --publish-url or "
+                      "--publish-chain", refused.stderr)
+        self.assertIn("(profile timestamped, claude-code; no flag)",
+                      refused.stderr)
+
+    def test_a_marker_remote_that_is_not_a_plain_url_is_never_followed(self):
+        # The marker is writer-reachable (ADR-0030): its remote is held to
+        # the installer's own rule before anything is sent there, and the
+        # startup line names the marker, never a flag nobody typed.
+        self.install("--profile", "full", "--remote", self.receiver.url)
+        marker = self.store / "coverage.json"
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        data["epochs"][-1]["remote"] = "https://shelf.example.test/$(id)"
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        self.aged_chain("sess-edited", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        self._stop()
+
+        self.assertIn("publish off (profile full, claude-code; the marker's "
+                      "remote is not a plain http or https URL)", self.said)
+        self.assertEqual(self.receiver.received, [])
+        refused = self.serve_refused("--publish-every", "1h")
+        self.assertEqual(refused.returncode, 64, refused.stderr)
+        self.assertIn("the marker's remote is not a plain http or https URL",
+                      refused.stderr)
+
     def test_a_timestamped_marker_still_runs_no_publish_keeper(self):
-        # The publish cadence is `full`'s alone (ADR-0031 ruling 6): a
+        # The publish cadence is `full`'s alone (ADR-0031 ruling 1): a
         # tier that never asked for the entries to leave never has them
         # leave because a release added a route.
         self.install("--profile", "timestamped")
@@ -1615,6 +1743,7 @@ class DrillUnderFullTest(unittest.TestCase):
              str(self.root), "--log", log, "--json"],
             capture_output=True, encoding="utf-8",
             env=keeper_env(LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex"),
                            PYTHONIOENCODING="utf-8"))
 
     def test_a_rehearsal_names_the_tier_and_sends_nothing(self):
@@ -1623,7 +1752,8 @@ class DrillUnderFullTest(unittest.TestCase):
              "full", "--remote", self.receiver.url],
             capture_output=True, check=True,
             env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
-                           LOXODONTA_HOME=str(self.store)))
+                           LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex")))
         make_store_chain(self.root / "alpha" / "receipts", "sess-drill",
                          entries=3)
 
@@ -1644,7 +1774,6 @@ class DrillUnderFullTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIsNone(json.loads(result.stdout)["profile"])
-
 
 
 class ChainRowsTravelNowhereTest(unittest.TestCase):

@@ -622,7 +622,10 @@ class ProfileKeeperTest(unittest.TestCase):
         self.home = Path(self._tmp.name).resolve() / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = Path(self._tmp.name).resolve() / "store"
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        # The witness is the layout beside the settings the installer
+        # writes, because the keeper follows a profile only while that
+        # harness's recorder is still wired there (#249).
+        self.witness = self.home / ".claude" / "projects"
         self.witness.mkdir()
         self.calendar = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
         self.calendar.mode = "pending"
@@ -642,7 +645,8 @@ class ProfileKeeperTest(unittest.TestCase):
         stamps the epoch that many seconds into the past (the recorder's
         clock override), so one install can be older than another."""
         knobs = {"HOME": str(self.home), "USERPROFILE": str(self.home),
-                 "LOXODONTA_HOME": str(self.store)}
+                 "LOXODONTA_HOME": str(self.store),
+                 "CODEX_HOME": str(self.home / ".codex")}
         if age:
             knobs["SOURCE_DATE_EPOCH"] = str(int(time.time()) - age)
         subprocess.run(
@@ -674,6 +678,7 @@ class ProfileKeeperTest(unittest.TestCase):
              "--calendar", self.calendar.url, *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env=keeper_env(LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex"),
                            PYTHONIOENCODING="utf-8"))
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()

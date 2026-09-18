@@ -27,8 +27,8 @@ from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
-# The ladder's third rung, word for word as ADR-0031 ruling 1 ratified
-# it (#249). Shared so the two ladder tests read the same string and a
+# The ladder's third rung, word for word as ratified in the #244 grill
+# (#249). Shared so the two ladder tests read the same string and a
 # looser rewrite of the claim fails both.
 FULL_LADDER_ROW = (
     "  full         --profile full --remote URL   head and receipts go "
@@ -550,8 +550,11 @@ class InstallPublishHeadTest(unittest.TestCase):
         # A private store, so the coverage marker the installer writes
         # (ADR-0030) lands here and never in the developer's own.
         self.store = self.root / "store"
+        # CODEX_HOME inside the temp home too: a machine that sets it
+        # would otherwise get this test's hooks in its real hooks.json.
         self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
-                    "LOXODONTA_HOME": str(self.store)}
+                    "LOXODONTA_HOME": str(self.store),
+                    "CODEX_HOME": str(self.home / ".codex")}
 
     def install(self, *args):
         return run_receipts("install-hook", *args, cwd=self.root,
@@ -688,8 +691,8 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("a 32-byte digest leaves at each session end",
                       ladder["timestamped"])
         self.assertIn("once the anchor matures", ladder["timestamped"])
-        # The third rung, word for word as ADR-0031 ruling 1 ratified
-        # it: the flag that reaches the tier, and the claim in the
+        # The third rung, word for word as ratified in the #244 grill:
+        # the flag that reaches the tier, and the claim in the
         # phrase the PRD fixed so it is never rewritten looser.
         self.assertEqual(ladder["full"], FULL_LADDER_ROW)
         self.assertIn("as of the last send", ladder["full"])
