@@ -106,7 +106,7 @@ The entry with `n == 0` and `prev == null` — the only entry allowed a null `pr
 
 ### Tool version
 
-Which recorder and supervisor a person is running: a semantic version in one constant per file (`TOOL_VERSION`), tagged at every promotion to `main`, and the same in both files by test. Decoupled from the *format* version the [genesis](#genesis) carries: the format says which chains the tool can read and is frozen at `0.1` (SPEC §2.1); the tool version moves with releases. `--version` on either file prints both beside the checkout's commit — the [recorder notice](#recorder-notice)'s fact, read from local git only, `unknown` outside a checkout. A version is a label on the file, never a channel to fetch a newer one (ADR-0015, ADR-0022).
+Which recorder, supervisor and receiver a person is running: a semantic version in one constant per file (`TOOL_VERSION`), tagged at every promotion to `main`, and the same in all three files by test. Decoupled from the *format* version the [genesis](#genesis) carries: the format says which chains the tool can read and is frozen at `0.1` (SPEC §2.1); the tool version moves with releases. `--version` on any of them prints both beside the checkout's commit — the [recorder notice](#recorder-notice)'s fact, read from local git only, `unknown` outside a checkout. A version is a label on the file, never a channel to fetch a newer one (ADR-0015, ADR-0022).
 
 ### Canonical form
 
