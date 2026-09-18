@@ -4602,8 +4602,9 @@ def package_readme(unit, packed, sessions, witness, record, notes,
             "--authority-chain <chain.pem>",
             "",
             "Every token here is judged against that one file, so when the "
-            "stamps records name more than one authority, make it a "
-            "bundle: their chains concatenated into one PEM file. The "
+            "stamps records name more than one authority, make it one "
+            "chain file holding every authority's certificates "
+            "(concatenated PEM). The "
             "names in those records are the packer's note of whom it "
             "asked, not a claim the verifier checks.",
             "",

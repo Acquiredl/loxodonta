@@ -4321,8 +4321,9 @@ def main(argv=None):
                                     "token is judged against this one "
                                     "file, so when the sidecar holds "
                                     "tokens from more than one authority, "
-                                    "give a bundle: their chains "
-                                    "concatenated into one PEM file")
+                                    "give one chain file holding every "
+                                    "authority's certificates "
+                                    "(concatenated PEM)")
     verify_parser.set_defaults(func=cmd_verify)
     package_parser = sub.add_parser(
         "verify-package",
@@ -4345,8 +4346,9 @@ def main(argv=None):
                                      "manifest's and each chain's, is "
                                      "judged against this one file, so when "
                                      "the records name more than one "
-                                     "authority, give a bundle: their "
-                                     "chains concatenated into one PEM file")
+                                     "authority, give one chain file "
+                                     "holding every authority's "
+                                     "certificates (concatenated PEM)")
     package_parser.set_defaults(func=cmd_verify_package)
     anchor_parser = sub.add_parser(
         "anchor", parents=[common],

@@ -398,7 +398,7 @@ class JudgedPackageStampTest(StampedStoreCase):
         folder = self.root / name
         folder.mkdir()
         # A subject of its own, as two real authorities have: openssl
-        # finds a token's issuer in a bundle by subject name, and two
+        # finds a token's issuer in a chain file by subject name, and two
         # certificates sharing one would leave it choosing between them.
         (folder / "req.cnf").write_text(
             REQ_CONFIG.replace("CN = loxodonta test authority",
@@ -478,7 +478,7 @@ class JudgedPackageStampTest(StampedStoreCase):
                         lines[-1])
         self.assertNotIn("someone-else", lines[-1] + lines[-2])
 
-    def test_two_authorities_are_judged_with_a_bundle_of_their_chains(self):
+    def test_two_authorities_are_judged_with_one_chain_file_holding_both(self):
         # One --authority-chain judges every token in the package, so a
         # chain stamped by one authority and a manifest stamped by
         # another need both chains in that one file: either alone fails
@@ -490,13 +490,13 @@ class JudgedPackageStampTest(StampedStoreCase):
         built = self.package(SESSION, "--folder", "--out", str(folder),
                              "--stamp", other.url)
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
-        bundle = self.root / "bundle.pem"
-        bundle.write_text(self.chain_file.read_text("utf-8")
+        both_chains = self.root / "both-authorities.pem"
+        both_chains.write_text(self.chain_file.read_text("utf-8")
                           + other_chain.read_text("utf-8"), "utf-8")
 
         first_only = self.judge(folder)
         other_only = self.judge(folder, other_chain)
-        both = self.judge(folder, bundle)
+        both = self.judge(folder, both_chains)
 
         self.assertEqual(first_only.returncode, 3, first_only.stdout)
         self.assertIn("seal stamp: SEAL-INVALID", first_only.stdout)
