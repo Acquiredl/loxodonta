@@ -78,27 +78,29 @@ HOMES = ("LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME")
 SUPERVISOR_VERB = re.compile(r'(?:^|[\s"/\\])supervisor\.py"?\s+"?([a-z-]+)')
 
 
-def inside_the_temp_root(value):
+def inside_the_temp_root(value, cwd):
     """Whether `value` names a folder under the temp root, which is where
-    every test's own home lives and where no machine keeps its real one."""
+    every test's own home lives and where no machine keeps its real one.
+    A relative `value` is read from `cwd`, as the child will read it."""
     if not value:
         return False
     temp = os.path.realpath(tempfile.gettempdir())
+    folder = os.path.realpath(os.path.join(cwd, value))
     try:
-        return os.path.commonpath([os.path.realpath(value), temp]) == temp
+        return os.path.commonpath([folder, temp]) == temp
     except ValueError:  # another drive, on Windows: not under it
         return False
 
 
-def strays(env):
+def strays(env, cwd):
     """The names in `env` that could still reach this machine's home: a
     home unset, outside the temp root, or no different from the one this
     process runs under; and a CLAUDE_PROJECT_DIR the test did not choose."""
     found = [name for name in HOMES
-             if not inside_the_temp_root(env.get(name))
+             if not inside_the_temp_root(env.get(name), cwd)
              or env.get(name) == os.environ.get(name)]
     project = env.get("CLAUDE_PROJECT_DIR")
-    if project and (not inside_the_temp_root(project)
+    if project and (not inside_the_temp_root(project, cwd)
                     or project == os.environ.get("CLAUDE_PROJECT_DIR")):
         found.append("CLAUDE_PROJECT_DIR")
     return found
@@ -125,7 +127,7 @@ def refuse_this_machines_home(event, args):
     Raising here fails the test that started it, at the start."""
     if event != "subprocess.Popen":
         return
-    _, command, _, env = args
+    _, command, cwd, env = args
     if isinstance(command, (str, bytes, os.PathLike)):
         command = os.fsdecode(command)
     else:
@@ -133,7 +135,8 @@ def refuse_this_machines_home(event, args):
     verb = SUPERVISOR_VERB.search(command)
     if verb is None or verb.group(1) not in HOME_READERS:
         return
-    names = strays(os.environ if env is None else env)
+    names = strays(os.environ if env is None else env,
+                   os.getcwd() if cwd is None else os.fsdecode(cwd))
     if names:
         raise AssertionError(
             "supervisor.py %s started with this machine's %s (#242). Give "
