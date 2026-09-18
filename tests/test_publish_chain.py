@@ -32,9 +32,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
 from test_receiver import make_chain, run_recorder
-from test_supervisor import (chain_head, chains_by_session,
-                             install_witness_hook, keeper_env,
-                             make_chain as make_store_chain, run_scan)
+from test_supervisor import (ago, chain_head, chains_by_session,
+                             install_witness_hook, isolated_env, keeper_env,
+                             make_chain as make_store_chain, run_scan,
+                             write_chain_row)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -1808,9 +1809,12 @@ class ChangedRemoteTest(unittest.TestCase):
     last row naming the remote it is about to send to. A remote that has
     acknowledged nothing receives the chain from its genesis, so its
     file is a receipt log that verifies; the first remote, sent to
-    again, resumes where it stopped. Two of the repo's own receivers as
-    subprocesses, because what their files hold, and whether `verify
-    --log` calls each VALID, is the point."""
+    again, resumes where it stopped. A row from before rows named their
+    remote counts for none: after the upgrade each chain goes once more
+    from genesis, and a receiver that already holds it keeps its file
+    unchanged. Two of the repo's own receivers as subprocesses, because
+    what their files hold, and whether `verify --log` calls each VALID,
+    is the point."""
 
     SESSION = "sess-remote-0001"
 
@@ -1884,23 +1888,35 @@ class ChangedRemoteTest(unittest.TestCase):
                              "the token is the credential; never in the memo")
         self.assertNotIn("127.0.0.1", memo)
 
-    def test_a_memo_from_before_remotes_were_named_resumes_without_a_resend(self):
-        # An existing install upgraded: its memo's rows name no remote,
-        # and they count for the remote the chain goes to next, so the
-        # upgrade resends nothing. The first row that names a remote
-        # claims them, so a remote changed after the upgrade starts from
-        # genesis, once.
+    def upgraded(self, *actions):
+        """A chain sent whole to the first remote by a recorder from
+        before rows named their remote, then grown by `actions`."""
         make_chain(self.log, ["step 1"], epoch=1700000000)
         self.assertEqual(self.publish_chain(self.first).returncode, 0)
         strip_remote_ids(self.log)
-        self.grow("step 2")
+        self.grow(*actions)
 
-        upgraded = self.publish_chain(self.first)
+    def test_after_the_upgrade_a_chain_goes_once_more_and_the_file_is_unchanged(self):
+        # The same remote after the upgrade: the old row names no remote
+        # and counts for none, so the chain goes again from genesis, and
+        # the receiver drops every line as an exact duplicate.
+        self.upgraded()
+        before = self.copy("first")
 
-        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
-        self.assertIn("published chain entries 2-2", upgraded.stdout)
-        self.assertEqual(self.copy("first"), self.log.read_bytes())
+        again = self.publish_chain(self.first)
+
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("published chain entries 0-1", again.stdout)
+        self.assertEqual(self.copy("first"), before)
         self.assertEqual(self.verdict("first"), "VALID")
+        self.assertIn("nothing to send", self.publish_chain(self.first).stdout)
+
+    def test_a_remote_re_pointed_before_the_next_send_gets_the_chain_from_genesis(self):
+        # Upgraded, then pointed elsewhere before any send named a
+        # remote: the new receiver's file starts at genesis and
+        # verifies, and the old one, sent to again, takes the chain once
+        # more and ends as the one chain too.
+        self.upgraded("step 2")
 
         switched = self.publish_chain(self.second)
 
@@ -1909,15 +1925,28 @@ class ChangedRemoteTest(unittest.TestCase):
         self.assertEqual(self.copy("second"), self.log.read_bytes())
         self.assertEqual(self.verdict("second"), "VALID")
 
-        again = self.publish_chain(self.first)
+        back = self.publish_chain(self.first)
 
-        self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertIn("nothing to send", again.stdout)
-        self.assertIn("entry 2", again.stdout)
+        self.assertEqual(back.returncode, 0, back.stderr)
+        self.assertIn("published chain entries 0-2", back.stdout)
+        self.assertEqual(self.copy("first"), self.log.read_bytes())
+        self.assertEqual(self.verdict("first"), "VALID")
         self.assertEqual([(row["first"], row["last"], row.get("remote_id"))
                           for row in chain_rows(self.log)],
-                         [(0, 1, None), (2, 2, remote_id(self.first.url)),
-                          (0, 2, remote_id(self.second.url))])
+                         [(0, 1, None), (0, 2, remote_id(self.second.url)),
+                          (0, 2, remote_id(self.first.url))])
+
+    def test_a_chain_finished_before_the_upgrade_reaches_a_new_remote_whole(self):
+        # Nothing new since the upgrade, and a remote never contacted:
+        # there is everything to send, not nothing.
+        self.upgraded()
+
+        new = self.publish_chain(self.second)
+
+        self.assertEqual(new.returncode, 0, new.stderr)
+        self.assertIn("published chain entries 0-1", new.stdout)
+        self.assertEqual(self.copy("second"), self.log.read_bytes())
+        self.assertEqual(self.verdict("second"), "VALID")
 
 
 class ChangedRemoteAtSessionEndTest(PublishBase):
@@ -1965,10 +1994,12 @@ class ChangedRemoteAtSessionEndTest(PublishBase):
 
 
 class ChangedRemoteKeeperTest(unittest.TestCase):
-    """The keeper reads the cursor the same way (#263): a remote named at
-    `scan` that has taken nothing receives each chain from genesis and
-    the current head, even when an earlier remote took both, and then
-    nothing twice."""
+    """The keeper reads the chain's cursor the same way (#263): a remote
+    named at `scan` that has taken nothing receives each chain from
+    genesis, and then nothing twice, while a head is posted once,
+    wherever it went (ADR-0025). The supervisor's copy of the rule is
+    tested on its own, so the two files cannot drift. Every scan runs in
+    a home and beside a witness of its own, never this machine's."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1976,15 +2007,23 @@ class ChangedRemoteKeeperTest(unittest.TestCase):
         base = Path(self._tmp.name).resolve()
         self.root = base / "repos"
         self.root.mkdir()
+        self.home = base / "home"
+        self.witness = base / "witness"
         self.kept = base / "receivers"
         self.first = start_receiver(self, self.kept / "first")
         self.second = start_receiver(self, self.kept / "second")
 
+    def tick(self, *flags, **knobs):
+        """One keeper turn on the zero cadence, through `scan`."""
+        result = run_scan(self.root, "--witness", str(self.witness),
+                          "--publish-every", "0s", *flags,
+                          env=isolated_env(self.home, **knobs))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
     def keep(self, receiver, **knobs):
-        return run_scan(self.root, "--publish-every", "0s",
-                        "--publish-url", receiver.url,
-                        "--publish-chain", receiver.url,
-                        env=keeper_env(**knobs))
+        return self.tick("--publish-url", receiver.url,
+                         "--publish-chain", receiver.url, **knobs)
 
     def heads(self, name):
         heads = self.kept / name / "heads.jsonl"
@@ -1993,67 +2032,110 @@ class ChangedRemoteKeeperTest(unittest.TestCase):
         return [json.loads(line)["head"]
                 for line in heads.read_text("utf-8").splitlines()]
 
-    def test_a_new_remote_gets_each_chain_from_genesis_and_the_current_head(self):
+    def copy(self, name, log):
+        return (self.kept / name / log.name).read_bytes()
+
+    def verdict(self, name, log):
+        judged = run_recorder("verify", "--log", self.kept / name / log.name)
+        return judged.stdout.strip()
+
+    def test_a_new_remote_gets_each_chain_from_genesis_and_a_head_goes_once(self):
         log = make_store_chain(self.root / "alpha" / "receipts", "sess-moved")
         head = chain_head(log)
-        first = self.keep(self.first)
-        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.keep(self.first)
         self.assertEqual(self.heads("first"), [head])
 
-        moved = self.keep(self.second, SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        self.keep(self.second, SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
 
-        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
-        copy = self.kept / "second" / log.name
-        self.assertEqual(copy.read_bytes(), log.read_bytes())
-        judged = run_recorder("verify", "--log", copy)
-        self.assertEqual(judged.stdout.strip(), "VALID",
-                         judged.stdout + judged.stderr)
-        self.assertEqual(self.heads("second"), [head],
-                         "a head sent elsewhere is not a head this remote has")
-        self.assertEqual([(row["head"], row["remote_id"])
-                          for row in head_rows(log)],
-                         [(head, remote_id(self.first.url)),
-                          (head, remote_id(self.second.url))])
+        self.assertEqual(self.copy("second", log), log.read_bytes())
+        self.assertEqual(self.verdict("second", log), "VALID")
+        self.assertEqual(self.heads("second"), [],
+                         "a head is posted once, wherever it went")
+        (row,) = head_rows(log)
+        self.assertEqual(set(row), {"head", "n", "ts", "event"})
 
-        again = self.keep(self.second, SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        self.keep(self.second, SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
 
-        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
-        self.assertEqual(self.heads("second"), [head])
         self.assertEqual(len(chain_rows(log)), 2)
-        self.assertEqual(self.heads("first"), [head])
+        self.assertEqual((self.heads("first"), self.heads("second")),
+                         ([head], []))
+
+    def test_the_keeper_counts_a_row_that_names_no_remote_for_none(self):
+        # The supervisor's copy of the recorder's rule: a memo from
+        # before rows named their remote says the whole chain left, and
+        # the keeper still owes it to the remote named here. Were the
+        # copy to count the old row, the keeper would stand down and the
+        # receiver would hold nothing.
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-old")
+        write_chain_row(log, 0, 2, chain_head(log), when=ago(600))
+
+        self.tick("--publish-chain", self.first.url)
+
+        self.assertEqual(self.copy("first", log), log.read_bytes())
+        self.assertEqual(self.verdict("first", log), "VALID")
+        self.assertEqual([(row["first"], row["last"], row.get("remote_id"))
+                          for row in chain_rows(log)],
+                         [(0, 2, None), (0, 2, remote_id(self.first.url))])
+
+    def test_the_recorder_and_the_supervisor_fingerprint_a_url_alike(self):
+        # The recorder sends the chain by hand; the keeper, named the
+        # same URL, finds it sent by its own fingerprint and takes no
+        # turn. Had the two fingerprints differed it would have taken
+        # one (the recorder then finding nothing to send), and that turn
+        # would have started the keeper's throttle: the second turn,
+        # with no knob to reset it, would then hold back the new entry.
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-alike")
+        by_hand = run_recorder("publish", "--chain", "--log", log,
+                               self.first.url)
+        self.assertEqual(by_hand.returncode, 0, by_hand.stderr)
+
+        self.tick("--publish-chain", self.first.url)
+
+        self.assertEqual(len(chain_rows(log)), 1, "nothing was resent")
+        grown = run_recorder("log", "--log", log, "--actor", "claude-code",
+                             "--action", "step 3")
+        self.assertEqual(grown.returncode, 0, grown.stderr)
+
+        self.tick("--publish-chain", self.first.url)
+
+        self.assertEqual(self.copy("first", log), log.read_bytes())
+        self.assertEqual(self.verdict("first", log), "VALID")
+        self.assertEqual([(row["first"], row["last"])
+                          for row in chain_rows(log)], [(0, 2), (3, 3)])
 
 
 class ChangedRemoteReadingTest(unittest.TestCase):
-    """The scan's per-route readings read the cursor the same way (#263):
-    what the SessionEnd command is wired to is the remote a route counts
-    as sent to, so a route rewired to a remote that has taken nothing
-    reads as wired in name only, its head as unpublished, and nothing as
-    having left by it, until that remote takes one. Never the URL."""
+    """The scan's wired-in-name-only reading counts the chain route as
+    sent only to the remote the SessionEnd command names (#263): a chain
+    rewired to a remote that has taken nothing reads as silent until
+    that remote takes a batch. A head counts wherever it went, since a
+    head is posted once (ADR-0025). Never the URL, and never this
+    machine's own settings, store or Codex hooks."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.witness = self.root / "witness"
+        base = Path(self._tmp.name).resolve()
+        self.root = base / "repos"
+        self.root.mkdir()
+        self.home = base / "home"
+        self.witness = base / "witness"
         self.old = serve_fake(self)
         self.new = serve_fake(self)
 
     def scan(self):
         result = run_scan(self.root, "--witness", str(self.witness),
-                          env=keeper_env())
+                          env=isolated_env(self.home))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for url in (self.old.url, self.new.url):
             self.assertNotIn(url, result.stdout)
         return json.loads(result.stdout)
 
-    def send_both(self, log, receiver):
-        for flags in ((), ("--chain",)):
-            sent = run_recorder("publish", *flags, "--log", log, receiver.url)
-            self.assertEqual(sent.returncode, 0, sent.stderr)
-
-    def test_a_route_rewired_to_a_new_remote_is_silent_until_it_takes_one(self):
+    def test_a_chain_rewired_to_a_new_remote_is_silent_until_it_takes_a_batch(self):
         log = make_store_chain(self.root / "alpha" / "receipts", "sess-read")
-        self.send_both(log, self.old)
+        for flags in ((), ("--chain",)):
+            sent = run_recorder("publish", *flags, "--log", log, self.old.url)
+            self.assertEqual(sent.returncode, 0, sent.stderr)
         install_witness_hook(
             self.witness, sessionend=True,
             command=(f'python loxodonta.py hook --publish "{self.new.url}" '
@@ -2062,22 +2144,20 @@ class ChangedRemoteReadingTest(unittest.TestCase):
         report = self.scan()
 
         published = report["published"]
-        self.assertTrue(published["wired"])
-        self.assertFalse(published["sent"])
-        self.assertIn("--publish and --publish-chain", published["note"])
-        (chain,) = chains_by_session(report)[("alpha", "sess-read")]
-        self.assertIs(chain["head_published"], False)
-        self.assertEqual(chain["left"], {"ts": None, "via": None})
-
-        self.send_both(log, self.new)
-
-        report = self.scan()
-
-        self.assertEqual(report["published"],
-                         {"wired": True, "sent": True, "note": None})
+        self.assertEqual((published["wired"], published["sent"]),
+                         (True, True), "the head counts wherever it went")
+        self.assertIn("(--publish-chain)", published["note"])
+        self.assertIn("a sent chain for the remote it names",
+                      published["note"])
+        self.assertNotIn("sent head", published["note"])
         (chain,) = chains_by_session(report)[("alpha", "sess-read")]
         self.assertIs(chain["head_published"], True)
-        self.assertIn(chain["left"]["via"], ("published", "published-chain"))
+
+        sent = run_recorder("publish", "--chain", "--log", log, self.new.url)
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+
+        self.assertEqual(self.scan()["published"],
+                         {"wired": True, "sent": True, "note": None})
 
 
 class ChainRowsTravelNowhereTest(unittest.TestCase):
@@ -2126,7 +2206,8 @@ class ChainRowsTravelNowhereTest(unittest.TestCase):
         body = written.read_text("utf-8")
         self.assertEqual(list(json.loads(body)),
                          ["redaction", "export", "machine", "sessions"])
-        for absent in ("publish", "127.0.0.1", "/hook", "x-loxodonta"):
+        for absent in ("publish", "127.0.0.1", "/hook", "x-loxodonta",
+                       "remote_id", remote_id(self.receiver.url)):
             self.assertNotIn(absent, body.lower(), absent)
 
     def test_a_package_carries_the_chain_and_not_the_memo(self):

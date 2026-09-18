@@ -1069,12 +1069,11 @@ def publish_head(log, url, session, timeout=SESSION_END_PUBLISH,
     body = published_head(last["entry_hash"], last["n"], session)
     failure = post_bounded(url, json.dumps(body).encode("utf-8"), timeout)
     if failure is None:
-        # The memo says one was sent, and where, the same note the
-        # publish command leaves, so the keeper never posts this head
-        # to this remote again (#263).
+        # The memo says one was sent, the same note the publish command
+        # leaves, so the keeper never posts this head again.
         try:
             append_published_record(log, body["head"], body["n"], body["ts"],
-                                    body["event"], url)
+                                    body["event"])
         except OSError:
             pass
     # How it went, written down in the same memo (#240): `sent`, or the
@@ -1099,43 +1098,16 @@ def published_path(log):
     return sidecar_path(log, ".published.jsonl")
 
 
-def remote_id(url):
-    """Which remote a memo row went to, without the URL (#263): the first
-    16 hex characters of the SHA-256 of the URL exactly as it was sent
-    to. A webhook URL, and the receiver's, carries its token, so the
-    memo never holds it (ADR-0025); a fingerprint of it names the remote
-    and reveals nothing usable. The supervisor computes the same thing
-    from the same URL, the rule written twice, since the two files never
-    import each other."""
-    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-
-
-def rows_for_remote(rows, url):
-    """The rows of one route that count for the remote at `url` (#263):
-    those naming it by `remote_id`, and those written before rows named
-    a remote at all. An old row belongs to the remote the memo's first
-    named row of that route names, which is where the chain was going
-    when the recorder was upgraded; until such a row exists it counts
-    for any remote, so an upgrade resends nothing. A remote changed
-    after the upgrade therefore starts from genesis, once."""
-    mine = remote_id(url)
-    named = [row["remote_id"] for row in rows if "remote_id" in row]
-    owner = named[0] if named else mine
-    return [row for row in rows if row.get("remote_id", owner) == mine]
-
-
-def append_published_record(log, head, n, ts, event, url):
+def append_published_record(log, head, n, ts, event):
     """The publish memo: one line per head that left, beside the chain in
     the anchor sidecar's pattern. It is writer-reachable and therefore
     testimony (GLOSSARY): it exists so the keeper never posts the same
-    head twice to the same remote, never to prove anything. The remote's
-    copy is the head record; this is the note that says one was sent.
-    It holds the head, the entry count, the time, the event kind, and
-    the remote's fingerprint, and never the URL: a webhook URL is a
-    credential."""
+    head twice, never to prove anything. The remote's copy is the head
+    record; this is the note that says one was sent. It holds the head,
+    the entry count, the time, and the event kind, and never the URL: a
+    webhook URL is a credential."""
     append_sidecar_record(published_path(log),
-                          {"head": head, "n": n, "ts": ts, "event": event,
-                           "remote_id": remote_id(url)})
+                          {"head": head, "n": n, "ts": ts, "event": event})
 
 
 def chain_session(log):
@@ -1164,7 +1136,8 @@ def chain_session(log):
 # kind `chain` carrying the range and the remote's fingerprint. The
 # cursor is per remote (#263): a remote the chain was never sent to gets
 # it from genesis, because a receiver's file that starts mid-chain can
-# never verify. The session id, the chain's file name,
+# never verify, and a row that names no remote, written before rows
+# named one, counts for none. The session id, the chain's file name,
 # the n range and the head ride in request headers named for the tool,
 # so what the receiver appends is chain bytes and nothing else. One
 # batch stays under the receiver's cap; a longer tail goes in several,
@@ -1212,29 +1185,44 @@ def entries_on_disk(log):
     return entries
 
 
+def remote_id(url):
+    """Which remote a chain row went to, without the URL (#263): the
+    first 16 hex characters of the SHA-256 of the URL exactly as it was
+    sent to. The receiver's URL carries its token, so the memo never
+    holds it (ADR-0025); a fingerprint of it names the remote and
+    reveals nothing usable. The supervisor computes the same thing from
+    the same URL, the rule written twice, since the two files never
+    import each other."""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
 def chain_cursor(log, url):
     """The last entry number the remote at `url` acknowledged, from the
-    memo's chain rows that count for it (`rows_for_remote`); -1 when
-    none does, so the send starts at genesis (entry 0). Read tolerantly:
-    the memo is bookkeeping, and a torn line in it means a resend the
-    receiver drops, never a stuck keeper. A memo that exists and cannot
-    be read at all is the caller's to handle: raised, not guessed at,
-    because guessing -1 would send the whole chain again on every
-    session end."""
+    memo's chain rows that name it (#263); -1 when none does, so the
+    send starts at genesis (entry 0). A row that names no remote was
+    written before rows named one, and counts for none: after the
+    upgrade each chain goes once more from genesis, and a receiver that
+    already holds it drops every line as an exact duplicate, its file
+    unchanged. Read tolerantly: the memo is bookkeeping, and a torn line
+    in it means a resend the receiver drops, never a stuck keeper. A
+    memo that exists and cannot be read at all is the caller's to
+    handle: raised, not guessed at, because guessing -1 would send the
+    whole chain again on every session end."""
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
         return -1
-    rows = []
+    mine = remote_id(url)
+    cursor = -1
     for line in lines:
         try:
             record = json.loads(line)
         except ValueError:
             continue
-        if is_chain_record(record) and isinstance(record.get("last"), int):
-            rows.append(record)
-    return max((row["last"] for row in rows_for_remote(rows, url)),
-               default=-1)
+        if is_chain_record(record) and isinstance(record.get("last"), int) \
+                and record.get("remote_id") == mine:
+            cursor = max(cursor, record["last"])
+    return cursor
 
 
 def chain_batch(entries, cursor, cap=CHAIN_BATCH_CAP):
@@ -1462,8 +1450,7 @@ def cmd_publish(args):
         return 1
     # The memo is written only for a head the remote took: a memo line
     # for a POST that never landed would stand the keeper down for good.
-    append_published_record(args.log, head, n, body["ts"], body["event"],
-                            args.url)
+    append_published_record(args.log, head, n, body["ts"], body["event"])
     print(f"published head {head[:12]}… (entry {n})")
     return 0
 

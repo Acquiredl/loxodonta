@@ -10,7 +10,6 @@ test drives the public CLI against a local fake receiver: no network,
 ever, and never internals.
 """
 
-import hashlib
 import json
 import re
 import subprocess
@@ -30,9 +29,10 @@ from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
 from test_supervisor import (ago, chain_head, chains_by_session,
-                             install_witness_hook, keeper_env, make_chain,
-                             run_scan, write_attempt_row, write_chain_row,
-                             write_completed_anchor, write_pending_anchor)
+                             install_witness_hook, isolated_env, keeper_env,
+                             make_chain, run_scan, write_attempt_row,
+                             write_chain_row, write_completed_anchor,
+                             write_pending_anchor)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -115,15 +115,11 @@ class PublishCommandTest(ReceiverFixture):
         for secret in (self.root.name, "alpha", "secret-wren", "receipts-",
                        ".jsonl"):
             self.assertNotIn(secret, raw)
-        # The memo: head, n, ts, event, and which remote took it by a
-        # fingerprint of the URL (#263), the first 16 hex characters of
-        # its SHA-256, and nothing else. Never the URL — a webhook URL
-        # is a credential.
-        fingerprint = hashlib.sha256(
-            self.receiver.url.encode("utf-8")).hexdigest()[:16]
+        # The memo: head, n, ts, event, and nothing else. Never the URL —
+        # a webhook URL is a credential.
         self.assertEqual(memo_of(log),
                          [{"head": head, "n": 2, "ts": body["ts"],
-                           "event": "cadence", "remote_id": fingerprint}])
+                           "event": "cadence"}])
         memo_text = Path(str(log) + ".published.jsonl").read_text(
             encoding="utf-8")
         self.assertNotIn("127.0.0.1", memo_text)
@@ -279,19 +275,25 @@ class LeftReadingTest(ReceiverFixture):
     `anchors`, a timestamp the reader ages. Quiet staleness evidence in
     the keeper's voice: never an alarm, never the exit code."""
 
+    def setUp(self):
+        super().setUp()
+        # Outside the scanned root: a home of its own and a witness with
+        # nothing wired, so no scan here reads this machine's settings,
+        # its Codex hooks or its coverage marker.
+        away = tempfile.TemporaryDirectory()
+        self.addCleanup(away.cleanup)
+        self.home = Path(away.name).resolve()
+        self.witness = self.home / "witness"
+
+    def scan(self, *extra):
+        return run_scan(self.root, "--witness", str(self.witness), *extra,
+                        env=isolated_env(self.home))
+
     def publish_by_hand(self, log):
         subprocess.run(
             [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
              self.receiver.url],
             capture_output=True, check=True, env=clean_env())
-
-    def scan(self, *extra):
-        """The scan beside a witness with nothing wired. `left` reads a
-        route against the remote the SessionEnd command names (#263), so
-        the default witness, this machine's own settings, would make the
-        reading the operator's rather than the test's."""
-        return run_scan(self.root, "--witness", str(self.root / "no-witness"),
-                        *extra, env=keeper_env())
 
     def test_left_is_the_newest_departure_published_or_anchored(self):
         both = make_chain(self.root / "alpha" / "receipts", "sess-both")
@@ -406,9 +408,8 @@ class LeftReadingTest(ReceiverFixture):
         # is written for a POST that never landed.
         log = make_chain(self.root / "alpha" / "receipts", "sess-dead")
 
-        result = run_scan(self.root, "--publish-every", "0s",
-                          "--publish-url", "http://127.0.0.1:9/hook",
-                          env=keeper_env())
+        result = self.scan("--publish-every", "0s",
+                           "--publish-url", "http://127.0.0.1:9/hook")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -442,7 +443,7 @@ class NeverPublishedTest(ReceiverFixture):
                         env=keeper_env())
 
     def test_a_wired_publish_that_never_sent_is_one_sentence(self):
-        self.wire(f'python loxodonta.py hook --publish "{self.receiver.url}"')
+        self.wire('python loxodonta.py hook --publish "http://127.0.0.1:9/hook"')
         log = make_chain(self.root / "alpha" / "receipts", "sess-never")
 
         result = self.scan()
@@ -457,8 +458,7 @@ class NeverPublishedTest(ReceiverFixture):
                          "the URL is a credential; the report never holds it")
         self.assertEqual(report["exit"], 0, "a sentence, never the exit")
 
-        # Once a head has left by that door, to the remote the command
-        # names (#263), the sentence is gone.
+        # Once any head has left by that door, the sentence is gone.
         subprocess.run(
             [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
              self.receiver.url],
@@ -498,7 +498,8 @@ class NeverPublishedTest(ReceiverFixture):
     def test_sent_is_measured_per_route_so_a_chain_wired_alone_is_read_as_its_own(self):
         # #248: the chain route (`--publish-chain`) is wired in name only
         # until a batch lands, whatever the head route did. A chain-only
-        # wiring, then a batch sent by hand to the remote it names, then
+        # wiring, then a batch sent by hand to the remote it names (a
+        # batch another remote took counts for nothing here, #263), then
         # the sentence is gone.
         self.wire(f'python loxodonta.py hook --publish-chain '
                   f'"{self.receiver.url}"')
@@ -525,7 +526,7 @@ class NeverPublishedTest(ReceiverFixture):
     def test_a_head_that_left_does_not_answer_for_a_chain_that_never_did(self):
         # Both routes wired, the head sent, the chain never: the sentence
         # names the chain route alone, and `sent` says something left.
-        self.wire(f'python loxodonta.py hook --publish "{self.receiver.url}" '
+        self.wire('python loxodonta.py hook --publish "http://127.0.0.1:9/h" '
                   '--publish-chain "http://127.0.0.1:9/c"')
         log = make_chain(self.root / "alpha" / "receipts", "sess-both")
         subprocess.run(
