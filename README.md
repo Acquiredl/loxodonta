@@ -42,10 +42,16 @@ python loxodonta.py head   # the chain head; keep a copy where the agent cannot 
 
 ## Install
 
-Python 3.9 or newer, nothing to install. Download `loxodonta.py`, `supervisor.py`, `receiver.py`, and `SHA256SUMS` from the [releases page](https://github.com/Acquiredl/loxodonta/releases) into one folder, check the sums, and ask the file which version it is:
+Python 3.9 or newer, nothing to install. Download what you need from the [releases page](https://github.com/Acquiredl/loxodonta/releases) into one folder, with `SHA256SUMS`:
+
+- `loxodonta.py` records each session and judges the record. Every machine that runs an agent needs it.
+- `supervisor.py` reads the record back: the dashboard, the scan, recall. It sits beside `loxodonta.py`, which it runs.
+- `receiver.py` keeps a copy on a second machine, for the `full` tier below. Only that machine needs it.
+
+Check the sums of what you downloaded, and ask the file which version it is:
 
 ```
-sha256sum -c SHA256SUMS         # Windows: certutil -hashfile loxodonta.py SHA256, then compare by eye
+sha256sum -c --ignore-missing SHA256SUMS   # Windows: certutil -hashfile loxodonta.py SHA256, then compare by eye
 python loxodonta.py --version   # loxodonta 0.7.0 (format 0.1, commit unknown)
 ```
 
@@ -119,7 +125,7 @@ python supervisor.py drill --root docs/demo --log docs/demo/bad-day-session.json
 
 Usage errors exit 64; `4` is a receipt format this verifier does not speak, `5` a harness transcript that no longer matches what the chain committed. The verdict line says why, the code says how grave.
 
-The anchor is the one piece kept off the machine at `timestamped`. `loxodonta anchor` posts the 32-byte chain head to the public OpenTimestamps calendars, which commit it to Bitcoin; `anchor --upgrade` completes the proof a few hours later and `verify --anchors` judges it offline, so everything up to an anchored head is on record as of that block. Off by default; `install-hook --anchor-at-session-end` opts in for every session end ([docs/ANCHORING.md](docs/ANCHORING.md)).
+The anchor is the one piece kept off the machine at `timestamped`. `loxodonta anchor` posts the 32-byte chain head to the public OpenTimestamps calendars, which commit it to Bitcoin; `anchor --upgrade` completes the proof a few hours later and `verify --anchors` judges it offline, so everything up to an anchored head is on record as of that block. Off by default; `install-hook --profile timestamped` opts in for every session end ([docs/ANCHORING.md](docs/ANCHORING.md)).
 
 The authority timestamp is the addition for operators who need seconds or standing: `--authority URL` beside `--profile timestamped` or `full` asks an RFC 3161 authority you name for a token over the same head, beside the anchor and never instead of it, and `verify --stamps --authority-chain FILE` judges the token through `openssl` ([docs/ANCHORING.md](docs/ANCHORING.md#6-the-authority-timestamp-which-is-not-an-anchor)).
 

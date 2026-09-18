@@ -126,10 +126,12 @@ not. When unsure, open an issue and ask; the answer is usually short.
 
 ## Releases
 
-Every promotion of `dev` to `main` gets a tag and a GitHub release carrying
+Every promotion of `dev` to `main` that moves the tools gets a tag and a
+GitHub release carrying
 `loxodonta.py`, `supervisor.py`, `receiver.py`, and a `SHA256SUMS` file over
 the three, so a person can check the file they downloaded against what was
-published (ADR-0022). The tool version is semantic and decoupled from the receipt
+published (ADR-0022). A promotion that changes none of the three files
+carries no tag and no release (ADR-0028). The tool version is semantic and decoupled from the receipt
 format, which stays at `0.1`. The ritual, in order:
 
 1. Branch a throwaway `promote/<date>` from `dev` and open a pull request
