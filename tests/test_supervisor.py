@@ -2233,6 +2233,18 @@ def keeper_env(**knobs):
     return env
 
 
+def isolated_env(home, **knobs):
+    """`keeper_env` with every home the tools read pointed inside `home`:
+    the store, the user's settings and Codex's hooks, so a scan reads
+    neither this machine's own wiring nor its coverage marker. Pair it
+    with a `--witness` under a temporary folder."""
+    env = keeper_env(LOXODONTA_HOME=str(Path(home) / ".loxodonta"),
+                     HOME=str(home), USERPROFILE=str(home),
+                     CODEX_HOME=str(Path(home) / ".codex"), **knobs)
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    return env
+
+
 class AnchorKeeperTest(unittest.TestCase):
     """The anchor keeper (issue #19): freshness assessed every tick,
     pending proofs completed with no operator action — the ritual the

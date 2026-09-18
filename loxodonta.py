@@ -1133,7 +1133,11 @@ def chain_session(log):
 # never delete (the receiver, docs/RECEIVER.md). The first send starts at
 # genesis; every later one starts after the last entry the remote
 # acknowledged, which the memo beside the chain remembers as a row of
-# kind `chain` carrying the range. The session id, the chain's file name,
+# kind `chain` carrying the range and the remote's fingerprint. The
+# cursor is per remote (#263): a remote the chain was never sent to gets
+# it from genesis, because a receiver's file that starts mid-chain can
+# never verify, and a row that names no remote, written before rows
+# named one, counts for none. The session id, the chain's file name,
 # the n range and the head ride in request headers named for the tool,
 # so what the receiver appends is chain bytes and nothing else. One
 # batch stays under the receiver's cap; a longer tail goes in several,
@@ -1181,10 +1185,25 @@ def entries_on_disk(log):
     return entries
 
 
-def chain_cursor(log):
-    """The last entry number the remote acknowledged, from the memo's
-    chain rows; -1 when it holds none, so the send starts at genesis
-    (entry 0). Read tolerantly: the memo is bookkeeping, and a torn line
+def remote_id(url):
+    """Which remote a chain row went to, without the URL (#263): the
+    first 16 hex characters of the SHA-256 of the URL exactly as it was
+    sent to. The receiver's URL carries its token, so the memo never
+    holds it (ADR-0025); a fingerprint of it names the remote and
+    reveals nothing usable. The supervisor computes the same thing from
+    the same URL, the rule written twice, since the two files never
+    import each other."""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def chain_cursor(log, url):
+    """The last entry number the remote at `url` acknowledged, from the
+    memo's chain rows that name it (#263); -1 when none does, so the
+    send starts at genesis (entry 0). A row that names no remote was
+    written before rows named one, and counts for none: after the
+    upgrade each chain goes once more from genesis, and a receiver that
+    already holds it drops every line as an exact duplicate, its file
+    unchanged. Read tolerantly: the memo is bookkeeping, and a torn line
     in it means a resend the receiver drops, never a stuck keeper. A
     memo that exists and cannot be read at all is the caller's to
     handle: raised, not guessed at, because guessing -1 would send the
@@ -1193,13 +1212,15 @@ def chain_cursor(log):
         lines = read_log(published_path(log))
     except FileNotFoundError:
         return -1
+    mine = remote_id(url)
     cursor = -1
     for line in lines:
         try:
             record = json.loads(line)
         except ValueError:
             continue
-        if is_chain_record(record) and isinstance(record.get("last"), int):
+        if is_chain_record(record) and isinstance(record.get("last"), int) \
+                and record.get("remote_id") == mine:
             cursor = max(cursor, record["last"])
     return cursor
 
@@ -1251,19 +1272,23 @@ def oversized_entry(entries, cursor, cap):
     return None
 
 
-def append_chain_record(log, first, last, head, event):
+def append_chain_record(log, first, last, head, event, url):
     """The memo's chain row: what left and up to which entry, the head
-    after that entry, the time, the event kind. Never the URL. Written
-    only once the remote has acknowledged the batch, so the cursor never
-    passes an entry that did not land."""
+    after that entry, the time, the event kind, and the fingerprint of
+    the remote that took it (#263). Never the URL. Written only once the
+    remote has acknowledged the batch, so the cursor never passes an
+    entry that did not land."""
     append_sidecar_record(published_path(log),
                           {"kind": CHAIN_KIND, "first": first, "last": last,
-                           "head": head, "ts": now_ts(), "event": event})
+                           "head": head, "ts": now_ts(), "event": event,
+                           "remote_id": remote_id(url)})
 
 
 def publish_chain(log, url, session, timeout, event):
-    """Send the chain's entries after the memo's cursor to `url`, one
-    bounded POST per batch, `timeout` seconds in all: each batch waits
+    """Send the chain's entries after `url`'s cursor in the memo to
+    `url`, one bounded POST per batch, `timeout` seconds in all: a
+    remote that has acknowledged nothing gets them from genesis (#263),
+    and each batch waits
     at most what is left of them, and none begins once they are spent
     (#262), so a batch that starts late can never carry the call past
     its total. Returns
@@ -1277,7 +1302,7 @@ def publish_chain(log, url, session, timeout, event):
     except OSError:
         return None, None
     try:
-        cursor = chain_cursor(log)
+        cursor = chain_cursor(log, url)
     except (OSError, ValueError):
         # A memo that exists and cannot be read — a directory in its
         # place, a permission, bytes that are not UTF-8 — must not turn
@@ -1307,7 +1332,7 @@ def publish_chain(log, url, session, timeout, event):
         if failure:
             return sent, failure
         try:
-            append_chain_record(log, first, last, head, event)
+            append_chain_record(log, first, last, head, event, url)
         except OSError:
             # Sent and not written down: the next send carries these
             # lines again and the receiver drops them as duplicates.
@@ -1316,13 +1341,13 @@ def publish_chain(log, url, session, timeout, event):
         cursor = last
 
 
-def chain_unsent(log):
-    """Whether anything sits after the memo's cursor, so a chain step
-    the window closed on can tell a step it skipped from one it never
-    owed. A memo that cannot be read counts as owing: the step did not
-    run, and the row should say why."""
+def chain_unsent(log, url):
+    """Whether anything sits after `url`'s cursor in the memo, so a
+    chain step the window closed on can tell a step it skipped from one
+    it never owed. A memo that cannot be read counts as owing: the step
+    did not run, and the row should say why."""
     try:
-        cursor = chain_cursor(log)
+        cursor = chain_cursor(log, url)
         return any(n > cursor for n, _, _ in entries_on_disk(log))
     except (OSError, ValueError):
         return True
@@ -1339,7 +1364,7 @@ def session_end_publish_chain(log, url, session, timeout, window=None):
         return  # the installer refuses these; a hand-edited file skips
     timeout = step_wait(timeout, window)
     if not timeout:
-        if chain_unsent(log):
+        if chain_unsent(log, url):
             append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN,
                                   0.0, WINDOW_CLOSED)
         return
@@ -1391,7 +1416,7 @@ def publish_chain_command(args):
               f"(head {head[:12]}…){damage}")
     elif failure is None:
         print(f"nothing to send: the remote has every entry through entry "
-              f"{chain_cursor(args.log)}{damage}")
+              f"{chain_cursor(args.log, args.url)}{damage}")
     if failure:
         # The same note the head route leaves, under this route's own
         # step: a batch the keeper could not send is written down where

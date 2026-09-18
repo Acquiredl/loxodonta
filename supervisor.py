@@ -873,14 +873,31 @@ def sidecar_heads(sidecar):
             and not is_attempt(record) and not is_chain_row(record)}
 
 
-def chain_cursor(memo):
-    """The last entry number the remote acknowledged by the chain route,
-    from the memo's chain rows; -1 when it holds none, so the recorder's
-    next send starts at genesis. For scheduling only: the memo is
+def remote_id(url):
+    """Which remote a chain row went to, without the URL (#263): the
+    first 16 hex characters of the SHA-256 of the URL exactly as the
+    recorder sends to it. The recorder's rule, twice over, since the two
+    files never import each other; computed here only to compare, and
+    never printed, served or written down."""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def chain_cursor(memo, remote=None):
+    """The last entry number the remote at `remote` acknowledged by the
+    chain route, from the memo's chain rows that name it (#263); -1 when
+    none does, so the recorder's next send there starts at genesis. The
+    recorder's rule, twice over: a row that names no remote was written
+    before rows named one and counts for none, so the keeper and the
+    recorder agree that each chain goes once more from genesis after
+    the upgrade. With no `remote` there is no remote to read against,
+    and every chain row counts. For scheduling only: the memo is
     writer-reachable and proves nothing."""
+    mine = remote_id(remote) if remote is not None else None
     return max((record["last"] for record in sidecar_records(memo)
                 if is_chain_row(record)
-                and isinstance(record.get("last"), int)), default=-1)
+                and isinstance(record.get("last"), int)
+                and (mine is None or record.get("remote_id") == mine)),
+               default=-1)
 
 
 def ripe_head(entries, now, cadence):
@@ -999,8 +1016,11 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     the chain after it, at most once each per throttle window. The memo
     is the recorder's (`<log>.published.jsonl`), writer-reachable and
     therefore testimony: it stops a repeat and proves nothing; the
-    remote's copy is the head record. Off by default: nothing leaves
-    the machine without the say-so. Returns (attempted, note, failed)."""
+    remote's copy is the head record. The chain's cursor is per remote
+    (#263), so a new chain remote gets each chain from its genesis; a
+    head is posted once, wherever it went (ADR-0025). Off by default:
+    nothing leaves the machine without the say-so. Returns (attempted,
+    note, failed)."""
     if not (url or chain_url) or not upgrade_due(last_attempt, now):
         return False, None, False
     memo = Path(str(log) + ".published.jsonl")
@@ -1017,7 +1037,7 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
             notes.append(note)
             failed = True
     if chain_url and isinstance(entries[-1].get("n"), int) \
-            and entries[-1]["n"] > chain_cursor(memo):
+            and entries[-1]["n"] > chain_cursor(memo, chain_url):
         attempted = True
         note = publish_through_recorder(log, chain_url, "chain")
         if note:
@@ -1316,13 +1336,30 @@ def sessionend_publishes(witness):
     {"head": bool, "chain": bool}: `--publish URL` is the head (ADR-0025),
     `--publish-chain URL` the chain (ADR-0031), each read as its own
     flag, so the scan can say per route when publishing is wired in
-    name only (#240 part 3). The URL on that line is a credential and
-    is never read past the flag."""
+    name only (#240 part 3). The URL on that line is a credential: this
+    reads the flags alone, and `sessionend_chain_remote` reads the
+    chain's URL only to fingerprint it, never to print it."""
     commands = sessionend_commands(witness)
     return {"head": any(re.search(r"(?:^|\s)--publish(?=\s|=|$)", command)
                         for command in commands),
             "chain": any(re.search(r"(?:^|\s)--publish-chain(?=\s|=|$)",
                                    command) for command in commands)}
+
+
+def sessionend_chain_remote(witness):
+    """The URL the wired SessionEnd command sends the chain to: the value
+    written after `--publish-chain`, quoted as the installer writes it
+    or bare, or None when no command carries one. Read only to be
+    fingerprinted (#263), so the chain route counts as sent only to the
+    remote it is wired to; the URL is a credential, and nothing here is
+    ever printed, served or written down."""
+    for command in sessionend_commands(witness):
+        found = re.search(r"(?:^|\s)--publish-chain(?:=|\s+)"
+                          r"(?:\"([^\"]*)\"|'([^']*)'|(\S+))", command)
+        if found:
+            return next(value for value in found.groups()
+                        if value is not None)
+    return None
 
 
 def published_reading(witness, logs):
@@ -1332,20 +1369,29 @@ def published_reading(witness, logs):
     wired, and nothing ever sent. Sent is measured per route (#248): a
     head row is the head route's, a chain row the chain route's, so a
     chain wired beside a head that has left still reads as never sent
-    until a batch lands. A receiver that was never listening looks
-    exactly like a hook that never fired until someone reads the memos;
-    this reads them. Never the URL, and never the exit."""
+    until a batch lands. The chain route is read per remote as well
+    (#263): only a batch the wired remote took counts, so a chain
+    rewired to a remote that has taken nothing reads as wired in name
+    only, whatever an earlier remote holds. A head counts wherever it
+    went, since a head is posted once (ADR-0025). A receiver that was
+    never listening looks exactly like a hook that never fired until
+    someone reads the memos; this reads them. Never the URL, and never
+    the exit."""
     routes = sessionend_publishes(witness)
+    remote = sessionend_chain_remote(witness)
     memos = [Path(str(log) + ".published.jsonl") for log in logs]
     landed = {"head": any(sidecar_heads(memo) for memo in memos),
-              "chain": any(chain_cursor(memo) >= 0 for memo in memos)}
+              "chain": any(chain_cursor(memo, remote) >= 0
+                           for memo in memos)}
     wired = any(routes.values())
     sent = any(landed.values())
     silent = [route for route in ("head", "chain")
               if routes[route] and not landed[route]]
     note = None
     if silent:
-        what = " and ".join(f"a sent {route}" for route in silent)
+        what = " and ".join("a sent head" if route == "head"
+                            else "a sent chain for the remote it names"
+                            for route in silent)
         flags = " and ".join("--publish" if route == "head"
                              else "--publish-chain" for route in silent)
         note = (f"publishing is wired on the SessionEnd command ({flags}) "
@@ -5501,8 +5547,10 @@ def metrics_text(report, age_seconds):
                     if chain.get("head_published") is False))])
     published = report.get("published") or {}
     gauge("loxodonta_publishing_wired_nothing_sent",
-          "1 when publishing is wired on the session-end command and no "
-          "chain in the store holds a sent head, else 0", "testimony",
+          "1 when publishing is wired on the session-end command and "
+          "nothing has left by either route (no chain holds a sent head, "
+          "and none holds a batch the wired remote took), else 0",
+          "testimony",
           [((), 1 if published.get("wired") and not published.get("sent")
             else 0)])
 

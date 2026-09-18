@@ -47,7 +47,7 @@ The help line in the table is exactly the one the route prints, with its grade i
 | `loxodonta_consumption_sessions` | `state` | testimony | Sessions whose busiest hour ran past the store's own norm, still receiving or gone quiet |
 | `loxodonta_heads_unanchored` | none | verdict | Chains whose head no anchor covers yet, from the spans verify replayed on the last scan |
 | `loxodonta_heads_unpublished` | none | testimony | Chains whose current head has no row in the publish memo beside them, chains with no head excluded |
-| `loxodonta_publishing_wired_nothing_sent` | none | testimony | 1 when publishing is wired on the session-end command and no chain in the store holds a sent head, else 0 |
+| `loxodonta_publishing_wired_nothing_sent` | none | testimony | 1 when publishing is wired on the session-end command and nothing has left by either route (no chain holds a sent head, and none holds a batch the wired remote took), else 0 |
 | `loxodonta_last_attempt_failed` | `step` | testimony | 1 when some chain's newest failed session-end attempt is this step, else 0 |
 | `loxodonta_store_drawers` | none | testimony | Drawers in the store, one per project |
 | `loxodonta_store_sessions` | none | testimony | Sessions in the store, counted per drawer, sibling chains folded into one |
@@ -77,7 +77,7 @@ Four notes on that table.
 
 - **`loxodonta_heads_unanchored` counts every `BROKEN` chain as unanchored.** `verify` returns at the break, before it ever runs its anchor check, so no `ANCHORED` span reaches the scan and the head reads uncovered whether or not a proof exists beside it. The direction is toward the alarm, which is the right way for a reading to be wrong, and the broken count beside it says why.
 - **Both gauges skip a chain with no entries.** A chain with nothing in it has no head, so it is neither anchored nor unanchored and neither published nor unpublished. It still counts in `loxodonta_store_chains`, so the three will not add up, deliberately.
-- **`loxodonta_heads_unpublished` is about the publish door only.** It asks whether the chain's current head has a row in the publish memo beside it, which is the keeper's own already-sent test with the cadence taken out. A head that left by the anchor door has not been published and is counted here; that is not a contradiction, it is two different doors. Beside it, `loxodonta_publishing_wired_nothing_sent` is the store-wide case the scan already says in one sentence: the door is wired on the session-end command and has never taken a head (#240 part 3).
+- **`loxodonta_heads_unpublished` is about the publish door only.** It asks whether the chain's current head has a row in the publish memo beside it, which is the keeper's own already-sent test with the cadence taken out. A head that left by the anchor door has not been published and is counted here; that is not a contradiction, it is two different doors. Beside it, `loxodonta_publishing_wired_nothing_sent` is the store-wide case the scan already says in one sentence: publishing is wired on the session-end command and nothing has left by either route (#240 part 3); the chain route counts only a batch the remote it is wired to took (#263). One silent route beside one that sends is the scan's sentence, which names the route, and not this gauge, which stays at 0.
 
 ### One reading that is deliberately absent
 

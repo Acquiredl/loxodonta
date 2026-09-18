@@ -30,9 +30,10 @@ from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
 from test_stamp import reply, start_authority
 from test_supervisor import (ago, chain_head, chains_by_session,
-                             install_witness_hook, keeper_env, make_chain,
-                             run_scan, write_attempt_row, write_chain_row,
-                             write_completed_anchor, write_pending_anchor)
+                             install_witness_hook, isolated_env, keeper_env,
+                             make_chain, run_scan, write_attempt_row,
+                             write_chain_row, write_completed_anchor,
+                             write_pending_anchor)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -284,6 +285,20 @@ class LeftReadingTest(ReceiverFixture):
     `anchors`, a timestamp the reader ages. Quiet staleness evidence in
     the keeper's voice: never an alarm, never the exit code."""
 
+    def setUp(self):
+        super().setUp()
+        # Outside the scanned root: a home of its own and a witness with
+        # nothing wired, so no scan here reads this machine's settings,
+        # its Codex hooks or its coverage marker.
+        away = tempfile.TemporaryDirectory()
+        self.addCleanup(away.cleanup)
+        self.home = Path(away.name).resolve()
+        self.witness = self.home / "witness"
+
+    def scan(self, *extra):
+        return run_scan(self.root, "--witness", str(self.witness), *extra,
+                        env=isolated_env(self.home))
+
     def publish_by_hand(self, log):
         subprocess.run(
             [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
@@ -298,7 +313,7 @@ class LeftReadingTest(ReceiverFixture):
         write_completed_anchor(anchored, chain_head(anchored))
         never = make_chain(self.root / "beta" / "receipts", "sess-never")
 
-        result = run_scan(self.root, env=keeper_env())
+        result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -330,7 +345,7 @@ class LeftReadingTest(ReceiverFixture):
         write_chain_row(both, 0, 2, chain_head(both), when=ago(90000))
         self.publish_by_hand(both)   # a head row, newer by a day
 
-        result = run_scan(self.root, env=keeper_env())
+        result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -355,7 +370,7 @@ class LeftReadingTest(ReceiverFixture):
         sidecar = Path(str(log) + ".anchors.jsonl")
         first = json.loads(sidecar.read_text("utf-8").splitlines()[0])["ts"]
 
-        result = run_scan(self.root, env=keeper_env())
+        result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         (chain,) = chains_by_session(json.loads(result.stdout))[
@@ -378,7 +393,7 @@ class LeftReadingTest(ReceiverFixture):
                           when=ago(60))
         quiet = make_chain(self.root / "beta" / "receipts", "sess-quiet")
 
-        result = run_scan(self.root, env=keeper_env())
+        result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -405,9 +420,8 @@ class LeftReadingTest(ReceiverFixture):
         # makes a keeper-driven failure outlive this one tick's report.
         log = make_chain(self.root / "alpha" / "receipts", "sess-dead")
 
-        result = run_scan(self.root, "--publish-every", "0s",
-                          "--publish-url", "http://127.0.0.1:9/hook",
-                          env=keeper_env())
+        result = self.scan("--publish-every", "0s",
+                           "--publish-url", "http://127.0.0.1:9/hook")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -503,9 +517,11 @@ class NeverPublishedTest(ReceiverFixture):
     def test_sent_is_measured_per_route_so_a_chain_wired_alone_is_read_as_its_own(self):
         # #248: the chain route (`--publish-chain`) is wired in name only
         # until a batch lands, whatever the head route did. A chain-only
-        # wiring, then a batch sent by hand, then the sentence is gone.
-        self.wire('python loxodonta.py hook --publish-chain '
-                  '"http://127.0.0.1:9/hook"')
+        # wiring, then a batch sent by hand to the remote it names (a
+        # batch another remote took counts for nothing here, #263), then
+        # the sentence is gone.
+        self.wire(f'python loxodonta.py hook --publish-chain '
+                  f'"{self.receiver.url}"')
         log = make_chain(self.root / "alpha" / "receipts", "sess-chain")
 
         published = json.loads(self.scan().stdout)["published"]
