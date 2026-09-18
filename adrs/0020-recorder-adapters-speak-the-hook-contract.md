@@ -110,7 +110,11 @@ The shape, as built:
   only. Codex and SDK chains get integrity, recall, anchoring, and the
   baseline tripwire; they do not get the completeness alarm until a
   witness is written for their transcript layout. This is stated in
-  `docs/HOOK.md`, not left to be discovered.
+  `docs/HOOK.md`, not left to be discovered. *(Addendum 2026-09-18,
+  #239: Claude Code does fire for a failed call, through an event of
+  its own, `PostToolUseFailure`, which `install-hook` now wires. Codex
+  has no such event and needs none: its `PostToolUse` already fires
+  after a non-zero exit.)*
 
 ## Consequences
 

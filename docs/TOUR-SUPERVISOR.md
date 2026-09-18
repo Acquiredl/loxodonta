@@ -182,6 +182,19 @@ a start claim says more calls owe receipts, an end claim says fewer,
 and "nothing was owed from here" is the silence the alarm exists to
 catch.
 
+A fifth finding reopened the second (#239). The harness does fire an
+event for a call that ran and failed, `PostToolUseFailure`, and
+`install-hook` now wires it beside `PostToolUse`, so such a call leaves
+a receipt like any other. What still fires nothing is a denial, or an
+input the harness rejects before it runs, and the transcript flags
+those with the same `is_error`. The one failure the transcript can
+vouch for is a shell command that ran, whose result begins
+`Exit code N`: `ran_and_failed` finds it, and it is owed only under an
+epoch that wired the failure event, which the calibration and the
+marker carry as `failures`. Every other failed call is `maybe`: `classify` lets a
+receipt for one pass without reading as surplus, and never counts one
+as owed.
+
 `classify` is the ratified state machine — a pure reading of the
 evidence: OK / QUIET / LAGGING (a 30-second grace, because an honest
 lock wait must never alarm) / ALARM-SILENT (recording stopped) /
