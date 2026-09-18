@@ -130,6 +130,48 @@ class HookTest(unittest.TestCase):
         )
         self.assertEqual(verify.returncode, 0, verify.stdout)
 
+    def test_a_failed_call_leaves_the_receipt_a_completed_one_would(self):
+        # #239: the harness sends PostToolUseFailure for a call that ran
+        # and failed. The field names are the ones measured against a
+        # live failing call (Claude Code 2.1.259); the recorder reads the
+        # same fields it reads for PostToolUse, so the receipt records
+        # the action attempted, and never the error it met (ADR-0027).
+        command = {"command": "python -c \"import sys; sys.exit(3)\"",
+                   "description": "Exit with status 3"}
+        completed = payload(session="sess-completed", tool="Bash",
+                            tool_input=command)
+        failed = {"session_id": "sess-failed",
+                  "transcript_path": str(self.workdir / "absent.jsonl"),
+                  "cwd": str(self.workdir),
+                  "permission_mode": "default",
+                  "hook_event_name": "PostToolUseFailure",
+                  "tool_name": "Bash",
+                  "tool_input": command,
+                  "tool_use_id": "toolu_01failed",
+                  "error": "Exit code 3\nsecret-looking-output",
+                  "is_interrupt": False,
+                  "duration_ms": 1738,
+                  "prompt_id": "prompt-1"}
+
+        # The payload names a real `cwd`, which routes to the store; an
+        # explicit --log-dir outranks it, and the store is pinned inside
+        # the test besides, so nothing reaches a real home.
+        pinned = {"LOXODONTA_HOME": str(self.workdir / "store")}
+        first = run_hook(completed, self.workdir, "--log-dir",
+                         str(self.workdir), extra_env=pinned)
+        second = run_hook(failed, self.workdir, "--log-dir",
+                          str(self.workdir), extra_env=pinned)
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        was, fell = (self.entries("sess-completed")[1],
+                     self.entries("sess-failed")[1])
+        self.assertEqual((fell["actor"], fell["action"], fell["files"]),
+                         (was["actor"], was["action"], was["files"]))
+        self.assertNotIn("secret-looking-output",
+                         self.session_log("sess-failed").read_text(
+                             encoding="utf-8"))
+
     def test_hook_chains_repeated_calls_in_one_session(self):
         run_hook(payload(tool="Bash",
                          tool_input={"command": "pytest -q"}), cwd=self.workdir)
@@ -920,6 +962,41 @@ class CoverageMarkerTest(unittest.TestCase):
                      for epoch in self.marker()["epochs"]}
 
         self.assertEqual(harnesses, {"claude-code": ["*"], "codex": [".*"]})
+
+    def test_the_marker_says_failed_calls_are_wired(self):
+        # #239: the witness owes a failed command a receipt only under an
+        # install that wired the failure event, so the marker says which
+        # installs did. Codex has no such event, and its epoch says none.
+        self.run_tool("install-hook")
+        self.run_tool("install-hook", "--codex")
+
+        epochs = {epoch["harness"]: epoch
+                  for epoch in self.marker()["epochs"]}
+
+        self.assertEqual(epochs["claude-code"]["failures"], ["*"])
+        self.assertNotIn("failures", epochs["codex"])
+
+    def test_a_rerun_that_newly_wires_failed_calls_appends_an_epoch(self):
+        # An install from before #239: PostToolUse alone in the settings
+        # and a marker epoch naming no failures. The re-run that adds the
+        # failure event writes that down once, and the next writes
+        # nothing, because nothing changed.
+        self.run_tool("install-hook")
+        path = self.home / ".claude" / "settings.json"
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        del settings["hooks"]["PostToolUseFailure"]
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        marker = self.marker()
+        del marker["epochs"][0]["failures"]
+        (self.store / "coverage.json").write_text(json.dumps(marker),
+                                                  encoding="utf-8")
+
+        self.run_tool("install-hook")
+        self.run_tool("install-hook")
+
+        self.assertEqual([epoch.get("failures")
+                          for epoch in self.marker()["epochs"]],
+                         [None, ["*"]])
 
     def test_uninstall_writes_nothing(self):
         # Ruling 2, and the asymmetry is the whole argument: a start

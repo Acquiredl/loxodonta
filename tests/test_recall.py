@@ -745,6 +745,57 @@ class InstallerTest(RecallBase):
         self.assertIn("startup|clear|compact",
                       json.dumps(settings["hooks"]["SessionStart"]))
 
+    def test_install_wires_failed_calls_beside_completed_ones(self):
+        # #239: the harness fires PostToolUseFailure, not PostToolUse,
+        # for a call that ran and failed. Same command, same matcher, so
+        # the receipt is the same receipt: the action attempted.
+        result, home = self.run_installer("install-hook")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hooks = self.settings(home)["hooks"]
+        (completed,) = hooks["PostToolUse"]
+        (failed,) = hooks["PostToolUseFailure"]
+        self.assertEqual(failed, completed)
+        self.assertIn("PostToolUseFailure", result.stdout)
+
+    def test_a_rerun_adds_the_failure_event_to_an_older_install(self):
+        # An install from before #239 wired PostToolUse alone, perhaps
+        # on a matcher of the operator's own. A re-run adds the failure
+        # event on that same matcher, once.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        del settings["hooks"]["PostToolUseFailure"]
+        settings["hooks"]["PostToolUse"][0]["matcher"] = "Edit|Write|Bash"
+        path.write_text(json.dumps(settings), encoding="utf-8")
+
+        again, _ = self.run_installer("install-hook")
+        once_more, _ = self.run_installer("install-hook")
+
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("PostToolUseFailure", again.stdout)
+        hooks = self.settings(home)["hooks"]
+        (failed,) = hooks["PostToolUseFailure"]
+        self.assertEqual(failed["matcher"], "Edit|Write|Bash")
+        self.assertEqual(failed["hooks"], hooks["PostToolUse"][0]["hooks"])
+        self.assertIn("already installed", once_more.stdout)
+
+    def test_uninstall_removes_the_failure_event_and_leaves_others(self):
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        settings["hooks"]["PostToolUseFailure"].append(
+            {"matcher": "Bash", "hooks": [{"type": "command",
+                                           "command": "somebody-else"}]})
+        path.write_text(json.dumps(settings), encoding="utf-8")
+
+        result, _ = self.run_installer("uninstall-hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PostToolUseFailure", result.stdout)
+        failed = json.dumps(self.settings(home)["hooks"]["PostToolUseFailure"])
+        self.assertNotIn("loxodonta.py", failed)
+        self.assertIn("somebody-else", failed)
+
     def test_install_can_opt_in_to_session_end_anchoring(self):
         # ADR-0024: the opt-in lives at install, on the wired SessionEnd
         # command, readable in the settings file; PostToolUse is untouched.
