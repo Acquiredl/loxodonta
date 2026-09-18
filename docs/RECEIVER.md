@@ -166,5 +166,5 @@ What none of this survives (ADR-0031):
 
 - **The receiver's own operator.** Whoever runs the receiver can read and delete its files. When that is the operator on a second machine, the property holds. When it is anyone else, that is a trust relationship this design does not cover.
 - **The receiver's box, reached another way.** A receiver reachable from the writer's machine by a credential other than the URL (an SSH key on the box, a shared filesystem, a login in a browser) is reachable by the writer. The tool cannot enforce this; the operator's choice of box does.
-- **The tail since the last send.** Everything after the last acknowledged entry can still be rewritten consistently on the writer's machine. The keeper's cadence bounds the window; session end closes it for sessions that reach one.
+- **The tail since the last send.** Everything after the last acknowledged entry can still be rewritten consistently on the writer's machine. Session end closes the window for sessions that reach one; before that, the keeper sends only a head that has sat unchanged past its cadence, which covers a session killed before its end and leaves a busy session's tail unsent until it ends.
 - **Garbage in.** The copy is of what the writer said.
