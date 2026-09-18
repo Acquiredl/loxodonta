@@ -1339,6 +1339,59 @@ class InstallAuthorityTest(unittest.TestCase):
             self.assertFalse((self.home / ".claude" / "settings.json").exists(),
                              bad)
 
+    REMOTE = "https://shelf.example.test:8790/7qpsWUkU86ML-NOuaGjSaetfYCGg"
+
+    def test_full_with_an_authority_wires_all_four_flags(self):
+        # Where #249 and #251 meet: `full` resolves to the anchor and
+        # both publishes to the one remote, and the authority is the one
+        # raw flag a tier takes beside its own, so it must survive the
+        # tier's resolution rather than be dropped by it.
+        result = self.install("--profile", "full", "--remote", self.REMOTE,
+                              "--authority", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertTrue(end.endswith(
+            f' --anchor --publish "{self.REMOTE}"'
+            f' --publish-chain "{self.REMOTE}" --stamp "{self.URL}"'), end)
+        self.assertIn(f"stamps the head with {self.URL}", result.stdout)
+        (epoch,) = self.epochs()
+        self.assertEqual(
+            (epoch["profile"], epoch["remote"], epoch["authority"]),
+            ("full", self.REMOTE, self.URL))
+
+    def test_full_with_an_authority_on_codex_wires_all_but_the_anchor(self):
+        # The Codex twin: the session-end anchor stays refused there
+        # (ADR-0024), and the two publishes and the stamp share one
+        # window (#262), so three flags and no `--anchor`.
+        (self.home / ".codex").mkdir(exist_ok=True)
+
+        result = self.install("--codex", "--profile", "full",
+                              "--remote", self.REMOTE, "--authority", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.codex_commands("SessionEnd")
+        self.assertIn("--actor codex", end)
+        self.assertNotIn("--anchor", end)
+        self.assertTrue(end.endswith(
+            f' --publish "{self.REMOTE}"'
+            f' --publish-chain "{self.REMOTE}" --stamp "{self.URL}"'), end)
+        (epoch,) = self.epochs()
+        self.assertEqual(
+            (epoch["harness"], epoch["profile"], epoch["remote"],
+             epoch["authority"]),
+            ("codex", "full", self.REMOTE, self.URL))
+
+    def test_full_with_an_authority_and_no_remote_writes_nothing(self):
+        # The authority composing with the tier does not make the tier
+        # whole: `full` without a remote is still no tier at all.
+        result = self.install("--profile", "full", "--authority", self.URL)
+
+        self.assertEqual(result.returncode, 64, result.stdout)
+        self.assertIn("--remote", result.stderr)
+        self.assertFalse((self.home / ".claude" / "settings.json").exists())
+        self.assertFalse((self.store / "coverage.json").exists())
+
     def test_codex_gets_the_flag_now_that_the_post_is_measured(self):
         # PRD #244 held the flag back until the stamp's one POST had
         # been measured inside Codex's three-second cap, as #183

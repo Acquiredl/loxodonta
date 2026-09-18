@@ -922,6 +922,41 @@ class ProfileKeeperTest(unittest.TestCase):
         self.assertNotIn("$(id)", said)
         self.assertEqual(authority.received, [])
 
+    def test_a_full_marker_with_an_authority_stamps_each_ripe_head_once(self):
+        # Where #249 and #251 meet on the keeper: at `full` the anchor
+        # keeper runs on the six-hour default, the publish keeper sends
+        # to the marker's remote, and the authority rides the anchor's
+        # turn. Two real turns (no scan cache, no throttle) still stamp
+        # the one ripe head exactly once.
+        remote = FakeReceiver(("127.0.0.1", 0), FakeReceiverHandler)
+        remote.received = []
+        remote.delay = 0
+        remote.url = f"http://127.0.0.1:{remote.server_address[1]}/hook"
+        threading.Thread(target=remote.serve_forever, daemon=True).start()
+        self.addCleanup(remote.server_close)
+        self.addCleanup(remote.shutdown)
+        authority = self.authority()
+        self.install("--profile", "full", "--remote", remote.url,
+                     "--authority", authority.url)
+        log = self.aged_chain("sess-full", age=7 * 3600)
+
+        self.serve(SUPERVISOR_SCAN_TTL_SECONDS="0",
+                   SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        self.tick()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile full, claude-code), stamping "
+                      f"the same head with {authority.url} on that turn "
+                      "(authority named by claude-code)", said)
+        self.assertIn("publish head and chain every 6h (profile full, "
+                      "claude-code)", said)
+        self.assertEqual(len(authority.received), 1,
+                         "a second turn asked about a head with a token")
+        self.assertEqual([row["head"] for row in self.tokens_of(log)],
+                         [chain_head(log)])
+        self.assertTrue(remote.received, "the publish keeper sent nothing")
+
     def test_an_authority_whose_recorder_is_unwired_stamps_nothing(self):
         # The wiring rule the profile follows (#249) binds the authority
         # too: Claude Code named one, then its recorder was taken off,
