@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import clean_env, start_calendar
 from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run
-from test_stamp import (CERTIFICATE_LIFE, GRANTED, MISSING_AUTHORITY_TOOLING,
+from test_stamp import (GRANTED, MISSING_AUTHORITY_TOOLING,
                         MISSING_EXPIRY_TOOLING, REQ_CONFIG, TSA_CONFIG,
                         answering, dated_authority, outlive, start_authority)
 
@@ -47,7 +47,7 @@ SESSION = "d0d0d0d0-aaaa-bbbb-cccc-000000000002"
 SIDECAR = "manifest.json.stamps.jsonl"
 
 
-def record(env, project, session, tool, tool_input):
+def hook_call(env, project, session, tool, tool_input):
     """One tool call recorded through the hook, as the harness would."""
     payload = json.dumps({"session_id": session,
                           "hook_event_name": "PostToolUse",
@@ -87,7 +87,7 @@ class StampedStoreCase(PackageCase):
         self.authority = start_authority(self)
 
     def hook(self, session, tool, tool_input):
-        result = record(self.env, self.project, session, tool, tool_input)
+        result = hook_call(self.env, self.project, session, tool, tool_input)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def stamp_chain(self, url=None):
@@ -623,6 +623,12 @@ class JudgedPackageStampTest(StampedStoreCase):
 
 
 OUTLIVED = "the authority's certificate expired after the token was issued"
+# Seconds the fixture's certificate stays in date: room for a stamp, a
+# package and its seal to finish inside it on a slow runner (under three
+# seconds here, where the stamp suite's one stamp takes under one and a
+# half), and short enough that waiting it out costs the class a few
+# seconds, once.
+SEALING_LIFE = 6
 
 
 @unittest.skipIf(MISSING_EXPIRY_TOOLING,
@@ -636,9 +642,9 @@ class OutlivedPackageStampTest(PackageCase):
     when openssl is absent, so the rung is never lost quietly.
 
     One session is recorded, its chain stamped and its package sealed
-    in setUpClass by an authority whose certificate expires
-    CERTIFICATE_LIFE seconds after it is made, and the class waits that
-    out once; each test judges its own copy of the package."""
+    in setUpClass by an authority whose certificate expires SEALING_LIFE
+    seconds after it is made, and the class waits that out once; each
+    test judges its own copy of the package."""
 
     @classmethod
     def setUpClass(cls):
@@ -653,15 +659,15 @@ class OutlivedPackageStampTest(PackageCase):
             folder.mkdir()
         cls.env = {**clean_env(), **neutral_env(cls.home)}
         for command in ("pytest -q", "git status"):
-            recorded = record(cls.env, cls.project, SESSION, "Bash",
-                              {"command": command})
+            recorded = hook_call(cls.env, cls.project, SESSION, "Bash",
+                                 {"command": command})
             assert recorded.returncode == 0, recorded.stderr
         (drawer,) = [p for p in (cls.home / ".loxodonta" / "receipts").iterdir()
                      if p.is_dir()]
         cls.chain = drawer / f"receipts-{SESSION}.jsonl"
         cls.authority_dir = cls.root / "authority"
         cls.chain_file, expires = dated_authority(
-            cls.authority_dir, "short-lived", -3600, CERTIFICATE_LIFE)
+            cls.authority_dir, "short-lived", -3600, SEALING_LIFE)
         # start_authority closes its server when the case it is given
         # finishes; for a class, that is when the class does.
         authority = start_authority(
@@ -679,7 +685,7 @@ class OutlivedPackageStampTest(PackageCase):
         # while the certificate was in date.
         assert time.time() < expires, (
             f"stamping and packing took longer than the certificate's "
-            f"{CERTIFICATE_LIFE}-second life; raise CERTIFICATE_LIFE")
+            f"{SEALING_LIFE}-second life; raise SEALING_LIFE")
         outlive(expires)
 
     def setUp(self):
@@ -734,12 +740,12 @@ class OutlivedPackageStampTest(PackageCase):
         # signature; judged as of the time the token states, the
         # signature fails, and a seal that fails is SEAL-INVALID.
         sidecar = self.folder / SIDECAR
-        (record_row,) = [json.loads(line) for line in
-                         sidecar.read_text("utf-8").splitlines()]
-        response = bytearray(base64.b64decode(record_row["response"]))
+        (record,) = [json.loads(line) for line in
+                     sidecar.read_text("utf-8").splitlines()]
+        response = bytearray(base64.b64decode(record["response"]))
         response[-40] ^= 0x01  # one bit, inside the signature
-        record_row["response"] = base64.b64encode(bytes(response)).decode()
-        sidecar.write_text(json.dumps(record_row) + "\n", "utf-8")
+        record["response"] = base64.b64encode(bytes(response)).decode()
+        sidecar.write_text(json.dumps(record) + "\n", "utf-8")
 
         judged = self.judge()
 

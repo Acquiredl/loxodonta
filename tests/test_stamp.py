@@ -22,7 +22,9 @@ itself. No network, ever, and never internals.
 
 import base64
 import json
+import math
 import os
+import re
 import shutil
 import socketserver
 import subprocess
@@ -1211,10 +1213,12 @@ commonName = supplied
 [ tsa_cert ]
 extendedKeyUsage = critical,timeStamping
 """
-# Seconds a short-lived certificate stays in date: room for a stamp, or
-# a package and its seal, to finish inside it on a slow runner, and
-# short enough that waiting it out costs a class a few seconds, once.
-CERTIFICATE_LIFE = 5
+# Seconds a short-lived certificate stays in date: room for one stamp to
+# finish inside it on a slow runner (under a second and a half here),
+# and short enough that waiting it out costs the class a few seconds,
+# once. The package suite's fixture does more inside the life and has a
+# longer one of its own.
+CERTIFICATE_LIFE = 4
 
 
 def openssl_in(folder, *args):
@@ -1231,11 +1235,13 @@ def openssl_date(epoch):
 def dated_authority(folder, name, starts, ends):
     """An authority of its own, made here with openssl in `folder`, whose
     certificate is in date from `starts` to `ends` seconds either side
-    of the moment it is signed. The key is made first, so a slow key
-    costs a short life nothing. The subject carries `name`, as two real
-    authorities' subjects differ, so one chain file can hold two of
-    them. Returns (the certificate, which is also the chain file a
-    recipient saves, and the epoch second it expires)."""
+    of the moment it is signed, rounded up to the next whole second so
+    the part of a second already gone never shortens a short life. The
+    key is made first, so a slow key costs that life nothing either. The
+    subject carries `name`, as two real authorities' subjects differ, so
+    one chain file can hold two of them. Returns (the certificate, which
+    is also the chain file a recipient saves, and the epoch second it
+    expires)."""
     folder.mkdir()
     subject = REQ_CONFIG.replace("CN = loxodonta test authority",
                                  f"CN = loxodonta test authority {name}")
@@ -1247,7 +1253,7 @@ def dated_authority(folder, name, starts, ends):
                        "-nodes", "-keyout", "tsa.key", "-out", "tsa.csr",
                        "-config", "req.cnf")
     assert keyed.returncode == 0, keyed.stderr
-    signed_at = int(time.time())
+    signed_at = math.ceil(time.time())
     made = openssl_in(folder, "ca", "-selfsign", "-batch", "-notext",
                       "-config", "ca.cnf", "-keyfile", "tsa.key",
                       "-in", "tsa.csr", "-out", "tsa.crt",
@@ -1421,6 +1427,29 @@ class OutlivedCertificateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 3, out + result.stderr)
         self.assertIn(f"STAMP-INVALID: head {self.head[:12]}… (entry 2)", out)
         self.assertIn("as of the time the token states", out)
+        self.assertNotIn("not judged", out)
+        self.assertNotRegex(out, r"(?m)^VALID$")
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_token_whose_stated_time_is_not_a_time_is_still_stamp_invalid(self):
+        # The token's time is the one field a tamperer could spoil to
+        # dodge the second check, and openssl still reports only expiry
+        # at the first. A month of 13 in the GeneralizedTime, the one
+        # 14-digit time a token carries (its certificate's are UTCTime,
+        # 12 digits): no time to judge as of, so the refusal stands.
+        (row,) = rows_of(self.sidecar)
+        response = base64.b64decode(row["response"])
+        (stated,) = re.finditer(rb"\d{14}Z", response)
+        at = stated.start() + 4  # past the year, at the month
+        spoiled = response[:at] + b"13" + response[at + 2:]
+        self.rewrite_row(response=base64.b64encode(spoiled).decode())
+
+        result = self.verify()
+
+        out = result.stdout
+        self.assertEqual(result.returncode, 3, out + result.stderr)
+        self.assertIn(f"STAMP-INVALID: head {self.head[:12]}… (entry 2)", out)
+        self.assertIn("the time the token states could not be read", out)
         self.assertNotIn("not judged", out)
         self.assertNotRegex(out, r"(?m)^VALID$")
         self.assertNotIn("Traceback", result.stderr)
