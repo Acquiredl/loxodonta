@@ -104,7 +104,8 @@ cadence and is not in its publish memo is posted once, through
 ripeness test. It exists for the bad day the session-end publish cannot
 cover: the hook was stripped, so no session end ever fired and nothing
 left the machine. The memo beside the chain (`<log>.published.jsonl`:
-head, entry count, time, event kind — never the URL, which is a
+head, entry count, time, event kind; a chain row adds its range and a
+fingerprint of the remote it went to, #263 — never the URL, which is a
 credential) is writer-reachable and therefore testimony: it stops a
 repeat and proves nothing; the remote's copy is the head record. What
 the report adds is `left`, per chain: when a head last left this machine
