@@ -13,10 +13,11 @@ Every test drives the public CLI against a fake authority on a free port
 calendar where the order matters, and, where openssl is on PATH, an
 authority the test makes with openssl itself: a key, a self-signed
 certificate with the timestamping extended key usage, a `tsa` section,
-and real tokens from `openssl ts -reply`. The DER reader below is written
-here, independently of the recorder's encoder, so the request is checked
-against RFC 3161 rather than against itself. No network, ever, and never
-internals.
+and real tokens from `openssl ts -reply`; one dated to the second with
+`openssl ca` stands for an authority whose certificate ran out (#264).
+The DER reader below is written here, independently of the recorder's
+encoder, so the request is checked against RFC 3161 rather than against
+itself. No network, ever, and never internals.
 """
 
 import base64
@@ -32,6 +33,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from types import SimpleNamespace
 
 # This folder on sys.path, so the sibling imports below also resolve
 # when the module runs alone (`python -m unittest tests.test_stamp`).
@@ -1185,6 +1187,332 @@ class JudgedStampTest(unittest.TestCase):
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertIn("Status: Granted.", shown.stdout)
         self.assertIn("Time stamp:", shown.stdout)
+
+
+# --- Judged after the authority's certificate expired (#264) ------------------
+
+# `openssl ca` dates a certificate to the second: `-startdate` and
+# `-enddate` are as old as the command, where `x509 -not_after` is
+# OpenSSL 3.4 and later and CI's Ubuntu runners carry 3.0. `-selfsign`
+# keeps the shape of the authority above, one self-signed certificate
+# that is its own chain file; the database and the serial file are the
+# bookkeeping `ca` insists on.
+CA_CONFIG = """[ ca ]
+default_ca = dated
+[ dated ]
+database = index.txt
+new_certs_dir = .
+serial = ca-serial
+default_md = sha256
+policy = any_name
+unique_subject = no
+[ any_name ]
+commonName = supplied
+[ tsa_cert ]
+extendedKeyUsage = critical,timeStamping
+"""
+# Seconds a short-lived certificate stays in date: room for a stamp, or
+# a package and its seal, to finish inside it on a slow runner, and
+# short enough that waiting it out costs a class a few seconds, once.
+CERTIFICATE_LIFE = 5
+
+
+def openssl_in(folder, *args):
+    return subprocess.run(["openssl", *args], cwd=str(folder),
+                          capture_output=True, encoding="utf-8",
+                          errors="replace")
+
+
+def openssl_date(epoch):
+    """A moment as `openssl ca -startdate` and `-enddate` read it."""
+    return time.strftime("%y%m%d%H%M%SZ", time.gmtime(epoch))
+
+
+def dated_authority(folder, name, starts, ends):
+    """An authority of its own, made here with openssl in `folder`, whose
+    certificate is in date from `starts` to `ends` seconds either side
+    of the moment it is signed. The key is made first, so a slow key
+    costs a short life nothing. The subject carries `name`, as two real
+    authorities' subjects differ, so one chain file can hold two of
+    them. Returns (the certificate, which is also the chain file a
+    recipient saves, and the epoch second it expires)."""
+    folder.mkdir()
+    subject = REQ_CONFIG.replace("CN = loxodonta test authority",
+                                 f"CN = loxodonta test authority {name}")
+    for file_name, text in (("req.cnf", subject), ("ca.cnf", CA_CONFIG),
+                            ("tsa.cnf", TSA_CONFIG), ("index.txt", ""),
+                            ("ca-serial", "01\n")):
+        (folder / file_name).write_text(text, "utf-8")
+    keyed = openssl_in(folder, "req", "-new", "-newkey", "rsa:2048",
+                       "-nodes", "-keyout", "tsa.key", "-out", "tsa.csr",
+                       "-config", "req.cnf")
+    assert keyed.returncode == 0, keyed.stderr
+    signed_at = int(time.time())
+    made = openssl_in(folder, "ca", "-selfsign", "-batch", "-notext",
+                      "-config", "ca.cnf", "-keyfile", "tsa.key",
+                      "-in", "tsa.csr", "-out", "tsa.crt",
+                      "-startdate", openssl_date(signed_at + starts),
+                      "-enddate", openssl_date(signed_at + ends),
+                      "-extensions", "tsa_cert")
+    assert made.returncode == 0, made.stderr
+    return folder / "tsa.crt", signed_at + ends
+
+
+def answering(folder):
+    """What a real authority does with a query, as a fake authority's
+    `answer`: `openssl ts -reply` under the key made in `folder`."""
+    answered = []
+
+    def sign(query):
+        stem = f"query-{len(answered) + 1}"
+        (folder / f"{stem}.tsq").write_bytes(query)
+        replied = openssl_in(folder, "ts", "-reply", "-queryfile",
+                             f"{stem}.tsq", "-config", "tsa.cnf",
+                             "-out", f"{stem}.tsr")
+        assert replied.returncode == 0, replied.stderr
+        answered.append(stem)
+        return (folder / f"{stem}.tsr").read_bytes()
+
+    return sign
+
+
+def outlive(expires):
+    """Wait out a certificate's life. openssl reads the time to the
+    second, and a certificate is still in date during its last one."""
+    time.sleep(max(0.0, expires + 1 - time.time()))
+
+
+def missing_expiry_tooling():
+    """Why the cases below cannot run here, or None when they can: all
+    the judged cases need, and an openssl that dates a certificate with
+    `ca -selfsign -startdate -enddate` and judges a token as of a given
+    moment with `ts -verify -attime`. Tried once as a round trip, in
+    missing_authority_tooling's posture: a tool the machine lacks is
+    said out loud, and never met later as a failure that would read as
+    a verdict about the recorder."""
+    if MISSING_AUTHORITY_TOOLING:
+        return MISSING_AUTHORITY_TOOLING
+    digest = "11" * 32
+    now = int(time.time())
+    steps = (("req -new", ("req", "-new", "-newkey", "rsa:2048", "-nodes",
+                           "-keyout", "tsa.key", "-out", "tsa.csr",
+                           "-config", "req.cnf")),
+             ("ca -selfsign -startdate -enddate",
+              ("ca", "-selfsign", "-batch", "-notext", "-config", "ca.cnf",
+               "-keyfile", "tsa.key", "-in", "tsa.csr", "-out", "tsa.crt",
+               "-startdate", openssl_date(now - 3600),
+               "-enddate", openssl_date(now + 3600),
+               "-extensions", "tsa_cert")),
+             ("ts -query", ("ts", "-query", "-digest", digest, "-sha256",
+                            "-cert", "-out", "trial.tsq")),
+             ("ts -reply", ("ts", "-reply", "-queryfile", "trial.tsq",
+                            "-config", "tsa.cnf", "-out", "trial.tsr")),
+             ("ts -verify -attime", ("ts", "-verify", "-digest", digest,
+                                     "-sha256", "-in", "trial.tsr",
+                                     "-CAfile", "tsa.crt",
+                                     "-attime", str(now))))
+    with tempfile.TemporaryDirectory() as scratch:
+        for file_name, text in (("req.cnf", REQ_CONFIG), ("ca.cnf", CA_CONFIG),
+                                ("tsa.cnf", TSA_CONFIG), ("index.txt", ""),
+                                ("ca-serial", "01\n")):
+            (Path(scratch) / file_name).write_text(text, "utf-8")
+        for label, step in steps:
+            tried = openssl_in(scratch, *step)
+            if tried.returncode != 0:
+                said = tried.stderr.strip().splitlines()
+                return (f"this openssl cannot run `openssl {label}`"
+                        + (f": {said[-1]}" if said else ""))
+    return None
+
+
+MISSING_EXPIRY_TOOLING = missing_expiry_tooling()
+
+
+@unittest.skipIf(MISSING_EXPIRY_TOOLING,
+                 f"{MISSING_EXPIRY_TOOLING}; the authority timestamp is "
+                 "judged by openssl, and this suite's authority is made by it")
+class OutlivedCertificateTest(unittest.TestCase):
+    """#264: `verify --stamps` once the authority's certificate has
+    expired. openssl checks a chain as of the moment it verifies, so a
+    genuine token fails on the calendar alone; the recorder says it was
+    not judged and why, and a token that fails for any other reason is
+    STAMP-INVALID as before.
+
+    One chain is stamped in setUpClass by an authority whose certificate
+    expires CERTIFICATE_LIFE seconds after it is made, and the class
+    waits that out once; each test judges its own copy of the chain."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._tmp.cleanup)
+        root = Path(cls._tmp.name).resolve()
+        cls.stamped = root / "stamped"
+        cls.stamped.mkdir()
+        run_receipts("init", cwd=cls.stamped)
+        for step in ("step 1", "step 2"):
+            run_receipts("log", "--actor", "agent", "--action", step,
+                         cwd=cls.stamped)
+        cls.head = run_receipts("head", cwd=cls.stamped).stdout.strip()
+        cls.chain_file, expires = dated_authority(
+            root / "authority", "short-lived", -3600, CERTIFICATE_LIFE)
+        # start_authority closes its server when the case it is given
+        # finishes; for a class, that is when the class does.
+        authority = start_authority(
+            SimpleNamespace(addCleanup=cls.addClassCleanup),
+            answer=answering(root / "authority"))
+        stamped = run_receipts("stamp", "--authority", authority.url,
+                               cwd=cls.stamped)
+        assert stamped.returncode == 0, stamped.stdout + stamped.stderr
+        # The premise every test here stands on: the token was issued
+        # while the certificate was in date.
+        assert time.time() < expires, (
+            f"stamping took longer than the certificate's "
+            f"{CERTIFICATE_LIFE}-second life; raise CERTIFICATE_LIFE")
+        outlive(expires)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.scratch = Path(self._tmp.name).resolve()
+        self.workdir = self.scratch / "chain"
+        shutil.copytree(self.stamped, self.workdir)
+        self.sidecar = self.workdir / "receipts.jsonl.stamps.jsonl"
+
+    def verify(self, env=None):
+        return run_receipts("verify", "--stamps", "--authority-chain",
+                            str(self.chain_file), cwd=self.workdir, env=env)
+
+    def rewrite_row(self, **changes):
+        (row,) = rows_of(self.sidecar)
+        row.update(changes)
+        self.sidecar.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    def test_a_token_judged_after_its_certificate_expired_is_not_judged(self):
+        # The token did not change; the certificate's life ran out. That
+        # is the calendar and not evidence, so it is a note and never a
+        # verdict, and the exit stays the chain's (ADR-0032 ruling 5,
+        # ADR-0026's posture).
+        result = self.verify()
+
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        self.assertIn("stamp not judged: the authority's certificate expired "
+                      "after the token was issued", out)
+        self.assertIn(f"head {self.head[:12]}… (entry 2) holds a token", out)
+        self.assertRegex(out, r"(?m)^VALID$")
+        self.assertNotIn("STAMP-INVALID", out)
+        self.assertNotIn("STAMPED", out)
+        self.assertNotIn("anchor", out.lower())
+
+    def test_a_tampered_token_is_still_stamp_invalid(self):
+        # openssl checks the certificate before the signature, so after
+        # expiry, expiry is all it says about a token with a flipped bit
+        # too. Judged again as of the time the token states, it is the
+        # signature that fails, and that is evidence.
+        (row,) = rows_of(self.sidecar)
+        response = bytearray(base64.b64decode(row["response"]))
+        response[-40] ^= 0x01  # one bit, inside the signature
+        self.rewrite_row(response=base64.b64encode(bytes(response)).decode())
+
+        result = self.verify()
+
+        out = result.stdout
+        self.assertEqual(result.returncode, 3, out + result.stderr)
+        self.assertIn(f"STAMP-INVALID: head {self.head[:12]}… (entry 2)", out)
+        self.assertIn("as of the time the token states", out)
+        self.assertNotIn("not judged", out)
+        self.assertNotRegex(out, r"(?m)^VALID$")
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_token_over_another_head_is_still_stamp_invalid(self):
+        # The row's head is in the chain and the token's imprint is not
+        # that head: a reason of its own, which expiry must not hide.
+        run_receipts("log", "--actor", "agent", "--action", "step 3",
+                     cwd=self.workdir)
+        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.rewrite_row(head=newer, n=3)
+
+        result = self.verify()
+
+        out = result.stdout
+        self.assertEqual(result.returncode, 3, out + result.stderr)
+        self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)", out)
+        self.assertNotIn("not judged", out)
+        self.assertNotRegex(out, r"(?m)^VALID$")
+
+    def test_a_token_issued_after_its_certificate_expired_is_stamp_invalid(self):
+        # An authority that signs under a certificate already past its
+        # end date: the time the token states is outside the
+        # certificate's life too, so no calendar excuses it.
+        chain_file, _ = dated_authority(self.scratch / "lapsed", "lapsed",
+                                        -2 * 86400, -86400)
+        lapsed = start_authority(self, answer=answering(self.scratch / "lapsed"))
+        fresh = self.scratch / "fresh"
+        fresh.mkdir()
+        run_receipts("init", cwd=fresh)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=fresh)
+        stamped = run_receipts("stamp", "--authority", lapsed.url, cwd=fresh)
+        self.assertEqual(stamped.returncode, 0,
+                         stamped.stdout + stamped.stderr)
+
+        result = run_receipts("verify", "--stamps", "--authority-chain",
+                              str(chain_file), cwd=fresh)
+
+        out = result.stdout
+        self.assertEqual(result.returncode, 3, out + result.stderr)
+        self.assertIn("STAMP-INVALID", out)
+        self.assertIn("certificate has expired", out)
+        self.assertIn("as of the time the token states", out)
+        self.assertNotIn("not judged", out)
+        self.assertNotRegex(out, r"(?m)^VALID$")
+
+    @unittest.skipIf(os.name == "nt", "a stand-in openssl needs a shebang, "
+                     "which Windows does not run")
+    def test_an_openssl_that_cannot_judge_as_of_a_moment_says_so(self):
+        # An openssl whose `ts -verify` has no -attime cannot ask the one
+        # question that would tell expiry from a reason of the token's
+        # own. The tool is there and the check could not run, which is
+        # ADR-0026's posture for an ssh-keygen that predates -Y verify:
+        # a note that says why, and never a verdict. The stand-in hides
+        # -attime from `ts -help` and refuses it the way OpenSSL 3 does.
+        real = shutil.which("openssl")
+        folder = self.scratch / "old-bin"
+        folder.mkdir()
+        script = folder / "openssl"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            "import os, subprocess, sys\n"
+            f"REAL = {real!r}\n"
+            "args = sys.argv[1:]\n"
+            'if args[:1] == ["ts"] and "-help" in args:\n'
+            "    shown = subprocess.run([REAL] + args, capture_output=True,\n"
+            "                           text=True)\n"
+            "    for stream, text in ((sys.stdout, shown.stdout),\n"
+            "                         (sys.stderr, shown.stderr)):\n"
+            '        stream.write("".join(line for line in\n'
+            "                             text.splitlines(True)\n"
+            '                             if "-attime" not in line))\n'
+            "    sys.exit(shown.returncode)\n"
+            'if "-attime" in args:\n'
+            '    print("ts: Unknown option: -attime", file=sys.stderr)\n'
+            '    print("ts: Use -help for summary.", file=sys.stderr)\n'
+            "    sys.exit(1)\n"
+            "os.execv(REAL, [REAL] + args)\n", encoding="utf-8")
+        script.chmod(0o755)
+
+        result = self.verify(env={
+            "PATH": str(folder) + os.pathsep + os.environ.get("PATH", "")})
+
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        self.assertIn("stamp not judged: the authority's certificate has "
+                      "expired, and this openssl cannot judge a token as of "
+                      "the time it states", out)
+        self.assertRegex(out, r"(?m)^VALID$")
+        self.assertNotIn("STAMP-INVALID", out)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 # --- The installer ------------------------------------------------------------

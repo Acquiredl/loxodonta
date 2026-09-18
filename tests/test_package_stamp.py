@@ -15,18 +15,23 @@ cases run against a fake authority on a free port that answers with a
 canned granted response, so they run everywhere; the judged cases need
 openssl both to make the authority and to judge its tokens, and skip
 with the same wording the package-sign suite uses for a missing
-ssh-keygen. No network, ever, and never internals.
+ssh-keygen. A third, an authority whose certificate is dated to the
+second, lets that certificate run out between the sealing and the
+judging (#264). No network, ever, and never internals.
 """
 
 import base64
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 # This folder on sys.path, so the sibling imports below also resolve
 # when the module runs alone (`python -m unittest tests.test_package_stamp`).
@@ -34,11 +39,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import clean_env, start_calendar
 from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run
-from test_stamp import (GRANTED, MISSING_AUTHORITY_TOOLING, REQ_CONFIG,
-                        TSA_CONFIG, start_authority)
+from test_stamp import (CERTIFICATE_LIFE, GRANTED, MISSING_AUTHORITY_TOOLING,
+                        MISSING_EXPIRY_TOOLING, REQ_CONFIG, TSA_CONFIG,
+                        answering, dated_authority, outlive, start_authority)
 
 SESSION = "d0d0d0d0-aaaa-bbbb-cccc-000000000002"
 SIDECAR = "manifest.json.stamps.jsonl"
+
+
+def record(env, project, session, tool, tool_input):
+    """One tool call recorded through the hook, as the harness would."""
+    payload = json.dumps({"session_id": session,
+                          "hook_event_name": "PostToolUse",
+                          "tool_name": tool, "tool_input": tool_input,
+                          "tool_response": {}})
+    return subprocess.run(
+        [sys.executable, str(LOXODONTA), "hook"],
+        input=payload.encode("utf-8"), capture_output=True,
+        env={**env, "PYTHONIOENCODING": "utf-8",
+             "CLAUDE_PROJECT_DIR": str(project)})
 
 
 class StampedStoreCase(PackageCase):
@@ -68,15 +87,7 @@ class StampedStoreCase(PackageCase):
         self.authority = start_authority(self)
 
     def hook(self, session, tool, tool_input):
-        payload = json.dumps({"session_id": session,
-                              "hook_event_name": "PostToolUse",
-                              "tool_name": tool, "tool_input": tool_input,
-                              "tool_response": {}})
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook"],
-            input=payload.encode("utf-8"), capture_output=True,
-            env={**self.env, "PYTHONIOENCODING": "utf-8",
-                 "CLAUDE_PROJECT_DIR": str(self.project)})
+        result = record(self.env, self.project, session, tool, tool_input)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def stamp_chain(self, url=None):
@@ -609,6 +620,163 @@ class JudgedPackageStampTest(StampedStoreCase):
         self.assertNotIn("unlisted:", judged.stdout)
         self.assertTrue(judged.stdout.strip().splitlines()[-1]
                         .startswith("SELF-CONSISTENT + STAMPED:"))
+
+
+OUTLIVED = "the authority's certificate expired after the token was issued"
+
+
+@unittest.skipIf(MISSING_EXPIRY_TOOLING,
+                 f"{MISSING_EXPIRY_TOOLING}; the authority timestamp is "
+                 "judged by openssl, and this suite's authority is made by it")
+class OutlivedPackageStampTest(PackageCase):
+    """#264 in the package: tokens judged after the authority's
+    certificate expired, the manifest's and a chain's. Expiry alone is
+    a note: no `+ STAMPED`, no SEAL-INVALID, and the verdict and the
+    residual trust say the token was not judged and why, as they do
+    when openssl is absent, so the rung is never lost quietly.
+
+    One session is recorded, its chain stamped and its package sealed
+    in setUpClass by an authority whose certificate expires
+    CERTIFICATE_LIFE seconds after it is made, and the class waits that
+    out once; each test judges its own copy of the package."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._tmp.cleanup)
+        cls.root = Path(cls._tmp.name).resolve()
+        cls.home = cls.root / "home"
+        cls.project = cls.root / "project"
+        cls.witness = cls.root / "no-witness"
+        built = cls.root / "built"
+        for folder in (cls.home, cls.project, cls.witness, built):
+            folder.mkdir()
+        cls.env = {**clean_env(), **neutral_env(cls.home)}
+        for command in ("pytest -q", "git status"):
+            recorded = record(cls.env, cls.project, SESSION, "Bash",
+                              {"command": command})
+            assert recorded.returncode == 0, recorded.stderr
+        (drawer,) = [p for p in (cls.home / ".loxodonta" / "receipts").iterdir()
+                     if p.is_dir()]
+        cls.chain = drawer / f"receipts-{SESSION}.jsonl"
+        cls.authority_dir = cls.root / "authority"
+        cls.chain_file, expires = dated_authority(
+            cls.authority_dir, "short-lived", -3600, CERTIFICATE_LIFE)
+        # start_authority closes its server when the case it is given
+        # finishes; for a class, that is when the class does.
+        authority = start_authority(
+            SimpleNamespace(addCleanup=cls.addClassCleanup),
+            answer=answering(cls.authority_dir))
+        stamped = run(LOXODONTA, "stamp", "--log", str(cls.chain),
+                      "--authority", authority.url, env=cls.env)
+        assert stamped.returncode == 0, stamped.stdout + stamped.stderr
+        cls.package_folder = built / "pkg"
+        packed = run(SUPERVISOR, "package", "--witness", str(cls.witness),
+                     SESSION, "--folder", "--out", str(cls.package_folder),
+                     "--stamp", authority.url, env=cls.env, cwd=str(built))
+        assert packed.returncode == 0, packed.stdout + packed.stderr
+        # The premise every test here stands on: both tokens were issued
+        # while the certificate was in date.
+        assert time.time() < expires, (
+            f"stamping and packing took longer than the certificate's "
+            f"{CERTIFICATE_LIFE}-second life; raise CERTIFICATE_LIFE")
+        outlive(expires)
+
+    def setUp(self):
+        self._work = tempfile.TemporaryDirectory()
+        self.addCleanup(self._work.cleanup)
+        self.work = Path(self._work.name).resolve()
+        self.folder = self.work / "pkg"
+        shutil.copytree(self.package_folder, self.folder)
+
+    def judge(self, folder=None, chain_file=None):
+        return self.verify_package(folder or self.folder, "--authority-chain",
+                                   str(chain_file or self.chain_file))
+
+    def test_the_manifests_token_is_not_judged_and_the_verdict_says_why(self):
+        judged = self.judge()
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        lines = out.strip().splitlines()
+        seal = next((l for l in lines if l.startswith("seal stamp:")), "")
+        self.assertTrue(seal.startswith(f"seal stamp: not judged: {OUTLIVED}"),
+                        out)
+        self.assertIn("neither earned nor failed", seal)
+        # A chain file is not what this recipient is missing, so the seal
+        # line must not send them after one.
+        self.assertNotIn("once it has both", seal)
+        # No quiet downgrade: the verdict and the residual trust both say
+        # the token was not judged, and why, and the when it would have
+        # given goes back to resting on the issuer's word.
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT:"), lines[-1])
+        self.assertIn(f"its authority timestamp was not judged, since "
+                      f"{OUTLIVED}", lines[-1])
+        self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
+        self.assertIn(f"Its authority timestamp was not judged, since "
+                      f"{OUTLIVED}", lines[-2])
+        self.assertIn("that it existed before today", lines[-2])
+        self.assertNotIn("STAMPED", lines[-1])
+        self.assertNotIn("INVALID", out)
+
+    def test_a_chains_token_is_a_note_under_its_chain(self):
+        judged = self.judge()
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        self.assertIn(f"stamp not judged: {OUTLIVED}", out)
+        self.assertNotIn("STAMP-INVALID", out)
+        self.assertNotIn("STAMPED: entries", out)
+
+    def test_a_tampered_manifest_token_is_still_seal_invalid(self):
+        # Expiry is all openssl says at first about a token with a
+        # flipped bit, since it checks the certificate before the
+        # signature; judged as of the time the token states, the
+        # signature fails, and a seal that fails is SEAL-INVALID.
+        sidecar = self.folder / SIDECAR
+        (record_row,) = [json.loads(line) for line in
+                         sidecar.read_text("utf-8").splitlines()]
+        response = bytearray(base64.b64decode(record_row["response"]))
+        response[-40] ^= 0x01  # one bit, inside the signature
+        record_row["response"] = base64.b64encode(bytes(response)).decode()
+        sidecar.write_text(json.dumps(record_row) + "\n", "utf-8")
+
+        judged = self.judge()
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 3, out + judged.stderr)
+        lines = out.strip().splitlines()
+        seal = next((l for l in lines if l.startswith("seal stamp:")), "")
+        self.assertTrue(seal.startswith("seal stamp: SEAL-INVALID:"), out)
+        self.assertIn("as of the time the token states", seal)
+        self.assertTrue(lines[-1].startswith("SEAL-INVALID:"), lines[-1])
+
+    def test_a_manifest_token_issued_after_its_certificate_expired_fails(self):
+        # Packed today by an authority whose certificate ran out last
+        # year: the manifest's token is judged against a chain file
+        # holding both authorities, so the chain's older token is still
+        # the note, and the seal is SEAL-INVALID on its own account.
+        lapsed_chain, _ = dated_authority(self.work / "lapsed", "lapsed",
+                                          -2 * 86400, -86400)
+        lapsed = start_authority(self, answer=answering(self.work / "lapsed"))
+        folder = self.work / "lapsed-pkg"
+        built = self.package(SESSION, "--folder", "--out", str(folder),
+                             "--stamp", lapsed.url)
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        both = self.work / "both-authorities.pem"
+        both.write_text(self.chain_file.read_text("utf-8")
+                        + lapsed_chain.read_text("utf-8"), "utf-8")
+
+        judged = self.judge(folder, both)
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 3, out + judged.stderr)
+        lines = out.strip().splitlines()
+        self.assertIn(f"stamp not judged: {OUTLIVED}", out)
+        seal = next((l for l in lines if l.startswith("seal stamp:")), "")
+        self.assertTrue(seal.startswith("seal stamp: SEAL-INVALID:"), out)
+        self.assertIn("certificate has expired", seal)
+        self.assertTrue(lines[-1].startswith("SEAL-INVALID:"), lines[-1])
 
 
 if __name__ == "__main__":
