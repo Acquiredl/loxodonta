@@ -535,17 +535,21 @@ def cadence_words(seconds):
 # what leaves the machine, and the recorder wrote the choice into the
 # coverage marker beside the matchers (ADR-0030). `serve` reads that
 # choice so the keeper's cadences follow it without the flags being
-# typed again; a flag typed anyway still wins. Read once, when `serve`
-# starts, because the startup line announces what is in force: a
-# re-install at another profile takes effect at the next start.
+# typed again; a flag typed anyway still wins. A harness's choice is
+# followed only while that harness's recorder is still wired (#249):
+# `uninstall-hook` writes nothing to the marker (ADR-0030), so the
+# wired command is what says the operator has stopped. Read once,
+# when `serve` starts, because the startup line announces what is in
+# force: a re-install at another profile, or an uninstall, takes
+# effect at the next start.
 
 PROFILE_ANCHOR_EVERY = 6 * 3600   # seconds: the timestamped tier's default
+PROFILE_PUBLISH_EVERY = 6 * 3600  # seconds: the full tier's, the same six
 
-# The tiers in ascending order; `full` joins when the published chain
-# lands. `custom` is the raw flags and declares no tier, so it ranks
-# with `local` here: whatever it wired at session end, it asked the
-# keeper for nothing.
-TIERS = ("local", "timestamped")
+# The tiers in ascending order. `custom` is the raw flags and declares
+# no tier, so it ranks with `local` here: whatever it wired at session
+# end, it asked the keeper for nothing.
+TIERS = ("local", "timestamped", "full")
 
 
 def marker_harnesses():
@@ -572,116 +576,238 @@ def marker_harnesses():
     return declared
 
 
-def marker_epoch():
-    """The epoch whose profile the keeper's cadence follows, or None:
-    the highest tier among each harness's newest (ADR-0031 ruling 1,
-    #246). Not simply the newest epoch of all: a flagless install for a
-    second harness would then read as the first harness's choice
+def marker_epoch(declared, wired):
+    """The epoch whose profile the keepers follow: the highest tier
+    among each harness's newest (ADR-0031 ruling 1, #246), among the
+    harnesses whose recorder is still wired, and only when none is,
+    among them all, so the startup line can say why the keeper is off
+    (#249). Not simply the newest epoch of all: a flagless install for
+    a second harness would then read as the first harness's choice
     withdrawn, and the keeper would stand down with nothing saying a
     Codex install did it, which is the end claim ADR-0030 ruling 2
-    refuses arriving by another door."""
-    declared = marker_harnesses()
-    if not declared:
-        return None
+    refuses arriving by another door. `declared` is marker_harnesses',
+    `wired` {harness: bool}."""
 
     def tier(epoch):
         return (TIERS.index(epoch["profile"])
                 if epoch["profile"] in TIERS else 0)
 
-    return sorted(declared.values(),
+    speaking = ([epoch for epoch in declared.values()
+                 if wired[epoch["harness"]]] or list(declared.values()))
+    return sorted(speaking,
                   key=lambda epoch: (tier(epoch), epoch["since"]))[-1]
 
 
-def marker_profile():
-    """The profile the keeper follows and the harness that declared it,
-    as (profile, harness), or None when the marker names none."""
-    epoch = marker_epoch()
-    return None if epoch is None else (epoch["profile"], epoch["harness"])
+def marker_authority(declared, wired):
+    """The authority the anchor keeper's turn stamps with (ADR-0032
+    ruling 3), as (URL or None, the harness whose epoch named it, why it
+    stamps nothing, or None when it does), or None when no epoch names
+    one. The rule has the tier's shape and its own reason: the newest
+    epoch, among each harness's newest, that names an authority at all,
+    so an install for another harness that names none never withdraws
+    it — that would stop the keeper stamping chains whose operator asked
+    for it, silently, on the word of an install that said nothing about
+    stamping. A harness that re-installs without the flag withdraws its
+    own, since its newest epoch is its operator's latest word.
 
-
-def marker_authority():
-    """The authority the keeper's anchor turn stamps with (ADR-0032
-    ruling 3), as (URL, the harness whose epoch named it, a note): the
-    one named by the newest epoch, among each harness's newest, that
-    names an authority at all. The same shape as the tier rule above and
-    for the same reason: an install for another harness that names no
-    authority never withdraws this one, since that would stop the keeper
-    stamping a chain whose operator asked for it, silently, on the word
-    of an install that said nothing about it. A harness that re-installs
-    without the flag does withdraw its own, since its newest epoch is
-    its operator's latest word.
-
-    The marker is writer-reachable, so what it names is checked the way
-    the installer checks it — a plain http or https URL with nothing a
-    shell could act on — before `serve` ever prints it or passes it to
-    the recorder. One that fails is ignored and the note says so,
-    naming the marker and not repeating the value. Returns (None, None,
-    None) when no epoch names an authority."""
-    named = [epoch for epoch in marker_harnesses().values()
+    It obeys the wiring rule the profile does (#249): the harnesses
+    whose recorder is still wired are the ones that speak, and only when
+    none is does the newest unwired one speak, to say why nothing is
+    stamped. And the marker is writer-reachable, so what it names is
+    held to the installer's rule, a plain http or https URL with nothing
+    a shell could act on, before `serve` prints it or hands it to the
+    recorder; one that fails stamps nothing, and the value is never
+    repeated."""
+    named = [epoch for epoch in declared.values()
              if isinstance(epoch.get("authority"), str)
              and epoch["authority"]]
     if not named:
-        return None, None, None
-    newest = sorted(named, key=lambda epoch: epoch["since"])[-1]
-    try:
-        return publish_url(newest["authority"]), newest["harness"], None
-    except argparse.ArgumentTypeError:
-        marker = Path(store_home()) / COVERAGE_NAME
-        return None, newest["harness"], (
-            f"note: the coverage marker ({marker.as_posix()}) names an "
-            f"authority for {newest['harness']} that is not a plain http or "
-            "https URL, so the keeper stamps nothing; `loxodonta "
-            "install-hook --authority URL` names one the installer accepts")
+        return None
+    speaking = ([epoch for epoch in named if wired[epoch["harness"]]]
+                or named)
+    newest = sorted(speaking, key=lambda epoch: epoch["since"])[-1]
+    harness = newest["harness"]
+    if not wired[harness]:
+        return None, harness, "no recorder wired"
+    if not plain_url(newest["authority"]):
+        return (None, harness,
+                "the marker's authority is not a plain http or https URL")
+    return newest["authority"], harness, None
 
+
+def marker_profile(witness=None):
+    """What the coverage marker says the keepers should follow, as
+    (profile, harness, remote, wired, authority), or None when no epoch
+    names a profile. The one place this tuple is built. `profile` and
+    `harness` are the strongest tier's (marker_epoch); the remote is
+    where that install wired publishing, and is the keeper's target at
+    `full` (#249), anything but a string reading as none and
+    `publish_cadences` checking the rest. `wired` is whether that
+    harness's recorder is still on its SessionEnd command, read from the
+    settings beside `witness` and from Codex's hooks file. `authority`
+    is marker_authority's reading, by its own rule, or None. With no
+    `witness` the wiring is not read and every harness counts as wired:
+    the drill names the tier and follows nothing."""
+    declared = marker_harnesses()
+    if not declared:
+        return None
+    wired = {harness: witness is None or recorder_wired(harness, witness)
+             for harness in declared}
+    strongest = marker_epoch(declared, wired)
+    remote = strongest.get("remote")
+    return (strongest["profile"], strongest["harness"],
+            remote if isinstance(remote, str) else None,
+            wired[strongest["harness"]],
+            marker_authority(declared, wired))
+
+
+def codex_hooks_file():
+    """Where Codex reads user-level hooks, by the recorder's rule:
+    $CODEX_HOME/hooks.json, default ~/.codex/hooks.json."""
+    home = (os.environ.get("CODEX_HOME")
+            or os.path.join(os.path.expanduser("~"), ".codex"))
+    return Path(home) / "hooks.json"
+
+
+def recorder_wired(harness, witness):
+    """Whether `harness`'s recorder is still on a SessionEnd command:
+    Claude Code's in the settings beside the witness layout, Codex's in
+    its hooks file, the two files `install-hook` writes. A harness with
+    no settings file this reader knows is read as not wired, so a
+    marker epoch nothing can confirm steers nothing."""
+    if harness == "claude-code":
+        return bool(sessionend_commands(witness))
+    if harness == "codex":
+        return bool(sessionend_commands_in(codex_hooks_file()))
+    return False
 
 def keeper_cadences(anchor_every, declared):
     """The anchor cadence in force and where it came from (ADR-0031
     ruling 1, #246): an explicit `--anchor-every` wins; with none, a
-    `timestamped` profile puts the anchor keeper on its six-hour
-    default; `local`, `custom` without a flag, or no profile at all
-    runs no anchor keeper. `declared` is marker_profile's (profile,
-    harness) or None, and the harness is named in the source so the
-    operator can see which install set the cadence. Returns (seconds
-    or None, the source in words)."""
+    `timestamped` or `full` profile puts the anchor keeper on its
+    six-hour default, since both tiers wired the session-end anchor;
+    `local`, `custom` without a flag, or no profile at all runs no
+    anchor keeper, and so does any profile whose harness no longer has
+    the recorder wired (#249). `declared` is marker_profile's (profile,
+    harness, remote, wired, authority) or None, and the harness is named
+    in the source so the operator can see which install set the cadence.
+    Returns (seconds or None, the source in words)."""
     if anchor_every is not None:
         return anchor_every, "flag --anchor-every"
     if declared is None:
         return None, "no profile on record; no flag"
-    profile, harness = declared
-    if profile == "timestamped":
+    profile, harness, _, wired, _ = declared
+    if not wired:
+        return None, f"profile {profile}, {harness}; no recorder wired"
+    if profile in ("timestamped", "full"):
         return PROFILE_ANCHOR_EVERY, f"profile {profile}, {harness}"
     return None, f"profile {profile}, {harness}; no flag"
 
 
+def plain_url(value):
+    """Whether `value` passes the installer's rule for a remote: a
+    plain http or https URL with nothing a shell could act on."""
+    if not isinstance(value, str):
+        return False
+    try:
+        publish_url(value)
+    except argparse.ArgumentTypeError:
+        return False
+    return True
+
+
+def publish_cadences(publish_every, publish_url, publish_chain, declared):
+    """The publish cadence in force, where each route sends, and where
+    the choice came from (ADR-0031 ruling 1, #249): the anchor keeper's
+    rule, applied to the two publish routes. A URL typed here replaces
+    the target whole — both routes — so an operator who names a remote
+    on the command line never also sends to the marker's; it needs a
+    cadence beside it, as it always has. A cadence typed alone keeps
+    the marker's remote for both routes when the marker speaks for
+    `full`, as `--anchor-every` alone keeps the profile's anchor; below
+    `full` there is no remote to keep, and a cadence with nowhere to
+    send is a command spoken wrong. With no flag, a `full` profile puts
+    the publish keeper on its six-hour default and sends both routes to
+    its remote, the head first and the chain after it, the far end
+    telling them apart by content type. Every other profile, no profile
+    at all, a harness no longer wired, and a remote that is not a plain
+    http or https URL run no publish keeper; `custom` runs none because
+    it wired its own session end and asked the keeper for nothing
+    (#246). The marker is writer-reachable (ADR-0030), so its remote is
+    held to the installer's rule before anything is sent there.
+    Returns (seconds or None, the head's URL, the chain's URL, the
+    source in words); raises ValueError for a command spoken wrong."""
+    target = None   # the marker's remote, when it may be followed
+    said = "no profile on record"   # what the marker says, in words
+    off = "no flag"                 # and why that sends nothing
+    if declared is not None:
+        profile, harness, remote, wired, _ = declared
+        said = f"profile {profile}, {harness}"
+        if not wired:
+            off = "no recorder wired"
+        elif profile == "full" and not plain_url(remote):
+            off = "the marker's remote is not a plain http or https URL"
+        elif profile == "full":
+            target = remote
+    if publish_url or publish_chain:
+        if publish_every is None:
+            raise ValueError("--publish-url and --publish-chain go with "
+                             "--publish-every")
+        return (publish_every, publish_url, publish_chain,
+                "flag --publish-every")
+    if publish_every is not None:
+        if target is None:
+            raise ValueError(
+                "--publish-every goes with --publish-url or "
+                "--publish-chain; alone, it keeps the remote of a "
+                "--profile full install, and the coverage marker offers "
+                f"none ({said}; {off})")
+        return (publish_every, target, target,
+                f"flag --publish-every, to the remote of {said}")
+    if target is None:
+        return None, None, None, f"{said}; {off}"
+    return PROFILE_PUBLISH_EVERY, target, target, said
+
+
 def keeper_words(anchor_every, anchor_source, publish_every,
-                 publish_url=None, publish_chain=None, authority=None,
-                 named_by=None):
+                 publish_url=None, publish_chain=None,
+                 publish_source="no flag", authority=None):
     """The startup line's second half: each keeper's cadence and its
     source, so the operator reads back what `serve` will send and why
-    (ADR-0031 ruling 1, #246). Publishing follows flags alone in this
-    release, and names its routes: the head, the chain, or both; the
-    tier that publishes on a cadence arrives with `full`. An authority
-    on the marker rides the anchor keeper's turn and has no cadence of
-    its own (ADR-0032 ruling 3), so it is said on the anchor's clause and
-    only when that clause has a cadence to ride: an authority with no
-    anchor cadence sends nothing, and a line claiming otherwise would be
-    the one thing this line exists to prevent. `named_by` is the harness
-    whose install named it, which need not be the harness whose profile
-    set the cadence (marker_authority). The URL is printed because
-    an authority URL is not a credential — it says whom the operator
-    chose to trust (ADR-0032 ruling 4) — where a webhook URL is, which is
-    why the publish clause names routes and never URLs."""
+    (ADR-0031 ruling 1, #246, #249). Publishing names its routes — the
+    head, the chain, or both — and its source the same way anchoring
+    does, since at `full` both routes run with no flag typed.
+
+    `authority` is marker_profile's reading of it, (URL, the harness that
+    named it, why it stamps nothing) or None. It rides the anchor
+    keeper's turn and has no cadence of its own (ADR-0032 ruling 3), so
+    it is said on the anchor's clause and only when that clause has a
+    cadence to ride: an authority with no anchor cadence sends nothing,
+    and a line claiming otherwise would be the one thing this line
+    exists to prevent. When it stamps nothing the clause says why, the
+    way the cadences do (`no recorder wired`). The harness is named
+    because it need not be the one whose profile set the cadence. The
+    URL is printed because an authority URL is not a credential — it
+    says whom the operator chose to trust (ADR-0032 ruling 4) — where a
+    webhook URL is, which is why the publish clause names routes and
+    never URLs; one that failed the installer's rule is never printed."""
     anchor = (f"anchor every {cadence_words(anchor_every)} ({anchor_source})"
               if anchor_every is not None else f"anchor off ({anchor_source})")
-    if anchor_every is not None and authority:
-        anchor += (f", stamping the same head with {authority} on that "
-                   f"turn (authority named by {named_by})")
+    if anchor_every is not None and authority is not None:
+        url, named_by, off = authority
+        if off:
+            anchor += (f", not stamping (authority named by {named_by}; "
+                       f"{off})")
+        else:
+            anchor += (f", stamping the same head with {url} on that "
+                       f"turn (authority named by {named_by})")
     routes = " and ".join(name for name, url in (("head", publish_url),
                                                  ("chain", publish_chain))
                           if url)
     publish = (f"publish {routes or 'head'} every "
-               f"{cadence_words(publish_every)} (flag --publish-every)"
-               if publish_every is not None else "publish off (no flag)")
+               f"{cadence_words(publish_every)} ({publish_source})"
+               if publish_every is not None
+               else f"publish off ({publish_source})")
     return f"keeper: {anchor}; {publish}"
 
 
@@ -1155,8 +1281,14 @@ def sessionend_commands(witness):
     """The recorder's SessionEnd command lines wired beside the witness
     layout, read from the harness settings: the one place the session-end
     choices live (ADR-0024 ruling 1). Either era's name (ADR-0010)."""
+    return sessionend_commands_in(witness.parent / "settings.json")
+
+
+def sessionend_commands_in(settings_file):
+    """The recorder's SessionEnd command lines in one hooks file, in
+    the shape Claude Code's settings and Codex's hooks.json share."""
     try:
-        settings = json.loads((witness.parent / "settings.json")
+        settings = json.loads(Path(settings_file)
                               .read_text(encoding="utf-8"))
         rules = settings["hooks"]["SessionEnd"]
     except (OSError, ValueError, KeyError, TypeError):
@@ -5167,9 +5299,17 @@ def run_drill(root, asked):
         })
 
     all_fired = all(d["fired"] for d in drills)
+    # The tier this store is on (ADR-0031 ruling 1), read from the
+    # coverage marker and reported, never acted on: a rehearsal sends
+    # nothing anywhere, whatever the profile wired, so the operator who
+    # drills a `full` store can see which alarms are rehearsed here and
+    # which of their heads are somewhere else. None when no install has
+    # named a profile.
+    declared = marker_profile()
     report = {
         "log": log.relative_to(root.resolve()).as_posix(),
         "sandbox": sandbox.relative_to(root).as_posix(),
+        "profile": declared[0] if declared else None,
         "known_head": known_head,
         "rehearsal": REHEARSAL,
         "drills": drills,
@@ -5645,25 +5785,42 @@ class Face(BaseHTTPRequestHandler):
 def cmd_serve(args):
     store = args.root is None
     root = store_receipts() if store else Path(args.root).resolve()
+    # Both keepers follow the profile the operator chose at install-hook
+    # (ADR-0031 ruling 1) while that harness's recorder is wired; a
+    # flag typed here still wins. One reading of the marker serves
+    # both, so the two cadences can never disagree about which install
+    # spoke, and it comes before the port is taken, because whether
+    # --publish-every stands alone depends on what the marker says.
+    declared = marker_profile(Path(args.witness))
+    anchor_every, anchor_source = keeper_cadences(args.anchor_every,
+                                                  declared)
+    try:
+        (publish_every, publish_head, publish_chain,
+         publish_source) = publish_cadences(args.publish_every,
+                                            args.publish_url,
+                                            args.publish_chain, declared)
+    except ValueError as e:
+        args.spoken_wrong(str(e))
     # 127.0.0.1 is the whole posture: nothing about this machine's
     # activity is ever offered to another one.
     server = Watchtower(("127.0.0.1", args.port), Face)
     server.root = root
     server.store = store
     server.witness = Path(args.witness)
-    # The keeper follows the profile the operator chose at install-hook
-    # (ADR-0031 ruling 1); a flag typed here still wins.
-    anchor_every, anchor_source = keeper_cadences(args.anchor_every,
-                                                  marker_profile())
     server.anchor_every = anchor_every
     server.calendars = args.calendar or ()
-    server.publish_every = args.publish_every
-    server.publish_url = args.publish_url
-    server.publish_chain = args.publish_chain
+    server.publish_every = publish_every
+    server.publish_url = publish_head
+    server.publish_chain = publish_chain
     # The authority rides the anchor keeper's turn and has no cadence of
-    # its own (ADR-0032 ruling 3), so it comes from the marker and from
-    # no flag here, by its own rule (marker_authority).
-    server.authority, named_by, authority_note = marker_authority()
+    # its own (ADR-0032 ruling 3). It comes from the same one reading of
+    # the marker, by its own rule (marker_authority), and from no flag
+    # here; the keeper is handed a URL only when that reading says it
+    # may stamp, and the startup line says why when it may not.
+    authority = declared[4] if declared else None
+    server.authority = (authority[0]
+                        if authority is not None and authority[2] is None
+                        else None)
     server.scan_lock = threading.Lock()
     server.views_lock = threading.Lock()
     server.scan_body = None
@@ -5671,14 +5828,10 @@ def cmd_serve(args):
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
-    print(keeper_words(anchor_every, anchor_source, args.publish_every,
-                       args.publish_url, args.publish_chain,
-                       server.authority, named_by),
+    print(keeper_words(anchor_every, anchor_source, publish_every,
+                       publish_head, publish_chain, publish_source,
+                       authority),
           flush=True)
-    if authority_note:
-        # After the keeper line, never before it: the second line is the
-        # cadence line wherever it is read.
-        print(authority_note, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -8175,20 +8328,26 @@ def main(argv):
                                "liveness witness for completeness)")
     watching.add_argument("--anchor-every", type=parse_cadence,
                           default=None, metavar="AGE",
-                          help="opt in: anchor a fresh head once it is "
-                               "this old (e.g. 6h, 1d). Off by default — "
-                               "nothing leaves the machine without it")
+                          help="anchor a fresh head once it is this old "
+                               "(e.g. 6h, 1d). scan: off unless given. "
+                               "serve: follows the coverage marker's "
+                               "profile (timestamped: anchor every 6h; "
+                               "full: anchor and publish every 6h) "
+                               "unless given")
     watching.add_argument("--calendar", action="append", default=None,
                           metavar="URL",
                           help="calendar for auto-anchoring (repeatable; "
                                "default: receipts' public pools)")
     watching.add_argument("--publish-every", type=parse_cadence,
                           default=None, metavar="AGE",
-                          help="opt in: publish a head once it is this old "
-                               "and has not left yet (e.g. 6h, 1d), to "
+                          help="publish a head once it is this old and "
+                               "has not left yet (e.g. 6h, 1d), to "
                                "--publish-url, through `loxodonta publish` "
-                               "(ADR-0025). Off by default — nothing leaves "
-                               "the machine without it")
+                               "(ADR-0025). scan: off unless given. "
+                               "serve: follows the coverage marker's "
+                               "profile (timestamped: anchor every 6h; "
+                               "full: anchor and publish every 6h) "
+                               "unless given")
     watching.add_argument("--publish-url", type=publish_url, default=None,
                           metavar="URL",
                           help="where --publish-every posts: a plain http "
@@ -8256,7 +8415,9 @@ def main(argv):
     serve.add_argument("--port", type=int, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
-    serve.set_defaults(func=cmd_serve)
+    # serve settles its publish flags against the coverage marker, so
+    # it refuses a command spoken wrong from inside, in argparse's words.
+    serve.set_defaults(func=cmd_serve, spoken_wrong=serve.error)
     adopt = sub.add_parser(
         "adopt", help="one-time move of legacy chains into the store "
                       "(ADR-0011): sidecars and .unlisted travel, "
@@ -8439,11 +8600,12 @@ def main(argv):
     args = parser.parse_args(argv)
     # The cadence says when and a URL says where, the head's or the
     # chain's; one without the other is a command spoken wrong, refused
-    # before any tick runs.
+    # before any tick runs. `serve` settles this itself, after reading
+    # the marker: at `full` its remote is the where (publish_cadences).
     cadence = getattr(args, "publish_every", None) is not None
     anywhere = (getattr(args, "publish_url", None) is not None
                 or getattr(args, "publish_chain", None) is not None)
-    if cadence != anywhere:
+    if args.command != "serve" and cadence != anywhere:
         parser.error("--publish-every goes with --publish-url or "
                      "--publish-chain, and either of them with it")
     return args.func(args)

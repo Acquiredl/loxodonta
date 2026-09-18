@@ -644,7 +644,10 @@ class ProfileKeeperTest(unittest.TestCase):
         self.home = Path(self._tmp.name).resolve() / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = Path(self._tmp.name).resolve() / "store"
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        # The witness is the layout beside the settings the installer
+        # writes, because the keeper follows a profile only while that
+        # harness's recorder is still wired there (#249).
+        self.witness = self.home / ".claude" / "projects"
         self.witness.mkdir()
         self.calendar = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
         self.calendar.mode = "pending"
@@ -664,7 +667,8 @@ class ProfileKeeperTest(unittest.TestCase):
         stamps the epoch that many seconds into the past (the recorder's
         clock override), so one install can be older than another."""
         knobs = {"HOME": str(self.home), "USERPROFILE": str(self.home),
-                 "LOXODONTA_HOME": str(self.store)}
+                 "LOXODONTA_HOME": str(self.store),
+                 "CODEX_HOME": str(self.home / ".codex")}
         if age:
             knobs["SOURCE_DATE_EPOCH"] = str(int(time.time()) - age)
         subprocess.run(
@@ -699,6 +703,7 @@ class ProfileKeeperTest(unittest.TestCase):
              "--calendar", self.calendar.url, *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env=keeper_env(LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex"),
                            PYTHONIOENCODING="utf-8", **knobs))
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
@@ -895,8 +900,9 @@ class ProfileKeeperTest(unittest.TestCase):
     def test_a_marker_authority_that_is_not_a_plain_url_is_ignored_and_said(self):
         # The marker is writer-reachable, so what it names is checked the
         # way the installer checks it before the keeper prints it or runs
-        # anything with it. The note names the marker and never repeats
-        # the value.
+        # anything with it. The keeper line says why nothing is stamped,
+        # in the words #249 uses for the marker's remote, and never
+        # repeats the value.
         authority = self.authority()
         self.install("--profile", "timestamped", "--authority", authority.url)
         marker = self.store / "coverage.json"
@@ -907,19 +913,43 @@ class ProfileKeeperTest(unittest.TestCase):
 
         self.serve()
         self.tick()
-        keeper = self.proc.stdout.readline()
-        note = self.proc.stdout.readline()
-        self.proc.kill()
-        self.proc.communicate()
+        said = self.said_at_startup()
 
-        self.assertIn("anchor every 6h (profile timestamped, claude-code)",
-                      keeper)
-        self.assertNotIn("stamping", keeper)
-        self.assertIn("note: the coverage marker", note)
-        self.assertIn(marker.as_posix(), note)
-        self.assertIn("not a plain http or https URL", note)
-        self.assertNotIn("$(id)", keeper + note)
+        self.assertIn("anchor every 6h (profile timestamped, claude-code), "
+                      "not stamping (authority named by claude-code; the "
+                      "marker's authority is not a plain http or https URL)",
+                      said)
+        self.assertNotIn("$(id)", said)
         self.assertEqual(authority.received, [])
+
+    def test_an_authority_whose_recorder_is_unwired_stamps_nothing(self):
+        # The wiring rule the profile follows (#249) binds the authority
+        # too: Claude Code named one, then its recorder was taken off,
+        # and a Codex install at the tier keeps the cadence alive. The
+        # authority's harness no longer speaks, so nothing is stamped,
+        # and the line says why the way the cadences do.
+        (self.home / ".codex").mkdir()
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url,
+                     age=86400)
+        self.install("--codex", "--profile", "timestamped")
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "uninstall-hook"],
+            capture_output=True, check=True,
+            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+                           LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex")))
+        log = self.aged_chain("sess-unwired", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile timestamped, codex), not "
+                      "stamping (authority named by claude-code; no recorder "
+                      "wired)", said)
+        self.assertEqual(authority.received, [])
+        self.assertEqual(self.tokens_of(log), [])
 
     def test_a_refused_token_is_asked_for_again_on_the_next_turn(self):
         # The control for the throttle test below: with no throttle, two
