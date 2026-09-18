@@ -834,27 +834,67 @@ SESSION_END_PUBLISH = 3.0   # seconds for the one POST; the anchor gets the rest
 CODEX_ACTOR = "codex"       # the actor the Codex installer writes
 # Codex caps the whole SessionEnd hook at three seconds (its docs);
 # asking for more is asking to be killed mid-seal, so the installer
-# wires this as the block's timeout and a Codex hook waits half of it
-# for its POST. Measured (#183, the tables in docs/HOOK.md): the seal
-# costs a fifth of a second on a 2 MB transcript and the POST a
-# twentieth over it, so the worst failure path lands near 1.8 seconds,
-# where the full three-second wait ran to 3.2 and past the cap. A POST
-# cut off early is the keeper's to finish (supervisor --publish-every).
+# wires this as the block's timeout, and every quick step of a Codex
+# session end shares half of it: the head, the chain and the stamp
+# together, in that order, never half each (#262). Measured (#183 and
+# #262, the tables in docs/HOOK.md): the seal costs a fifth of a
+# second on a 2 MB transcript, so the worst failure path lands near
+# 1.8 seconds however many remotes sit silent, where one budget per
+# step put two silent remotes at 3.2 and past the cap. What the window
+# cuts off is the keeper's to finish (supervisor --publish-every).
 # Nothing bounds the seal, so a very large transcript eats the margin:
 # half a gigabyte of it leaves half a second.
 CODEX_SESSION_END_TIMEOUT = 3
 CODEX_SESSION_END_PUBLISH = CODEX_SESSION_END_TIMEOUT / 2
+WINDOW_CLOSED = "the session-end window closed before this step"
+
+
+def is_codex(actor):
+    """The installer writes CODEX_ACTOR exactly; a hand-wired hook is
+    matched case-blind, since what a missed match costs is a killed
+    hook."""
+    return (actor or "").casefold() == CODEX_ACTOR
 
 
 def publish_budget(actor):
-    """The seconds a session-end POST may take, by the harness that
+    """The seconds one session-end POST may take, by the harness that
     wired the hook: the harness's own cap on the whole hook is what
-    bounds it, and only Codex's is short enough to matter. The
-    installer writes CODEX_ACTOR exactly; a hand-wired hook is matched
-    case-blind, since what a missed match costs is a killed hook."""
-    return (CODEX_SESSION_END_PUBLISH
-            if (actor or "").casefold() == CODEX_ACTOR
-            else SESSION_END_PUBLISH)
+    bounds it, and only Codex's is short enough to matter."""
+    return CODEX_SESSION_END_PUBLISH if is_codex(actor) \
+        else SESSION_END_PUBLISH
+
+
+def quick_window(actor):
+    """The seconds the quick session-end steps share, all of them
+    together (#262): the head, the chain, the stamp, in that order.
+    One window and not one budget per step, because the harness caps
+    the hook and not the step, and a step it kills never writes the
+    attempt row that says how it went (#240).
+
+    On Codex that is half the cap, the rule #183 set for one POST now
+    applied to every POST of the session end. On Claude Code it is the
+    twelve-second window the anchor has always shared with them, and
+    Claude Code's budgets are unchanged, because its worst case already
+    fits: three silent quick steps at three seconds each spend nine of
+    the twelve, the anchor takes what they leave (three seconds at
+    worst, as it always has, since it never had twelve of its own), and
+    the whole run after the seal ends inside twelve seconds, well inside
+    the twenty the installer writes on the SessionEnd hook. The window's
+    one new effect there is that a batch of the chain can no longer run
+    past its step's three seconds."""
+    return CODEX_SESSION_END_PUBLISH if is_codex(actor) \
+        else SESSION_END_BUDGET
+
+
+def step_wait(bound, window):
+    """The seconds a quick step's POST may wait: its own bound, or what
+    is left of the window when that is less, to the tenth of a second
+    the attempt rows are written in. 0 means the window has closed and
+    the step does not start. `window` is a deadline on the monotonic
+    clock, or None for no window (the operator's own commands)."""
+    if window is None:
+        return bound
+    return max(0.0, round(min(bound, window - time.monotonic()), 1))
 
 
 def published_head(head, n, session, event="session-end"):
@@ -1004,11 +1044,13 @@ def post_bounded(url, body, timeout, content_type="application/json",
                    timeout, no_answer(timeout))
 
 
-def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
+def publish_head(log, url, session, timeout=SESSION_END_PUBLISH,
+                 window=None):
     """POST `log`'s head to `url`, waiting at most `timeout` seconds,
-    name lookup included. Never raises, never prints: a slow or
-    unreachable remote costs nothing else, and staleness is the
-    supervisor's to surface."""
+    name lookup included, and never past the session-end `window`
+    (#262): with none of it left, the step does not start and its row
+    says so. Never raises, never prints: a slow or unreachable remote
+    costs nothing else, and staleness is the supervisor's to surface."""
     if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
         # The installer refuses these; a hand-edited settings file gets
         # a quiet skip rather than a local file opened by urllib.
@@ -1018,6 +1060,11 @@ def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
     except OSError:
         return
     if last is None:
+        return
+    timeout = step_wait(timeout, window)
+    if not timeout:
+        append_attempt_record(published_path(log), STEP_PUBLISH_HEAD, 0.0,
+                              WINDOW_CLOSED)
         return
     body = published_head(last["entry_hash"], last["n"], session)
     failure = post_bounded(url, json.dumps(body).encode("utf-8"), timeout)
@@ -1216,8 +1263,10 @@ def append_chain_record(log, first, last, head, event):
 
 def publish_chain(log, url, session, timeout, event):
     """Send the chain's entries after the memo's cursor to `url`, one
-    bounded POST per batch, each waiting at most `timeout` seconds and
-    none begun once `timeout` seconds have passed in all. Returns
+    bounded POST per batch, `timeout` seconds in all: each batch waits
+    at most what is left of them, and none begins once they are spent
+    (#262), so a batch that starts late can never carry the call past
+    its total. Returns
     (sent, failure): `sent` is the (first, last) range the remote
     acknowledged in this call, or None when nothing was; `failure` is
     the one line the bounded POST produced for the batch that did not
@@ -1248,11 +1297,12 @@ def publish_chain(log, url, session, timeout, event):
         if batch is None:
             return sent, None
         body, first, last, head = batch
-        if time.monotonic() >= deadline:
+        wait = step_wait(timeout, deadline)
+        if not wait:
             return sent, (f"the budget of {timeout:g} seconds ran out "
                           f"before entry {first}")
         failure = post_bounded(
-            url, body, timeout, CHAIN_TYPE,
+            url, body, wait, CHAIN_TYPE,
             chain_headers(log, session, first, last, head))
         if failure:
             return sent, failure
@@ -1266,14 +1316,33 @@ def publish_chain(log, url, session, timeout, event):
         cursor = last
 
 
-def session_end_publish_chain(log, url, session, timeout):
+def chain_unsent(log):
+    """Whether anything sits after the memo's cursor, so a chain step
+    the window closed on can tell a step it skipped from one it never
+    owed. A memo that cannot be read counts as owing: the step did not
+    run, and the row should say why."""
+    try:
+        cursor = chain_cursor(log)
+        return any(n > cursor for n, _, _ in entries_on_disk(log))
+    except (OSError, ValueError):
+        return True
+
+
+def session_end_publish_chain(log, url, session, timeout, window=None):
     """The hook's chain send: quiet, best-effort, under the head's
-    budget rule, and written down in the memo as an attempt row of step
+    budget rule and inside what the head left of the session-end window
+    (#262), and written down in the memo as an attempt row of step
     `publish-chain` (#240): `sent`, or the one line the bounded POST
-    produced. A chain with nothing after the cursor was not a step and
-    leaves no row."""
+    produced, or the window closed before it began. A chain with
+    nothing after the cursor was not a step and leaves no row."""
     if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
         return  # the installer refuses these; a hand-edited file skips
+    timeout = step_wait(timeout, window)
+    if not timeout:
+        if chain_unsent(log):
+            append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN,
+                                  0.0, WINDOW_CLOSED)
+        return
     sent, failure = publish_chain(log, url, session, timeout, "session-end")
     if sent is None and failure is None:
         return
@@ -1532,10 +1601,11 @@ def ask_authority(url, head, timeout):
     return reply, None
 
 
-def stamp_head(log, url, timeout=SESSION_END_PUBLISH):
+def stamp_head(log, url, timeout=SESSION_END_PUBLISH, window=None):
     """The session-end stamp (ADR-0032 ruling 3): ask the authority for
-    a token over `log`'s head, waiting at most `timeout` seconds, and
-    write down how it went. Never raises, never prints: an exit hook
+    a token over `log`'s head, waiting at most `timeout` seconds and
+    never past the session-end `window` (#262), and write down how it
+    went. Never raises, never prints: an exit hook
     that complains is noise nobody can act on. A head that already has
     a token is not asked for again and leaves no row, like the anchor."""
     try:
@@ -1546,6 +1616,11 @@ def stamp_head(log, url, timeout=SESSION_END_PUBLISH):
         return  # a damaged tail cannot be stamped
     head, n = last["entry_hash"], last["n"]
     if head in stamped_heads(log):
+        return
+    timeout = step_wait(timeout, window)
+    if not timeout:
+        append_attempt_record(stamps_path(log), STEP_STAMP, 0.0,
+                              WINDOW_CLOSED)
         return
     reply, failure = ask_authority(url, head, timeout)
     if reply is not None:
@@ -3278,18 +3353,25 @@ def cmd_hook(args):
         # sealed head and the sealed chain, each opt-in bounded by the
         # same budget rule, and a slow calendar can never cost the
         # commitment nor the three quick steps, so the anchor takes
-        # what is left of the budget.
-        deadline = time.monotonic() + SESSION_END_BUDGET
+        # what is left of the budget. The quick steps share one window
+        # (#262): each POST waits its own bound or what the steps before
+        # it left, whichever is less, and a step with nothing left writes
+        # that down and does not start, so the harness's cap is never
+        # what stops a step before its row is written.
+        started = time.monotonic()
+        deadline = started + SESSION_END_BUDGET
+        window = started + quick_window(args.actor)
+        bound = publish_budget(args.actor)
         if args.publish:
-            publish_head(log, args.publish, session,
-                         timeout=publish_budget(args.actor))
+            publish_head(log, args.publish, session, timeout=bound,
+                         window=window)
         if args.publish_chain:
-            # The entries after the cursor, under the head's budget
-            # (ADR-0031 ruling 3); what does not fit is the keeper's.
+            # The entries after the cursor (ADR-0031 ruling 3); what
+            # does not fit the window is the keeper's.
             session_end_publish_chain(log, args.publish_chain, session,
-                                      timeout=publish_budget(args.actor))
+                                      timeout=bound, window=window)
         if args.stamp:
-            stamp_head(log, args.stamp, timeout=publish_budget(args.actor))
+            stamp_head(log, args.stamp, timeout=bound, window=window)
         if args.anchor:
             session_end_anchor(log, args.calendar or DEFAULT_CALENDARS,
                                budget=deadline - time.monotonic())
@@ -3648,9 +3730,9 @@ def install_codex_hooks(publish=None, profile="local",
     sets no CLAUDE_PROJECT_DIR. `publish` is the published-head opt-in
     (ADR-0025) and `publish_chain` the published-chain one (ADR-0031),
     both riding on the SessionEnd command as they do for Claude Code
-    and both cut off at half Codex's cap (#183): the chain send stops
-    at its budget and leaves the rest at the cursor, which is what the
-    budget rule and the cursor are for. `profile` is written to the
+    and sharing half Codex's cap between them (#183, #262): the chain
+    send stops where the window closes and leaves the rest at the
+    cursor, which is what the window and the cursor are for. `profile` is written to the
     coverage marker (ADR-0031 ruling 1); the session-end anchor it
     would wire stays refused here (ADR-0024), since a calendar round
     trip has no cursor to resume from, so the supervisor's keeper
@@ -3856,9 +3938,10 @@ def cmd_install_hook(args):
                   "own instead.", file=sys.stderr)
             return 1
         # Both publishes are wired: #183 measured one POST inside the
-        # same three seconds, and the hook cuts each off at half the
-        # cap. The chain send is bounded the same way and resumes from
-        # its cursor, so a short clock costs batches, never entries.
+        # same three seconds, and the hook gives all its quick steps
+        # half the cap between them, one window and not one each
+        # (#262). The chain resumes from its cursor, so a short clock
+        # costs batches, never entries.
         return install_codex_hooks(args.publish_head, args.profile,
                                    args.publish_chain)
     supervisor = supervisor_path()

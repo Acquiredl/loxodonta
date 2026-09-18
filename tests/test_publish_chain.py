@@ -40,6 +40,10 @@ RECEIVER = REPO_ROOT / "receiver.py"
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 NDJSON = "application/x-ndjson"
+# What a quick session-end step writes when the window has closed on
+# it (#262): the recorder's words, pinned here as the operator reads
+# them in the sidecar.
+WINDOW_CLOSED = "the session-end window closed before this step"
 PUBLISH_TO = re.compile(r"^publish to (https?://\S+)$", re.M)
 
 
@@ -566,10 +570,15 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.addCleanup(os.environ.pop, "LOXODONTA_CHAIN_BATCH_BYTES", None)
 
     def test_a_budget_that_runs_out_between_batches_keeps_what_landed(self):
-        # Each batch is acknowledged on its own, so a budget spent
+        # Each batch is acknowledged on its own, so a window spent
         # part-way through a tail leaves the batches that landed, their
-        # rows, and a cursor: one attempt row names the entry the budget
-        # stopped short of, and the next send starts exactly there.
+        # rows, and a cursor, and the next send starts at the entry after
+        # it. Where the window closes is the clock's business. Between
+        # two batches, the one attempt row names the entry it stopped
+        # short of. Inside one, the batch is cut off at what the window
+        # had left, never past it (#262): it is not written down, so it
+        # goes again next time and a receiver that already took it drops
+        # the duplicate.
         self.transcript.write_bytes(b"page one\n")
         # The first call is deliberately the longest line this chain
         # will hold, so the cap taken from it also fits the commitment
@@ -590,23 +599,35 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.assertEqual([(row["first"], row["last"]) for row in rows],
                          [(n, n) for n in range(len(rows))])
         (attempt,) = attempt_rows(self.chain())
-        stopped = re.fullmatch(
+        between = re.fullmatch(
             r"the budget of 1\.5 seconds ran out before entry (\d+)",
             attempt["outcome"])
-        self.assertTrue(stopped, attempt["outcome"])
-        self.assertEqual(int(stopped.group(1)), rows[-1]["last"] + 1,
-                         "the budget stops at the entry after the cursor")
+        inside = re.fullmatch(r"no answer within (\d\.\d) seconds",
+                              attempt["outcome"])
+        self.assertTrue(between or inside, attempt["outcome"])
+        if between:
+            self.assertEqual(int(between.group(1)), rows[-1]["last"] + 1,
+                             "the budget stops at the entry after the cursor")
+        else:
+            self.assertLess(float(inside.group(1)), 1.5,
+                            "a later batch waits only what the window left")
 
         # The rest is the next turn's, resumed from the same cursor.
         self.receiver.chain_delay = 0
+        before = len(self.receiver.received)
         rest = run_recorder("publish", "--chain", "--log", self.chain(),
                             self.receiver.url)
 
         self.assertEqual(rest.returncode, 0, rest.stderr)
-        self.assertEqual(b"".join(sent["raw"] for sent in
-                                  self.receiver.received),
+        resumed = self.receiver.received[before]["headers"]["x-loxodonta-range"]
+        self.assertEqual(int(resumed.split("-")[0]), rows[-1]["last"] + 1)
+        # Every line reached the far end, in order; the one repeat a
+        # receiver can see is the batch the window cut off, which the
+        # receiver's append rule drops (docs/RECEIVER.md section 4).
+        self.assertEqual(b"".join(dict.fromkeys(
+                             sent["raw"] for sent in self.receiver.received)),
                          self.chain_lines(),
-                         "every line, once, in order, across both turns")
+                         "every line, in order, across both turns")
 
     def test_a_codex_hook_gives_the_chain_half_the_cap(self):
         # The same budget rule as the head (#183): a Codex hook waits
@@ -676,6 +697,101 @@ class PublishChainAtSessionEndTest(PublishBase):
         judged = run_recorder("verify", "--log", copy)
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertEqual(judged.stdout.strip(), "VALID")
+
+
+class SessionEndWindowTest(PublishBase):
+    """One session-end window, not one budget per step (#262). Codex caps
+    the whole SessionEnd hook at three seconds, and every quick step of
+    a Codex session end shares half of it: the head, then the chain,
+    then the stamp, each waiting its own bound or what the steps before
+    it left, whichever is less. A step with nothing left does not start
+    and writes that down, so the harness's cap is never what stops a
+    step before its row is written. In the #183 pattern: silent local
+    servers, the hook's own clock judged against the cap, and the rows
+    saying what the clock cannot."""
+
+    def silent(self):
+        """A remote that takes the request and never answers in time."""
+        server = serve_fake(self)
+        server.delay = 6
+        server.chain_delay = 6
+        return server
+
+    def stamp_attempts(self):
+        stamps = self.chain().with_name(self.chain().name + ".stamps.jsonl")
+        if not stamps.exists():
+            return []
+        return [row for row in map(json.loads, stamps.read_text(
+                    encoding="utf-8").splitlines())
+                if row.get("kind") == "attempt"]
+
+    def rows_by_step(self):
+        return {row["step"]: (row["budget"], row["outcome"])
+                for row in attempt_rows(self.chain()) + self.stamp_attempts()}
+
+    def ended_codex(self, head, chain, stamp):
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        started = time.monotonic()
+        result = self.session_end("--actor", "codex", "--publish", head.url,
+                                  "--publish-chain", chain.url,
+                                  "--stamp", stamp.url)
+        took = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        return took
+
+    def test_three_silent_remotes_end_inside_codexs_cap_with_a_row_each(self):
+        # Before the window each step waited its own 1.5 seconds, and
+        # three silent remotes held a Codex hook to 4.7 (#262): killed,
+        # and the steps after the one running never said so.
+        head, chain, stamp = self.silent(), self.silent(), self.silent()
+
+        took = self.ended_codex(head, chain, stamp)
+
+        self.assertLess(took, 3, "Codex would have killed the hook")
+        self.assertGreater(took, 1, "the head was never waited on")
+        self.assertEqual(self.rows_by_step(), {
+            "publish-head": (1.5, "no answer within 1.5 seconds"),
+            "publish-chain": (0.0, WINDOW_CLOSED),
+            "stamp": (0.0, WINDOW_CLOSED)})
+        self.assertEqual((len(chain.received), len(stamp.received)), (0, 0),
+                         "a step the window closed on never starts")
+        last = json.loads(self.chain().read_text(
+            encoding="utf-8").splitlines()[-1])
+        self.assertTrue(last["action"].startswith("transcript-commitment:"))
+
+    def test_a_head_that_answers_leaves_the_rest_of_the_window_to_the_chain(self):
+        head = serve_fake(self)
+        chain, stamp = self.silent(), self.silent()
+
+        took = self.ended_codex(head, chain, stamp)
+
+        self.assertLess(took, 3, "Codex would have killed the hook")
+        rows = self.rows_by_step()
+        self.assertEqual(rows["publish-head"], (1.5, "sent"))
+        waited, outcome = rows["publish-chain"]
+        self.assertTrue(0 < waited <= 1.5, waited)
+        self.assertEqual(outcome, f"no answer within {waited:g} seconds")
+        self.assertEqual(rows["stamp"], (0.0, WINDOW_CLOSED))
+        self.assertEqual(len(stamp.received), 0)
+
+    def test_claude_code_keeps_three_seconds_a_step(self):
+        # Claude Code's twenty-second hook already fits three silent
+        # steps and the anchor inside its twelve-second window, so its
+        # bounds are unchanged: each quick step still waits three
+        # seconds, and nothing closes on the chain.
+        head, chain = self.silent(), self.silent()
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+
+        result = self.session_end("--publish", head.url,
+                                  "--publish-chain", chain.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.rows_by_step(), {
+            "publish-head": (3.0, "no answer within 3 seconds"),
+            "publish-chain": (3.0, "no answer within 3 seconds")})
 
 
 class InstallPublishChainTest(unittest.TestCase):

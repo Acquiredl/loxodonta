@@ -182,7 +182,8 @@ class PublishBase(unittest.TestCase):
         """The session's one chain, wherever the store filed it."""
         found = [p for p in (self.store / "receipts").rglob(
                      f"receipts-{self.SESSION}*.jsonl")
-                 if not p.name.endswith((".anchors.jsonl", ".published.jsonl"))]
+                 if not p.name.endswith((".anchors.jsonl", ".published.jsonl",
+                                         ".stamps.jsonl"))]
         self.assertEqual(len(found), 1, found)
         return found[0]
 
