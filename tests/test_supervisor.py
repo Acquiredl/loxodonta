@@ -808,7 +808,8 @@ def ago(seconds):
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def prime_memory(root, matcher="Edit|Write|NotebookEdit|Bash", age=864000):
+def prime_memory(root, matcher="Edit|Write|NotebookEdit|Bash", age=864000,
+                 failures=None):
     """Give a supervisor a calibration memory older than the fixtures.
 
     ADR-0029: a session whose first witnessed event predates the
@@ -817,26 +818,35 @@ def prime_memory(root, matcher="Edit|Write|NotebookEdit|Bash", age=864000):
     while a scan started here stamps its first observation *now* — so
     without this, every fixture would be older than the memory watching
     it. A real machine's supervisor has been looking for weeks by the
-    time these sessions run; this is that machine.
+    time these sessions run; this is that machine. `failures` is the
+    matcher wired for failed calls (#239), when the memory saw one.
     """
+    epoch = {"since": ago(age), "matchers": [matcher]}
+    if failures:
+        epoch["failures"] = [failures]
     (root / BASELINE_NAME).write_text(json.dumps({
         "chains": {},
-        "calibration": [{"since": ago(age), "matchers": [matcher]}],
+        "calibration": [epoch],
     }), encoding="utf-8")
 
 
 def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash",
                          command="python loxodonta.py hook",
-                         sessionend=False):
+                         sessionend=False, failures=None):
     """The harness settings beside the witness layout, wiring a receipts
     PostToolUse hook for the given tools — what tells the watch which
     tool events owe a receipt. `command` is the wired command line, the
     seam the recorder-drift notice reads to find the executed file.
-    `sessionend` wires the exit-commitment hook too (ADR-0018)."""
+    `sessionend` wires the exit-commitment hook too (ADR-0018), and
+    `failures` the failed-call event on that matcher (#239)."""
     witness.mkdir(parents=True, exist_ok=True)
     hooks = {"PostToolUse": [{"matcher": matcher, "hooks": [
         {"type": "command", "command": command},
     ]}]}
+    if failures:
+        hooks["PostToolUseFailure"] = [{"matcher": failures, "hooks": [
+            {"type": "command", "command": command},
+        ]}]
     if sessionend:
         hooks["SessionEnd"] = [{"hooks": [
             {"type": "command", "command": command},
@@ -847,12 +857,14 @@ def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash",
 
 def write_transcript(witness, project, session, event_times=(),
                      error_times=(), chatter=0, idle=0, tool="Bash",
-                     metadata=0):
+                     metadata=0, failure="Exit code 1\nboom"):
     """A synthetic harness transcript shaped like the real one: each
     tool event is a tool_use block (carrying the tool's name) paired by
-    id with a tool-result line (the witness signal). Failed results are
-    excluded by the watch — the hook never fires for them — and plain
-    chatter lines are never counted."""
+    id with a tool-result line (the witness signal). A failed result
+    owes a receipt only where the failure event is wired and the result
+    says the command ran (#239), and plain chatter lines are never
+    counted. `failure` is the failed result's text: by default a shell
+    command that ran and exited, as the harness words one."""
     folder = witness / munge(project)
     folder.mkdir(parents=True, exist_ok=True)
     lines = []
@@ -865,10 +877,11 @@ def write_transcript(witness, project, session, event_times=(),
         # Failure as the harness really writes it (field capture,
         # 2026-08-29): toolUseResult collapses to a plain string and
         # the error flag sits on the tool_result block, not the result.
-        result = "Error: Exit code 1\nboom" if failed else {"stdout": "ok"}
+        result = "Error: " + failure if failed else {"stdout": "ok"}
         block = {"type": "tool_result", "tool_use_id": use_id}
         if failed:
             block["is_error"] = True
+            block["content"] = failure
         lines.append({"type": "user", "timestamp": ts,
                       "toolUseResult": result, "message": {
                           "content": [block]}})
@@ -1887,6 +1900,130 @@ class CalibrationTest(unittest.TestCase):
                          again.stdout + again.stderr)
 
 
+class FailedCallWitnessTest(unittest.TestCase):
+    """#239: the harness fires `PostToolUseFailure`, not `PostToolUse`,
+    for a tool call that ran and failed, and nothing at all for one it
+    denied or refused to start. Once install-hook wires the failure
+    event, the witness moves with it: a failed shell command owes a
+    receipt like a completed call, from the epoch that wired the event
+    and never before. The transcript marks a denial with the same
+    `is_error` flag as a failure, so any other failed call may owe a
+    receipt or may not, and is charged neither way."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name).resolve() / "witness"
+        install_witness_hook(self.witness, matcher="*", failures="*")
+        prime_memory(self.root, matcher="*", failures="*")
+        # The store pinned empty: coverage_epochs() reads the marker
+        # from the store's home, never the developer's real one.
+        store = Path(self._tmp.name).resolve() / "store"
+        self.env = {**os.environ, "LOXODONTA_HOME": str(store)}
+
+    def scan(self):
+        return run_scan(self.root, "--witness", str(self.witness),
+                        env=self.env)
+
+    def states(self, result):
+        return {s["session"]: s
+                for s in json.loads(result.stdout)["completeness"]["sessions"]}
+
+    def session(self, name, receipts, completed, failed, **transcript):
+        make_chain(self.root / "alpha" / "receipts", name, entries=receipts)
+        write_transcript(self.witness, self.root / "alpha", name,
+                         event_times=completed, error_times=failed,
+                         **transcript)
+
+    def test_a_failed_command_owes_a_receipt_and_is_paid_by_it(self):
+        self.session("sess-paid", 3, [ago(6000), ago(5990)], [ago(5980)])
+
+        judged = self.states(self.scan())["sess-paid"]
+
+        self.assertEqual(judged["tools"], 3, "the failed command is owed")
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+    def test_a_failed_command_with_no_receipt_alarms_while_live(self):
+        # The hook that fires on success and not on failure is exactly
+        # the gap #239 found; once the event is wired, a missing
+        # failure receipt is a deficit like any other.
+        self.session("sess-short", 2, [ago(600), ago(500)], [ago(400)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        judged = self.states(result)["sess-short"]
+        self.assertEqual(judged["state"], "ALARM-DEFICIT")
+        self.assertEqual(judged["deficit"], 1)
+
+    def test_a_call_that_never_ran_owes_nothing(self):
+        # A denial and a rejected input carry the flag a failure does,
+        # and the harness fires no hook for either (its hooks page).
+        self.session("sess-denied", 2, [ago(6000), ago(5990)], [ago(5980)],
+                     failure="Permission to use Bash has been denied.")
+        self.session("sess-rejected", 2, [ago(5000), ago(4990)],
+                     [ago(4980)], tool="Edit",
+                     failure="<tool_use_error>String to replace not found "
+                             "in file.</tool_use_error>")
+
+        rows = self.states(self.scan())
+
+        for name in ("sess-denied", "sess-rejected"):
+            self.assertEqual(rows[name]["tools"], 2, name)
+            self.assertEqual(rows[name]["state"], "ENDED-CLEAN", name)
+
+    def test_a_failed_call_that_may_have_run_is_never_surplus(self):
+        # A fetch that failed ran, and fired the failure event; a fetch
+        # that was denied reads the same in the transcript. Its receipt
+        # is welcome and never surplus, and its absence never a deficit.
+        self.session("sess-fetched", 3, [ago(6000), ago(5990)], [ago(5980)],
+                     tool="WebFetch",
+                     failure="Claude Code is unable to fetch from "
+                             "example.com")
+        self.session("sess-unfetched", 2, [ago(5000), ago(4990)],
+                     [ago(4980)], tool="WebFetch",
+                     failure="Claude Code is unable to fetch from "
+                             "example.com")
+
+        rows = self.states(self.scan())
+
+        fetched, unfetched = rows["sess-fetched"], rows["sess-unfetched"]
+        self.assertEqual(fetched["state"], "ENDED-CLEAN")
+        self.assertEqual((fetched["tools"], fetched["receipts"]), (2, 3))
+        self.assertEqual(fetched["may_owe"], 1,
+                         "the row says why receipts outnumber the owed")
+        self.assertEqual(unfetched["state"], "ENDED-CLEAN")
+
+    def test_a_failed_command_owes_nothing_before_the_event_was_wired(self):
+        # Both sides of one upgrade. The memory began with completed
+        # calls wired alone; re-running install-hook added the failure
+        # event, dated by the settings file's mtime like any matcher
+        # change (ADR-0016). Before it, a failed command owes nothing,
+        # and a receipt for one (a change the supervisor dated late) is
+        # no surplus; after it, a failed command with no receipt is owed.
+        prime_memory(self.root, matcher="*")
+        stamp = time.time() - 3000
+        os.utime(self.witness.parent / "settings.json", (stamp, stamp))
+        self.session("sess-before", 2, [ago(6000), ago(5990)], [ago(5980)])
+        self.session("sess-dated-late", 3, [ago(5000), ago(4990)],
+                     [ago(4980)])
+        self.session("sess-after", 2, [ago(2600), ago(2590)], [ago(2580)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = self.states(result)
+        self.assertEqual(rows["sess-before"]["tools"], 2)
+        self.assertEqual(rows["sess-before"]["state"], "ENDED-CLEAN")
+        self.assertEqual(rows["sess-dated-late"]["state"], "ENDED-CLEAN")
+        self.assertEqual(rows["sess-after"]["tools"], 3)
+        self.assertEqual(rows["sess-after"]["state"], "ENDED-DEFICIT")
+        words = json.loads(result.stdout)["completeness"]["calibration"]
+        self.assertIn("in force at its time", words["words"])
+
+
 class BeforeMemoryTest(unittest.TestCase):
     """ADR-0029, from issue #114: the supervisor judges nothing older
     than its own memory. This is the one case ADR-0016's effective
@@ -2055,13 +2192,17 @@ class CoverageMarkerTest(unittest.TestCase):
     def watch(self, result):
         return json.loads(result.stdout)["completeness"]
 
-    def mark(self, since, matchers=("*",), harness="claude-code"):
+    def mark(self, since, matchers=("*",), harness="claude-code",
+             failures=()):
         """The marker as `install-hook` writes it (its own CLI is tested
         in tests/test_hook.py); this exercises the reader."""
+        epoch = {"since": since, "matchers": list(matchers),
+                 "harness": harness}
+        if failures:
+            epoch["failures"] = list(failures)
         (self.store / "coverage.json").write_text(json.dumps({
             "purpose": "test fixture",
-            "epochs": [{"since": since, "matchers": list(matchers),
-                        "harness": harness}]}), encoding="utf-8")
+            "epochs": [epoch]}), encoding="utf-8")
 
     def a_session(self, name, when):
         make_chain(self.root / "alpha" / "receipts", name, entries=3)
@@ -2078,6 +2219,21 @@ class CoverageMarkerTest(unittest.TestCase):
 
         self.assertEqual(judged["state"], "ENDED-CLEAN")
         self.assertEqual(judged["tools"], 3)
+
+    def test_a_marker_that_wired_failed_calls_is_read_for_them(self):
+        # #239: the install that wired the failure event says so, and a
+        # failed command in the week before the first scan is owed.
+        self.mark(ago(7200), failures=("*",))
+        install_witness_hook(self.witness, matcher="*", failures="*")
+        make_chain(self.root / "alpha" / "receipts", "sess-week", entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-week",
+                         event_times=[ago(3600), ago(3600)],
+                         error_times=[ago(3600)])
+
+        judged = self.states(self.scan())["sess-week"]
+
+        self.assertEqual(judged["tools"], 3)
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
 
     def test_without_the_marker_that_same_work_is_unjudged(self):
         # The control, and the bug this ADR closes.
@@ -2732,6 +2888,27 @@ class RecorderDriftTest(unittest.TestCase):
 
         self.assertEqual(recorder["state"], "unknown")
         self.assertIsNone(recorder["branch"])
+
+    def test_an_install_from_before_the_failure_event_says_so(self):
+        # #239: an install from before it wired completed calls alone,
+        # and a failed call leaves no receipt until install-hook runs
+        # again. One clause on the line that already reads the wired
+        # command, never an alarm of its own.
+        home = Path(self._tmp.name).resolve() / "loose"
+        home.mkdir()
+        script = home / "loxodonta.py"
+        script.write_text("# loose recorder\n", encoding="utf-8")
+        command = f'python "{script.as_posix()}" hook'
+        install_witness_hook(self.witness, matcher="*", command=command)
+
+        older = self.notice()
+        install_witness_hook(self.witness, matcher="*", command=command,
+                             failures="*")
+        rewired = self.notice()
+
+        self.assertIn("failed tool calls", older["note"])
+        self.assertIn("install-hook", older["note"])
+        self.assertNotIn("failed tool calls", rewired["note"])
 
     def test_no_wired_hook_means_no_recorder_to_report_on(self):
         self.witness.mkdir(parents=True, exist_ok=True)
