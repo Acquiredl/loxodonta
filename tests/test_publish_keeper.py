@@ -10,6 +10,7 @@ test drives the public CLI against a local fake receiver: no network,
 ever, and never internals.
 """
 
+import hashlib
 import json
 import re
 import subprocess
@@ -114,11 +115,15 @@ class PublishCommandTest(ReceiverFixture):
         for secret in (self.root.name, "alpha", "secret-wren", "receipts-",
                        ".jsonl"):
             self.assertNotIn(secret, raw)
-        # The memo: head, n, ts, event, and nothing else. Never the URL —
-        # a webhook URL is a credential.
+        # The memo: head, n, ts, event, and which remote took it by a
+        # fingerprint of the URL (#263), the first 16 hex characters of
+        # its SHA-256, and nothing else. Never the URL — a webhook URL
+        # is a credential.
+        fingerprint = hashlib.sha256(
+            self.receiver.url.encode("utf-8")).hexdigest()[:16]
         self.assertEqual(memo_of(log),
                          [{"head": head, "n": 2, "ts": body["ts"],
-                           "event": "cadence"}])
+                           "event": "cadence", "remote_id": fingerprint}])
         memo_text = Path(str(log) + ".published.jsonl").read_text(
             encoding="utf-8")
         self.assertNotIn("127.0.0.1", memo_text)
@@ -429,7 +434,7 @@ class NeverPublishedTest(ReceiverFixture):
                         env=keeper_env())
 
     def test_a_wired_publish_that_never_sent_is_one_sentence(self):
-        self.wire('python loxodonta.py hook --publish "http://127.0.0.1:9/hook"')
+        self.wire(f'python loxodonta.py hook --publish "{self.receiver.url}"')
         log = make_chain(self.root / "alpha" / "receipts", "sess-never")
 
         result = self.scan()
@@ -444,7 +449,8 @@ class NeverPublishedTest(ReceiverFixture):
                          "the URL is a credential; the report never holds it")
         self.assertEqual(report["exit"], 0, "a sentence, never the exit")
 
-        # Once any head has left by that door, the sentence is gone.
+        # Once a head has left by that door, to the remote the command
+        # names (#263), the sentence is gone.
         subprocess.run(
             [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
              self.receiver.url],
@@ -484,9 +490,10 @@ class NeverPublishedTest(ReceiverFixture):
     def test_sent_is_measured_per_route_so_a_chain_wired_alone_is_read_as_its_own(self):
         # #248: the chain route (`--publish-chain`) is wired in name only
         # until a batch lands, whatever the head route did. A chain-only
-        # wiring, then a batch sent by hand, then the sentence is gone.
-        self.wire('python loxodonta.py hook --publish-chain '
-                  '"http://127.0.0.1:9/hook"')
+        # wiring, then a batch sent by hand to the remote it names, then
+        # the sentence is gone.
+        self.wire(f'python loxodonta.py hook --publish-chain '
+                  f'"{self.receiver.url}"')
         log = make_chain(self.root / "alpha" / "receipts", "sess-chain")
 
         published = json.loads(self.scan().stdout)["published"]
@@ -510,7 +517,7 @@ class NeverPublishedTest(ReceiverFixture):
     def test_a_head_that_left_does_not_answer_for_a_chain_that_never_did(self):
         # Both routes wired, the head sent, the chain never: the sentence
         # names the chain route alone, and `sent` says something left.
-        self.wire('python loxodonta.py hook --publish "http://127.0.0.1:9/h" '
+        self.wire(f'python loxodonta.py hook --publish "{self.receiver.url}" '
                   '--publish-chain "http://127.0.0.1:9/c"')
         log = make_chain(self.root / "alpha" / "receipts", "sess-both")
         subprocess.run(
