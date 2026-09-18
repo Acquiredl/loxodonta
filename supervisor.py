@@ -548,25 +548,18 @@ PROFILE_ANCHOR_EVERY = 6 * 3600   # seconds: the timestamped tier's default
 TIERS = ("local", "timestamped")
 
 
-def marker_epoch():
-    """The one epoch of the coverage marker that speaks for the keeper,
-    or None when no epoch names a profile (a marker from before profiles
-    existed, or no marker at all). Each harness's newest epoch speaks for
-    that harness, and the highest tier among them speaks for the keeper
-    (ADR-0031 ruling 1, #246). Not simply the newest epoch of all: a
-    flagless install for a second harness would then read as the first
-    harness's choice withdrawn, and the keeper would stand down with
-    nothing saying a Codex install did it, which is the end claim
-    ADR-0030 ruling 2 refuses arriving by another door.
-
-    One epoch answers for both cadence and authority, so the keeper never
-    anchors on one install's word and stamps on another's."""
+def marker_harnesses():
+    """Each harness's newest epoch of the coverage marker that names a
+    profile, as {harness: epoch}, or {} when there is none (a marker from
+    before profiles existed, or no marker at all). Each harness speaks
+    through its newest epoch and no older one: a re-install for that
+    harness is its operator's latest word."""
     try:
         with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
-        return None
-    declared = {}   # harness -> its newest epoch that names a profile
+        return {}
+    declared = {}
     # Sorted is stable, so two epochs stamped the same second keep the
     # order the recorder appended them in, and the newest is the last.
     for epoch in sorted((epoch for epoch in (data.get("epochs") or [])
@@ -576,6 +569,18 @@ def marker_epoch():
                          and isinstance(epoch.get("profile"), str)),
                         key=lambda epoch: epoch["since"]):
         declared[epoch["harness"]] = epoch
+    return declared
+
+
+def marker_epoch():
+    """The epoch whose profile the keeper's cadence follows, or None:
+    the highest tier among each harness's newest (ADR-0031 ruling 1,
+    #246). Not simply the newest epoch of all: a flagless install for a
+    second harness would then read as the first harness's choice
+    withdrawn, and the keeper would stand down with nothing saying a
+    Codex install did it, which is the end claim ADR-0030 ruling 2
+    refuses arriving by another door."""
+    declared = marker_harnesses()
     if not declared:
         return None
 
@@ -589,23 +594,44 @@ def marker_epoch():
 
 def marker_profile():
     """The profile the keeper follows and the harness that declared it,
-    as (profile, harness), or None when the marker names none. `serve`
-    reads the epoch itself and converts it there, so that one epoch
-    answers for both the cadence and the authority; this is the reading
-    for a caller that wants the profile alone."""
+    as (profile, harness), or None when the marker names none."""
     epoch = marker_epoch()
     return None if epoch is None else (epoch["profile"], epoch["harness"])
 
 
-def marker_authority(epoch):
-    """The authority that epoch names, or None: whom the operator chose
-    to trust at install (ADR-0032 ruling 2), which puts the stamp on the
-    anchor keeper's turn. An epoch that names none withdraws it, the way
-    a re-install without the flag turns the session-end stamp off."""
-    if not isinstance(epoch, dict):
-        return None
-    named = epoch.get("authority")
-    return named if isinstance(named, str) and named else None
+def marker_authority():
+    """The authority the keeper's anchor turn stamps with (ADR-0032
+    ruling 3), as (URL, the harness whose epoch named it, a note): the
+    one named by the newest epoch, among each harness's newest, that
+    names an authority at all. The same shape as the tier rule above and
+    for the same reason: an install for another harness that names no
+    authority never withdraws this one, since that would stop the keeper
+    stamping a chain whose operator asked for it, silently, on the word
+    of an install that said nothing about it. A harness that re-installs
+    without the flag does withdraw its own, since its newest epoch is
+    its operator's latest word.
+
+    The marker is writer-reachable, so what it names is checked the way
+    the installer checks it — a plain http or https URL with nothing a
+    shell could act on — before `serve` ever prints it or passes it to
+    the recorder. One that fails is ignored and the note says so,
+    naming the marker and not repeating the value. Returns (None, None,
+    None) when no epoch names an authority."""
+    named = [epoch for epoch in marker_harnesses().values()
+             if isinstance(epoch.get("authority"), str)
+             and epoch["authority"]]
+    if not named:
+        return None, None, None
+    newest = sorted(named, key=lambda epoch: epoch["since"])[-1]
+    try:
+        return publish_url(newest["authority"]), newest["harness"], None
+    except argparse.ArgumentTypeError:
+        marker = Path(store_home()) / COVERAGE_NAME
+        return None, newest["harness"], (
+            f"note: the coverage marker ({marker.as_posix()}) names an "
+            f"authority for {newest['harness']} that is not a plain http or "
+            "https URL, so the keeper stamps nothing; `loxodonta "
+            "install-hook --authority URL` names one the installer accepts")
 
 
 def keeper_cadences(anchor_every, declared):
@@ -628,7 +654,8 @@ def keeper_cadences(anchor_every, declared):
 
 
 def keeper_words(anchor_every, anchor_source, publish_every,
-                 publish_url=None, publish_chain=None, authority=None):
+                 publish_url=None, publish_chain=None, authority=None,
+                 named_by=None):
     """The startup line's second half: each keeper's cadence and its
     source, so the operator reads back what `serve` will send and why
     (ADR-0031 ruling 1, #246). Publishing follows flags alone in this
@@ -638,14 +665,17 @@ def keeper_words(anchor_every, anchor_source, publish_every,
     its own (ADR-0032 ruling 3), so it is said on the anchor's clause and
     only when that clause has a cadence to ride: an authority with no
     anchor cadence sends nothing, and a line claiming otherwise would be
-    the one thing this line exists to prevent. The URL is printed because
+    the one thing this line exists to prevent. `named_by` is the harness
+    whose install named it, which need not be the harness whose profile
+    set the cadence (marker_authority). The URL is printed because
     an authority URL is not a credential — it says whom the operator
     chose to trust (ADR-0032 ruling 4) — where a webhook URL is, which is
     why the publish clause names routes and never URLs."""
     anchor = (f"anchor every {cadence_words(anchor_every)} ({anchor_source})"
               if anchor_every is not None else f"anchor off ({anchor_source})")
     if anchor_every is not None and authority:
-        anchor += f", stamping the same head with {authority} on that turn"
+        anchor += (f", stamping the same head with {authority} on that "
+                   f"turn (authority named by {named_by})")
     routes = " and ".join(name for name, url in (("head", publish_url),
                                                  ("chain", publish_chain))
                           if url)
@@ -4472,6 +4502,11 @@ def package_readme(unit, packed, sessions, witness, record, notes,
     yet (ADR-0007 ruling 2)."""
     project = unit["project"]
     count = sum(len(listings) for listings in sessions.values())
+    # Tokens anywhere in the package, the manifest's own or a chain's:
+    # either way the recipient needs a chain file to judge them.
+    stamped = SEAL_STAMP in seals or any(
+        chain.get("stamps") for listings in sessions.values()
+        for chain in listings)
     if unit["kind"] == "session":
         title = f"session {unit['session']}"
         what = ("This is the receipt log of one AI agent session: one line "
@@ -4553,11 +4588,34 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "",
         "    python loxodonta.py verify-package <this package>",
         "",
+    ]
+    if stamped:
+        lines += [
+            "This package carries authority timestamps (tokens), judged "
+            "through `openssl` against a certificate chain you save from "
+            "the authority yourself. The package does not carry one, "
+            "because a chain handed over by the issuer would be the "
+            "issuer's word about whom to trust, and without one each token "
+            "is reported as present and not judged. With it:",
+            "",
+            "    python loxodonta.py verify-package <this package> "
+            "--authority-chain <chain.pem>",
+            "",
+            "Every token here is judged against that one file, so when the "
+            "stamps records name more than one authority, make it a "
+            "bundle: their chains concatenated into one PEM file. The "
+            "names in those records are the packer's note of whom it "
+            "asked, not a claim the verifier checks.",
+            "",
+        ]
+    lines += [
         "It prints the manifest's summary, the recorder's own verdict for "
         "each chain, the file references it cannot check off the machine, "
         "each artifact against the manifest, then the package verdict and "
         "one line of residual trust. Exit 0 is `SELF-CONSISTENT`; 1 is "
-        "`CHAIN-BROKEN`; 2 is `ARTIFACT-DIVERGED`; 3 is `ANCHOR-MISMATCH`; 4 is "
+        "`CHAIN-BROKEN`; 2 is `ARTIFACT-DIVERGED`; 3 is not what was "
+        "issued: `ANCHOR-MISMATCH` or `STAMP-INVALID` under a chain, "
+        "`SEAL-INVALID` or `SEAL-MISSING` for a seal; 4 is "
         "`UNSUPPORTED-FORMAT`, a refusal; 5 is `TRANSCRIPT-DIVERGED` "
         "(docs/PACKAGE.md).",
         "",
@@ -4925,7 +4983,8 @@ def cmd_package(args):
     # A reading, not a tick (tick=False): the keepers stay quiet, so
     # packaging appends nothing to the chain it copies and sends nothing
     # off the machine; the baseline still remembers the look. Only the
-    # seal step sends anything, and only with --anchor.
+    # seal step sends anything, and only with --anchor or --stamp: the
+    # manifest's 32-byte digest, to the calendars or to the authority.
     report = scan_root(store_receipts(), witness=Path(args.witness),
                        store=True, tick=False)
     # Declared in ADR-0007's ladder order, the two *when* seals before
@@ -5593,19 +5652,17 @@ def cmd_serve(args):
     server.witness = Path(args.witness)
     # The keeper follows the profile the operator chose at install-hook
     # (ADR-0031 ruling 1); a flag typed here still wins.
-    epoch = marker_epoch()
-    anchor_every, anchor_source = keeper_cadences(
-        args.anchor_every,
-        None if epoch is None else (epoch["profile"], epoch["harness"]))
+    anchor_every, anchor_source = keeper_cadences(args.anchor_every,
+                                                  marker_profile())
     server.anchor_every = anchor_every
     server.calendars = args.calendar or ()
     server.publish_every = args.publish_every
     server.publish_url = args.publish_url
     server.publish_chain = args.publish_chain
     # The authority rides the anchor keeper's turn and has no cadence of
-    # its own (ADR-0032 ruling 3), so it comes from the same epoch that
-    # set the cadence and from no flag here.
-    server.authority = marker_authority(epoch)
+    # its own (ADR-0032 ruling 3), so it comes from the marker and from
+    # no flag here, by its own rule (marker_authority).
+    server.authority, named_by, authority_note = marker_authority()
     server.scan_lock = threading.Lock()
     server.views_lock = threading.Lock()
     server.scan_body = None
@@ -5615,8 +5672,12 @@ def cmd_serve(args):
           "(localhost only)", flush=True)
     print(keeper_words(anchor_every, anchor_source, args.publish_every,
                        args.publish_url, args.publish_chain,
-                       server.authority),
+                       server.authority, named_by),
           flush=True)
+    if authority_note:
+        # After the keeper line, never before it: the second line is the
+        # cadence line wherever it is read.
+        print(authority_note, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

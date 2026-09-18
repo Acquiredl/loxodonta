@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
-from test_stamp import start_authority
+from test_stamp import reply, start_authority
 from test_supervisor import (ago, chain_head, chains_by_session,
                              install_witness_hook, keeper_env, make_chain,
                              run_scan, write_attempt_row, write_chain_row,
@@ -688,15 +688,18 @@ class ProfileKeeperTest(unittest.TestCase):
                        capture_output=True, check=True, env=env)
         return log
 
-    def serve(self, *extra):
-        """Start `serve` against the store's marker and read the URL."""
+    def serve(self, *extra, **knobs):
+        """Start `serve` against the store's marker and read the URL.
+        `knobs` are supervisor environment settings, such as the scan
+        cache's lifetime, for the tests that need every request to be a
+        tick of its own."""
         self.proc = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--root",
              str(self.root), "--port", "0", "--witness", str(self.witness),
              "--calendar", self.calendar.url, *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env=keeper_env(LOXODONTA_HOME=str(self.store),
-                           PYTHONIOENCODING="utf-8"))
+                           PYTHONIOENCODING="utf-8", **knobs))
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
@@ -801,7 +804,7 @@ class ProfileKeeperTest(unittest.TestCase):
         head = chain_head(log)
         self.assertIn("anchor every 6h (profile timestamped, claude-code), "
                       f"stamping the same head with {authority.url} on that "
-                      "turn", said)
+                      "turn (authority named by claude-code)", said)
         self.assertEqual(self.calendar.submitted, [bytes.fromhex(head)],
                          "the same turn anchored the ripe head")
         self.assertEqual(len(authority.received), 1)
@@ -863,6 +866,96 @@ class ProfileKeeperTest(unittest.TestCase):
         self.assertNotIn("stamping", said)
         self.assertEqual(authority.received, [])
         self.assertFalse(Path(str(log) + ".stamps.jsonl").exists())
+
+    def test_an_install_elsewhere_without_an_authority_never_withdraws_it(self):
+        # Two harnesses tie on tier, and the newer names no authority:
+        # read as one epoch, that would stop the keeper stamping Claude
+        # Code's chains, silently, on the word of a Codex install that
+        # said nothing about stamping. The authority follows its own
+        # rule, the newest epoch among each harness's newest that names
+        # one, and the line names the harness that named it.
+        (self.home / ".codex").mkdir()
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url,
+                     age=86400)
+        self.install("--codex", "--profile", "timestamped")
+        log = self.aged_chain("sess-tie", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile timestamped, codex)", said)
+        self.assertIn(f"stamping the same head with {authority.url} on that "
+                      "turn (authority named by claude-code)", said)
+        self.assertEqual(len(authority.received), 1)
+        self.assertEqual([row["head"] for row in self.tokens_of(log)],
+                         [chain_head(log)])
+
+    def test_a_marker_authority_that_is_not_a_plain_url_is_ignored_and_said(self):
+        # The marker is writer-reachable, so what it names is checked the
+        # way the installer checks it before the keeper prints it or runs
+        # anything with it. The note names the marker and never repeats
+        # the value.
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        marker = self.store / "coverage.json"
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        data["epochs"][-1]["authority"] = "https://a.example.test/$(id)"
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        self.aged_chain("sess-bad", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        keeper = self.proc.stdout.readline()
+        note = self.proc.stdout.readline()
+        self.proc.kill()
+        self.proc.communicate()
+
+        self.assertIn("anchor every 6h (profile timestamped, claude-code)",
+                      keeper)
+        self.assertNotIn("stamping", keeper)
+        self.assertIn("note: the coverage marker", note)
+        self.assertIn(marker.as_posix(), note)
+        self.assertIn("not a plain http or https URL", note)
+        self.assertNotIn("$(id)", keeper + note)
+        self.assertEqual(authority.received, [])
+
+    def test_a_refused_token_is_asked_for_again_on_the_next_turn(self):
+        # The control for the throttle test below: with no throttle, two
+        # ticks are two turns, and a refusal leaves no token for the
+        # dedupe to stop at, so the authority is asked twice. Without
+        # this the one query below could be a scan that never ran.
+        authority = self.authority()
+        authority.answer = reply(2)   # rejection, and no token
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        log = self.aged_chain("sess-again", age=7 * 3600)
+
+        self.serve(SUPERVISOR_SCAN_TTL_SECONDS="0",
+                   SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        self.tick()
+        self.tick()
+        self.said_at_startup()
+
+        self.assertEqual(len(authority.received), 2)
+        self.assertEqual(self.tokens_of(log), [])
+
+    def test_two_ticks_inside_one_window_ask_a_refusing_authority_once(self):
+        # The throttle, seen where the dedupe cannot hide it: an authority
+        # that refuses leaves no token, so only the keeper's window keeps
+        # a second tick from asking again.
+        authority = self.authority()
+        authority.answer = reply(2)
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        self.aged_chain("sess-window", age=7 * 3600)
+
+        self.serve(SUPERVISOR_SCAN_TTL_SECONDS="0")
+        self.tick()
+        self.tick()
+        self.said_at_startup()
+
+        self.assertEqual(len(authority.received), 1,
+                         "a second tick inside the window asked again")
 
     def test_a_later_local_install_for_another_harness_stands_no_keeper_down(self):
         # The keeper follows the strongest tier any harness declares,
