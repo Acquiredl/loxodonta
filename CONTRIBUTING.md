@@ -47,8 +47,12 @@ The repo enforces its own vocabulary. `tools/house_check.py` fails on the
 GLOSSARY anti-terms anywhere (the refutation form, "not immutable", is
 allowed), on em dashes in the front-door files (README, SECURITY,
 CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT), and on overclaim words there
-("prove", "guarantee", "always"); elsewhere those words only warn. CI runs
-exactly this command, so passing it locally is passing CI:
+("prove", "guarantee", "always"); elsewhere those words only warn. It also
+fails on the tool's old name used as the command (ADR-0010), and on the
+words the GLOSSARY refuses for its own terms, a "backup" for the published
+chain or a "bundle" for the package, in those files and in the code, and
+warns on them elsewhere. CI runs exactly this command, so passing it
+locally is passing CI:
 
 ```
 python tools/house_check.py
