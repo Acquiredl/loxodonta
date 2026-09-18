@@ -9,8 +9,8 @@ only channel; there is no email address.
 ## Scope
 
 - The recorder, `loxodonta.py`: the chain writer, `verify`, anchoring.
-- The supervisor, `supervisor.py`: `scan`, `serve`, the recall surface,
-  `mcp`, `export`.
+- The supervisor, `supervisor.py`: `scan`, `serve` and its `/metrics`
+  route, the recall surface, `mcp`, `export`.
 - The receiver, `receiver.py`: `serve`, the token path, and the files it
   keeps (`docs/RECEIVER.md`).
 - The adapters under `adapters/`.
@@ -55,7 +55,8 @@ These are vulnerabilities, and reports of them are wanted:
   the digest. A receipt holds a one-line action summary and file
   fingerprints, never file contents, so a secret in one is a bug in whatever
   wrote it ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
-- `serve` reachable from off the machine, or `mcp` gaining a write path.
+- `serve`, its dashboard or its `/metrics` route, reachable from off the
+  machine, or `mcp` gaining a write path.
 - The receiver answering anything but a POST at its token's path, a header
   reaching its disk as a path, or any route that returns, lists or deletes
   what it holds.
