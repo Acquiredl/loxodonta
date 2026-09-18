@@ -571,10 +571,9 @@ class FileReferenceTest(ReceiptsCliTest):
         try:
             os.symlink(str(target), str(link))
         except OSError as e:
-            self.skipTest("cannot create a symlink on this machine "
-                          f"({e.strerror or type(e).__name__}); "
-                          "Windows needs Developer Mode or the privilege, "
-                          "and CI's Linux and macOS runners run this test")
+            self.skipTest("symlinks cannot be created here "
+                          f"({e.strerror or type(e).__name__}); this test "
+                          "runs wherever they can")
 
         result = run_receipts(
             "log", "--actor", "agent", "--action", "read through a link",
