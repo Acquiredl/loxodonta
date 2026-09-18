@@ -10,6 +10,8 @@ A package confirms that it is unaltered since packaging. It never confirms that 
 
 The GLOSSARY's words apply exactly: *package*, *manifest*, *seal*, *issuer*, *recipient*, *testimony*. It is not called a bundle, so the concept keeps one name; the field-data export's `--raw` zip is a *raw archive*, a different thing with no manifest (ADR-0026 ruling 9).
 
+Where a package is built, where it is judged, and what the evidence in each place is worth is drawn on one page in [TOPOLOGY.md](TOPOLOGY.md).
+
 ## 2. Building one
 
 ```

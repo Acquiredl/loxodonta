@@ -10,6 +10,8 @@ What it holds is the operator's copy of what the writer said, at an address of t
 
 What it is not. It is not a reader: it never runs `verify`, never serves a file back, and knows no vendor; anything that turns its files into somebody's storage grows on its side of the wire, never the recorder's (ADR-0031 ruling 5). It is not `tools/publish_echo.py`: the echo listens on the loopback address of the writer's own machine, prints what a published head holds, and keeps nothing, so nothing there has left the machine. The receiver is the remote the echo tells you to go and find.
 
+Where the receiver sits beside the other two files, and what the evidence on each machine is worth, is drawn on one page in [TOPOLOGY.md](TOPOLOGY.md).
+
 ## 2. Running it
 
 On the machine that will keep the copy:
