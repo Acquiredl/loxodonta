@@ -1097,9 +1097,14 @@ class JudgedStampTest(unittest.TestCase):
 
         out = result.stdout
         self.assertEqual(result.returncode, 0, out + result.stderr)
-        self.assertIn(f"STAMPED: entries 0..2 existed when "
-                      f"{self.authority.url} signed this head", out)
-        self.assertIn(str(self.chain_file), out)
+        # What openssl checked, and the name as what it is: the key the
+        # chain file certifies is the signer, and the record's URL is the
+        # writer's note of whom it asked (ADR-0008 ruling 4's rule).
+        self.assertIn(f"STAMPED: entries 0..2 existed when a key certified "
+                      f"by {self.chain_file} signed this head under its own "
+                      f"clock (the record names {self.authority.url}, "
+                      "testimony)", out)
+        self.assertNotIn(f"{self.authority.url} signed", out)
         self.assertRegex(out, r"(?m)^VALID$")
         self.assertNotIn("not judged", out)
         self.assertNotIn("STAMP-INVALID", out)

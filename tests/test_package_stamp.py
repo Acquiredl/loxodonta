@@ -294,6 +294,56 @@ class StampedPackageTest(StampedStoreCase):
         self.assertIn(f"{name}: matches the manifest", judged.stdout)
         self.assertNotIn("unlisted:", judged.stdout)
 
+    def test_an_unlisted_stamps_sidecar_stays_unlisted_and_unjudged(self):
+        # A chain's tokens are judged only when the manifest lists its
+        # stamps sidecar. A package with none verifies as it did before
+        # stamps travelled, with no NO-STAMPS line pointing at a
+        # temporary copy; and a sidecar dropped in afterwards is a file
+        # nothing vouches for, named and judged by nobody, like any other.
+        folder = self.work / "plain"
+        built = self.package(SESSION, "--folder", "--out", str(folder))
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        (chain,) = self.manifest_of(folder)["chains"]
+        self.assertIsNone(chain["stamps"])
+
+        before = self.verify_package(folder)
+
+        self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+        self.assertNotIn("NO-STAMPS", before.stdout)
+        self.assertNotIn("STAMP", before.stdout)
+
+        dropped = folder / (self.chain.name + ".stamps.jsonl")
+        dropped.write_text(json.dumps({
+            "head": "ab" * 32, "n": 1, "ts": "2026-09-17T05:35:42Z",
+            "authority": "https://authority.example.test/tsr",
+            "response": base64.b64encode(GRANTED).decode()}) + "\n", "utf-8")
+
+        after = self.verify_package(folder)
+
+        out = after.stdout
+        self.assertEqual(after.returncode, 0, out + after.stderr)
+        self.assertIn(f"unlisted: {dropped.name} (not in the manifest, not "
+                      "judged)", out)
+        self.assertNotIn("STAMP-INVALID", out)
+        self.assertNotIn("NO-STAMPS", out)
+        self.assertTrue(out.strip().splitlines()[-1]
+                        .startswith("SELF-CONSISTENT:"))
+
+    def test_a_listed_stamps_sidecar_that_is_stripped_is_artifact_diverged(self):
+        # The listing is what vouches for the sidecar, so taking the
+        # file away is a package that is not what it lists.
+        self.stamp_chain()
+        folder = self.work / "stripped"
+        built = self.package(SESSION, "--folder", "--out", str(folder))
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        (folder / (self.chain.name + ".stamps.jsonl")).unlink()
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 2, judged.stdout + judged.stderr)
+        lines = judged.stdout.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("ARTIFACT-DIVERGED:"), lines[-1])
+
     def test_an_attempt_row_rides_in_the_packaged_sidecar_and_is_not_judged(self):
         # #240: the recorder's note on how a query went sits in the
         # stamps sidecar beside the tokens. The package carries the
@@ -327,34 +377,51 @@ class JudgedPackageStampTest(StampedStoreCase):
 
     def setUp(self):
         super().setUp()
-        self.authority_dir = self.root / "authority"
-        self.authority_dir.mkdir()
-        (self.authority_dir / "req.cnf").write_text(REQ_CONFIG, "utf-8")
-        (self.authority_dir / "tsa.cnf").write_text(TSA_CONFIG, "utf-8")
-        self.chain_file = self.authority_dir / "tsa.crt"
-        made = self.openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                            "-keyout", "tsa.key", "-out", "tsa.crt",
-                            "-days", "2", "-config", "req.cnf",
-                            "-extensions", "tsa_cert")
-        self.assertEqual(made.returncode, 0, made.stderr)
         self.queries = 0
+        self.authority_dir, self.chain_file, self.sign = \
+            self.openssl_authority("authority")
         self.authority.answer = self.sign
 
-    def openssl(self, *args):
-        return subprocess.run(["openssl", *args], cwd=str(self.authority_dir),
+    def openssl(self, *args, where=None):
+        return subprocess.run(["openssl", *args],
+                              cwd=str(where or self.authority_dir),
                               capture_output=True, encoding="utf-8",
                               errors="replace")
 
-    def sign(self, query):
-        """What a real authority does with the recorder's query: answer
-        it with `openssl ts -reply` under the test authority's key."""
-        self.queries += 1
-        name = f"query-{self.queries}"
-        (self.authority_dir / f"{name}.tsq").write_bytes(query)
-        answered = self.openssl("ts", "-reply", "-queryfile", f"{name}.tsq",
-                                "-config", "tsa.cnf", "-out", f"{name}.tsr")
-        assert answered.returncode == 0, answered.stderr
-        return (self.authority_dir / f"{name}.tsr").read_bytes()
+    def openssl_authority(self, name):
+        """An authority of its own, made here with openssl in a folder
+        called `name`: its key, its self-signed timestamping certificate,
+        and what a real authority does with a query, answering it with
+        `openssl ts -reply` under that key. Returns (the folder, the
+        certificate a recipient would save as its chain file, the
+        answering function for a fake authority)."""
+        folder = self.root / name
+        folder.mkdir()
+        # A subject of its own, as two real authorities have: openssl
+        # finds a token's issuer in a bundle by subject name, and two
+        # certificates sharing one would leave it choosing between them.
+        (folder / "req.cnf").write_text(
+            REQ_CONFIG.replace("CN = loxodonta test authority",
+                               f"CN = loxodonta test authority {name}"),
+            "utf-8")
+        (folder / "tsa.cnf").write_text(TSA_CONFIG, "utf-8")
+        made = self.openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                            "-keyout", "tsa.key", "-out", "tsa.crt",
+                            "-days", "2", "-config", "req.cnf",
+                            "-extensions", "tsa_cert", where=folder)
+        self.assertEqual(made.returncode, 0, made.stderr)
+
+        def sign(query):
+            self.queries += 1
+            stem = f"query-{self.queries}"
+            (folder / f"{stem}.tsq").write_bytes(query)
+            answered = self.openssl("ts", "-reply", "-queryfile",
+                                    f"{stem}.tsq", "-config", "tsa.cnf",
+                                    "-out", f"{stem}.tsr", where=folder)
+            assert answered.returncode == 0, answered.stderr
+            return (folder / f"{stem}.tsr").read_bytes()
+
+        return folder, folder / "tsa.crt", sign
 
     def judge(self, folder, chain_file=None):
         return self.verify_package(folder, "--authority-chain",
@@ -371,15 +438,77 @@ class JudgedPackageStampTest(StampedStoreCase):
         seal = next((l for l in lines if l.startswith("seal stamp: STAMPED")),
                     None)
         self.assertIsNotNone(seal, out)
-        self.assertIn(self.authority.url, seal)
-        self.assertIn(str(self.chain_file), seal)
+        self.assertIn(f"a key certified by {self.chain_file} signed this "
+                      "manifest's sha256 under its own clock", seal)
+        self.assertIn(f"(the record names {self.authority.url}, testimony)",
+                      seal)
         self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + STAMPED:"),
                         lines[-1])
+        self.assertIn("a key certified by the --authority-chain file signed "
+                      "the manifest's sha256 under its own clock", lines[-1])
         self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
-        self.assertIn("the authority's clock and key custody", lines[-2])
+        self.assertIn("keeps an honest clock and sole custody of the key",
+                      lines[-2])
+        # The verdict and the trust line carry no name at all: the
+        # manifest names no authority (ADR-0008 ruling 4's rule).
+        self.assertNotIn(self.authority.url, lines[-1] + lines[-2])
         # A token is not an anchor, and the rung never says it is.
         self.assertNotIn("ANCHORED", out)
         self.assertNotIn("Bitcoin", lines[-1])
+
+    def test_an_edited_authority_name_is_never_presented_as_the_signer(self):
+        # The stamps record's `authority` sits in a file the manifest does
+        # not list, so the writer can change it without touching a seal.
+        # The token still verifies, since openssl never read the name,
+        # and the output must never offer the edited name as the signer.
+        folder = self.stamped_folder()
+        edited = "https://someone-else.example/tsr"
+        (record,) = self.sidecar_records(folder)
+        record["authority"] = edited
+        (folder / SIDECAR).write_text(json.dumps(record) + "\n", "utf-8")
+
+        judged = self.judge(folder)
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        self.assertNotIn(f"{edited} signed", out)
+        self.assertIn(f"(the record names {edited}, testimony)", out)
+        lines = out.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + STAMPED:"),
+                        lines[-1])
+        self.assertNotIn("someone-else", lines[-1] + lines[-2])
+
+    def test_two_authorities_are_judged_with_a_bundle_of_their_chains(self):
+        # One --authority-chain judges every token in the package, so a
+        # chain stamped by one authority and a manifest stamped by
+        # another need both chains in that one file: either alone fails
+        # the other's token, and the two concatenated judge both.
+        self.stamp_chain()
+        _, other_chain, other_sign = self.openssl_authority("other")
+        other = start_authority(self, answer=other_sign)
+        folder = self.work / "two"
+        built = self.package(SESSION, "--folder", "--out", str(folder),
+                             "--stamp", other.url)
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        bundle = self.root / "bundle.pem"
+        bundle.write_text(self.chain_file.read_text("utf-8")
+                          + other_chain.read_text("utf-8"), "utf-8")
+
+        first_only = self.judge(folder)
+        other_only = self.judge(folder, other_chain)
+        both = self.judge(folder, bundle)
+
+        self.assertEqual(first_only.returncode, 3, first_only.stdout)
+        self.assertIn("seal stamp: SEAL-INVALID", first_only.stdout)
+        self.assertEqual(other_only.returncode, 3, other_only.stdout)
+        self.assertIn("STAMP-INVALID", other_only.stdout)
+        out = both.stdout
+        self.assertEqual(both.returncode, 0, out + both.stderr)
+        self.assertIn("STAMPED: entries 0..2 existed when a key certified by",
+                      out)
+        self.assertIn("seal stamp: STAMPED", out)
+        self.assertTrue(out.strip().splitlines()[-1]
+                        .startswith("SELF-CONSISTENT + STAMPED:"))
 
     def test_a_tampered_token_is_seal_invalid_exit_3(self):
         folder = self.stamped_folder()
@@ -431,33 +560,22 @@ class JudgedPackageStampTest(StampedStoreCase):
         response[-40] ^= 0x01
         record["response"] = base64.b64encode(bytes(response)).decode()
         packed.write_text(json.dumps(record) + "\n", "utf-8")
-        # The artifact listing commits the sidecar's bytes, so the
-        # manifest has to be taught the edited bytes or ARTIFACT-DIVERGED
-        # would be the graver finding and this one would go unsaid.
-        self.relist(folder, packed)
+        # The edit also takes the sidecar off its manifest listing, an
+        # exit-2 finding; exit 3 outranks it, so the verdict names the
+        # token. The manifest itself is untouched, so its own token
+        # still holds and the seal is no part of this.
 
         judged = self.judge(folder)
 
-        self.assertEqual(judged.returncode, 3, judged.stdout + judged.stderr)
-        self.assertIn("STAMP-INVALID", judged.stdout)
-        lines = judged.stdout.strip().splitlines()
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 3, out + judged.stderr)
+        lines = out.strip().splitlines()
+        findings = [l for l in lines if l.startswith("STAMP-INVALID: head ")]
+        self.assertEqual(len(findings), 1, out)
         self.assertTrue(lines[-1].startswith("STAMP-INVALID:"), lines[-1])
         self.assertIn("is not evidence for that chain", lines[-1])
         self.assertNotIn("ANCHOR", lines[-1])
-
-    def relist(self, folder, path):
-        """The manifest's artifact row for `path`, rewritten to the bytes
-        on disk now: the seal above it is what the test is about, and a
-        package whose manifest disagrees with its own files would be
-        judged on the disagreement first."""
-        manifest = json.loads((folder / "manifest.json").read_text("utf-8"))
-        for listing in manifest["artifacts"]:
-            if listing["path"] == path.name:
-                listing["sha256"] = hashlib.sha256(
-                    path.read_bytes()).hexdigest()
-                listing["bytes"] = path.stat().st_size
-        (folder / "manifest.json").write_text(
-            json.dumps(manifest, indent=2), "utf-8")
+        self.assertIn("seal stamp: STAMPED", out)
 
     def test_a_chains_good_token_is_detail_and_earns_the_package_nothing(self):
         # Ruling 6 reaches the third seal too: a token over a chain head

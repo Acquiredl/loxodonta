@@ -1979,11 +1979,18 @@ def check_stamps(log, entries, chain_file):
             continue
         verdict, detail = judge_stamp(head, reply, chain_file)
         if verdict == "stamped":
-            print(f"STAMPED: entries 0..{n} existed when "
-                  f"{record.get('authority')} signed this head — openssl "
-                  f"accepted the token against {chain_file}; the time "
-                  "inside it is the authority's word, not this machine's "
-                  "(`openssl ts -reply -text` prints it)")
+            # What openssl checked, and nothing it did not: that a key
+            # the chain file certifies signed this head under its own
+            # clock. The record's `authority` is the writer's note of
+            # whom it asked, in a file the writer can edit, so it is
+            # named as testimony and never as the signer (the trap
+            # ADR-0008 ruling 4 closes for the signature).
+            print(f"STAMPED: entries 0..{n} existed when a key certified "
+                  f"by {chain_file} signed this head under its own clock "
+                  f"(the record names {record.get('authority')}, "
+                  "testimony) — the time inside the token is that key's "
+                  "word, not this machine's (`openssl ts -reply -text` "
+                  "prints it)")
         elif verdict == "invalid":
             bad = True
             print(f"STAMP-INVALID: {label}: {detail} — evidence that does "
@@ -2483,13 +2490,18 @@ def judge_chain(folder, listing, chain_file=None):
     # packaged stamps sidecar is judged exactly as `verify --stamps`
     # judges one (ADR-0032 ruling 5): through openssl against the chain
     # file the recipient named, or as an honest note when they named
-    # none. `mechanisms` carries back which of the two exit-3 findings
-    # fired, since the package names it.
+    # none. Only when the manifest lists it, though: a sidecar the
+    # manifest does not vouch for is named `unlisted` and judged by
+    # nobody, which is the rule every other unlisted file follows, and
+    # a package from before stamps travelled verifies as it always did,
+    # with no NO-STAMPS line pointing a recipient at a temporary copy.
+    # `mechanisms` carries back which of the two exit-3 findings fired,
+    # since the package names it.
     mechanisms = []
     code = cmd_verify(argparse.Namespace(log=log, files=False,
                                          expect_head=None,
                                          transcript=transcript, anchors=True,
-                                         stamps=True,
+                                         stamps=bool(listing.get("stamps")),
                                          authority_chain=chain_file),
                       mechanisms)
     if mechanisms:
@@ -2651,11 +2663,15 @@ def judge_manifest_stamp(folder, chain_file):
             else:
                 verdict, detail = judge_stamp(head, reply, chain_file)
                 if verdict == "stamped":
-                    print(f"seal stamp: STAMPED: {record.get('authority')} "
-                          "signed this manifest's sha256 — openssl accepted "
-                          f"the token against {chain_file}; the time inside "
-                          "it is the authority's word, not this machine's "
-                          "(`openssl ts -reply -text` prints it)")
+                    # The signer is the key the recipient's chain file
+                    # certifies; the name in the record sits in a file
+                    # the manifest does not list, so it is testimony.
+                    print(f"seal stamp: STAMPED: a key certified by "
+                          f"{chain_file} signed this manifest's sha256 under "
+                          "its own clock (the record names "
+                          f"{record.get('authority')}, testimony) — the time "
+                          "inside the token is that key's word, not this "
+                          "machine's (`openssl ts -reply -text` prints it)")
                     stamped = True
                     continue
                 if verdict == "not judged":
@@ -2860,15 +2876,21 @@ def ceiling_lines(manifest, earned):
         unsaid.append("that it existed before today")
     if stamped:
         # With a token and no anchor, when is not unsaid: it is said by
-        # the authority, and what it rests on is the authority's word,
-        # which the residual trust states as the condition it is rather
-        # than letting the rung sound like the anchor's.
+        # whoever holds the key that signed it, and what it rests on is
+        # that holder's word, which the residual trust states as the
+        # condition it is rather than letting the rung sound like the
+        # anchor's. The manifest names no authority, and the name in the
+        # stamps record is testimony, so the verdict says what openssl
+        # checked and no name at all, as ADR-0008 ruling 4 has it for
+        # the signature.
         rungs += " + STAMPED"
-        given += (", and the authority the manifest names signed its sha256 "
-                  "under that authority's own clock")
+        given += (", and a key certified by the --authority-chain file "
+                  "signed the manifest's sha256 under its own clock")
         trusted += (", and it existed by the time inside that token if the "
-                    "authority's clock and key custody are what the "
-                    "authority says")
+                    "holder of that key keeps an honest clock and sole "
+                    "custody of the key; whose key it is rests on where you "
+                    "got the chain file, never on the name the stamps "
+                    "record gives")
     if key is not None:
         rungs += f" + SIGNED (key: {key})"
         given += (", and the manifest, and transitively every artifact it "
@@ -4295,7 +4317,12 @@ def main(argv=None):
     verify_parser.add_argument("--authority-chain", metavar="FILE",
                                default=None,
                                help="the authority's certificate chain "
-                                    "(PEM) you saved, for --stamps")
+                                    "(PEM) you saved, for --stamps. Every "
+                                    "token is judged against this one "
+                                    "file, so when the sidecar holds "
+                                    "tokens from more than one authority, "
+                                    "give a bundle: their chains "
+                                    "concatenated into one PEM file")
     verify_parser.set_defaults(func=cmd_verify)
     package_parser = sub.add_parser(
         "verify-package",
@@ -4313,7 +4340,13 @@ def main(argv=None):
                                      "from the authority, for the tokens "
                                      "this package carries (ADR-0032); "
                                      "without it a token is present and not "
-                                     "judged, and the seal earns no rung")
+                                     "judged, and the seal earns no rung. "
+                                     "Every token in the package, the "
+                                     "manifest's and each chain's, is "
+                                     "judged against this one file, so when "
+                                     "the records name more than one "
+                                     "authority, give a bundle: their "
+                                     "chains concatenated into one PEM file")
     package_parser.set_defaults(func=cmd_verify_package)
     anchor_parser = sub.add_parser(
         "anchor", parents=[common],
