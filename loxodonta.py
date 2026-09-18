@@ -3608,15 +3608,25 @@ def session_end_notice(old, new, choices):
     return f" ({'; '.join(parts)})" if parts else ""
 
 
-def chain_notice(url):
+def chain_notice(url, profile):
     """What leaves at every session end once the chain is wired, said
     before anything is written (ADR-0031): every entry, and action lines
     are command lines. The export's `--raw` stance (ADR-0021), told to
-    the operator in the same breath as the choice."""
+    the operator in the same breath as the choice. And what leaves
+    besides the sessions still to come: the keeper walks every chain
+    in the store and sends each from genesis, so last month's command
+    lines go too, once `serve` publishes — at `full` with no flag
+    typed, under `custom` when it is given `--publish-chain`."""
+    past = ("`supervisor serve`, when it runs, then also sends every "
+            "chain already in the store, from its first entry."
+            if profile == "full" else
+            "A `supervisor serve` run with --publish-chain also sends "
+            "every chain already in the store, from its first entry.")
     return ("every entry will leave this machine at session end, to "
             f"{url}: the timestamp, the actor, the action line and the "
             "file references. Action lines are command lines and can "
-            "carry anything the agent typed, a pasted secret included.")
+            "carry anything the agent typed, a pasted secret included. "
+            + past)
 
 
 def profile_notice(profile, matchers, codex=False):
@@ -3744,7 +3754,7 @@ def install_codex_hooks(publish=None, profile="local",
     if publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
-        print(chain_notice(publish_chain))
+        print(chain_notice(publish_chain, profile))
     had_backup = backup_settings(path)
     record = recorder_command(CODEX_ACTOR)
     record_end = recorder_command(CODEX_ACTOR, publish=publish,
@@ -3955,7 +3965,7 @@ def cmd_install_hook(args):
     if args.publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
-        print(chain_notice(args.publish_chain))
+        print(chain_notice(args.publish_chain, args.profile))
     had_backup = backup_settings(path)
 
     hooks = settings.setdefault("hooks", {})

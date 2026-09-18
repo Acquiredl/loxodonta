@@ -868,6 +868,11 @@ class InstallPublishChainTest(unittest.TestCase):
         self.assertIn("action line", said)
         self.assertIn("command lines", said)
         self.assertIn("anything the agent typed", said)
+        # And the store's past: the keeper walks every chain there and
+        # sends each from genesis, once a `serve` is given the flag.
+        self.assertIn("A `supervisor serve` run with --publish-chain also "
+                      "sends every chain already in the store, from its "
+                      "first entry.", said)
         self.assertLess(said.index("every entry"), said.index("installed in"))
         # A head-only install says nothing of the kind: only the head
         # leaves, and ADR-0025 said what that is.
@@ -1267,7 +1272,11 @@ class InstallProfileFullTest(unittest.TestCase):
 
     def test_the_what_leaves_text_is_said_once_before_the_settings_file(self):
         # ADR-0031: at `full` every entry leaves, and the installer says
-        # so before it writes anything. Once, not once per route.
+        # so before it writes anything. Once, not once per route. Not
+        # only the sessions still to come: `serve` follows the profile
+        # with no flag typed and walks every chain in the store, so on
+        # its first turn last month's sessions leave too, each from its
+        # first entry, and the text says that as well.
         result = self.install("--profile", "full", "--remote", self.URL)
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1277,6 +1286,9 @@ class InstallProfileFullTest(unittest.TestCase):
                       "file references", said)
         self.assertIn("command lines", said)
         self.assertIn("anything the agent typed", said)
+        self.assertIn("`supervisor serve`, when it runs, then also sends "
+                      "every chain already in the store, from its first "
+                      "entry.", said)
         self.assertEqual(said.count("anything the agent typed"), 1)
         self.assertLess(said.index("every entry"), said.index("installed in"))
 
