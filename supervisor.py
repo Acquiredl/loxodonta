@@ -790,22 +790,50 @@ def is_chain_row(record):
     return isinstance(record, dict) and record.get("kind") == "chain"
 
 
-def sidecar_heads(sidecar):
+def remote_id(url):
+    """Which remote a memo row went to, without the URL (#263): the first
+    16 hex characters of the SHA-256 of the URL exactly as the recorder
+    sends to it. The recorder's rule, twice over, since the two files
+    never import each other; computed here only to compare, and never
+    printed, served, or written down."""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def rows_for_remote(rows, url):
+    """The rows of one route that count for the remote at `url` (#263),
+    by the recorder's rule: those naming it by `remote_id`, and those
+    written before rows named a remote, which belong to the remote the
+    first named row of that route names and, until one exists, count
+    for any remote. With no `url` there is no remote to read against,
+    and every row counts, as every row did before rows named one."""
+    if url is None:
+        return list(rows)
+    mine = remote_id(url)
+    named = [row["remote_id"] for row in rows if "remote_id" in row]
+    owner = named[0] if named else mine
+    return [row for row in rows if row.get("remote_id", owner) == mine]
+
+
+def sidecar_heads(sidecar, remote=None):
     """Heads that already have a record, for scheduling only: the head
-    route's rows, never a note and never a chain row."""
-    return {record["head"] for record in sidecar_records(sidecar)
+    route's rows, never a note and never a chain row. With `remote`,
+    only the heads that remote took (#263), so a head sent to one remote
+    is still owed to the next."""
+    rows = [record for record in sidecar_records(sidecar)
             if isinstance(record.get("head"), str)
-            and not is_attempt(record) and not is_chain_row(record)}
+            and not is_attempt(record) and not is_chain_row(record)]
+    return {row["head"] for row in rows_for_remote(rows, remote)}
 
 
-def chain_cursor(memo):
+def chain_cursor(memo, remote=None):
     """The last entry number the remote acknowledged by the chain route,
-    from the memo's chain rows; -1 when it holds none, so the recorder's
-    next send starts at genesis. For scheduling only: the memo is
-    writer-reachable and proves nothing."""
-    return max((record["last"] for record in sidecar_records(memo)
-                if is_chain_row(record)
-                and isinstance(record.get("last"), int)), default=-1)
+    from the memo's chain rows that count for `remote` (#263); -1 when
+    none does, so the recorder's next send there starts at genesis. For
+    scheduling only: the memo is writer-reachable and proves nothing."""
+    rows = [record for record in sidecar_records(memo)
+            if is_chain_row(record) and isinstance(record.get("last"), int)]
+    return max((row["last"] for row in rows_for_remote(rows, remote)),
+               default=-1)
 
 
 def ripe_head(entries, now, cadence):
@@ -903,8 +931,11 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     the chain after it, at most once each per throttle window. The memo
     is the recorder's (`<log>.published.jsonl`), writer-reachable and
     therefore testimony: it stops a repeat and proves nothing; the
-    remote's copy is the head record. Off by default: nothing leaves
-    the machine without the say-so. Returns (attempted, note, failed)."""
+    remote's copy is the head record. Both readings are per remote
+    (#263): a head or a batch another remote took is still owed to the
+    one named here, so a new remote gets the current head and each
+    chain from its genesis. Off by default: nothing leaves the machine
+    without the say-so. Returns (attempted, note, failed)."""
     if not (url or chain_url) or not upgrade_due(last_attempt, now):
         return False, None, False
     memo = Path(str(log) + ".published.jsonl")
@@ -914,14 +945,14 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     attempted = False
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
-    if url and head not in sidecar_heads(memo):
+    if url and head not in sidecar_heads(memo, url):
         attempted = True
         note = publish_through_recorder(log, url, "head")
         if note:
             notes.append(note)
             failed = True
     if chain_url and isinstance(entries[-1].get("n"), int) \
-            and entries[-1]["n"] > chain_cursor(memo):
+            and entries[-1]["n"] > chain_cursor(memo, chain_url):
         attempted = True
         note = publish_through_recorder(log, chain_url, "chain")
         if note:
@@ -964,10 +995,14 @@ def publish_through_recorder(log, url, what):
     return None
 
 
-def last_departure(log):
+def last_departure(log, remotes=None):
     """When something of this chain last left the machine, and by which
     door: the newest `ts` across the publish memo and the anchor
-    sidecar, or {"ts": None, "via": None} when nothing has left. The
+    sidecar, or {"ts": None, "via": None} when nothing has left. A
+    publish route counts only what went to the remote it now sends to,
+    `remotes` being {"head": URL or None, "chain": URL or None} (#263):
+    a row another remote took says nothing about this one, and a route
+    rewired to a remote that has taken nothing reads as stale. The
     door is the route, not the file (#248): `published` is a head that
     the remote took, `published-chain` a batch of the entries
     themselves, `anchored` a digest a calendar took. A batch counts,
@@ -979,16 +1014,23 @@ def last_departure(log):
     the anchor keeper's voice: a timestamp the reader ages, never an
     alarm, never the exit. Both files are writer-reachable, so a fresh
     reading here proves nothing; a stale one is the reason to look."""
+    remotes = remotes or {}
     departures = []   # (when, ts, via)
-    for record in sidecar_records(Path(str(log) + ".published.jsonl")):
-        when = parse_when(record.get("ts"))
-        # A head row is a head that left and a chain row a batch of
-        # entries that left; an attempt row is a note that a step was
-        # tried (#240), and a refused POST never left.
-        if when is not None and not is_attempt(record):
-            departures.append((when, record["ts"],
-                               "published-chain" if is_chain_row(record)
-                               else "published"))
+    # A head row is a head that left and a chain row a batch of entries
+    # that left; an attempt row is a note that a step was tried (#240),
+    # and a refused POST never left.
+    memo = [record for record in
+            sidecar_records(Path(str(log) + ".published.jsonl"))
+            if not is_attempt(record)]
+    routes = (("published", "head",
+               [record for record in memo if not is_chain_row(record)]),
+              ("published-chain", "chain",
+               [record for record in memo if is_chain_row(record)]))
+    for via, route, rows in routes:
+        for record in rows_for_remote(rows, remotes.get(route)):
+            when = parse_when(record.get("ts"))
+            if when is not None:
+                departures.append((when, record["ts"], via))
     # An upgrade appends a second record for the same head, stamped
     # when the proof completed, so a head's departure is its first
     # record: the newest record would make an idle chain read fresh
@@ -1034,11 +1076,13 @@ def last_failed(log):
     return newest[1] if newest else None
 
 
-def head_published(log, entries):
+def head_published(log, entries, remote=None):
     """Whether this chain's current head has a head row in the publish
     memo (ADR-0025, ADR-0031): `ripe_head`'s own test with the cadence
     taken out, so what the keeper calls already sent and what the report
-    calls published are one reading rather than two. Attempt rows are
+    calls published are one reading rather than two. Like the keeper's,
+    it reads against the remote the head route sends to (#263), so a
+    head another remote took is unpublished here. Attempt rows are
     skipped by their kind (#240), so a POST the remote refused is never
     a publication. None when the chain has no entries and so has no
     head. Testimony, like every sidecar reading: the memo sits beside
@@ -1047,7 +1091,7 @@ def head_published(log, entries):
         return None
     head = entries[-1].get("entry_hash")
     return bool(head) and head in sidecar_heads(
-        Path(str(log) + ".published.jsonl"))
+        Path(str(log) + ".published.jsonl"), remote)
 
 
 def assess_anchors(detail, entries):
@@ -1227,6 +1271,28 @@ def sessionend_publishes(witness):
                                    command) for command in commands)}
 
 
+def sessionend_remotes(witness):
+    """Where each publish route on the wired SessionEnd command sends,
+    as {"head": URL or None, "chain": URL or None}: the value written
+    after `--publish` and after `--publish-chain`, quoted as the
+    installer writes it or bare. Read only to be fingerprinted (#263),
+    so a route is counted as sent only to the remote it is wired to;
+    the URL is a credential, and nothing here is ever printed, served
+    or written down. None where the route is not wired or its value
+    cannot be read, and then no remote is read against."""
+    remotes = {"head": None, "chain": None}
+    for route, flag in (("head", "--publish"), ("chain", "--publish-chain")):
+        for command in sessionend_commands(witness):
+            found = re.search(r"(?:^|\s)" + flag
+                              + r"(?:=|\s+)(?:\"([^\"]*)\"|'([^']*)'|(\S+))",
+                              command)
+            if found:
+                remotes[route] = next(value for value in found.groups()
+                                      if value is not None)
+                break
+    return remotes
+
+
 def published_reading(witness, logs):
     """#240 part 3: whether the wired SessionEnd command publishes,
     whether any chain here holds a row saying something was sent, and
@@ -1234,13 +1300,19 @@ def published_reading(witness, logs):
     wired, and nothing ever sent. Sent is measured per route (#248): a
     head row is the head route's, a chain row the chain route's, so a
     chain wired beside a head that has left still reads as never sent
-    until a batch lands. A receiver that was never listening looks
+    until a batch lands. And per remote (#263): a route counts as sent
+    only to the remote the command names, so a route rewired to a
+    remote that has taken nothing reads as wired in name only, whatever
+    the old one took. A receiver that was never listening looks
     exactly like a hook that never fired until someone reads the memos;
     this reads them. Never the URL, and never the exit."""
     routes = sessionend_publishes(witness)
+    remotes = sessionend_remotes(witness)
     memos = [Path(str(log) + ".published.jsonl") for log in logs]
-    landed = {"head": any(sidecar_heads(memo) for memo in memos),
-              "chain": any(chain_cursor(memo) >= 0 for memo in memos)}
+    landed = {"head": any(sidecar_heads(memo, remotes["head"])
+                          for memo in memos),
+              "chain": any(chain_cursor(memo, remotes["chain"]) >= 0
+                           for memo in memos)}
     wired = any(routes.values())
     sent = any(landed.values())
     silent = [route for route in ("head", "chain")
@@ -1251,9 +1323,10 @@ def published_reading(witness, logs):
         flags = " and ".join("--publish" if route == "head"
                              else "--publish-chain" for route in silent)
         note = (f"publishing is wired on the SessionEnd command ({flags}) "
-                f"and no chain here holds {what}: either no session has "
-                "ended since the wiring, or the remote has never taken "
-                "one — each chain's last failed attempt says which")
+                f"and no chain here holds {what} for the remote it names: "
+                "either no session has ended since the wiring, or that "
+                "remote has never taken one — each chain's last failed "
+                "attempt says which")
     return {"wired": wired, "sent": sent, "note": note}
 
 
@@ -2188,6 +2261,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     awakened = {}
     heads = {}
     families = {}
+    # The remote each publish route is read against (#263): the keeper's
+    # own target when it sends (at `full`, `serve` has already put the
+    # marker's remote there), else the one the SessionEnd command names.
+    # With neither, every row counts, as before rows named a remote.
+    wired = sessionend_remotes(witness)
+    remotes = {"head": publish_url or wired["head"],
+               "chain": publish_chain or wired["chain"]}
     # Walk in display order — repo, then session, then sibling sequence —
     # so the grouping below is plain insertion, no re-sorting.
     if store:
@@ -2242,7 +2322,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             # When a head last left the machine, published or anchored
             # (ADR-0025): staleness evidence beside the anchor panel,
             # aged by the reader, never raising the exit.
-            "left": last_departure(log),
+            "left": last_departure(log, remotes),
             # The last session-end step that failed, from the recorder's
             # own attempt rows (#240): step, time, outcome, or None.
             "last_failed": last_failed(log),
@@ -2251,7 +2331,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             # route counts, None when the chain has no head at all.
             # `left` above answers a different question, the newest door
             # a head went out of, and keeps its shape.
-            "head_published": head_published(log, entries),
+            "head_published": head_published(log, entries,
+                                             remotes["head"]),
         }
         if keeper_note:
             chain["anchors"]["note"] = keeper_note

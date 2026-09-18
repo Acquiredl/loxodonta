@@ -285,6 +285,14 @@ class LeftReadingTest(ReceiverFixture):
              self.receiver.url],
             capture_output=True, check=True, env=clean_env())
 
+    def scan(self, *extra):
+        """The scan beside a witness with nothing wired. `left` reads a
+        route against the remote the SessionEnd command names (#263), so
+        the default witness, this machine's own settings, would make the
+        reading the operator's rather than the test's."""
+        return run_scan(self.root, "--witness", str(self.root / "no-witness"),
+                        *extra, env=keeper_env())
+
     def test_left_is_the_newest_departure_published_or_anchored(self):
         both = make_chain(self.root / "alpha" / "receipts", "sess-both")
         write_pending_anchor(both, chain_head(both), submitted=ago(100000))
@@ -293,7 +301,7 @@ class LeftReadingTest(ReceiverFixture):
         write_completed_anchor(anchored, chain_head(anchored))
         never = make_chain(self.root / "beta" / "receipts", "sess-never")
 
-        result = run_scan(self.root, env=keeper_env())
+        result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -325,7 +333,7 @@ class LeftReadingTest(ReceiverFixture):
         write_chain_row(both, 0, 2, chain_head(both), when=ago(90000))
         self.publish_by_hand(both)   # a head row, newer by a day
 
-        result = run_scan(self.root, env=keeper_env())
+        result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -350,7 +358,7 @@ class LeftReadingTest(ReceiverFixture):
         sidecar = Path(str(log) + ".anchors.jsonl")
         first = json.loads(sidecar.read_text("utf-8").splitlines()[0])["ts"]
 
-        result = run_scan(self.root, env=keeper_env())
+        result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         (chain,) = chains_by_session(json.loads(result.stdout))[
@@ -373,7 +381,7 @@ class LeftReadingTest(ReceiverFixture):
                           when=ago(60))
         quiet = make_chain(self.root / "beta" / "receipts", "sess-quiet")
 
-        result = run_scan(self.root, env=keeper_env())
+        result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
