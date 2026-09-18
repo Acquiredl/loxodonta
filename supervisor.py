@@ -552,33 +552,18 @@ PROFILE_PUBLISH_EVERY = 6 * 3600  # seconds: the full tier's, the same six
 TIERS = ("local", "timestamped", "full")
 
 
-def marker_profile(witness=None):
-    """The strongest profile any harness declares in the coverage
-    marker, as (profile, harness, remote, wired), or None when no epoch
-    names one (a marker from before profiles existed, or no marker at
-    all). The remote is where that install wired publishing, and is
-    the keeper's target at `full` (#249); anything but a string reads
-    as none, and `publish_cadences` checks the rest. `wired` is whether
-    that harness's recorder is still on its SessionEnd command, read
-    from the settings beside `witness` and from Codex's hooks file:
-    the harnesses still wired are the ones that speak, and only when
-    none is does the strongest unwired one speak, so the startup line
-    can say why the keeper is off. With no `witness` the wiring is not
-    read and `wired` is True: the drill names the tier and follows
-    nothing. Each harness's newest epoch speaks for that harness, and
-    the highest tier among them speaks for the keeper (ADR-0031
-    ruling 1, #246).
-    Not simply the newest epoch of all: a flagless install for a
-    second harness would then read as the first harness's choice
-    withdrawn, and the keeper would stand down with nothing saying a
-    Codex install did it, which is the end claim ADR-0030 ruling 2
-    refuses arriving by another door."""
+def marker_harnesses():
+    """Each harness's newest epoch of the coverage marker that names a
+    profile, as {harness: epoch}, or {} when there is none (a marker from
+    before profiles existed, or no marker at all). Each harness speaks
+    through its newest epoch and no older one: a re-install for that
+    harness is its operator's latest word."""
     try:
         with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
-        return None
-    declared = {}   # harness -> its newest epoch that names a profile
+        return {}
+    declared = {}
     # Sorted is stable, so two epochs stamped the same second keep the
     # order the recorder appended them in, and the newest is the last.
     for epoch in sorted((epoch for epoch in (data.get("epochs") or [])
@@ -588,23 +573,92 @@ def marker_profile(witness=None):
                          and isinstance(epoch.get("profile"), str)),
                         key=lambda epoch: epoch["since"]):
         declared[epoch["harness"]] = epoch
-    if not declared:
-        return None
+    return declared
+
+
+def marker_epoch(declared, wired):
+    """The epoch whose profile the keepers follow: the highest tier
+    among each harness's newest (ADR-0031 ruling 1, #246), among the
+    harnesses whose recorder is still wired, and only when none is,
+    among them all, so the startup line can say why the keeper is off
+    (#249). Not simply the newest epoch of all: a flagless install for
+    a second harness would then read as the first harness's choice
+    withdrawn, and the keeper would stand down with nothing saying a
+    Codex install did it, which is the end claim ADR-0030 ruling 2
+    refuses arriving by another door. `declared` is marker_harnesses',
+    `wired` {harness: bool}."""
 
     def tier(epoch):
         return (TIERS.index(epoch["profile"])
                 if epoch["profile"] in TIERS else 0)
 
-    wired = {harness: witness is None or recorder_wired(harness, witness)
-             for harness in declared}
     speaking = ([epoch for epoch in declared.values()
                  if wired[epoch["harness"]]] or list(declared.values()))
-    strongest = sorted(speaking,
-                       key=lambda epoch: (tier(epoch), epoch["since"]))[-1]
+    return sorted(speaking,
+                  key=lambda epoch: (tier(epoch), epoch["since"]))[-1]
+
+
+def marker_authority(declared, wired):
+    """The authority the anchor keeper's turn stamps with (ADR-0032
+    ruling 3), as (URL or None, the harness whose epoch named it, why it
+    stamps nothing, or None when it does), or None when no epoch names
+    one. The rule has the tier's shape and its own reason: the newest
+    epoch, among each harness's newest, that names an authority at all,
+    so an install for another harness that names none never withdraws
+    it — that would stop the keeper stamping chains whose operator asked
+    for it, silently, on the word of an install that said nothing about
+    stamping. A harness that re-installs without the flag withdraws its
+    own, since its newest epoch is its operator's latest word.
+
+    It obeys the wiring rule the profile does (#249): the harnesses
+    whose recorder is still wired are the ones that speak, and only when
+    none is does the newest unwired one speak, to say why nothing is
+    stamped. And the marker is writer-reachable, so what it names is
+    held to the installer's rule, a plain http or https URL with nothing
+    a shell could act on, before `serve` prints it or hands it to the
+    recorder; one that fails stamps nothing, and the value is never
+    repeated."""
+    named = [epoch for epoch in declared.values()
+             if isinstance(epoch.get("authority"), str)
+             and epoch["authority"]]
+    if not named:
+        return None
+    speaking = ([epoch for epoch in named if wired[epoch["harness"]]]
+                or named)
+    newest = sorted(speaking, key=lambda epoch: epoch["since"])[-1]
+    harness = newest["harness"]
+    if not wired[harness]:
+        return None, harness, "no recorder wired"
+    if not plain_url(newest["authority"]):
+        return (None, harness,
+                "the marker's authority is not a plain http or https URL")
+    return newest["authority"], harness, None
+
+
+def marker_profile(witness=None):
+    """What the coverage marker says the keepers should follow, as
+    (profile, harness, remote, wired, authority), or None when no epoch
+    names a profile. The one place this tuple is built. `profile` and
+    `harness` are the strongest tier's (marker_epoch); the remote is
+    where that install wired publishing, and is the keeper's target at
+    `full` (#249), anything but a string reading as none and
+    `publish_cadences` checking the rest. `wired` is whether that
+    harness's recorder is still on its SessionEnd command, read from the
+    settings beside `witness` and from Codex's hooks file. `authority`
+    is marker_authority's reading, by its own rule, or None. With no
+    `witness` the wiring is not read and every harness counts as wired:
+    the drill names the tier and follows nothing."""
+    declared = marker_harnesses()
+    if not declared:
+        return None
+    wired = {harness: witness is None or recorder_wired(harness, witness)
+             for harness in declared}
+    strongest = marker_epoch(declared, wired)
     remote = strongest.get("remote")
     return (strongest["profile"], strongest["harness"],
             remote if isinstance(remote, str) else None,
-            wired[strongest["harness"]])
+            wired[strongest["harness"]],
+            marker_authority(declared, wired))
 
 
 def codex_hooks_file():
@@ -627,7 +681,6 @@ def recorder_wired(harness, witness):
         return bool(sessionend_commands_in(codex_hooks_file()))
     return False
 
-
 def keeper_cadences(anchor_every, declared):
     """The anchor cadence in force and where it came from (ADR-0031
     ruling 1, #246): an explicit `--anchor-every` wins; with none, a
@@ -636,14 +689,14 @@ def keeper_cadences(anchor_every, declared):
     `local`, `custom` without a flag, or no profile at all runs no
     anchor keeper, and so does any profile whose harness no longer has
     the recorder wired (#249). `declared` is marker_profile's (profile,
-    harness, remote, wired) or None, and the harness is named in the
-    source so the operator can see which install set the cadence.
+    harness, remote, wired, authority) or None, and the harness is named
+    in the source so the operator can see which install set the cadence.
     Returns (seconds or None, the source in words)."""
     if anchor_every is not None:
         return anchor_every, "flag --anchor-every"
     if declared is None:
         return None, "no profile on record; no flag"
-    profile, harness, _, wired = declared
+    profile, harness, _, wired, _ = declared
     if not wired:
         return None, f"profile {profile}, {harness}; no recorder wired"
     if profile in ("timestamped", "full"):
@@ -688,7 +741,7 @@ def publish_cadences(publish_every, publish_url, publish_chain, declared):
     said = "no profile on record"   # what the marker says, in words
     off = "no flag"                 # and why that sends nothing
     if declared is not None:
-        profile, harness, remote, wired = declared
+        profile, harness, remote, wired, _ = declared
         said = f"profile {profile}, {harness}"
         if not wired:
             off = "no recorder wired"
@@ -718,14 +771,36 @@ def publish_cadences(publish_every, publish_url, publish_chain, declared):
 
 def keeper_words(anchor_every, anchor_source, publish_every,
                  publish_url=None, publish_chain=None,
-                 publish_source="no flag"):
+                 publish_source="no flag", authority=None):
     """The startup line's second half: each keeper's cadence and its
     source, so the operator reads back what `serve` will send and why
     (ADR-0031 ruling 1, #246, #249). Publishing names its routes — the
     head, the chain, or both — and its source the same way anchoring
-    does, since at `full` both routes run with no flag typed."""
+    does, since at `full` both routes run with no flag typed.
+
+    `authority` is marker_profile's reading of it, (URL, the harness that
+    named it, why it stamps nothing) or None. It rides the anchor
+    keeper's turn and has no cadence of its own (ADR-0032 ruling 3), so
+    it is said on the anchor's clause and only when that clause has a
+    cadence to ride: an authority with no anchor cadence sends nothing,
+    and a line claiming otherwise would be the one thing this line
+    exists to prevent. When it stamps nothing the clause says why, the
+    way the cadences do (`no recorder wired`). The harness is named
+    because it need not be the one whose profile set the cadence. The
+    URL is printed because an authority URL is not a credential — it
+    says whom the operator chose to trust (ADR-0032 ruling 4) — where a
+    webhook URL is, which is why the publish clause names routes and
+    never URLs; one that failed the installer's rule is never printed."""
     anchor = (f"anchor every {cadence_words(anchor_every)} ({anchor_source})"
               if anchor_every is not None else f"anchor off ({anchor_source})")
+    if anchor_every is not None and authority is not None:
+        url, named_by, off = authority
+        if off:
+            anchor += (f", not stamping (authority named by {named_by}; "
+                       f"{off})")
+        else:
+            anchor += (f", stamping the same head with {url} on that "
+                       f"turn (authority named by {named_by})")
     routes = " and ".join(name for name, url in (("head", publish_url),
                                                  ("chain", publish_chain))
                           if url)
@@ -821,14 +896,25 @@ def ripe_head(entries, now, cadence):
     return entries[-1].get("entry_hash") or None
 
 
-def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
+def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
+                 authority=None):
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
     --upgrade` (the record's own calendar; judgment stays with verify),
     and — only when the operator opted in with a cadence — a fresh head
-    that has aged past it is anchored. Off by default: nothing leaves
-    the machine without the say-so. Returns (attempted, note, failed)."""
+    that has aged past it is anchored, and stamped by the authority the
+    marker names, on this same turn. Off by default: nothing leaves the
+    machine without the say-so. Returns (attempted, note, failed).
+
+    Two commitments of one head, one cadence (ADR-0032 ruling 3): there
+    is no second clock to tune, and a head that already holds a token is
+    not asked about again — the guard here saves the process, and the
+    recorder's own dedupe is what makes the guard safe to get wrong.
+    `failed` stays the anchor's: a query the authority refused is not an
+    anchor that failed, and it is already written down as this chain's
+    last failed attempt, in the stamps sidecar, by the verb itself."""
     sidecar = Path(str(log) + ".anchors.jsonl")
+    stamps = Path(str(log) + ".stamps.jsonl")
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
@@ -859,6 +945,16 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars):
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
                              "keeper will try again")
+        if head and authority and head not in sidecar_heads(stamps):
+            finished = subprocess.run(
+                [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
+                 "--authority", authority],
+                capture_output=True, encoding="utf-8", env=env)
+            attempted = True
+            if finished.returncode != 0:
+                notes.append("stamping failed — the authority did not "
+                             "grant a token for this head; it stays "
+                             "unstamped and the keeper will try again")
     return attempted, "; ".join(notes) or None, failed
 
 
@@ -1014,12 +1110,14 @@ def last_departure(log):
 
 
 def last_failed(log):
-    """The newest session-end step that failed, read from the attempt
-    rows in both sidecars (#240): the step, the time, and the recorder's
-    one line on what happened, or None when no attempt has failed. Read
-    whether or not a keeper cadence is set, so a posture wired in name
-    only is visible within a session rather than a week. Testimony like
-    the rows themselves: a reason to look, never the exit."""
+    """The newest step that failed, read from the attempt rows in every
+    sidecar (#240): the step, the time, and the recorder's one line on
+    what happened, or None when no attempt has failed. A session end
+    writes most of these rows, and the keeper's own turn writes the
+    rest, through the same verbs an operator runs by hand. Read whether
+    or not a keeper cadence is set, so a posture wired in name only is
+    visible within a session rather than a week. Testimony like the rows
+    themselves: a reason to look, never the exit."""
     newest = None
     for suffix in SIDECAR_SUFFIXES:
         for record in sidecar_records(Path(str(log) + suffix)):
@@ -2156,7 +2254,8 @@ def watch_consumption(families, now):
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
               publish_every=None, publish_url=None, publish_chain=None,
-              store=False, tick=True, show_before_memory=False):
+              store=False, tick=True, show_before_memory=False,
+              authority=None):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
@@ -2209,7 +2308,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         # nothing off the machine.
         attempted, keeper_note, anchor_failed = (
             keep_anchors(log, keeper.get(relpath), now, entries,
-                         anchor_every, calendars)
+                         anchor_every, calendars, authority)
             if tick else (False, None, False))
         posted, publish_note, publish_failed = (
             keep_published(log, keeper.get("publish:" + relpath), now, entries,
@@ -4343,8 +4442,10 @@ PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
 # order they are declared and applied: the anchor (--anchor) says when,
 # the issuer signature (--sign) says which key (ADR-0026 ruling 4).
 SEAL_ANCHOR = "anchor"
+SEAL_STAMP = "stamp"
 SEAL_SIGNATURE = "signature"
 MANIFEST_SIDECAR = "manifest.json.anchors.jsonl"   # the anchor's proof
+MANIFEST_STAMPS = "manifest.json.stamps.jsonl"   # the authority's token
 MANIFEST_SIGNATURE = "manifest.json.sig"   # ssh-keygen's detached signature
 MANIFEST_PUBLIC_KEY = "manifest.json.pub"  # the key that made it: testimony
 # The ssh-keygen signature namespace, the verifier's and the signer's
@@ -4408,9 +4509,14 @@ def chain_listing(log):
             continue
         if isinstance(entry, dict) and isinstance(entry.get("entry_hash"), str):
             head = entry["entry_hash"]
-    sidecar = log.with_name(log.name + ".anchors.jsonl")
+    anchors = log.with_name(log.name + ".anchors.jsonl")
+    stamps = log.with_name(log.name + ".stamps.jsonl")
     return {"path": log.name, "head": head, "entries": len(lines),
-            "anchors": sidecar.name if sidecar.exists() else None}
+            "anchors": anchors.name if anchors.exists() else None,
+            # The stamps sidecar travels as the anchors sidecar does
+            # (ADR-0032 ruling 4): both are evidence about this chain,
+            # and `verify-package` judges each with the chain it names.
+            "stamps": stamps.name if stamps.exists() else None}
 
 
 def artifact_listing(path):
@@ -4514,17 +4620,25 @@ def transcript_words(session, transcripts):
 
 
 def package_readme(unit, packed, sessions, witness, record, notes,
-                   transcripts=None):
+                   seals=(), transcripts=None):
     """The plain-words page a recipient reads first: what is inside, how
     to verify it, what each layer shows and does not. `sessions` is
     {session: [chain listings]} in the package's order; `notes` says, per
-    session that needs it, where it was recorded; `transcripts` is None
-    when none was requested, else {session: the packaged transcript's
-    name, or None when it was gone}. The page may print the chain heads,
-    which exist before it is written; it never prints the manifest's
-    hash, which does not exist yet (ADR-0007 ruling 2)."""
+    session that needs it, where it was recorded; `seals` is the set the
+    manifest declares, named here because a page saying a sealed package
+    declares none is the kind of stale sentence a recipient would read
+    as the truth; `transcripts` is None when none was requested, else
+    {session: the packaged transcript's name, or None when it was gone}.
+    The page may print the chain heads, which exist before it is
+    written; it never prints the manifest's hash, which does not exist
+    yet (ADR-0007 ruling 2)."""
     project = unit["project"]
     count = sum(len(listings) for listings in sessions.values())
+    # Tokens anywhere in the package, the manifest's own or a chain's:
+    # either way the recipient needs a chain file to judge them.
+    stamped = SEAL_STAMP in seals or any(
+        chain.get("stamps") for listings in sessions.values()
+        for chain in listings)
     if unit["kind"] == "session":
         title = f"session {unit['session']}"
         what = ("This is the receipt log of one AI agent session: one line "
@@ -4566,6 +4680,14 @@ def package_readme(unit, packed, sessions, witness, record, notes,
                 lines.append(f"{indent}- `{chain['anchors']}`: its anchor "
                              "sidecar, the OpenTimestamps proofs the recorder "
                              "collected for this chain's heads.")
+            if chain["stamps"]:
+                lines.append(f"{indent}- `{chain['stamps']}`: its stamps "
+                             "sidecar, the tokens an authority signed over "
+                             "this chain's heads. A token is that "
+                             "authority's signed word and not an anchor; "
+                             "judging one needs `openssl` and that "
+                             "authority's certificate chain, which this "
+                             "package does not carry.")
         lines.append(f"{indent}- {transcript_words(session, transcripts)}")
     if record:
         lines.append(
@@ -4579,7 +4701,8 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "- `manifest.json`: the list of everything above, written last. "
         "Chains are listed by head and entry count, the other files by "
         "sha256 and byte count. Its hash is the only surface a seal "
-        "applies to, and this package declares no seals.",
+        "applies to, and this package declares "
+        + (", ".join(seals) if seals else "no seals") + ".",
         "",
         "The transcript ships only on request (ADR-0026 ruling 2). The "
         "chain holds `Read: .env` with a fingerprint; the transcript holds "
@@ -4597,11 +4720,35 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "",
         "    python loxodonta.py verify-package <this package>",
         "",
+    ]
+    if stamped:
+        lines += [
+            "This package carries authority timestamps (tokens), judged "
+            "through `openssl` against a certificate chain you save from "
+            "the authority yourself. The package does not carry one, "
+            "because a chain handed over by the issuer would be the "
+            "issuer's word about whom to trust, and without one each token "
+            "is reported as present and not judged. With it:",
+            "",
+            "    python loxodonta.py verify-package <this package> "
+            "--authority-chain <chain.pem>",
+            "",
+            "Every token here is judged against that one file, so when the "
+            "stamps records name more than one authority, make it one "
+            "chain file holding every authority's certificates "
+            "(concatenated PEM). The "
+            "names in those records are the packer's note of whom it "
+            "asked, not a claim the verifier checks.",
+            "",
+        ]
+    lines += [
         "It prints the manifest's summary, the recorder's own verdict for "
         "each chain, the file references it cannot check off the machine, "
         "each artifact against the manifest, then the package verdict and "
         "one line of residual trust. Exit 0 is `SELF-CONSISTENT`; 1 is "
-        "`CHAIN-BROKEN`; 2 is `ARTIFACT-DIVERGED`; 3 is `ANCHOR-MISMATCH`; 4 is "
+        "`CHAIN-BROKEN`; 2 is `ARTIFACT-DIVERGED`; 3 is not what was "
+        "issued: `ANCHOR-MISMATCH` or `STAMP-INVALID` under a chain, "
+        "`SEAL-INVALID` or `SEAL-MISSING` for a seal; 4 is "
         "`UNSUPPORTED-FORMAT`, a refusal; 5 is `TRANSCRIPT-DIVERGED` "
         "(docs/PACKAGE.md).",
         "",
@@ -4669,11 +4816,13 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
             listings[session].append(listing)
             shutil.copyfile(log, stage / log.name)
             written.append(log.name)
-            if listing["anchors"]:
-                shutil.copyfile(log.with_name(listing["anchors"]),
-                                stage / listing["anchors"])
-                written.append(listing["anchors"])
-                artifacts.append(artifact_listing(stage / listing["anchors"]))
+            for beside in ("anchors", "stamps"):
+                if not listing[beside]:
+                    continue
+                shutil.copyfile(log.with_name(listing[beside]),
+                                stage / listing[beside])
+                written.append(listing[beside])
+                artifacts.append(artifact_listing(stage / listing[beside]))
         if transcripts is not None:
             # The transcript travels under a bare name that names the
             # session (the layout is flat), listed by sha256 like any
@@ -4718,7 +4867,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     artifacts.append(artifact_listing(stage / "witness.json"))
     write_lf(stage / "README.md",
              package_readme(unit, packed, listings, witness, record.exists(),
-                            notes, shipped))
+                            notes, seals, shipped))
     written.append("README.md")
     artifacts.append(artifact_listing(stage / "README.md"))
     manifest = {
@@ -4811,15 +4960,20 @@ def sign_manifest(stage, keyfile):
     return key_fingerprint(stage / MANIFEST_PUBLIC_KEY), None
 
 
-def seal_package(stage, seals, calendars, keyfile):
+def seal_package(stage, seals, calendars, keyfile, authority=None):
     """Apply the declared seals to the manifest, the last step of
-    ADR-0007's write order: the signature first, then the anchor, since
-    signing can fail on a passphrase or a touch and the anchor is the
-    one step that leaves the machine, so a signing that fails costs no
-    calendar submission. The signature: sign_manifest. The anchor
+    ADR-0007's write order: the signature first, then the authority
+    timestamp, then the anchor. Signing can fail on a passphrase or a
+    touch, and the other two are the steps that leave the machine, so a
+    signing that fails costs neither; between those two the quick round
+    trip goes before the slow one, which is the order ADR-0032 ruling 3
+    put them in at session end. The signature: sign_manifest. The anchor
     (ADR-0026 ruling 4): the recorder posts the manifest's sha256 to the
     calendars once and writes the proof beside it as
     manifest.json.anchors.jsonl; the supervisor never speaks OTS itself.
+    The authority timestamp: the recorder asks `authority` for a token
+    over that same sha256 and writes it as manifest.json.stamps.jsonl;
+    the supervisor never speaks RFC 3161 itself either.
     Returns (the seal files written, in order; the signing key's
     fingerprint, or None; and the problem when a seal could not be
     applied, the tool's own words already on stderr)."""
@@ -4834,6 +4988,18 @@ def seal_package(stage, seals, calendars, keyfile):
         if problem:
             return [], None, problem
         written += [MANIFEST_SIGNATURE, MANIFEST_PUBLIC_KEY]
+    if SEAL_STAMP in seals:
+        finished = subprocess.run(
+            [sys.executable, str(LOXODONTA), "stamp",
+             f"--manifest={stage / 'manifest.json'}",
+             "--authority", authority],
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        if finished.returncode != 0:
+            print(finished.stderr.strip() or "the recorder gave no reason",
+                  file=sys.stderr)
+            return [], None, "the manifest was not stamped"
+        written.append(MANIFEST_STAMPS)
     if SEAL_ANCHOR in seals:
         command = [sys.executable, str(LOXODONTA), "anchor",
                    f"--manifest={stage / 'manifest.json'}"]
@@ -4950,15 +5116,18 @@ def cmd_package(args):
     # A reading, not a tick (tick=False): the keepers stay quiet, so
     # packaging appends nothing to the chain it copies and sends nothing
     # off the machine; the baseline still remembers the look. Only the
-    # seal step sends anything, and only with --anchor.
+    # seal step sends anything, and only with --anchor or --stamp: the
+    # manifest's 32-byte digest, to the calendars or to the authority.
     report = scan_root(store_receipts(), witness=Path(args.witness),
                        store=True, tick=False)
-    # Declared in ADR-0007's ladder order, the anchor before the
-    # signature, which is the order the verifier judges and prints
-    # them; applied the other way round (seal_package), since neither
-    # depends on the other and only the anchor leaves the machine.
-    seals = ([SEAL_ANCHOR] if args.anchor else []) + (
-        [SEAL_SIGNATURE] if args.sign else [])
+    # Declared in ADR-0007's ladder order, the two *when* seals before
+    # the signature and the anchor before the authority timestamp, which
+    # is the order the verifier judges and prints them; applied the
+    # other way round (seal_package), since none depends on another and
+    # only the two commitments leave the machine.
+    seals = (([SEAL_ANCHOR] if args.anchor else [])
+             + ([SEAL_STAMP] if args.stamp else [])
+             + ([SEAL_SIGNATURE] if args.sign else []))
     # `~` reaches argv unexpanded from PowerShell and cmd, and
     # ssh-keygen does not expand it either; the docs' own example
     # starts with it, so it means home on every shell here.
@@ -4992,7 +5161,7 @@ def cmd_package(args):
             shutil.rmtree(out)
             return 1
         sealed, fingerprint, problem = seal_package(out, seals, calendars,
-                                                    keyfile)
+                                                    keyfile, args.stamp)
         if problem:
             # A package declaring a seal it does not carry would verify
             # SEAL-MISSING; better nothing than that.
@@ -5004,7 +5173,7 @@ def cmd_package(args):
             if package_too_large(Path(staging), written):
                 return 1
             sealed, fingerprint, problem = seal_package(
-                Path(staging), seals, calendars, keyfile)
+                Path(staging), seals, calendars, keyfile, args.stamp)
             if not problem:
                 zip_package(Path(staging), written + sealed, out)
     if problem:
@@ -5024,6 +5193,15 @@ def cmd_package(args):
               "proof is pending until Bitcoin has it, a few hours")
         print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
               f'--manifest="{(where / "manifest.json").as_posix()}"')
+    if args.stamp:
+        # The token is the authority's word about a moment, and the
+        # recipient can only judge it with that authority's certificate
+        # chain, which this package does not carry and must not: a chain
+        # shipped by the issuer is the issuer's word about whom to trust.
+        print(f"stamped: the manifest's sha256 went to {args.stamp}; send "
+              "the recipient that authority's certificate chain by another "
+              "route, since `verify-package --authority-chain FILE` judges "
+              "the token against it")
     if fingerprint:
         # The issuer's one job past signing (ADR-0008 ruling 4): the
         # fingerprint is what the recipient compares, so it is printed
@@ -5417,6 +5595,7 @@ class Watchtower(ThreadingHTTPServer):
                                    publish_every=self.publish_every,
                                    publish_url=self.publish_url,
                                    publish_chain=self.publish_chain,
+                                   authority=self.authority,
                                    store=self.store)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
@@ -5633,6 +5812,15 @@ def cmd_serve(args):
     server.publish_every = publish_every
     server.publish_url = publish_head
     server.publish_chain = publish_chain
+    # The authority rides the anchor keeper's turn and has no cadence of
+    # its own (ADR-0032 ruling 3). It comes from the same one reading of
+    # the marker, by its own rule (marker_authority), and from no flag
+    # here; the keeper is handed a URL only when that reading says it
+    # may stamp, and the startup line says why when it may not.
+    authority = declared[4] if declared else None
+    server.authority = (authority[0]
+                        if authority is not None and authority[2] is None
+                        else None)
     server.scan_lock = threading.Lock()
     server.views_lock = threading.Lock()
     server.scan_body = None
@@ -5641,7 +5829,8 @@ def cmd_serve(args):
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
     print(keeper_words(anchor_every, anchor_source, publish_every,
-                       publish_head, publish_chain, publish_source),
+                       publish_head, publish_chain, publish_source,
+                       authority),
           flush=True)
     try:
         server.serve_forever()
@@ -8340,8 +8529,9 @@ def main(argv):
     export.set_defaults(func=cmd_export)
     package = sub.add_parser(
         "package",
-        help="a session or a drawer as a package: its chains and anchor "
-             "sidecars, the project record, a witness snapshot labelled "
+        help="a session or a drawer as a package: its chains and the "
+             "sidecars beside them, the project record, a witness "
+             "snapshot labelled "
              "testimony, a README, and a manifest written last; verified "
              "by `loxodonta verify-package` alone (ADR-0026)")
     # One unit or the other: argparse refuses both with a usage error.
@@ -8380,6 +8570,20 @@ def main(argv):
                          metavar="URL",
                          help="calendar for --anchor (repeatable; default: "
                               "the public pools)")
+    package.add_argument("--stamp", default=None, metavar="URL",
+                         type=publish_url,
+                         help="seal the package with an authority "
+                              "timestamp: the recorder asks this RFC 3161 "
+                              "timestamp authority for a token over the "
+                              "manifest's sha256 and ships it beside the "
+                              "manifest, so verify-package can earn "
+                              "+ STAMPED (ADR-0032, ADR-0026 ruling 4). A "
+                              "second commitment beside --anchor, never "
+                              "instead of it: the token is the authority's "
+                              "signed word, and the recipient judges it "
+                              "with openssl and the certificate chain you "
+                              "saved from that authority. No default: whom "
+                              "to trust is the choice")
     package.add_argument("--sign", default=None, metavar="KEYFILE",
                          help="seal the package with the issuer signature: "
                               "ssh-keygen signs the manifest with this SSH "

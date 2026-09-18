@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
+from test_stamp import reply, start_authority
 from test_supervisor import (ago, chain_head, chains_by_session,
                              install_witness_hook, keeper_env, make_chain,
                              run_scan, write_attempt_row, write_chain_row,
@@ -136,11 +137,15 @@ class PublishCommandTest(ReceiverFixture):
         self.assertFalse(target.exists())
         self.assertEqual(memo_of(log), [])
 
-    def test_a_remote_that_does_not_take_the_head_leaves_no_memo(self):
-        # Exit 1 and one line naming the failure, never the URL; the memo
-        # is written only for a head the remote took, or the keeper would
-        # stand down on a POST that never landed. A redirect is a failure
-        # too: nothing reaches the host it points at.
+    def test_a_remote_that_does_not_take_the_head_leaves_no_head_row(self):
+        # Exit 1 and one line naming the failure, never the URL; a head
+        # row is written only for a head the remote took, or the keeper
+        # would stand down on a POST that never landed. What the memo
+        # does gain is the attempt row (#240, #251): this verb is what
+        # the keeper's cadence runs, so a failure here has to be
+        # readable afterwards, and the row carries the step and the
+        # outcome and never the URL. A redirect is a failure too:
+        # nothing reaches the host it points at.
         log = make_chain(self.root / "alpha" / "receipts", "sess-pub3")
         closed = "http://127.0.0.1:9/hook"  # discard port: nothing listens
         redirector = FakeReceiver(("127.0.0.1", 0), RedirectingHandler)
@@ -157,7 +162,12 @@ class PublishCommandTest(ReceiverFixture):
             self.assertIn("not published", result.stderr)
             self.assertNotIn("127.0.0.1", result.stderr)
         self.assertEqual(self.receiver.received, [])
-        self.assertEqual(memo_of(log), [])
+        rows = memo_of(log)
+        self.assertEqual([row for row in rows if row.get("kind") != "attempt"],
+                         [], "a head row for a head that never landed")
+        self.assertEqual([(row["step"], row["outcome"] != "sent")
+                          for row in rows], [("publish-head", True)] * 2)
+        self.assertNotIn("127.0.0.1", json.dumps(rows))
 
 
 class PublishKeeperTest(ReceiverFixture):
@@ -389,8 +399,10 @@ class LeftReadingTest(ReceiverFixture):
 
     def test_a_dead_remote_is_a_note_in_left_and_never_the_exit(self):
         # The keeper's existing voice for aging heads: the failure is said
-        # in the report, the exit code stays the chains' own, and no memo
-        # is written for a POST that never landed.
+        # in the report, the exit code stays the chains' own, and no head
+        # row is written for a POST that never landed. The turn does
+        # leave the attempt row the verb writes (#251), which is what
+        # makes a keeper-driven failure outlive this one tick's report.
         log = make_chain(self.root / "alpha" / "receipts", "sess-dead")
 
         result = run_scan(self.root, "--publish-every", "0s",
@@ -407,7 +419,14 @@ class LeftReadingTest(ReceiverFixture):
         self.assertIsNone(chain["left"]["ts"])
         self.assertNotIn("127.0.0.1:9", result.stdout,
                          "the URL is a credential; the report never holds it")
-        self.assertEqual(memo_of(log), [])
+        rows = memo_of(log)
+        self.assertEqual([row for row in rows if row.get("kind") != "attempt"],
+                         [])
+        (note,) = rows
+        self.assertEqual(note["step"], "publish-head")
+        self.assertNotEqual(note["outcome"], "sent")
+        self.assertNotIn("127.0.0.1", json.dumps(rows))
+        self.assertEqual(chain["last_failed"]["step"], "publish-head")
 
 
 class NeverPublishedTest(ReceiverFixture):
@@ -610,9 +629,12 @@ class ProfileKeeperTest(unittest.TestCase):
     1): with no `--anchor-every` and a `timestamped` profile, the anchor
     keeper runs on a six-hour default; an explicit flag wins; `local`,
     or `custom` without a flag, runs no keeper. The startup line says
-    which cadence is in force and where it came from. The marker is the
-    real installer's, the chain is aged through the recorder's clock
-    override, and the calendar is a fake on a free port."""
+    which cadence is in force and where it came from. When that epoch
+    also names an authority, the same turn stamps the head it anchors
+    (ADR-0032 ruling 3, #251): one cadence, two commitments. The marker
+    is the real installer's, the chain is aged through the recorder's
+    clock override, and the calendar and the authority are fakes on free
+    ports."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -670,8 +692,11 @@ class ProfileKeeperTest(unittest.TestCase):
                        capture_output=True, check=True, env=env)
         return log
 
-    def serve(self, *extra):
-        """Start `serve` against the store's marker and read the URL."""
+    def serve(self, *extra, **knobs):
+        """Start `serve` against the store's marker and read the URL.
+        `knobs` are supervisor environment settings, such as the scan
+        cache's lifetime, for the tests that need every request to be a
+        tick of its own."""
         self.proc = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--root",
              str(self.root), "--port", "0", "--witness", str(self.witness),
@@ -679,7 +704,7 @@ class ProfileKeeperTest(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env=keeper_env(LOXODONTA_HOME=str(self.store),
                            CODEX_HOME=str(self.home / ".codex"),
-                           PYTHONIOENCODING="utf-8"))
+                           PYTHONIOENCODING="utf-8", **knobs))
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
@@ -758,6 +783,244 @@ class ProfileKeeperTest(unittest.TestCase):
 
         self.assertIn("anchor off (profile custom, claude-code", said)
         self.assertEqual(self.calendar.submitted, [])
+
+    def authority(self):
+        """A fake timestamp authority on a free port, started only by the
+        tests that name one, so the rest pay for no server."""
+        return start_authority(self)
+
+    def tokens_of(self, log):
+        sidecar = Path(str(log) + ".stamps.jsonl")
+        if not sidecar.exists():
+            return []
+        return [json.loads(line) for line in
+                sidecar.read_text(encoding="utf-8").splitlines()
+                if "response" in line]
+
+    def test_an_authority_on_the_marker_is_stamped_on_the_anchor_turn(self):
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        log = self.aged_chain("sess-stamp", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        head = chain_head(log)
+        self.assertIn("anchor every 6h (profile timestamped, claude-code), "
+                      f"stamping the same head with {authority.url} on that "
+                      "turn (authority named by claude-code)", said)
+        self.assertEqual(self.calendar.submitted, [bytes.fromhex(head)],
+                         "the same turn anchored the ripe head")
+        self.assertEqual(len(authority.received), 1)
+        self.assertEqual([row["head"] for row in self.tokens_of(log)], [head])
+
+    def test_a_head_that_already_holds_a_token_is_not_asked_about_again(self):
+        # One head, one token: the keeper skips a head the sidecar
+        # already holds, and the recorder's own dedupe is the backstop
+        # under that (#250). The token here is a real one, left by the
+        # verb before `serve` ever runs.
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        log = self.aged_chain("sess-once", age=7 * 3600)
+        stamped = subprocess.run(
+            [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
+             "--authority", authority.url],
+            capture_output=True, encoding="utf-8",
+            env=keeper_env(PYTHONIOENCODING="utf-8"))
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+
+        self.serve()
+        self.tick()
+        self.said_at_startup()
+
+        self.assertEqual(len(authority.received), 1,
+                         "the keeper asked about a head that had a token")
+        self.assertEqual(len(self.tokens_of(log)), 1)
+
+    def test_a_marker_without_an_authority_stamps_nothing(self):
+        # The tier commits the head to the calendars and to nobody else
+        # until an authority is named: no default is baked in.
+        authority = self.authority()
+        self.install("--profile", "timestamped")
+        log = self.aged_chain("sess-plain", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile timestamped, claude-code)",
+                      said)
+        self.assertNotIn("stamping", said)
+        self.assertEqual(authority.received, [])
+        self.assertFalse(Path(str(log) + ".stamps.jsonl").exists())
+
+    def test_an_authority_with_no_anchor_cadence_is_not_claimed(self):
+        # `custom` asks the keeper for nothing, so there is no turn to
+        # ride and nothing is stamped; a startup line claiming otherwise
+        # is what that line exists to prevent.
+        authority = self.authority()
+        self.install("--profile", "custom", "--authority", authority.url)
+        log = self.aged_chain("sess-custom", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor off (profile custom, claude-code", said)
+        self.assertNotIn("stamping", said)
+        self.assertEqual(authority.received, [])
+        self.assertFalse(Path(str(log) + ".stamps.jsonl").exists())
+
+    def test_an_install_elsewhere_without_an_authority_never_withdraws_it(self):
+        # Two harnesses tie on tier, and the newer names no authority:
+        # read as one epoch, that would stop the keeper stamping Claude
+        # Code's chains, silently, on the word of a Codex install that
+        # said nothing about stamping. The authority follows its own
+        # rule, the newest epoch among each harness's newest that names
+        # one, and the line names the harness that named it.
+        (self.home / ".codex").mkdir()
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url,
+                     age=86400)
+        self.install("--codex", "--profile", "timestamped")
+        log = self.aged_chain("sess-tie", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile timestamped, codex)", said)
+        self.assertIn(f"stamping the same head with {authority.url} on that "
+                      "turn (authority named by claude-code)", said)
+        self.assertEqual(len(authority.received), 1)
+        self.assertEqual([row["head"] for row in self.tokens_of(log)],
+                         [chain_head(log)])
+
+    def test_a_marker_authority_that_is_not_a_plain_url_is_ignored_and_said(self):
+        # The marker is writer-reachable, so what it names is checked the
+        # way the installer checks it before the keeper prints it or runs
+        # anything with it. The keeper line says why nothing is stamped,
+        # in the words #249 uses for the marker's remote, and never
+        # repeats the value.
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        marker = self.store / "coverage.json"
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        data["epochs"][-1]["authority"] = "https://a.example.test/$(id)"
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        self.aged_chain("sess-bad", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile timestamped, claude-code), "
+                      "not stamping (authority named by claude-code; the "
+                      "marker's authority is not a plain http or https URL)",
+                      said)
+        self.assertNotIn("$(id)", said)
+        self.assertEqual(authority.received, [])
+
+    def test_a_full_marker_with_an_authority_stamps_each_ripe_head_once(self):
+        # Where #249 and #251 meet on the keeper: at `full` the anchor
+        # keeper runs on the six-hour default, the publish keeper sends
+        # to the marker's remote, and the authority rides the anchor's
+        # turn. Two real turns (no scan cache, no throttle) still stamp
+        # the one ripe head exactly once.
+        remote = FakeReceiver(("127.0.0.1", 0), FakeReceiverHandler)
+        remote.received = []
+        remote.delay = 0
+        remote.url = f"http://127.0.0.1:{remote.server_address[1]}/hook"
+        threading.Thread(target=remote.serve_forever, daemon=True).start()
+        self.addCleanup(remote.server_close)
+        self.addCleanup(remote.shutdown)
+        authority = self.authority()
+        self.install("--profile", "full", "--remote", remote.url,
+                     "--authority", authority.url)
+        log = self.aged_chain("sess-full", age=7 * 3600)
+
+        self.serve(SUPERVISOR_SCAN_TTL_SECONDS="0",
+                   SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        self.tick()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile full, claude-code), stamping "
+                      f"the same head with {authority.url} on that turn "
+                      "(authority named by claude-code)", said)
+        self.assertIn("publish head and chain every 6h (profile full, "
+                      "claude-code)", said)
+        self.assertEqual(len(authority.received), 1,
+                         "a second turn asked about a head with a token")
+        self.assertEqual([row["head"] for row in self.tokens_of(log)],
+                         [chain_head(log)])
+        self.assertTrue(remote.received, "the publish keeper sent nothing")
+
+    def test_an_authority_whose_recorder_is_unwired_stamps_nothing(self):
+        # The wiring rule the profile follows (#249) binds the authority
+        # too: Claude Code named one, then its recorder was taken off,
+        # and a Codex install at the tier keeps the cadence alive. The
+        # authority's harness no longer speaks, so nothing is stamped,
+        # and the line says why the way the cadences do.
+        (self.home / ".codex").mkdir()
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url,
+                     age=86400)
+        self.install("--codex", "--profile", "timestamped")
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "uninstall-hook"],
+            capture_output=True, check=True,
+            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+                           LOXODONTA_HOME=str(self.store),
+                           CODEX_HOME=str(self.home / ".codex")))
+        log = self.aged_chain("sess-unwired", age=7 * 3600)
+
+        self.serve()
+        self.tick()
+        said = self.said_at_startup()
+
+        self.assertIn("anchor every 6h (profile timestamped, codex), not "
+                      "stamping (authority named by claude-code; no recorder "
+                      "wired)", said)
+        self.assertEqual(authority.received, [])
+        self.assertEqual(self.tokens_of(log), [])
+
+    def test_a_refused_token_is_asked_for_again_on_the_next_turn(self):
+        # The control for the throttle test below: with no throttle, two
+        # ticks are two turns, and a refusal leaves no token for the
+        # dedupe to stop at, so the authority is asked twice. Without
+        # this the one query below could be a scan that never ran.
+        authority = self.authority()
+        authority.answer = reply(2)   # rejection, and no token
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        log = self.aged_chain("sess-again", age=7 * 3600)
+
+        self.serve(SUPERVISOR_SCAN_TTL_SECONDS="0",
+                   SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        self.tick()
+        self.tick()
+        self.said_at_startup()
+
+        self.assertEqual(len(authority.received), 2)
+        self.assertEqual(self.tokens_of(log), [])
+
+    def test_two_ticks_inside_one_window_ask_a_refusing_authority_once(self):
+        # The throttle, seen where the dedupe cannot hide it: an authority
+        # that refuses leaves no token, so only the keeper's window keeps
+        # a second tick from asking again.
+        authority = self.authority()
+        authority.answer = reply(2)
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        self.aged_chain("sess-window", age=7 * 3600)
+
+        self.serve(SUPERVISOR_SCAN_TTL_SECONDS="0")
+        self.tick()
+        self.tick()
+        self.said_at_startup()
+
+        self.assertEqual(len(authority.received), 1,
+                         "a second tick inside the window asked again")
 
     def test_a_later_local_install_for_another_harness_stands_no_keeper_down(self):
         # The keeper follows the strongest tier any harness declares,
