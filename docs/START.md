@@ -64,11 +64,20 @@ on Windows). There is no daemon and no scheduled job. The command writes one
 entry into your harness's settings file, and the harness runs the recorder as
 a child process after each completed tool call.
 
-On its own that is the lower tier. An edit, a deletion, or a reorder of a
-receipt is caught unconditionally; a chain regenerated from scratch is caught
-only against a head kept off the machine. `install-hook --publish-head URL`
-posts the chain head to a remote when a session ends, and the installer says
-which tier you are on either way. [HOOK.md](HOOK.md) says which remotes count.
+On its own that is the lowest tier, `local`. An edit, a deletion, or a
+reorder of a receipt is caught unconditionally; a chain regenerated from
+scratch is caught only against a head kept off the machine. The installer
+ends with the ladder, one row per tier and the flag that reaches it (on
+Codex the middle row says the digest leaves on the supervisor's cadence,
+since Codex caps its session-end hook):
+
+```
+  local        receipts stay on this machine. Edits to history are caught; a regenerated chain only against a head you keep (`head`, then `verify --expect-head`).
+  timestamped  --profile timestamped   a 32-byte digest leaves at each session end; regeneration is caught once the anchor matures.
+  full         --profile full --remote URL   head and receipts go to a remote you name; a wiped log survives there as of the last send.
+```
+
+[HOOK.md](HOOK.md) says what each tier sends and which remotes count.
 
 ### 3. Work normally
 
