@@ -114,3 +114,11 @@ ships on a release.
 - `.github/workflows/release.yml` (the tag-matches-`TOOL_VERSION` gate,
   unchanged: it runs on a tag, and this promotion pushes none)
 - `docs/START.md` (the promotion that raised it)
+
+## Addendum, 2026-09-18
+
+The tools are three files since ADR-0031 added `receiver.py`, and
+ruling 1 reads with all three: a promotion that changes none of
+`loxodonta.py`, `supervisor.py` or `receiver.py` carries no tag and
+no release, and one that moves any of them gets a minor version, a
+tag, and a release carrying the three.

@@ -15,12 +15,12 @@
 ## Where things live
 
 - `loxodonta.py` — the recorder: `init` / `log` / `run` / `head` / `verify` / `verify-package` / `report` / `anchor` / `publish` / `stamp` / `hook` / `explain` / `install-hook` / `uninstall-hook`.
-- `supervisor.py` — the reader: `scan` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `verify` / `mcp` / `export` / `package`.
+- `supervisor.py` — the reader: `scan` / `calibrate` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `verify` / `mcp` / `export` / `package`.
 - `receiver.py` — the receiver: `serve`, one verb; the URL that can only add, never delete (ADR-0031, `docs/RECEIVER.md`).
 - `adapters/` — per-harness recorder adapters (ADR-0020).
 - `tools/` — repo tooling; `house_check.py` enforces the vocabulary.
 - `tests/` — the suite, through the public CLI: `python -m unittest discover -s tests`.
-- `docs/` — SPEC, HOOK, ANCHORING, RECEIVER, METRICS, MCP, OWASP, the tours, HISTORY.
+- `docs/` — START, SPEC, HOOK, ANCHORING, PACKAGE, RECEIVER, METRICS, MCP, OWASP, FIRE-DRILL, EXPERIMENTS, FIELD-DATA, the tours, HISTORY.
 - `adrs/` — decisions that are hard to reverse; `.out-of-scope/` — what was deliberately not built.
 - The store: `~/.loxodonta/receipts/<project-slug>/`, one drawer per project (ADR-0011, `docs/HOOK.md`).
 
