@@ -36,7 +36,7 @@ settle where vendor code lives: the producer on the untrusted box speaks
 one dumb wire, and the pluggable exporters live in a separate collector
 process. **Filebeat**'s registry is the cursor pattern: a per-file
 position, batches, retries, and duplicates tolerated at the receiver.
-For the bundle of choices: **Tor Browser's Security Level** (Standard,
+For the set of choices: **Tor Browser's Security Level** (Standard,
 Safer, Safest) and **Firefox's Enhanced Tracking Protection** (Standard,
 Strict, Custom) give people who cannot judge individual settings a
 ladder, with the raw settings still open to those who can; **Cloudflare's
@@ -167,7 +167,7 @@ one-switch version.
 - **`local` / `local+` / `full security`.** The author's first names.
   `local+` says nothing about what the plus is; `full security` promises
   prevention. Plain `full` kept.
-- **Call the bundle a posture, a mode, or a level.** Rejected: *posture*
+- **Call the profile a posture, a mode, or a level.** Rejected: *posture*
   is this repo's word for an artifact's trust standing; the other two
   say nothing.
 - **S3 (or GCS, or Azure) direct from the recorder.** Rejected: one
