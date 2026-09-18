@@ -150,6 +150,23 @@ list made the authority the default; every one made it an addition.
 - ADR-0003's alternatives section now has one entry that later became
   an addition; readers of that ADR are pointed here.
 
+**2026-09-18 (#264):** ruling 5's "a token `openssl` rejects ... is
+`STAMP-INVALID`" no longer covers a certificate that expired after the
+token was issued. `openssl ts -verify` checks the chain as of the
+moment it runs, so a genuine token failed on the calendar alone, exit
+3. When expiry is openssl's reason, the recorder now asks the same
+question as of the time the token states (`-attime`, the time read from
+what `openssl ts -reply -text` prints, so the token is still never
+parsed here). Holding then, it is `stamp not judged: the authority's
+certificate expired after the token was issued`, a note and never a
+verdict, and in a package the seal line, the residual trust and the
+verdict say so. Failing then too, or stating no time that can be read,
+it stays `STAMP-INVALID` or `SEAL-INVALID`. An `openssl` with no
+`-attime` gets ruling 5's note for a tool that cannot judge. The note
+is never `STAMPED`: past its certificate's end date nothing vouches
+for the key. Long-term validation stays unbuilt, as "Certificate life"
+above says.
+
 ## Alternatives considered
 
 - **Keep ADR-0003 as written.** Rejected: the edge is positioning, and
