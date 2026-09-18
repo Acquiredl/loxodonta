@@ -328,7 +328,13 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertIn("the chain was not published", refused.stderr)
         self.assertIn("the remote answered 400", refused.stderr)
         self.assertNotIn("127.0.0.1", refused.stderr)
-        self.assertEqual(memo_of(self.log), [])
+        self.assertEqual(chain_rows(self.log), [])
+        # What the memo does gain is the note (#240, #251): this verb is
+        # what the keeper's cadence runs, so a batch it could not send is
+        # written down where the session end writes its own attempts.
+        (note,) = attempt_rows(self.log)
+        self.assertEqual(note["step"], "publish-chain")
+        self.assertEqual(note["outcome"], "the remote answered 400")
 
         fake.status = 200
         again = self.publish_chain(fake.url)
@@ -1122,7 +1128,14 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.assertIsNone(chain["left"]["ts"])
         self.assertNotIn("127.0.0.1:9", result.stdout,
                          "the URL is a credential; the report never holds it")
-        self.assertEqual(memo_of(log), [])
+        self.assertEqual(chain_rows(log), [])
+        # The note outlives this tick's report (#251): the keeper's turn
+        # ran the verb, and the verb wrote down how it went.
+        (note,) = attempt_rows(log)
+        self.assertEqual(note["step"], "publish-chain")
+        self.assertNotEqual(note["outcome"], "sent")
+        self.assertNotIn("127.0.0.1", json.dumps(memo_of(log)))
+        self.assertEqual(chain["last_failed"]["step"], "publish-chain")
 
     def test_a_url_without_a_cadence_is_a_usage_error(self):
         make_store_chain(self.root / "alpha" / "receipts", "sess-half")
