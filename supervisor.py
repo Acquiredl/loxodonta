@@ -5547,8 +5547,10 @@ def metrics_text(report, age_seconds):
                     if chain.get("head_published") is False))])
     published = report.get("published") or {}
     gauge("loxodonta_publishing_wired_nothing_sent",
-          "1 when publishing is wired on the session-end command and no "
-          "chain in the store holds a sent head, else 0", "testimony",
+          "1 when publishing is wired on the session-end command and "
+          "nothing has left by either route (no chain holds a sent head, "
+          "and none holds a batch the wired remote took), else 0",
+          "testimony",
           [((), 1 if published.get("wired") and not published.get("sent")
             else 0)])
 
