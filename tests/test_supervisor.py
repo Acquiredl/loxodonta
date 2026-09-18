@@ -1903,16 +1903,22 @@ class BeforeMemoryTest(unittest.TestCase):
         self.witness = Path(self._tmp.name).resolve() / "witness"
         install_witness_hook(self.witness)
         self.baseline = self.root / BASELINE_NAME
+        # The coverage marker is machine-wide whatever --root says
+        # (ADR-0030), so the memory these tests date is this home's, not
+        # the machine's (#242).
+        self.home = Path(self._tmp.name).resolve() / "home"
+        self.env = isolated_env(self.home)
 
     def scan(self, *extra):
-        return run_scan(self.root, "--witness", str(self.witness), *extra)
+        return run_scan(self.root, "--witness", str(self.witness), *extra,
+                        env=self.env)
 
     def calibrate(self, *args):
         return subprocess.run(
             [sys.executable, str(SUPERVISOR), "calibrate",
              "--root", str(self.root), *args],
             capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
     def watch(self, result):
         return json.loads(result.stdout)["completeness"]
@@ -1975,6 +1981,31 @@ class BeforeMemoryTest(unittest.TestCase):
         self.assertEqual(rows[0]["state"], "BEFORE-MEMORY")
         self.assertNotIn("deficit", rows[0],
                          "an unknown owed is not a deficit")
+
+    def test_a_marker_in_the_home_the_scan_reads_moves_the_memory(self):
+        # The coupling, tested rather than avoided (#242): the scan reads
+        # the coverage marker from the machine-wide home whatever --root
+        # says (ADR-0030). A marker older than the session, in this
+        # test's own home, judges the session the tests above leave
+        # unjudged. The same marker in the machine's home is what failed
+        # them wherever install-hook had run.
+        self.scan()
+        write_transcript(self.witness, self.root / "alpha", "sess-old",
+                         event_times=[ago(6000), ago(5900), ago(5800)])
+        self.assertEqual(self.watch(self.scan())["before_memory"]["count"], 1)
+        store = Path(self.env["LOXODONTA_HOME"])
+        store.mkdir(parents=True)
+        (store / "coverage.json").write_text(json.dumps({
+            "purpose": "test fixture",
+            "epochs": [{"since": ago(9000), "matchers": ["*"],
+                        "harness": "claude-code"}]}), encoding="utf-8")
+
+        watch = self.watch(self.scan())
+
+        self.assertNotIn("before_memory", watch)
+        self.assertEqual([s["session"] for s in watch["sessions"]],
+                         ["sess-old"])
+        self.assertIn("install-hook", watch["calibration"]["words"])
 
     def test_seeding_restores_judgment_and_forgetting_takes_it_back(self):
         # Ruling 6 end to end: the operator states what was wired before

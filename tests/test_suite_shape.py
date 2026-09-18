@@ -12,10 +12,11 @@ module names itself instead of taking the parent interpreter with it.
 
 No test reads this machine's home (#242). `scan` reads the coverage
 marker from the machine-wide store whatever `--root` says (ADR-0030),
-and the harness settings beside the default witness; `serve` and `drill`
-read the marker's profile, `calibrate` the settings, `export` and
-`package` both. A test that starts one of them with the environment it
-inherited is judging the machine it runs on. BeforeMemoryTest did that:
+and the harness settings beside the default witness; `serve`, `export`
+and `package` read both, `drill` the marker's profile, and `calibrate`
+with no `--root` the store's own baseline. A test that starts one of
+them with the environment it inherited is judging the machine it runs
+on. BeforeMemoryTest did that:
 green in CI, whose runner has never run `install-hook`, and four failures
 on every machine that had. The tripwire below refuses such a start before
 the process exists, and names where it came from.
@@ -62,9 +63,10 @@ class EveryModuleRunsAlone(unittest.TestCase):
 
 
 # --- The tripwire (#242) ------------------------------------------------------
-# The supervisor verbs that read the coverage marker or the harness
-# settings. The recall verbs read the store as well, but only the drawer
-# of the `--repo` a test names, which is a folder of the test's own.
+# The supervisor verbs that read machine-wide state: the coverage marker,
+# the harness settings or the store's baseline. The recall verbs read the
+# store as well, but only the drawer of the `--repo` a test names, which
+# is a folder of the test's own.
 HOME_READERS = {"scan", "serve", "calibrate", "drill", "export", "package"}
 # Every home those verbs reach: the store, the user's home as either
 # platform spells it (Path.home() reads USERPROFILE on Windows and HOME
