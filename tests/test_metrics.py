@@ -13,7 +13,6 @@ parser of their own; nothing is imported from the tool.
 """
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -146,7 +145,7 @@ class MetricsFixture(ServerFixture):
         """`scan --json` over the same root and witness: the numbers the
         route must agree with."""
         result = run_scan(self.root, "--witness", str(self.witness),
-                          env={**os.environ, **self.knobs, **knobs})
+                          env={**self.env, **self.knobs, **knobs})
         self.assertIn(result.returncode, range(0, 8),
                       result.stdout + result.stderr)
         return json.loads(result.stdout)
