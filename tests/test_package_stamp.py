@@ -32,7 +32,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package_stamp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import clean_env, start_calendar
+from test_anchor import start_calendar
 from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run
 from test_stamp import (GRANTED, MISSING_AUTHORITY_TOOLING, REQ_CONFIG,
                         TSA_CONFIG, start_authority)
@@ -59,8 +59,7 @@ class StampedStoreCase(PackageCase):
         self.work = self.root / "work"
         self.work.mkdir()
         # The neutral home, and no proxy in the way of 127.0.0.1.
-        self.env = {**clean_env(), **neutral_env(self.home)}
-        self.env.pop("CLAUDE_PROJECT_DIR", None)  # clean_env kept it (#242)
+        self.env = neutral_env(self.home)
         for command in ("pytest -q", "git status"):
             self.hook(SESSION, "Bash", {"command": command})
         (drawer,) = [p for p in (self.home / ".loxodonta" / "receipts").iterdir()

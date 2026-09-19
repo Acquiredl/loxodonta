@@ -21,6 +21,18 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_supervisor`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import home_guard  # noqa: E402
+
+# Every suite that starts scan, serve, calibrate, drill, export or
+# package takes isolated_env from this module, so arming the home guard
+# here arms it wherever those suites run, alone or under discovery
+# (#242).
+home_guard.arm()
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 BASELINE_NAME = ".supervisor-baseline.json"
@@ -2286,8 +2298,9 @@ def isolated_env(home, **knobs):
     with a `--witness` under a temporary folder. The knobs land last, so
     a test that keeps its store or its project somewhere of its own
     names it here (`LOXODONTA_HOME=...`, `CLAUDE_PROJECT_DIR=...`). Every
-    start of a verb that reads the machine's home goes through this
-    (#242); tests/test_suite_shape.py refuses one that does not."""
+    start of scan, serve, calibrate, drill, export or package goes
+    through this (#242); the home guard (tests/home_guard.py) refuses
+    one that does not."""
     env = keeper_env(LOXODONTA_HOME=str(Path(home) / ".loxodonta"),
                      HOME=str(home), USERPROFILE=str(home),
                      CODEX_HOME=str(Path(home) / ".codex"))

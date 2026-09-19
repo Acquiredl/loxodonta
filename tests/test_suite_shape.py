@@ -1,4 +1,4 @@
-"""The suite's own shape: two tests about the suite, not about the recorder.
+"""The suite's own shape: tests about the suite, not about the recorder.
 
 Every test module imports on its own (#118). `python -m unittest discover
 -s tests` puts `tests/` on `sys.path`, so a module that says `from
@@ -10,16 +10,11 @@ That test imports every `tests/test_*.py` the way that loop does, as
 `tests.<name>` from the repo root, each in its own subprocess so a broken
 module names itself instead of taking the parent interpreter with it.
 
-No test reads this machine's home (#242). `scan` reads the coverage
-marker from the machine-wide store whatever `--root` says (ADR-0030),
-and the harness settings beside the default witness; `serve`, `export`
-and `package` read both, `drill` the marker's profile, and `calibrate`
-with no `--root` the store's own baseline. A test that starts one of
-them with the environment it inherited is judging the machine it runs
-on. BeforeMemoryTest did that:
-green in CI, whose runner has never run `install-hook`, and four failures
-on every machine that had. The tripwire below refuses such a start before
-the process exists, and names where it came from.
+The home guard is armed and says where a start came from (#242). The
+guard itself lives in tests/home_guard.py, which says what it covers and
+what it leaves to #274; these tests hold it to refusing the six
+home-reading supervisor verbs when any one home is the machine's, and to
+naming the line that made the start.
 """
 
 import os
@@ -39,6 +34,9 @@ from test_supervisor import isolated_env
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = REPO_ROOT / "tests"
 SUPERVISOR = REPO_ROOT / "supervisor.py"
+# Written out here rather than read from the guard, so a home dropped
+# from the guard's list fails these tests instead of passing with it.
+EVERY_HOME = {"LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME"}
 
 
 class EveryModuleRunsAlone(unittest.TestCase):
@@ -62,109 +60,27 @@ class EveryModuleRunsAlone(unittest.TestCase):
                     % (name, name, done.stderr))
 
 
-# --- The tripwire (#242) ------------------------------------------------------
-# The supervisor verbs that read machine-wide state: the coverage marker,
-# the harness settings or the store's baseline. The recall verbs read the
-# store as well, looking for the drawer of the `--repo` a test names, but
-# neither the marker nor the settings, so they are not held to this.
-HOME_READERS = {"scan", "serve", "calibrate", "drill", "export", "package"}
-# Every home those verbs reach: the store, the user's home as either
-# platform spells it (Path.home() reads USERPROFILE on Windows and HOME
-# elsewhere, and the default witness hangs off it), and Codex's hooks.
-HOMES = ("LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME")
-# The verb after `supervisor.py` in the command. On Windows subprocess
-# hands the audit hook one command line, elsewhere a list, which is
-# joined with spaces first, so one pattern reads both.
-SUPERVISOR_VERB = re.compile(r'(?:^|[\s"/\\])supervisor\.py"?\s+"?([a-z-]+)')
+def named_homes(refusal):
+    """The names a refusal says were the machine's, as a set of whole
+    names: "HOME" alone is not found inside "CODEX_HOME"."""
+    listed = re.search(r"this machine's (.+?) \(#242", str(refusal))
+    return set(listed.group(1).split(", ")) if listed else set()
 
 
-def inside_the_temp_root(value, cwd):
-    """Whether `value` names a folder under the temp root, which is where
-    every test's own home lives and where no machine keeps its real one.
-    A relative `value` is read from `cwd`, as the child will read it."""
-    if not value:
-        return False
-    temp = os.path.normcase(os.path.realpath(tempfile.gettempdir()))
-    folder = os.path.normcase(os.path.realpath(os.path.join(cwd, value)))
-    try:
-        return os.path.commonpath([folder, temp]) == temp
-    except ValueError:  # another drive, on Windows: not under it
-        return False
+class HomeGuardTest(unittest.TestCase):
+    """`--help` is the verb's whole run in every probe here: it reads no
+    home, so a probe that got past a disarmed guard would still read
+    nothing of this machine."""
 
+    command = [sys.executable, str(SUPERVISOR), "scan", "--help"]
 
-def strays(env, cwd):
-    """The names in `env` that could still reach this machine's home: a
-    home unset, outside the temp root, or no different from the one this
-    process runs under; and a CLAUDE_PROJECT_DIR the test did not choose."""
-    found = [name for name in HOMES
-             if not inside_the_temp_root(env.get(name), cwd)
-             or env.get(name) == os.environ.get(name)]
-    project = env.get("CLAUDE_PROJECT_DIR")
-    if project and (not inside_the_temp_root(project, cwd)
-                    or project == os.environ.get("CLAUDE_PROJECT_DIR")):
-        found.append("CLAUDE_PROJECT_DIR")
-    return found
-
-
-def started_from():
-    """Where in tests/ the start came from, outermost first: the test,
-    then any helper it went through."""
-    frames = []
-    frame = sys._getframe(2)  # past this function and the hook
-    while frame is not None:
-        path = Path(frame.f_code.co_filename).resolve()
-        if path.parent == TESTS_DIR:
-            frames.append("tests/%s:%d in %s" % (
-                path.name, frame.f_lineno, frame.f_code.co_name))
-        frame = frame.f_back
-    return list(reversed(frames))
-
-
-def refuse_this_machines_home(event, args):
-    """An audit hook: every process a test starts passes through
-    `subprocess.Popen`, whichever helper started it, so this is the one
-    place a home-reading verb can be stopped before it reads anything.
-    Raising here fails the test that started it, at the start."""
-    if event != "subprocess.Popen":
-        return
-    _, command, cwd, env = args
-    if isinstance(command, (str, bytes, os.PathLike)):
-        command = os.fsdecode(command)
-    else:
-        command = " ".join(os.fsdecode(part) for part in command)
-    verb = SUPERVISOR_VERB.search(command)
-    if verb is None or verb.group(1) not in HOME_READERS:
-        return
-    names = strays(os.environ if env is None else env,
-                   os.getcwd() if cwd is None else os.fsdecode(cwd))
-    if names:
-        raise AssertionError(
-            "supervisor.py %s started with this machine's %s (#242). Give "
-            "it isolated_env(home) from tests/test_supervisor.py, with the "
-            "home in a temporary folder of the test's own. Started from:\n  "
-            "%s" % (verb.group(1), ", ".join(names),
-                    "\n  ".join(started_from()) or "outside tests/"))
-
-
-# Discovery imports every module before it runs a single test, so the
-# tripwire is armed for the whole suite, CI's run included. A module run
-# on its own runs without it.
-sys.addaudithook(refuse_this_machines_home)
-
-
-class NoTestReadsThisMachinesHome(unittest.TestCase):
-
-    def test_a_home_reading_start_with_the_inherited_home_is_refused(self):
-        # `--help` reads no home even if the tripwire were not armed.
-        command = [sys.executable, str(SUPERVISOR), "scan", "--help"]
-
+    def test_a_start_with_the_inherited_home_is_refused_where_it_was_made(self):
         with self.assertRaises(AssertionError) as refused:
-            subprocess.run(command, capture_output=True)
+            subprocess.run(self.command, capture_output=True)
 
         said = str(refused.exception)
         self.assertIn("supervisor.py scan", said)
-        for name in ("LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME"):
-            self.assertIn(name, said)
+        self.assertEqual(named_homes(said), EVERY_HOME, said)
         # It names the line that started it, so the offender is found
         # without a search.
         where = re.search(r"tests/test_suite_shape\.py:(\d+) in (\w+)", said)
@@ -172,14 +88,28 @@ class NoTestReadsThisMachinesHome(unittest.TestCase):
         self.assertEqual(where.group(2), self._testMethodName)
         line = Path(__file__).read_text(
             encoding="utf-8").splitlines()[int(where.group(1)) - 1]
-        self.assertIn("subprocess.run(command", line)
+        self.assertIn("subprocess.run(self.command", line)
 
-        # The same start in a home of the test's own goes ahead.
+    def test_each_home_left_to_the_machine_is_refused_by_its_own_name(self):
         with tempfile.TemporaryDirectory() as home:
-            done = subprocess.run(
-                command, capture_output=True, encoding="utf-8",
-                env={**isolated_env(Path(home).resolve()),
-                     "PYTHONIOENCODING": "utf-8"})
+            isolated = {**isolated_env(Path(home).resolve()),
+                        "PYTHONIOENCODING": "utf-8"}
+
+            for name in sorted(EVERY_HOME):
+                with self.subTest(home=name):
+                    leaky = dict(isolated)
+                    if name in os.environ:
+                        leaky[name] = os.environ[name]
+                    else:
+                        del leaky[name]
+                    with self.assertRaises(AssertionError) as refused:
+                        subprocess.run(self.command, capture_output=True,
+                                       env=leaky)
+                    self.assertEqual(named_homes(refused.exception), {name})
+
+            # All four of the test's own, and the same start goes ahead.
+            done = subprocess.run(self.command, capture_output=True,
+                                  encoding="utf-8", env=isolated)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("usage", done.stdout)
 

@@ -18,6 +18,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_demo_store`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import isolated_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 SUPERVISOR = REPO_ROOT / "supervisor.py"
@@ -41,16 +47,12 @@ def run(script, *args, env=None, cwd=None):
 
 
 def neutral_env(home):
-    """The environment a reader of the demo store runs under: the
-    neutral home is home, the store is its .loxodonta, Codex's hooks are
-    its .codex (#242), and nothing of the test process's own project
-    leaks in."""
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("CLAUDE_PROJECT_DIR", "LOXODONTA_HOME",
-                        "SOURCE_DATE_EPOCH")}
-    env.update({"LOXODONTA_HOME": str(home / ".loxodonta"),
-                "HOME": str(home), "USERPROFILE": str(home),
-                "CODEX_HOME": str(home / ".codex")})
+    """The environment a reader of the demo store runs under:
+    isolated_env's, with the neutral home as every home and nothing of
+    the test process's own project, and no clock override leaking in
+    from the shell."""
+    env = isolated_env(home)
+    env.pop("SOURCE_DATE_EPOCH", None)
     return env
 
 
