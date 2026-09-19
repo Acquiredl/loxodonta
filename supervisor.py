@@ -1269,16 +1269,32 @@ def munge(path):
     return re.sub(r"[^A-Za-z0-9-]", "-", str(path))
 
 
+def read_settings(settings_file):
+    """One harness settings file as a dict, or None when it cannot be
+    read. Python's JSON reader takes three words JSON does not have,
+    `Infinity`, `-Infinity` and `NaN`; the harness cannot read a file
+    holding one, so neither does any reader here, and nothing from such
+    a file reaches a report that must itself stay JSON (#260 review)."""
+    def refuse(word):
+        raise ValueError(f"{word} is not JSON")
+
+    try:
+        settings = json.loads(Path(settings_file).read_text(encoding="utf-8"),
+                              parse_constant=refuse)
+    except (OSError, ValueError):
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
 def hook_matchers(witness):
     """Which tools owe a receipt: the PostToolUse matchers wired to
     receipts, read from the harness settings beside the witness layout.
     No wired hook means nothing owes a receipt — a session can never be
     behind a recorder that was never asked to record."""
+    settings = read_settings(witness.parent / "settings.json")
     try:
-        settings = json.loads((witness.parent / "settings.json")
-                              .read_text(encoding="utf-8"))
         rules = settings["hooks"]["PostToolUse"]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (KeyError, TypeError):
         return []
     matchers = []
     for rule in rules if isinstance(rules, list) else []:
@@ -1307,11 +1323,10 @@ def sessionend_commands(witness):
 def sessionend_commands_in(settings_file):
     """The recorder's SessionEnd command lines in one hooks file, in
     the shape Claude Code's settings and Codex's hooks.json share."""
+    settings = read_settings(settings_file)
     try:
-        settings = json.loads(Path(settings_file)
-                              .read_text(encoding="utf-8"))
         rules = settings["hooks"]["SessionEnd"]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (KeyError, TypeError):
         return []
     commands = []
     for rule in rules if isinstance(rules, list) else []:
@@ -1417,50 +1432,67 @@ RETENTION_DEFAULT_DAYS = 30   # the harness's documented default
 
 def transcript_retention(witness):
     """How long the harness keeps session transcripts, read from the
-    settings beside the witness layout, as {"days", "set", "file",
-    "words"}, plus "value" when the setting is there. None when no
-    settings file can be read: that is not a state of its own, and the
-    witness already says what it says about it. `days` is the documented
-    default when the setting is absent, and None when the value is not
-    the whole number of days, 1 or more, that the harness documents:
-    that value is repeated as it stands, never guessed at. Only this one
-    file is read, and the words say so."""
+    user settings file beside the witness layout, as {"days", "set",
+    "file", "words"}, plus "value" when the setting is there. None when
+    no settings file can be read: that is not a state of its own, and
+    the witness already says what it says about it. `days` is the
+    documented default when the setting is absent, and None when the
+    value is not the whole number of days, 1 or more, that the harness
+    documents: that value is repeated as it stands, never guessed at.
+    Only this one file is read, and every line says so."""
     settings_file = witness.parent / "settings.json"
-    try:
-        settings = json.loads(settings_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(settings, dict):
+    settings = read_settings(settings_file)
+    if settings is None:
         return None
     where = settings_file.as_posix()
     reading = {"days": RETENTION_DEFAULT_DAYS,
                "set": RETENTION_SETTING in settings, "file": where}
-    if reading["set"]:
-        value = reading["value"] = settings[RETENTION_SETTING]
-        shown = clip(json.dumps(value))
-        # A whole number is one however JSON spells it: 45.0 is 45 days.
-        if isinstance(value, float) and value.is_integer():
-            value = int(value)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            reading["days"] = None
-            reading["words"] = (
-                f"{RETENTION_SETTING} is {shown} in {where}: the harness "
-                "documents a whole number of days, 1 or more, so no number "
-                "of days is read from this one")
-            return reading
-        reading["days"] = value
-        source = f"{RETENTION_SETTING} is {shown} in {where}"
+    kept = ("The chain and its transcript commitments stay after that, "
+            "with no transcript left to judge them against (ADR-0017)")
+    unread = ("Only this file is read. A `claude --settings` file and "
+              "project, local and managed settings can say otherwise, and "
+              "from harness v2.1.248 a session started or last continued "
+              "in Claude Desktop or Cowork is kept at any age unless "
+              "desktopSessionCleanupPeriodDays, or a managed "
+              f"{RETENTION_SETTING}, sets a limit")
+    if not reading["set"]:
+        reading["words"] = (
+            "the harness deletes a session transcript once it is older "
+            f"than {RETENTION_DEFAULT_DAYS} days: {RETENTION_SETTING} is "
+            f"not set in {where}, so the harness default of "
+            f"{RETENTION_DEFAULT_DAYS}. {kept}. {unread}")
+        return reading
+
+    value = settings[RETENTION_SETTING]
+    shown = clip(json.dumps(value))
+    # JSON's 1e999 is past a float's range, and both the harness and this
+    # reader take it for Infinity, which a report that must stay JSON
+    # cannot carry: the words say it, and `value` is left out.
+    try:
+        json.dumps(value, allow_nan=False)
+    except ValueError:
+        pass
     else:
-        source = (f"{RETENTION_SETTING} is not set in {where}, so the "
-                  f"harness default of {RETENTION_DEFAULT_DAYS}")
+        reading["value"] = value
+    days = value
+    # A whole number is one however JSON spells it: 45.0 is 45 days.
+    if isinstance(days, float) and days.is_integer():
+        days = int(days)
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        reading["days"] = None
+        reading["words"] = (
+            f"{RETENTION_SETTING} is {shown} in {where}: the harness "
+            "documents a whole number of days, 1 or more, so no number of "
+            "days is read from this one. Its docs say its sweep pauses "
+            "while this setting fails, deleting nothing, unless managed "
+            f"settings set {RETENTION_SETTING}, when the sweep runs at "
+            f"that number. {unread}")
+        return reading
+    reading["days"] = days
     reading["words"] = (
         "the harness deletes a session transcript once it is older than "
-        f"{reading['days']} days: {source}. The chain and its transcript "
-        "commitments stay after that, with no transcript left to judge "
-        "them against (ADR-0017). Only this file is read; project, local "
-        "and managed settings can say otherwise, and recent harness "
-        "versions keep Claude Desktop and Cowork sessions by a rule of "
-        "their own (desktopSessionCleanupPeriodDays)")
+        f"{days} days: {RETENTION_SETTING} is {shown} in {where}. {kept}. "
+        f"{unread}")
     return reading
 
 
@@ -1629,11 +1661,10 @@ def recorder_path(witness):
     """The file the harness actually runs for PostToolUse, read out of
     the wired command line — the only place that truth lives. Either
     era's name (ADR-0010)."""
+    settings = read_settings(witness.parent / "settings.json")
     try:
-        settings = json.loads((witness.parent / "settings.json")
-                              .read_text(encoding="utf-8"))
         rules = settings["hooks"]["PostToolUse"]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (KeyError, TypeError):
         return None
     for rule in rules if isinstance(rules, list) else []:
         if not isinstance(rule, dict):

@@ -160,9 +160,12 @@ a flat "the transcript is tamper-evident".
 - GLOSSARY gains **Transcript commitment** and **Bookkeeping entry**;
   the verdict ladder gains `TRANSCRIPT-DIVERGED` (exit 5).
 - *(Addendum 2026-09-18, #260: the harness deletes a session transcript
-  once it is older than `cleanupPeriodDays` days, 30 by default. The
-  chain and its commitment entries outlast it, and `verify --transcript`
-  then has nothing to judge; `supervisor scan` reads the setting and
-  reports the number, and copies nothing:
-  `supervisor package --transcript` stays the one way to carry a
-  transcript past the sweep (ADR-0026).)*
+  once it is older than `cleanupPeriodDays` days, 30 by default; from
+  harness v2.1.248, one started or last continued in Claude Desktop or
+  Cowork is kept at any age unless `desktopSessionCleanupPeriodDays`
+  sets a limit. The chain and its commitment entries outlast it, and
+  `verify --transcript` then has nothing to judge; `supervisor scan`
+  reads the setting and reports the number, and copies nothing:
+  `supervisor package --transcript` stays the one way this tool offers
+  to carry a transcript past the sweep (ADR-0026), and raising the
+  setting is the harness's own.)*
