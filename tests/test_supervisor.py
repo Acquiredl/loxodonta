@@ -2051,6 +2051,41 @@ class FailedCallWitnessTest(unittest.TestCase):
         self.assertEqual((judged["state"], judged["deficit"],
                           judged["may_owe"]), ("ALARM-DEFICIT", 1, 1))
 
+    def test_a_may_owe_receipt_still_on_its_way_gets_the_grace(self):
+        # Receipts go to a tool's may_owe calls first, so while a failed
+        # fetch's receipt is still on its way, the fetch that stands
+        # unpaid is the earlier, receipted one. Dated by that earlier
+        # call, the deficit skipped the grace window every receipt gets
+        # and alarmed on a scan that read the chain a moment too soon;
+        # dated no earlier than the failed call, it lags, as a command's
+        # would.
+        self.session("sess-lag-fetch", ["WebFetch: example.com"],
+                     [ago(600)], [ago(3)], tool="WebFetch",
+                     failure="Claude Code is unable to fetch from "
+                             "example.com")
+        self.session("sess-lag-bash", ["Bash: a"], [ago(600)], [ago(3)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = self.states(result)
+        self.assertEqual(rows["sess-lag-fetch"]["state"], "LAGGING")
+        self.assertEqual(rows["sess-lag-bash"]["state"], "LAGGING")
+
+    def test_fewer_receipts_than_may_owe_calls_leave_every_owed_call_unpaid(self):
+        # The floor: two failed fetches that may owe and one receipt of
+        # the tool. The receipt goes to them, none is left over, and all
+        # three completed fetches stand unpaid, not one of them.
+        failed = "Claude Code is unable to fetch from example.com"
+        self.session("sess-floor", ["WebFetch: a"],
+                     [ago(6000), ago(5990), ago(5980)],
+                     [ago(5970), ago(5960)], tool="WebFetch", failure=failed)
+
+        judged = self.states(self.scan())["sess-floor"]
+
+        self.assertEqual((judged["state"], judged["tools"], judged["deficit"],
+                          judged["may_owe"]), ("ENDED-DEFICIT", 3, 3, 2))
+
     def test_one_tool_short_and_another_over_reads_as_the_deficit(self):
         # ADR-0034 ruling 4. Tool by tool, a session can be short in one
         # tool and over in another while the totals match; a surplus in
@@ -2072,7 +2107,10 @@ class FailedCallWitnessTest(unittest.TestCase):
             row = rows[name]
             self.assertEqual((row["state"], row["tools"], row["receipts"],
                               row["deficit"]), (state, 3, 3, 1), name)
-            self.assertIn("no receipt of", row["words"], name)
+            self.assertIn("receipts fall short of the calls"
+                          if state == "ALARM-DEFICIT"
+                          else "receipts short of the calls", row["words"],
+                          name)
 
     def test_a_call_that_never_ran_owes_nothing_and_excuses_nothing(self):
         # A rejected input, a marked denial, and a shell call with no

@@ -1229,14 +1229,17 @@ WATCH_WORDS = {
                     "since the deficit began — recording stopped (disabled "
                     "hook? wedged lock?). An accident detector: investigate "
                     "while the session is live.",
-    "ALARM-DEFICIT": "receipts still arrive, but a call the witness saw "
-                     "has no receipt of its tool — the fork-shaped hole, "
-                     "where a chain reads intact with entries missing. An "
-                     "accident detector: investigate while the session is "
-                     "live.",
-    "ENDED-DEFICIT": "the session ended with calls the witness saw that "
-                     "have no receipt of their tool — those receipts are "
-                     "missing forever; kept as evidence, not as a siren.",
+    "ALARM-DEFICIT": "receipts still arrive, but a tool's receipts fall "
+                     "short of the calls the witness saw it make — the "
+                     "fork-shaped hole, where a chain reads intact with "
+                     "entries missing, or a failed call that fired nothing "
+                     "beside calls of its tool (ADR-0034). An accident "
+                     "detector: investigate while the session is live.",
+    "ENDED-DEFICIT": "the session ended with a tool's receipts short of the "
+                     "calls the witness saw it make — those receipts are "
+                     "missing forever, unless a failed call among them "
+                     "fired nothing (ADR-0034); kept as evidence, not as a "
+                     "siren.",
     "ENDED-SURPLUS": "the session ended with more receipts than witnessed "
                      "tools — witness lag frozen at end, or receipts that "
                      "arrived unwitnessed; kept as evidence, not as a "
@@ -1825,8 +1828,9 @@ def read_witness(transcript, calibration):
     matcher over yesterday's narrow sessions). Chatter is never counted:
     a chat-only session can never alarm.
 
-    Returns a dict. `owed` is those events. `may_owe` counts by tool the
-    failed calls that may or may not owe (ADR-0034), and `witnessed` is
+    Returns a dict. `owed` is those events. `may_owe` holds by tool the
+    timestamps of the failed calls that may or may not owe (ADR-0034),
+    and `witnessed` is
     every tool the transcript shows a result for, so reconcile() can
     tell a receipt of a tool the session used from a line naming none.
     `latest` is the newest timestamped record of any conversational
@@ -1902,7 +1906,7 @@ def read_witness(transcript, calibration):
                 if failed:
                     owes = failed_call_owes(record, found, name, epoch)
                     if owes == "may_owe":
-                        may_owe[name] = may_owe.get(name, 0) + 1
+                        may_owe.setdefault(name, []).append(when)
                     elif owes == "unworded":
                         unworded += 1
                     if owes != "owed":
@@ -1925,30 +1929,36 @@ def read_witness(transcript, calibration):
 def reconcile(owed, may_owe, receipts, witnessed):
     """Pair the witness with the chain tool by tool (ADR-0034), where
     the reading before it paired two totals. `owed` is [(timestamp,
-    tool)] in time order; `may_owe` and `receipts` count by tool, a
+    tool)] in time order; `may_owe` holds by tool the timestamps of the
+    failed calls that may owe, and `receipts` counts by tool, a
     receipt's tool being the one its action line names (tool_of).
 
     A receipt pays only calls of its own tool. Within a tool, receipts
     go first to the failed calls that may owe, and only what is left
-    pays the owed calls, earliest first: a receipt that may be the one a
-    failed call left can never cover the one an owed call lost, whether
-    the two calls share a tool (a starved fetch beside a failed one) or
-    not (a starved command beside a failed fetch). The price is a false
-    deficit when a failed call that may owe did not in fact fire, in a
-    session with owed calls of the same tool (ADR-0034 ruling 2). A
-    receipt whose line names no tool the transcript shows (a line
-    written by hand with `loxodonta log`, say) keeps the reading from
-    before: it pays the earliest unpaid call of any tool, and is surplus
-    only when none is left. Returns (deficit, surplus, the timestamp of
-    the first call still unpaid, or None)."""
+    (never less than none) pays the owed calls, earliest first: a
+    receipt that may be the one a failed call left can never cover the
+    one an owed call lost, whether the two calls share a tool (a starved
+    fetch beside a failed one) or not (a starved command beside a failed
+    fetch). The price is a false deficit when a failed call that may owe
+    did not in fact fire, in a session with owed calls of the same tool
+    (ADR-0034 ruling 2). The unpaid call is then an earlier one, so its
+    deficit is dated no earlier than the tool's newest failed call that
+    may owe: a receipt still on its way from that call gets the grace
+    window any receipt gets. A receipt whose line names no tool the
+    transcript shows (a line written by hand with `loxodonta log`, say)
+    keeps the reading from before: it pays the earliest unpaid call of
+    any tool, and is surplus only when none is left. Returns (deficit,
+    surplus, the timestamp the deficit dates from, or None)."""
     calls = {}
     for when, tool in owed:
         calls.setdefault(tool, []).append(when)
     unpaid, surplus = [], 0
     for tool in witnessed:
         mine = calls.get(tool, [])
-        left = max(0, receipts.get(tool, 0) - may_owe.get(tool, 0))
-        unpaid.extend(mine[left:])
+        its_may_owe = may_owe.get(tool, [])
+        left = max(0, receipts.get(tool, 0) - len(its_may_owe))
+        newest = max((when or "" for when in its_may_owe), default="")
+        unpaid.extend(max(when or "", newest) for when in mine[left:])
         surplus += max(0, left - len(mine))
     pooled = sum(count for tool, count in receipts.items()
                  if tool not in witnessed)
@@ -2022,7 +2032,7 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     return {"state": classify(tools, deficit, surplus, ended, idle,
                               deficit_age, silent),
             "tools": tools, "deficit": deficit,
-            "may_owe": sum(seen["may_owe"].values()),
+            "may_owe": sum(len(calls) for calls in seen["may_owe"].values()),
             "worded": seen["worded"], "unworded": seen["unworded"]}
 
 
@@ -7565,13 +7575,13 @@ function render(report) {
     const live = LIVE.includes(s.state);
     const row = el("div", "watch-row " + (live ? "live" : "quiet"));
     row.appendChild(el("span", "chip", s.state));
-    // Paired tool by tool (ADR-0034), the totals can match while a call
-    // still has no receipt of its tool, so the count that decided the
-    // chip is said beside them.
+    // Paired tool by tool (ADR-0034), the totals can match while a tool
+    // is short, and failed calls that may owe take receipts first, so
+    // the two counts that decided the chip are said beside the totals.
     row.appendChild(el("span", "file", s.repo + " · " + s.session +
       " · witnessed " + s.tools + ", received " + s.receipts +
-      (s.deficit ? ", " + s.deficit + " without a receipt of their tool"
-                 : "")));
+      (s.deficit ? ", " + s.deficit + " short" : "") +
+      (s.may_owe ? ", " + s.may_owe + " may owe" : "")));
     if (s.words) row.appendChild(el("p", "claim", s.words));
     // A session whose receipts landed in more than one drawer is
     // counted once, against the whole family — say so, so the tally
