@@ -159,3 +159,8 @@ a flat "the transcript is tamper-evident".
   a hard kill, so that residue stays, and is documented.)*
 - GLOSSARY gains **Transcript commitment** and **Bookkeeping entry**;
   the verdict ladder gains `TRANSCRIPT-DIVERGED` (exit 5).
+- *(Addendum 2026-09-18, #260: the harness deletes a session transcript
+  once it is older than `cleanupPeriodDays` days, 30 by default. The
+  chain and its commitment entries outlast it, and `verify --transcript`
+  then has nothing to judge; `supervisor scan` reads the setting and
+  reports the number. Nothing here copies or archives a transcript.)*
