@@ -1332,8 +1332,10 @@ def openssl_without_attime(folder):
 
 
 def outlive(expires):
-    """Wait out a certificate's life. openssl reads the time to the
-    second, and a certificate is still in date during its last one."""
+    """Wait out a certificate's life, with a second to spare. openssl
+    counts a certificate expired from the very second of its end date,
+    so the spare second is margin for a clock read a moment apart, not
+    a second the certificate is still in date."""
     time.sleep(max(0.0, expires + 1 - time.time()))
 
 

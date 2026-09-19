@@ -2089,12 +2089,17 @@ def judge_outlived(head, token, chain_file, refused):
     whose certificate has run out is vouched for by nobody now, and
     whoever holds it could sign any past time they liked (long-term
     validation is not built, ADR-0032). Failing, the token has a reason
-    of its own, and that is the verdict. A token whose time cannot be
-    read keeps openssl's first refusal: openssl decoded it to check its
-    chain and every token carries a time, so the fault is the token's.
+    of its own, and that is the verdict.
+
     An openssl that can be asked about no moment but now gets ADR-0026's
-    posture for an ssh-keygen that predates `-Y verify`: not judged, and
-    why."""
+    posture for an ssh-keygen that predates `-Y verify`, before anything
+    else is read: nothing could be judged, so it is not judged, and why.
+    A token whose time cannot be read keeps openssl's first refusal:
+    openssl decoded it to check its chain, and every token carries
+    exactly one time, so a time printed as `Bad time value`, or missing,
+    or twice over, is the token's fault and not this machine's."""
+    if not takes_attime():
+        return "not judged", STAMP_NO_ATTIME
     stated = token_time(token)
     if stated is None:
         return "invalid", (f"{openssl_reason(refused.stderr)}; the time the "
@@ -2103,8 +2108,6 @@ def judge_outlived(head, token, chain_file, refused):
     then = openssl_verify(head, token, chain_file, "-attime", str(stated))
     if then.returncode == 0:
         return "not judged", STAMP_OUTLIVED
-    if not takes_attime():
-        return "not judged", STAMP_NO_ATTIME
     return "invalid", (f"{openssl_reason(then.stderr)} (judged as of the "
                        "time the token states)")
 
