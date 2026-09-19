@@ -190,28 +190,31 @@ an input the harness rejects before it runs, or a call a `PreToolUse`
 hook blocks, and the transcript flags all of them with the same
 `is_error`; only the words tell some apart. `failed_call_owes` reads
 them under the epoch in force, which the calibration and the marker
-now carry as `failures`: nothing where the event was not wired, or
-where the result is a `<tool_use_error>` or the record a marked denial;
-owed where the result opens `Exit code N`, a command that ran; and
-`may_owe` for the rest. Then `reconcile` pairs receipts with calls tool
-by tool rather than as two totals, so a `may_owe` receipt excuses only
-its own tool's surplus and never pays for a receipt another call lost,
-which the first cut of this let the writer do on purpose.
+now carry as `failures`: nothing where the event was not wired, where
+the result is a `<tool_use_error>` or the record a marked denial, or
+where a shell failure has no `Exit code N` line; owed where the result
+opens with that line, a command that ran; and `may_owe` for any other
+tool's failure. Then `reconcile` pairs receipts with calls tool by tool
+rather than as two totals, and within a tool gives its `may_owe` calls
+their receipts first, so a receipt a failed call may have left never
+pays for one an owed call lost, in another tool or its own. The first
+two cuts of this let the writer do exactly that on purpose.
 
 `classify` is the ratified state machine — a pure reading of the
 evidence: OK / QUIET / LAGGING (a 30-second grace, because an honest
 lock wait must never alarm) / ALARM-SILENT (recording stopped) /
-ALARM-DEFICIT (the fork-shaped hole: receipts arrive, fewer than owed)
-/ SURPLUS (an investigate flag, never a verdict) / ENDED-CLEAN /
-ENDED-DEFICIT (missing forever; kept as evidence, not a siren) /
-ENDED-SURPLUS (a surplus does not become clean by the session ending) /
-UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY. Deficit is sticky
-— lost receipts never arrive later — and since pairing went tool by
-tool it also wins: a session short in one tool and over in another
-reads as the deficit, never the surplus (ADR-0034). ELSEWHERE belongs to legacy `--root`
-mode alone (#117): a witnessed session whose chain is not under the
-root but *is* in the store has recorded fine, and the wrong universe
-is being scanned (ADR-0011). Naming it rather than charging it keeps
+ALARM-DEFICIT (the fork-shaped hole: receipts arrive, and an owed call
+has none of its tool) / SURPLUS (an investigate flag, never a verdict)
+/ ENDED-CLEAN / ENDED-DEFICIT (missing forever; kept as evidence, not
+a siren) / ENDED-SURPLUS (a surplus does not become clean by the
+session ending) / UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY.
+Deficit is sticky — lost receipts never arrive later — and since
+pairing went tool by tool it also wins: a session short in one tool and
+over in another reads as the deficit, never the surplus (ADR-0034).
+ELSEWHERE belongs to legacy `--root` mode alone (#117): a witnessed
+session whose chain is not under the root but *is* in the store has
+recorded fine, and the wrong universe is being scanned (ADR-0011).
+Naming it rather than charging it keeps
 the alarm about recording stopping; a session with no chain in either
 place is still the disabled hook, and still alarms.
 
