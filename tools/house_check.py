@@ -63,7 +63,9 @@ OVERCLAIMS = [
 # the settings file", "the legacy mode", "an MCP server", "OpenSSL's
 # security level"), so each pattern names the concept, the word tied to
 # what it would stand for. A bare everyday noun ("a mirror of your work",
-# "the server", "your collector") is ambiguous and is not judged. A
+# "the server", "your collector") is ambiguous and is not judged, and
+# neither is a verb ("the report mirrors the chain", "back up your
+# receipts"): an operator copying their own files is everyday. A
 # synonym warns everywhere and fails on the front door and in the code;
 # the refutation form escapes it, so an ADR may still name the word it
 # rejected.
@@ -85,12 +87,8 @@ SYNONYMS = [
      "the entries only go outward, to a remote chosen because it only "
      "adds, and nothing is restored from it or synced back",
      [_CHAIN + r"(?:'s|')? (?:backup|mirror|replica)s?",            # "chain backup", "the chain's mirror"
-      r"(?:backups?|mirror\w*|replica\w*) (?:of )?"                 # "a mirror of the chain",
-      + _THE + r"(?:[\w-]+ )?" + _CHAIN + r"(?!')",                 # `backup_chain`, "mirror the receipts"
-      r"(?:back|backs|backed|backing) up "                          # "backs up the entries",
-      + _THE + r"(?:[\w-]+ )?" + _CHAIN,                            # never "the settings file"
-      _THE + _CHAIN + r" (?:(?:are|is|were|was|get|gets|got|being) )?"
-      r"(?:backed up|mirrored|replicated)",                         # "your receipts are backed up"
+      r"(?:backup|mirror|replica)s? (?:of " + _THE                  # "a mirror of the chain",
+      + r"(?:[\w-]+ )?)?" + _CHAIN + r"(?!')",                     # `backup_chain`
       r"(?:remote|off-box|off-site|offsite|off-machine) "
       r"(?:backup|mirror|replica)s?"]),                             # "an off-box backup"
     ("receiver",
@@ -116,8 +114,8 @@ SYNONYMS = [
      "product, so it is never called an anchor (ADR-0032)",
      [r"(?:authority|authority's|TSA|TSA's|RFC ?3161|timestamp authority)"
       r"[ -]anchor(?:s|ed)?",                                       # "the TSA anchor"
-      r"anchor(?:s|ed|ing) (?:(?:the|a|its|each) (?:head|chain|manifest|digest)s? )?"
-      r"(?:by|with|through|via|at|from|to) " + _THE
+      r"(?:anchored by|anchors (?:the|a|its|each) (?:head|chain|manifest|digest)s?"
+      r" (?:at|by|with|through)) " + _THE
       + r"(?:qualified |public |internal )?(?:authority|TSA|RFC ?3161)",  # "anchors the head at the authority"
       r"anchor tokens?"]),                                          # a token is the stamp's
 ]
@@ -140,9 +138,11 @@ OLD_NAME = [
     #    or the script and a verb. Its name alone is only a file name.
     r"(?:\bpython3? (?:\S*[/\\])?receipts\.py(?: " + _VERBS + r")?"
     r"|(?<![\w.-])receipts\.py " + _VERBS + r")(?!\w)",
-    # 3. The tool named as a tool, in any case: "the receipts CLI", "Install
-    #    the Receipts tool". Not "receipts tool calls" or "command lines".
-    r"(?<![\w.-])(?i:receipts (?:tool|CLI|command|recorder)s?(?! (?:call|line)s?\b))",
+    # 3. The tool named as a tool, after "the" or "a" and in any case:
+    #    "the receipts CLI", "Install the Receipts tool". Never "hook
+    #    receipts tool names", "the receipts tooling" or "command lines".
+    r"(?i:\b(?:the|a) receipts (?:tool|CLI|command|recorder)s?)(?![\w-])"
+    r"(?! (?:call|line)s?\b)",
 ]
 OLD_NAME_NOTE = (" -> say loxodonta: the command is loxodonta; only the "
                  "artifact keeps the name receipts (ADR-0010)")
@@ -157,7 +157,8 @@ OLD_NAME_NOTE = (" -> say loxodonta: the command is loxodonta; only the "
 _GAP = r"[^\w.?!]"                       # a space or a mark, never . ? !
 QUOTED = r"[\"\u201c`]$"                 # a quoted mention: "immutable"
 REFUTATIONS = [
-    r"\bnot\b(?: called)?" + _GAP + r"*(?:(?:a|an|the)" + _GAP + r"+)?$",    # "not a blockchain", "not called a bundle"
+    # "not a blockchain", "not called a bundle"; "whether or not" refuses nothing
+    r"(?<!whether or )\bnot\b(?: called)?" + _GAP + r"*(?:(?:a|an|the)" + _GAP + r"+)?$",
     r"\bnever\b(?: called)?" + _GAP + r"*(?:(?:a|an|the)" + _GAP + r"+)?$",  # "never a *protection level*"
     r"\bcannot\b" + _GAP + r"*$",       # "cannot prove"
     r"\bno\b" + _GAP + r"*$",           # 'no "immutable"', "no guarantee"

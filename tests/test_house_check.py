@@ -200,14 +200,32 @@ class OldNameTest(Fixture):
             "Install the receipts tool first.",
             "The Receipts CLI prints the verdict.",
             "The receipts recorder writes one line per call.",
+            "Wrap it in a receipts command of your own.",
         ]) + "\n")
 
         result = run_checker(doc)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        for number in (1, 2, 3, 4):
+        for number in (1, 2, 3, 4, 5):
             self.assertIn(f"NOTES.md:{number}: old-name: ", result.stdout)
-        self.assertEqual(result.stdout.count("old-name"), 4, result.stdout)
+        self.assertEqual(result.stdout.count("old-name"), 5, result.stdout)
+
+    def test_the_tool_by_name_needs_the_or_a_and_a_whole_word(self):
+        # Without "the" or "a" before it, or with more word after it, the
+        # noun is the receipts, and their tool calls, names and text.
+        doc = self.write("docs/NOTES.md", "\n".join([
+            "Hook receipts tool-call counts match.",
+            "Hook receipts tool names are allowlisted.",
+            "Hook receipts tool use is recorded.",
+            "Raw receipts command-line text leaves only with --raw.",
+            "Hook receipts command text is redacted.",
+            "Read the receipts tooling notes first.",
+        ]) + "\n")
+
+        result = run_checker(doc)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
 
     def test_the_artifact_keeps_its_name(self):
         # The noun survives on purpose (ADR-0010): the file, the folder,
@@ -319,17 +337,24 @@ class SynonymTest(Fixture):
             "At full, a backup of the chain lands on a second machine.",
             "The chain's mirror sits on a second box.",
             "The hook calls `backup_chain` at session end.",
-            "Mirror the receipts to the far machine.",
-            "Your receipts are backed up at the remote.")
+            "An off-box replica of the entries survives the wipe.",
+            # "whether or not" refuses nothing
+            "Whether or not a chain backup lands, the head is posted.")
 
     def test_published_chain_passes_the_everyday_backup_and_mirror(self):
+        # The verbs are everyday: an operator backing up their own files,
+        # a report that mirrors what it read. Only the nouns are judged.
         self.assert_passes_on_the_front_door(
             "The installer backs up the settings file before it writes.",
             "Keep it out of backups that leave the machine.",
             "`--codex` mirrors the Claude Code flags, and the report mirrors the log.",
             "Back up the receipts folder with your usual tools.",
+            "Back up your receipts before you upgrade.",
+            "Operators back up their receipts with their usual tools.",
             "It restores a backup of the log; keep a mirror of your work.",
             "The dashboard mirrors the chain's verdict.",
+            "The report mirrors the chain it was generated from.",
+            "The status band mirrors the chain verdict.",
             'The copy survives a wipe, never "your receipts are backed up".')
 
     def test_receiver_fails_as_a_chain_server_or_a_collector_for_the_chain(self):
@@ -377,6 +402,7 @@ class SynonymTest(Fixture):
             "The authority timestamp is made beside the anchor, never instead of it.",
             "An authority with no anchor cadence sends nothing.",
             "The anchor keeper's turn also stamps the head.",
+            "Anchoring with the authority named also stamps the head.",
             "So it is not an anchor and is never called one.")
 
     def test_a_synonym_warns_off_the_front_door(self):
@@ -434,7 +460,7 @@ class CodePassTest(Fixture):
         # A quote that opens a string, `not` as an operator, and `no_` as
         # an identifier's prefix refuse nothing: each of these fails alone.
         for source in (
-                '"""Mirror the receipts to the far machine."""',
+                '"""A mirror of the receipts, sent to the far machine."""',
                 '"""Immutable once written."""',
                 'HELP = "immutable record of the session"',
                 'print(f"chain backup sent to {url}")',
@@ -447,6 +473,19 @@ class CodePassTest(Fixture):
                 result = run_checker(code)
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_a_file_that_does_not_tokenize_is_judged_strictly(self):
+        # With no way to tell its comments from its code, nothing in the
+        # file is refused, not even a refusal in a comment.
+        code = self.write("loxodonta.py", "\n".join([
+            "# not an audit log",
+            'x = """never closed',
+        ]) + "\n")
+
+        result = run_checker(code)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("loxodonta.py:1: anti-term: ", result.stdout)
 
     def test_a_comment_or_docstring_still_refuses_in_words(self):
         code = self.write("loxodonta.py", "\n".join([

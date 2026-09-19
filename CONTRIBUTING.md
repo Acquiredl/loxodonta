@@ -50,7 +50,8 @@ CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT), and on overclaim words there
 ("prove", "guarantee", "always"); elsewhere those words only warn. It also
 fails on the tool's old name (ADR-0010) where it can only mean the tool:
 the old command written as code, the old script run with `python`, or the
-old name followed by "tool" or "CLI". Prose is not judged, since there the
+old name after "the" or "a" and before "tool", "CLI", "command" or
+"recorder". Prose is not judged, since there the
 word means the receipts themselves as often as the tool, and the history,
 the changelog, the tours and the ADRs from before the rename keep the old
 name. The words the GLOSSARY refuses for its own terms, such as a "chain
