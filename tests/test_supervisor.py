@@ -21,6 +21,18 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_supervisor`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import home_guard  # noqa: E402
+
+# Every suite that starts scan, serve, calibrate, drill, export or
+# package takes isolated_env from this module, so arming the home guard
+# here arms it wherever those suites run, alone or under discovery
+# (#242).
+home_guard.arm()
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 BASELINE_NAME = ".supervisor-baseline.json"
@@ -106,16 +118,18 @@ def write_chain_row(log, first, last, head, when):
         out.write(json.dumps(row) + "\n")
 
 
-def run_scan(root, *extra, env=None):
+def run_scan(root, *extra, env):
     # Pin both ends of the pipe to UTF-8 (PYTHONIOENCODING for the child,
     # encoding= for this parent): `text=True` alone decodes with the locale
     # codec — cp1252 on Windows — and crashes on a UTF-8-emitting child.
+    # `env` has no default: the one it had was the machine's own, and the
+    # scan reads the coverage marker from there whatever --root says
+    # (#242). Build it with isolated_env.
     return subprocess.run(
         [sys.executable, str(SUPERVISOR), "scan", "--root", str(root),
          "--json", *extra],
         capture_output=True, encoding="utf-8",
-        env={**(os.environ if env is None else env),
-             "PYTHONIOENCODING": "utf-8"})
+        env={**env, "PYTHONIOENCODING": "utf-8"})
 
 
 def make_chain(log_dir, session, entries=2, action="step {i}"):
@@ -140,18 +154,20 @@ def chains_by_session(report):
             for repo in report["repos"] for sess in repo["sessions"]}
 
 
-def run_store_scan(store_home, witness, *extra, env=None):
+def run_store_scan(store_home, witness, *extra):
     """`scan` with no --root: the store is the default universe
     (ADR-0011), reached through LOXODONTA_HOME. The witness is always
     pinned — store mode watches every transcript on the machine, so an
-    unpinned test would read the developer's real sessions."""
+    unpinned test would read the developer's real sessions — and the
+    rest of the home sits beside the store, in the same temporary
+    folder (#242)."""
     return subprocess.run(
         [sys.executable, str(SUPERVISOR), "scan", "--json",
          "--witness", str(witness), *extra],
         capture_output=True, encoding="utf-8",
-        env={**(os.environ if env is None else env),
-             "PYTHONIOENCODING": "utf-8",
-             "LOXODONTA_HOME": str(store_home)})
+        env={**isolated_env(Path(store_home).parent / "home",
+                            LOXODONTA_HOME=str(store_home)),
+             "PYTHONIOENCODING": "utf-8"})
 
 
 class StoreScanTest(unittest.TestCase):
@@ -375,11 +391,12 @@ class ScanCensusTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
 
     def test_scan_reports_a_chain_with_its_verdict_as_json(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
@@ -396,7 +413,7 @@ class ScanCensusTest(unittest.TestCase):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         make_chain(self.root / "beta" / "receipts", "sess-bbbb")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         sessions = chains_by_session(json.loads(result.stdout))
         self.assertIn(("alpha", "sess-aaaa"), sessions)
@@ -409,7 +426,7 @@ class ScanCensusTest(unittest.TestCase):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa-002")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         sessions = chains_by_session(json.loads(result.stdout))
         self.assertNotIn(("alpha", "sess-aaaa-002"), sessions,
@@ -426,7 +443,7 @@ class ScanCensusTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         write_completed_anchor(log, chain_head(log))
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -442,7 +459,7 @@ class ScanCensusTest(unittest.TestCase):
             self.root / "alpha" / ".claude" / "worktrees" / "wt" / "receipts",
             "sess-stranded")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         sessions = chains_by_session(json.loads(result.stdout))
         self.assertIn(("alpha", "sess-stranded"), sessions)
@@ -451,7 +468,7 @@ class ScanCensusTest(unittest.TestCase):
                         "strandedness is evidence — say so")
 
     def test_an_empty_root_is_a_clean_scan(self):
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
@@ -463,11 +480,11 @@ class ScanCensusTest(unittest.TestCase):
         # default pretty-prints for eyes — both parse identically.
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
 
-        machine = run_scan(self.root)
+        machine = run_scan(self.root, env=self.env)
         human = subprocess.run(
             [sys.executable, str(SUPERVISOR), "scan", "--root", str(self.root)],
             capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
         def shape(text):
             # Two runs are two moments, and the scan stamps itself: the
@@ -486,6 +503,7 @@ class ScanVerdictTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
 
     def tamper(self, log):
         lines = log.read_text(encoding="utf-8").splitlines()
@@ -503,7 +521,7 @@ class ScanVerdictTest(unittest.TestCase):
         self.tamper(log)
         make_chain(self.root / "beta" / "receipts", "sess-bbbb")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertNotEqual(result.returncode, 0)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -525,7 +543,7 @@ class ScanVerdictTest(unittest.TestCase):
                  f"transcript-commitment: bytes={count} sha256=" + "0" * 64],
                 capture_output=True, check=True)
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 7,
                          result.stdout + result.stderr)
@@ -544,7 +562,7 @@ class ScanVerdictTest(unittest.TestCase):
         self.tear(log)
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa-002")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -561,7 +579,7 @@ class ScanVerdictTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         self.tear(log)
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertNotEqual(result.returncode, 0)
 
@@ -572,7 +590,7 @@ class ScanVerdictTest(unittest.TestCase):
         self.tamper(log)
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa-002")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertNotEqual(result.returncode, 0)
 
@@ -587,7 +605,7 @@ class ScanVerdictTest(unittest.TestCase):
         log.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
         make_chain(self.root / "beta" / "receipts", "sess-bbbb")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertNotEqual(result.returncode, 0)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -605,7 +623,7 @@ class ScanVerdictTest(unittest.TestCase):
         empty.write_text("", encoding="utf-8")
         make_chain(self.root / "beta" / "receipts", "sess-bbbb")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertNotEqual(result.returncode, 0)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -625,13 +643,14 @@ class ScanAnchorTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
 
     def test_an_anchored_chain_is_a_distinct_claim_not_just_valid(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         write_completed_anchor(log, chain_head(log))
         make_chain(self.root / "beta" / "receipts", "sess-bbbb")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -657,7 +676,7 @@ class ScanAnchorTest(unittest.TestCase):
         # rightly (and confusingly) still matches.
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=1)
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -677,6 +696,7 @@ class BaselineTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
         self.baseline = self.root / ".supervisor-baseline.json"
 
     def events(self, result):
@@ -684,13 +704,13 @@ class BaselineTest(unittest.TestCase):
 
     def test_appends_between_ticks_raise_no_alarm(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        first = run_scan(self.root)  # cold start seeds silently
+        first = run_scan(self.root, env=self.env)  # cold start seeds silently
         subprocess.run(
             [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", "one more step"],
             capture_output=True, check=True)
 
-        second = run_scan(self.root)
+        second = run_scan(self.root, env=self.env)
 
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(self.events(first), [], "cold start is silent")
@@ -704,7 +724,7 @@ class BaselineTest(unittest.TestCase):
         # no anchor still verifies VALID — only the memory of the last
         # look notices.
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        run_scan(self.root)
+        run_scan(self.root, env=self.env)
         log.unlink()
         subprocess.run([sys.executable, str(LOXODONTA), "init",
                         "--log", str(log)], capture_output=True, check=True)
@@ -717,7 +737,7 @@ class BaselineTest(unittest.TestCase):
              "--actor", "claude-code", "--action", "nothing to see here"],
             capture_output=True, check=True)
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         report = json.loads(result.stdout)
@@ -734,13 +754,13 @@ class BaselineTest(unittest.TestCase):
     def test_a_shortened_chain_regresses_and_a_deleted_chain_vanishes(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         gone = make_chain(self.root / "beta" / "receipts", "sess-bbbb")
-        run_scan(self.root)
+        run_scan(self.root, env=self.env)
         lines = log.read_text(encoding="utf-8").splitlines()
         log.write_text("".join(l + "\n" for l in lines[:-1]),
                        encoding="utf-8")  # still a VALID, shorter chain
         gone.unlink()
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         changes = {e["session"]: e["change"] for e in self.events(result)}
@@ -749,12 +769,12 @@ class BaselineTest(unittest.TestCase):
 
     def test_alarm_language_investigates_and_never_claims_a_verdict(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        run_scan(self.root)
+        run_scan(self.root, env=self.env)
         lines = log.read_text(encoding="utf-8").splitlines()
         log.write_text("".join(l + "\n" for l in lines[:-1]),
                        encoding="utf-8")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         baseline_words = json.dumps(
             json.loads(result.stdout)["baseline"]).lower()
@@ -764,13 +784,13 @@ class BaselineTest(unittest.TestCase):
 
     def test_the_baseline_updates_each_tick_so_one_change_shouts_once(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        run_scan(self.root)
+        run_scan(self.root, env=self.env)
         lines = log.read_text(encoding="utf-8").splitlines()
         log.write_text("".join(l + "\n" for l in lines[:-1]),
                        encoding="utf-8")
-        caught = run_scan(self.root)
+        caught = run_scan(self.root, env=self.env)
 
-        settled = run_scan(self.root)
+        settled = run_scan(self.root, env=self.env)
 
         self.assertEqual(caught.returncode, 5)
         self.assertEqual(settled.returncode, 0,
@@ -781,17 +801,17 @@ class BaselineTest(unittest.TestCase):
 
     def test_a_corrupt_baseline_is_reported_never_trusted(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        run_scan(self.root)
+        run_scan(self.root, env=self.env)
         self.baseline.write_text("{not json at all", encoding="utf-8")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout)
         self.assertIn("could not be read",
                       report["baseline"].get("note", ""))
         self.assertEqual(report["baseline"]["events"], [])
-        after = run_scan(self.root)
+        after = run_scan(self.root, env=self.env)
         self.assertNotIn("note", json.loads(after.stdout)["baseline"],
                          "remembering resumes from the fresh look")
 
@@ -946,9 +966,11 @@ class SubagentWitnessTest(unittest.TestCase):
         self.witness = Path(self._tmp.name).resolve() / "witness"
         install_witness_hook(self.witness, matcher="*")
         prime_memory(self.root, matcher="*")
+        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
 
     def scan(self, *extra):
-        return run_scan(self.root, "--witness", str(self.witness), *extra)
+        return run_scan(self.root, "--witness", str(self.witness), *extra,
+                        env=self.env)
 
     def states(self, result):
         return {s["session"]: s
@@ -1031,6 +1053,7 @@ class DaybookTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
         self.daybook = self.root / ".supervisor-daybook.json"
 
     def rows(self, result):
@@ -1043,7 +1066,7 @@ class DaybookTest(unittest.TestCase):
     def test_a_scan_writes_the_day_it_looked(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0,
                          result.stdout + result.stderr)
@@ -1059,7 +1082,7 @@ class DaybookTest(unittest.TestCase):
     def test_the_window_is_fourteen_days_oldest_first(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
 
-        rows = self.rows(run_scan(self.root))
+        rows = self.rows(run_scan(self.root, env=self.env))
 
         self.assertEqual(len(rows), 14)
         self.assertEqual([r["day"] for r in rows],
@@ -1073,9 +1096,9 @@ class DaybookTest(unittest.TestCase):
         # how often the operator looks, so an unwatched day must never
         # paint like a clean one.
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        run_scan(self.root)
+        run_scan(self.root, env=self.env)
 
-        rows = self.rows(run_scan(self.root))
+        rows = self.rows(run_scan(self.root, env=self.env))
 
         unwatched = [r for r in rows[:-1] if not r["watched"]]
         self.assertEqual(len(unwatched), 13,
@@ -1088,7 +1111,7 @@ class DaybookTest(unittest.TestCase):
         # "Was today clean?" is not "is it clean right now" — a tripwire
         # that fired this morning still colours the day this evening.
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        run_scan(self.root)
+        run_scan(self.root, env=self.env)
         log.unlink()
         subprocess.run([sys.executable, str(LOXODONTA), "init",
                         "--log", str(log)], capture_output=True, check=True)
@@ -1096,9 +1119,9 @@ class DaybookTest(unittest.TestCase):
             [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", "step 0"],
             capture_output=True, check=True)
-        tripped = run_scan(self.root)
+        tripped = run_scan(self.root, env=self.env)
 
-        settled = run_scan(self.root)
+        settled = run_scan(self.root, env=self.env)
 
         self.assertEqual(tripped.returncode, 5, tripped.stdout)
         self.assertEqual(settled.returncode, 0,
@@ -1118,7 +1141,7 @@ class DaybookTest(unittest.TestCase):
                 recent: {"worst": 0, "scans": 1}}}), encoding="utf-8")
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
 
-        rows = self.rows(run_scan(self.root))
+        rows = self.rows(run_scan(self.root, env=self.env))
 
         kept = json.loads(self.daybook.read_text(encoding="utf-8"))["days"]
         self.assertNotIn(stale, kept, "the book forgets past its season")
@@ -1141,10 +1164,11 @@ class CompletenessTest(unittest.TestCase):
         self.witness = Path(self._tmp.name).resolve() / "witness"
         install_witness_hook(self.witness)
         prime_memory(self.root)
+        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
 
     def scan(self, *extra, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
-                        *extra, env=env)
+                        *extra, env=self.env if env is None else env)
 
     def states(self, result):
         report = json.loads(result.stdout)
@@ -1157,7 +1181,7 @@ class CompletenessTest(unittest.TestCase):
         home = Path(self._tmp.name).resolve() / "store"
         for session in sessions:
             make_chain(home / "receipts" / "alpha-deadbeef", session)
-        return {**os.environ, "LOXODONTA_HOME": str(home)}
+        return {**self.env, "LOXODONTA_HOME": str(home)}
 
     def test_a_session_recorded_into_the_store_is_named_not_charged(self):
         # #117, from the field (2026-09-03): --root scans a legacy folder
@@ -1244,7 +1268,7 @@ class CompletenessTest(unittest.TestCase):
                          event_times=[ago(300), ago(290),
                                       ago(0), ago(0), ago(0)])
 
-        result = self.scan(env={**os.environ,
+        result = self.scan(env={**self.env,
                                 "SUPERVISOR_GRACE_SECONDS": "0"})
 
         self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
@@ -1670,7 +1694,7 @@ class CompletenessTest(unittest.TestCase):
         write_transcript(self.witness, self.root / "alpha", "sess-off",
                          event_times=[ago(7200), ago(7100)], idle=7000)
         install_witness_hook(self.witness, sessionend=True)
-        quiet = {**os.environ, "SUPERVISOR_TAIL_KEEPER": "0"}
+        quiet = {**self.env, "SUPERVISOR_TAIL_KEEPER": "0"}
         self.scan(env=quiet)
         self.seed_epoch()
 
@@ -1703,7 +1727,8 @@ class CompletenessTest(unittest.TestCase):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         nowhere = Path(self._tmp.name).resolve() / "no-such-layout" / "projects"
 
-        result = run_scan(self.root, "--witness", str(nowhere))
+        result = run_scan(self.root, "--witness", str(nowhere),
+                          env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout)
@@ -1774,10 +1799,11 @@ class CalibrationTest(unittest.TestCase):
         self.root.mkdir()
         self.witness = Path(self._tmp.name).resolve() / "witness"
         self.baseline = self.root / ".supervisor-baseline.json"
+        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
 
     def scan(self, *extra, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
-                        *extra, env=env)
+                        *extra, env=self.env if env is None else env)
 
     def states(self, result):
         report = json.loads(result.stdout)
@@ -1804,7 +1830,7 @@ class CalibrationTest(unittest.TestCase):
              "--root", str(self.root), "--since", since,
              "--matchers", matcher],
             capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
     def test_widening_does_not_rejudge_ended_sessions(self):
         # A session recorded honestly under the narrow matcher: three
@@ -1903,16 +1929,22 @@ class BeforeMemoryTest(unittest.TestCase):
         self.witness = Path(self._tmp.name).resolve() / "witness"
         install_witness_hook(self.witness)
         self.baseline = self.root / BASELINE_NAME
+        # The coverage marker is machine-wide whatever --root says
+        # (ADR-0030), so the memory these tests date is this home's, not
+        # the machine's (#242).
+        self.home = Path(self._tmp.name).resolve() / "home"
+        self.env = isolated_env(self.home)
 
     def scan(self, *extra):
-        return run_scan(self.root, "--witness", str(self.witness), *extra)
+        return run_scan(self.root, "--witness", str(self.witness), *extra,
+                        env=self.env)
 
     def calibrate(self, *args):
         return subprocess.run(
             [sys.executable, str(SUPERVISOR), "calibrate",
              "--root", str(self.root), *args],
             capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
     def watch(self, result):
         return json.loads(result.stdout)["completeness"]
@@ -1975,6 +2007,31 @@ class BeforeMemoryTest(unittest.TestCase):
         self.assertEqual(rows[0]["state"], "BEFORE-MEMORY")
         self.assertNotIn("deficit", rows[0],
                          "an unknown owed is not a deficit")
+
+    def test_a_marker_in_the_home_the_scan_reads_moves_the_memory(self):
+        # The coupling, tested rather than avoided (#242): the scan reads
+        # the coverage marker from the machine-wide home whatever --root
+        # says (ADR-0030). A marker older than the session, in this
+        # test's own home, judges the session the tests above leave
+        # unjudged. The same marker in the machine's home is what failed
+        # them wherever install-hook had run.
+        self.scan()
+        write_transcript(self.witness, self.root / "alpha", "sess-old",
+                         event_times=[ago(6000), ago(5900), ago(5800)])
+        self.assertEqual(self.watch(self.scan())["before_memory"]["count"], 1)
+        store = Path(self.env["LOXODONTA_HOME"])
+        store.mkdir(parents=True)
+        (store / "coverage.json").write_text(json.dumps({
+            "purpose": "test fixture",
+            "epochs": [{"since": ago(9000), "matchers": ["*"],
+                        "harness": "claude-code"}]}), encoding="utf-8")
+
+        watch = self.watch(self.scan())
+
+        self.assertNotIn("before_memory", watch)
+        self.assertEqual([s["session"] for s in watch["sessions"]],
+                         ["sess-old"])
+        self.assertIn("install-hook", watch["calibration"]["words"])
 
     def test_seeding_restores_judgment_and_forgetting_takes_it_back(self):
         # Ruling 6 end to end: the operator states what was wired before
@@ -2042,7 +2099,8 @@ class CoverageMarkerTest(unittest.TestCase):
         self.store = Path(self._tmp.name).resolve() / "store"
         self.store.mkdir()
         install_witness_hook(self.witness, matcher="*")
-        self.env = {**os.environ, "LOXODONTA_HOME": str(self.store)}
+        self.env = isolated_env(Path(self._tmp.name).resolve() / "home",
+                                LOXODONTA_HOME=str(self.store))
 
     def scan(self, *extra):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -2153,7 +2211,7 @@ class CoverageMarkerTest(unittest.TestCase):
         # yet" when the hook is wired and "nothing is recording" when it
         # is not, and those want opposite things from the reader.
         store = Path(self._tmp.name).resolve() / "freshstore"
-        env = {**os.environ, "LOXODONTA_HOME": str(store),
+        env = {**self.env, "LOXODONTA_HOME": str(store),
                "PYTHONIOENCODING": "utf-8"}
         # Its own parent: hook_matchers reads `<witness>/../settings.json`,
         # so a bare path beside the wired witness would read the wired
@@ -2237,12 +2295,27 @@ def isolated_env(home, **knobs):
     """`keeper_env` with every home the tools read pointed inside `home`:
     the store, the user's settings and Codex's hooks, so a scan reads
     neither this machine's own wiring nor its coverage marker. Pair it
-    with a `--witness` under a temporary folder."""
+    with a `--witness` under a temporary folder. The knobs land last, so
+    a test that keeps its store or its project somewhere of its own
+    names it here (`LOXODONTA_HOME=...`, `CLAUDE_PROJECT_DIR=...`). Every
+    start of scan, serve, calibrate, drill, export or package goes
+    through this (#242); the home guard (tests/home_guard.py) refuses
+    one that does not."""
     env = keeper_env(LOXODONTA_HOME=str(Path(home) / ".loxodonta"),
                      HOME=str(home), USERPROFILE=str(home),
-                     CODEX_HOME=str(Path(home) / ".codex"), **knobs)
+                     CODEX_HOME=str(Path(home) / ".codex"))
     env.pop("CLAUDE_PROJECT_DIR", None)
+    env.update(knobs)
     return env
+
+
+def home_outside(test):
+    """A temporary home for `test`, removed when it ends, for a test whose
+    scanned root is its whole temporary folder: a home inside the root
+    would sit in the census it is meant to stay out of."""
+    away = tempfile.TemporaryDirectory()
+    test.addCleanup(away.cleanup)
+    return Path(away.name).resolve()
 
 
 class AnchorKeeperTest(unittest.TestCase):
@@ -2255,6 +2328,7 @@ class AnchorKeeperTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
 
     def start_calendar(self):
         server = HTTPServer(("127.0.0.1", 0), FakeCalendarHandler)
@@ -2284,7 +2358,7 @@ class AnchorKeeperTest(unittest.TestCase):
                              submitted=ago(100000))
         make_chain(self.root / "beta" / "receipts", "sess-bare")
 
-        result = run_scan(self.root, env=keeper_env())
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -2315,7 +2389,7 @@ class AnchorKeeperTest(unittest.TestCase):
         write_pending_anchor(log, head, submitted=ago(2400000))
         write_completed_anchor(log, head, append=True)
 
-        result = run_scan(self.root, env=keeper_env())
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         chain = self.chain_report(result, "alpha", "sess-split")
@@ -2332,10 +2406,10 @@ class AnchorKeeperTest(unittest.TestCase):
         subprocess.run(
             [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
              "--calendar", calendar.url],
-            capture_output=True, check=True, env=keeper_env())
+            capture_output=True, check=True, env=self.env)
         calendar.mode = "complete"
 
-        result = run_scan(self.root, env=keeper_env())
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         chain = self.chain_report(result, "alpha", "sess-aaaa")
@@ -2352,13 +2426,13 @@ class AnchorKeeperTest(unittest.TestCase):
         subprocess.run(
             [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
              "--calendar", calendar.url],
-            capture_output=True, check=True, env=keeper_env())
+            capture_output=True, check=True, env=self.env)
 
-        first = run_scan(self.root, env=keeper_env())   # polls: pending
+        first = run_scan(self.root, env=self.env)   # polls: pending
         calendar.mode = "complete"
-        throttled = run_scan(self.root, env=keeper_env())
-        eager = run_scan(self.root, env=keeper_env(
-            SUPERVISOR_UPGRADE_EVERY_SECONDS="0"))
+        throttled = run_scan(self.root, env=self.env)
+        eager = run_scan(self.root, env={
+            **self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"})
 
         self.assertEqual(len(calendar.polled), 2,
                          "one poll on the first tick, none while "
@@ -2376,7 +2450,7 @@ class AnchorKeeperTest(unittest.TestCase):
         head = chain_head(log)
 
         result = run_scan(self.root, "--anchor-every", "0s",
-                          "--calendar", calendar.url, env=keeper_env())
+                          "--calendar", calendar.url, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calendar.submitted, [bytes.fromhex(head)],
@@ -2387,7 +2461,8 @@ class AnchorKeeperTest(unittest.TestCase):
 
         again = run_scan(self.root, "--anchor-every", "0s",
                          "--calendar", calendar.url,
-                         env=keeper_env(SUPERVISOR_UPGRADE_EVERY_SECONDS="0"))
+                         env={**self.env,
+                              "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"})
 
         self.assertEqual(len(calendar.submitted), 1,
                          "a head already submitted is not resubmitted")
@@ -2406,7 +2481,7 @@ class AnchorKeeperTest(unittest.TestCase):
                           when=ago(600))
 
         result = run_scan(self.root, "--anchor-every", "0s",
-                          "--calendar", calendar.url, env=keeper_env())
+                          "--calendar", calendar.url, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calendar.submitted, [bytes.fromhex(head)])
@@ -2420,7 +2495,7 @@ class AnchorKeeperTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
 
         result = run_scan(self.root, "--calendar", calendar.url,
-                          env=keeper_env())
+                          env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calendar.submitted, [])
@@ -2431,7 +2506,7 @@ class AnchorKeeperTest(unittest.TestCase):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
 
         result = run_scan(self.root, "--anchor-every", "1d",
-                          "--calendar", calendar.url, env=keeper_env())
+                          "--calendar", calendar.url, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calendar.submitted, [])
@@ -2443,7 +2518,7 @@ class AnchorKeeperTest(unittest.TestCase):
                              "sess-sib-002", entries=1)
 
         result = run_scan(self.root, "--anchor-every", "0s",
-                          "--calendar", calendar.url, env=keeper_env())
+                          "--calendar", calendar.url, env=self.env)
 
         self.assertEqual(sorted(calendar.submitted),
                          sorted([bytes.fromhex(chain_head(base)),
@@ -2459,7 +2534,7 @@ class AnchorKeeperTest(unittest.TestCase):
 
         result = run_scan(self.root, "--anchor-every", "0s",
                           "--calendar", "http://127.0.0.1:1",
-                          env=keeper_env())
+                          env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -2479,7 +2554,7 @@ class AnchorKeeperTest(unittest.TestCase):
 
         result = run_scan(self.root, "--anchor-every", "0s",
                           "--calendar", "http://127.0.0.1:1",
-                          env=keeper_env())
+                          env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         chain = self.chain_report(result, "alpha", "sess-2xfl")
@@ -2492,7 +2567,7 @@ class AnchorKeeperTest(unittest.TestCase):
         write_completed_anchor(log, chain_head(log))
 
         result = run_scan(self.root, "--anchor-every", "0s",
-                          "--calendar", calendar.url, env=keeper_env())
+                          "--calendar", calendar.url, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calendar.submitted, [])
@@ -2503,7 +2578,7 @@ class AnchorKeeperTest(unittest.TestCase):
                              "sess-sib-002", entries=1)
         write_completed_anchor(sibling, chain_head(sibling), height=900000)
 
-        result = run_scan(self.root, env=keeper_env())
+        result = run_scan(self.root, env=self.env)
 
         sessions = chains_by_session(json.loads(result.stdout))
         bare, anchored = sessions[("alpha", "sess-sib")]
@@ -2522,13 +2597,14 @@ class DrillTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
 
     def drill(self, log):
         return subprocess.run(
             [sys.executable, str(SUPERVISOR), "drill", "--root",
              str(self.root), "--log", str(log), "--json"],
             capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
     def test_the_four_way_battery_fires_every_expected_alarm(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
@@ -2569,7 +2645,7 @@ class DrillTest(unittest.TestCase):
                    entries=3)
         self.drill("alpha/receipts/receipts-sess-aaaa.jsonl")
 
-        result = run_scan(self.root)
+        result = run_scan(self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -2606,6 +2682,7 @@ class WalkFindingsTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve() / "repos"
         self.root.mkdir()
+        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
 
     def test_scan_counts_entries_not_raw_lines(self):
         # GLOSSARY: an entry is a parsed record; a torn line is damage,
@@ -2614,7 +2691,7 @@ class WalkFindingsTest(unittest.TestCase):
                          entries=2)
         with open(log, "a", encoding="utf-8") as f:
             f.write('{"n": 3, "torn')
-        finished = run_scan(self.root)
+        finished = run_scan(self.root, env=self.env)
         report = json.loads(finished.stdout)
         chain = chains_by_session(report)[("alpha", "sess-torn")][0]
         self.assertEqual(chain["entries"], 3)   # genesis + 2, damage aside
@@ -2629,7 +2706,8 @@ class WalkFindingsTest(unittest.TestCase):
         install_witness_hook(witness)
         (witness / "anyproj").mkdir(parents=True)
         (witness / "anyproj" / "sess-dirx.jsonl").mkdir()
-        finished = run_scan(self.root, "--witness", str(witness))
+        finished = run_scan(self.root, "--witness", str(witness),
+                            env=self.env)
         self.assertNotIn("Traceback", finished.stderr)
         report = json.loads(finished.stdout)
         states = {s["session"]: s["state"]
@@ -2646,7 +2724,7 @@ class WalkFindingsTest(unittest.TestCase):
         (self.root / ".supervisor-baseline.json").write_text(json.dumps({
             "chains": {},
             "keeper": {relpath: "2099-01-01T00:00:00Z"}}), encoding="utf-8")
-        finished = run_scan(self.root)
+        finished = run_scan(self.root, env=self.env)
         report = json.loads(finished.stdout)
         chain = chains_by_session(report)[("alpha", "sess-futr")][0]
         # the upgrade was attempted (and failed fast, offline): the note
@@ -2671,6 +2749,7 @@ class RecorderDriftTest(unittest.TestCase):
         self.root = Path(self._tmp.name).resolve() / "repos"
         self.root.mkdir()
         self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
 
     def git(self, *args, cwd):
         return subprocess.run(["git", *args], cwd=str(cwd),
@@ -2693,7 +2772,8 @@ class RecorderDriftTest(unittest.TestCase):
         return home, script
 
     def notice(self):
-        result = run_scan(self.root, "--witness", str(self.witness), "--json")
+        result = run_scan(self.root, "--witness", str(self.witness), "--json",
+                          env=self.env)
         self.assertEqual(result.returncode, 0,
                          result.stdout + result.stderr)
         return json.loads(result.stdout)["recorder"]
@@ -2912,14 +2992,16 @@ class ConsumptionTest(unittest.TestCase):
         # Pinned to an empty layout: consumption reads only chains, and
         # the completeness watch must not read the developer's machine.
         self.witness = Path(self._tmp.name).resolve() / "witness" / "projects"
+        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
 
     def scan(self, env=None):
-        return run_scan(self.root, "--witness", str(self.witness), env=env)
+        return run_scan(self.root, "--witness", str(self.witness),
+                        env=self.env if env is None else env)
 
     def hot_env(self, **extra):
         """The suite's threshold handle: hot means a busiest hour of at
         least max(10, 3 x the store's median active hour)."""
-        return {**os.environ, "SUPERVISOR_HOT_TIMES": "3",
+        return {**self.env, "SUPERVISOR_HOT_TIMES": "3",
                 "SUPERVISOR_HOT_FLOOR": "10", **extra}
 
     def watched(self, result):
@@ -3024,7 +3106,8 @@ class DashLeadingStoreTest(unittest.TestCase):
                 [sys.executable, str(SUPERVISOR), "scan", "--json",
                  "--witness", str(witness)],
                 cwd=str(root), capture_output=True, encoding="utf-8",
-                env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                env={**isolated_env(root / "home"),
+                     "PYTHONIOENCODING": "utf-8",
                      "LOXODONTA_HOME": "-dashhome"})
 
             self.assertEqual(result.returncode, 0,
@@ -3035,13 +3118,13 @@ class DashLeadingStoreTest(unittest.TestCase):
             self.assertEqual(chain["verdict"], "VALID")
 
 
-def run_supervisor(*args):
-    """Invoke the supervisor as an operator would, with nothing prepared:
-    a usage error is decided before any store is read."""
+def run_supervisor(home, *args):
+    """Invoke the supervisor as an operator would, with nothing prepared
+    in `home`: a usage error is decided before any store is read."""
     return subprocess.run(
         [sys.executable, str(SUPERVISOR), *args],
         capture_output=True, encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
 
 
 class UsageExitTest(unittest.TestCase):
@@ -3049,8 +3132,11 @@ class UsageExitTest(unittest.TestCase):
     scan's 5/6/7 and verify's 0..5 are never an argparse error (ADR-0026
     ruling 7). Argparse's message stays on stderr; stdout stays empty."""
 
+    def setUp(self):
+        self.home = home_outside(self)
+
     def test_unknown_flag_exits_64_with_argparse_message(self):
-        result = run_supervisor("scan", "--no-such-flag")
+        result = run_supervisor(self.home, "scan", "--no-such-flag")
 
         self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
         self.assertIn("unrecognized arguments", result.stderr)
@@ -3061,7 +3147,7 @@ class UsageExitTest(unittest.TestCase):
     def test_malformed_cadence_exits_64_not_a_verdict_number(self):
         # parse_cadence raises ArgumentTypeError inside the scan subparser;
         # the subparser must speak 64 too, or scan's own exits collide.
-        result = run_supervisor("scan", "--anchor-every", "soon")
+        result = run_supervisor(self.home, "scan", "--anchor-every", "soon")
 
         self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
         self.assertIn("anchor-every", result.stderr)

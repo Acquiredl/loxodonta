@@ -24,6 +24,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_serve`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import home_outside, isolated_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -92,12 +98,16 @@ def log_entry(log, action, actor="claude-code", files=()):
 
 
 class ServerFixture(unittest.TestCase):
-    """A temp root and a real `serve` subprocess on an ephemeral port."""
+    """A temp root and a real `serve` subprocess on an ephemeral port, in
+    a home of the test's own: serve reads the coverage marker and follows
+    the profile it names, so the machine's home would hand a test its
+    remote (#242)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
 
     def serve(self, extra_env=None, extra_args=()):
         """Start `serve` on an ephemeral port and read the announced URL.
@@ -107,7 +117,7 @@ class ServerFixture(unittest.TestCase):
             [sys.executable, str(SUPERVISOR), "serve", "--root",
              str(self.root), "--port", "0", *extra_args],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+            env={**self.env, "PYTHONIOENCODING": "utf-8",
                  **(extra_env or {})})
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
@@ -149,7 +159,7 @@ class StoreServeTest(ServerFixture):
             [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
              "--witness", str(witness)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+            env={**self.env, "PYTHONIOENCODING": "utf-8",
                  "LOXODONTA_HOME": str(self.home)})
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
@@ -847,7 +857,7 @@ class ServeTest(ServerFixture):
             [sys.executable, str(SUPERVISOR), "scan", "--root",
              str(self.root), "--json"],
             capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
         served, printed = json.loads(body), json.loads(cli.stdout)
         # Two ticks, two clocks: the freshness stamp is the one field
         # allowed to differ between them.
