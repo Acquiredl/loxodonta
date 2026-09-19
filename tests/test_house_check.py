@@ -2,13 +2,13 @@
 #123, presentation arc): the repo's own vocabulary enforced by a stdlib
 script that runs in the suite and in CI.
 
-Every test writes a small Markdown or tool-file fixture (issue #241 added
-the old name, the synonym table and the code pass), runs the command a
-maintainer would run, and reads the exit code and the findings it
-printed. The rule
-lists live in the script next to the vocabulary they enforce; the tests
-pin the behavior of each rule, each allowlisted form, and the file set
-each rule applies to.
+Every test writes a small Markdown or tool-file fixture, runs the command
+a maintainer would run, and reads the exit code and the findings it
+printed. The rule lists live in the script next to the vocabulary they
+enforce; the tests pin the behavior of each rule, each allowlisted form,
+and the file set each rule applies to. Issue #241 added the old name, the
+synonym table and the code pass, each with a failing and a passing
+fixture.
 """
 
 import os
@@ -132,31 +132,74 @@ class OverclaimTest(Fixture):
         self.assertEqual(result.stdout.strip(), "")
 
 
+class RefutationTest(Fixture):
+    # The escapes every rule shares, tightened in the #241 review.
+
+    def test_rejected_escapes_only_the_words_inside_its_bold_heading(self):
+        # An ADR names what it rejected as a bold heading followed by
+        # Rejected; a word outside that bold span is not refused by it.
+        adr = self.write("adrs/0031-x.md", "\n".join([
+            "- **Call it a bundle.** Rejected: two words for one concept.",
+            "- **Call the bundle a posture, a mode, or a level.** Rejected: "
+            "the other two say nothing.",
+        ]) + "\n")
+        readme = self.write(
+            "README.md",
+            "The log is immutable and proves it, see **Rejected alternatives** below.\n")
+
+        inside = run_checker(adr)
+        outside = run_checker(readme)
+
+        self.assertEqual(inside.returncode, 0, inside.stdout + inside.stderr)
+        self.assertEqual(inside.stdout.strip(), "")
+        self.assertEqual(outside.returncode, 1, outside.stdout + outside.stderr)
+        self.assertIn("README.md:1: anti-term: ", outside.stdout)
+        self.assertIn("README.md:1: overclaim: ", outside.stdout)
+
+    def test_a_refusal_never_reaches_across_the_end_of_a_sentence(self):
+        for sentence in ("Is it a package? No. A bundle ships the session.",
+                         "It is not. The chain server appends.",
+                         "Was it changed? No! It is immutable."):
+            with self.subTest(sentence=sentence):
+                readme = self.write("README.md", sentence + "\n")
+
+                result = run_checker(readme)
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("README.md:1: ", result.stdout)
+
+
 class OldNameTest(Fixture):
     # ADR-0010: the command is `loxodonta`; only the artifact keeps the
-    # name `receipts` (issue #241).
+    # name `receipts` (issue #241). Only the forms that cannot be the
+    # plural noun are judged.
 
-    def test_the_old_command_fails_in_a_page_that_is_not_about_the_past(self):
+    def test_the_old_command_fails_where_it_is_written_as_code(self):
         doc = self.write("docs/NOTES.md", "\n".join([
             "# Notes",
             "",
             "Ask deliberately, with `receipts verify --files`.",
+            "Or at a prompt: `$ receipts init`.",
+            "",
+            "```",
             "receipts run --actor ci -- make test",
+            "python receipts head --log chain.jsonl",
+            "```",
         ]) + "\n")
 
         result = run_checker(doc)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("NOTES.md:3: old-name: ", result.stdout)
-        self.assertIn("NOTES.md:4: old-name: ", result.stdout)
+        for number in (3, 4, 7, 8):
+            self.assertIn(f"NOTES.md:{number}: old-name: ", result.stdout)
         self.assertIn("say loxodonta", result.stdout)
 
-    def test_the_old_name_as_the_tool_fails_as_subject_possessive_or_cli(self):
+    def test_the_old_script_and_the_tool_by_name_fail_anywhere(self):
         doc = self.write("docs/NOTES.md", "\n".join([
-            "Purpose B is the product: receipts exists so that a writer is caught.",
-            "The part receipts actually needs is small.",
-            "receipts' hook does not record tool outcomes.",
-            "Each copy is verified through the public receipts CLI.",
+            "Then run python receipts.py verify on the copy.",
+            "Install the receipts tool first.",
+            "The Receipts CLI prints the verdict.",
+            "The receipts recorder writes one line per call.",
         ]) + "\n")
 
         result = run_checker(doc)
@@ -164,27 +207,40 @@ class OldNameTest(Fixture):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         for number in (1, 2, 3, 4):
             self.assertIn(f"NOTES.md:{number}: old-name: ", result.stdout)
+        self.assertEqual(result.stdout.count("old-name"), 4, result.stdout)
 
     def test_the_artifact_keeps_its_name(self):
         # The noun survives on purpose (ADR-0010): the file, the folder,
-        # the sibling chains, the genesis actor, and receipts in prose,
-        # including a plural subject and a noun at the end of a phrase.
+        # the sibling chains, the genesis actor, and receipts in prose.
         doc = self.write("docs/NOTES.md", "\n".join([
             "The log is `receipts.jsonl`, under `~/.loxodonta/receipts/<slug>/`.",
             "A sibling chain is `receipts-<session>-002.jsonl`.",
             'Genesis is pinned: `actor: "receipts"`, `action: "genesis"`.',
             "Receipts are written by a hook the harness fires.",
-            "Two receipts, a verdict, one word of history rewritten.",
             "A session of 3,721 receipts has a shape no waterfall can hold.",
-            "A session with tool calls and no receipts is `ENDED-DEFICIT`.",
-            "A receipts log plus its file references is one artifact.",
-            "Every N receipts inside the hook is rejected.",
-            "`loxodonta verify` reads the receipts; receipts must never hold secrets.",
-            "The recorder began life as `receipts.py`.",
-            # The tool's name is written in lower case even opening a
-            # sentence; the capitalized word is the noun.
-            "Receipts' timestamps are testimony.",
-            "Receipts run from genesis to the head.",
+            "The recorder began life as `receipts.py`; hook detection knows `receipts.py` too.",
+            "No receipts tool calls are owed for a failed call.",
+        ]) + "\n")
+
+        result = run_checker(doc)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_bare_prose_is_not_judged_because_it_is_ambiguous(self):
+        # Before a verb, `receipts` is the plural noun as often as the old
+        # tool, so prose is left alone either way: the first seven are the
+        # noun, the last two the tool, and none of them is judged.
+        doc = self.write("docs/NOTES.md", "\n".join([
+            "The session's receipts log grows by one line.",
+            "Hook receipts run from genesis to the head.",
+            "Per-project receipts drawers sit under the store.",
+            "Hook receipts' timestamps are testimony.",
+            "Each session's receipts verify clean.",
+            "Compare receipts vs heads.",
+            "The name receipts stays with the artifact.",
+            "Ask with receipts verify.",
+            "Then receipts will verify the chain.",
         ]) + "\n")
 
         result = run_checker(doc)
@@ -216,18 +272,20 @@ class OldNameTest(Fixture):
 
 class SynonymTest(Fixture):
     # The synonym table (issue #241): each GLOSSARY term and the words
-    # that must not stand in for it. One failing and one passing fixture
-    # per row; the passing one carries the everyday uses of the same
+    # that must not stand in for it. Each row has failing sentences and
+    # passing ones; the passing ones carry the everyday uses of the same
     # words, which this repo is full of and which must never fire.
 
-    def assert_fails_on_the_front_door(self, sentence, term):
-        readme = self.write("README.md", sentence + "\n")
+    def assert_each_fails_on_the_front_door(self, term, *sentences):
+        for sentence in sentences:
+            with self.subTest(sentence=sentence):
+                readme = self.write("README.md", sentence + "\n")
 
-        result = run_checker(readme)
+                result = run_checker(readme)
 
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("README.md:1: synonym: ", result.stdout)
-        self.assertIn(f"say {term}:", result.stdout)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("README.md:1: synonym: ", result.stdout)
+                self.assertIn(f"say {term}:", result.stdout)
 
     def assert_passes_on_the_front_door(self, *sentences):
         readme = self.write("README.md", "\n".join(sentences) + "\n")
@@ -237,45 +295,60 @@ class SynonymTest(Fixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
 
-    def test_profile_fails_as_a_security_level(self):
-        self.assert_fails_on_the_front_door(
-            "Pick a security level at install.", "profile")
+    def test_profile_fails_as_a_protection_level_full_security_or_a_flag(self):
+        self.assert_each_fails_on_the_front_door(
+            "profile",
+            "Pick a protection level at install.",
+            "The full security tier sends the entries.",
+            "Wire it with `--level full`.",
+            'Or pass "--posture timestamped".')
 
     def test_profile_passes_the_everyday_mode_and_level(self):
         self.assert_passes_on_the_front_door(
             "`--root` remains the explicit legacy mode.",
             "Hooks go into your user-level settings, at the top level.",
             "A run of unread days is the one failure mode the chains cannot report.",
-            "Set the log level to debug.",
+            "Set the log level to debug; OpenSSL's security level 2 refuses the key.",
+            "**Tor Browser's Security Level** is prior art for the ladder.",
+            "Make the folder with `mkdir --mode=700`.",
             "Not a *posture*, not a *mode*, and never a *protection level*.")
 
-    def test_published_chain_fails_as_a_backup_of_the_chain(self):
-        self.assert_fails_on_the_front_door(
+    def test_published_chain_fails_as_a_backup_mirror_or_replica_of_the_chain(self):
+        self.assert_each_fails_on_the_front_door(
+            "published chain",
             "At full, a backup of the chain lands on a second machine.",
-            "published chain")
+            "The chain's mirror sits on a second box.",
+            "The hook calls `backup_chain` at session end.",
+            "Mirror the receipts to the far machine.",
+            "Your receipts are backed up at the remote.")
 
     def test_published_chain_passes_the_everyday_backup_and_mirror(self):
         self.assert_passes_on_the_front_door(
             "The installer backs up the settings file before it writes.",
             "Keep it out of backups that leave the machine.",
-            "`--codex` mirrors the Claude Code flags.",
+            "`--codex` mirrors the Claude Code flags, and the report mirrors the log.",
+            "Back up the receipts folder with your usual tools.",
+            "It restores a backup of the log; keep a mirror of your work.",
+            "The dashboard mirrors the chain's verdict.",
             'The copy survives a wipe, never "your receipts are backed up".')
 
-    def test_receiver_fails_as_a_chain_server(self):
-        self.assert_fails_on_the_front_door(
+    def test_receiver_fails_as_a_chain_server_or_a_collector_for_the_chain(self):
+        self.assert_each_fails_on_the_front_door(
+            "receiver",
             "Run the chain server on a machine the writer cannot reach.",
-            "receiver")
+            "Point the hook at a collector for the published chain.")
 
     def test_receiver_passes_the_everyday_server_and_collector(self):
         self.assert_passes_on_the_front_door(
-            "The dashboard's server binds 127.0.0.1.",
+            "The dashboard's server binds 127.0.0.1; start the server.",
             "The same five readings are an MCP server.",
             "Public calendar servers aggregate digests; `http.server` serves the page.",
-            "The OpenTelemetry Collector settles where vendor code lives.")
+            "The OpenTelemetry Collector settles where vendor code lives.",
+            "Your collector can scrape the route.")
 
     def test_package_fails_as_a_bundle(self):
-        self.assert_fails_on_the_front_door(
-            "`supervisor package` ships the session as a bundle.", "package")
+        self.assert_each_fails_on_the_front_door(
+            "package", "`supervisor package` ships the session as a bundle.")
 
     def test_package_passes_the_refused_and_the_everyday_bundle(self):
         self.assert_passes_on_the_front_door(
@@ -284,9 +357,20 @@ class SynonymTest(Fixture):
             "Prior art: **Sigstore bundles**, and bundled navigation.",
             "The flag bundles nothing new.")
 
+    def test_the_raw_export_is_a_raw_archive_not_a_package(self):
+        readme = self.write("README.md", "The raw bundle carries command lines.\n")
+
+        result = run_checker(readme)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("say raw archive:", result.stdout)
+        self.assertNotIn("say package:", result.stdout)
+
     def test_authority_timestamp_fails_as_an_anchor(self):
-        self.assert_fails_on_the_front_door(
-            "The TSA anchor arrives in one round trip.", "authority timestamp")
+        self.assert_each_fails_on_the_front_door(
+            "authority timestamp",
+            "The TSA anchor arrives in one round trip.",
+            "The stamp anchors the head at the authority.")
 
     def test_authority_timestamp_passes_beside_the_anchor(self):
         self.assert_passes_on_the_front_door(
@@ -303,19 +387,6 @@ class SynonymTest(Fixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("NOTES.md:1: synonym (warning): ", result.stdout)
 
-    def test_an_adr_may_name_the_word_it_rejected(self):
-        # The refutation form is the escape, and in an ADR the rejected
-        # alternative is written as a bold heading followed by Rejected.
-        adr = self.write("adrs/0026-x.md", "\n".join([
-            "- **Call it a bundle.** Rejected: two words for one concept.",
-            '- "Bundle", the everyday word, is avoided.',
-        ]) + "\n")
-
-        result = run_checker(adr)
-
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.strip(), "")
-
     def test_the_tours_keep_their_analogies(self):
         # The tour's envelope analogy quotes the past on purpose, as the
         # old-name rule lets it.
@@ -330,9 +401,9 @@ class SynonymTest(Fixture):
 
 class CodePassTest(Fixture):
     # The code pass (issue #241): the anti-terms and the synonym table
-    # read the tool files too, identifiers, docstrings and comments, with
-    # an underscore read as a space. A synonym fails there as it does on
-    # the front door.
+    # read the tool files too, with an underscore read as a space. Only a
+    # comment or a docstring can refuse a word there, and a synonym fails
+    # as it does on the front door.
 
     def test_a_function_named_for_a_synonym_fails(self):
         code = self.write("loxodonta.py", "\n".join([
@@ -359,6 +430,39 @@ class CodePassTest(Fixture):
         self.assertIn("supervisor.py:2: anti-term: ", result.stdout)
         self.assertIn("supervisor.py:3: anti-term: AUDIT_LOG = None", result.stdout)
 
+    def test_python_syntax_is_never_read_as_a_refusal(self):
+        # A quote that opens a string, `not` as an operator, and `no_` as
+        # an identifier's prefix refuse nothing: each of these fails alone.
+        for source in (
+                '"""Mirror the receipts to the far machine."""',
+                '"""Immutable once written."""',
+                'HELP = "immutable record of the session"',
+                'print(f"chain backup sent to {url}")',
+                "if not backup_chain(entries):\n    pass",
+                'p.add_argument("--level", ...)',
+                "sent = True  # no_backup_chain any more"):
+            with self.subTest(source=source):
+                code = self.write("loxodonta.py", source + "\n")
+
+                result = run_checker(code)
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_a_comment_or_docstring_still_refuses_in_words(self):
+        code = self.write("loxodonta.py", "\n".join([
+            '"""Tamper-evident, not immutable."""',
+            "",
+            "",
+            "def send(entries):",
+            '    """Never a chain backup: the entries only go outward."""',
+            "    return entries  # not an audit log, and no chain backup either",
+        ]) + "\n")
+
+        result = run_checker(code)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
     def test_the_everyday_words_and_the_prose_rules_pass_in_code(self):
         # backup_settings backs up the settings file, which is exactly
         # what it says; the overclaim, em-dash and old-name rules are
@@ -367,7 +471,7 @@ class CodePassTest(Fixture):
             "def backup_settings(path):",
             '    """Back up the settings file — always, before a write."""',
             "    had_backup = True  # the server object from http.server",
-            '    actor = "receipts"  # receipts verify reads this',
+            '    actor = "receipts"  # `receipts verify` reads this',
             "    return had_backup",
         ]) + "\n")
 

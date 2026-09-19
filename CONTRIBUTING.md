@@ -48,11 +48,15 @@ GLOSSARY anti-terms anywhere (the refutation form, "not immutable", is
 allowed), on em dashes in the front-door files (README, SECURITY,
 CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT), and on overclaim words there
 ("prove", "guarantee", "always"); elsewhere those words only warn. It also
-fails on the tool's old name used as the command (ADR-0010), and on the
-words the GLOSSARY refuses for its own terms, a "backup" for the published
-chain or a "bundle" for the package, in those files and in the code, and
-warns on them elsewhere. CI runs exactly this command, so passing it
-locally is passing CI:
+fails on the tool's old name (ADR-0010) where it can only mean the tool:
+the old command written as code, the old script run with `python`, or the
+old name followed by "tool" or "CLI". Prose is not judged, since there the
+word means the receipts themselves as often as the tool, and the history,
+the changelog, the tours and the ADRs from before the rename keep the old
+name. The words the GLOSSARY refuses for its own terms, such as a "chain
+backup" for the published chain or "a bundle" for the package, fail in the
+front-door files and in the code and warn elsewhere. CI runs exactly this
+command, so passing it locally is passing CI:
 
 ```
 python tools/house_check.py
