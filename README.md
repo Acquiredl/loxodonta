@@ -86,6 +86,8 @@ python supervisor.py serve     # the dashboard, bound to 127.0.0.1 only
 
 `serve` also answers `/metrics` in the Prometheus text format, on the same address, so the supervisor works with Grafana and Elastic through Prometheus ([docs/METRICS.md](docs/METRICS.md)).
 
+The supervisor reads the store on the machine the agent works on, so what it says is a reason to look and never proof; [docs/TOPOLOGY.md](docs/TOPOLOGY.md) draws where each of the three files runs and what a verdict is worth there.
+
 ## A bad day, on record
 
 [docs/demo/bad-day-session.jsonl](docs/demo/bad-day-session.jsonl) is a chain from a session that fetched a page carrying a prompt injection and did what it said:

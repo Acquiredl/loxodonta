@@ -10,6 +10,8 @@ What it holds is the operator's copy of what the writer said, at an address of t
 
 What it is not. It is not a reader: it never runs `verify`, never serves a file back, and knows no vendor; anything that turns its files into somebody's storage grows on its side of the wire, never the recorder's (ADR-0031 ruling 5). It is not `tools/publish_echo.py`: the echo listens on the loopback address of the writer's own machine, prints what a published head holds, and keeps nothing, so nothing there has left the machine. The receiver is the remote the echo tells you to go and find.
 
+Where the receiver sits beside the other two files, and what the evidence on each machine is worth, is drawn on one page in [TOPOLOGY.md](TOPOLOGY.md).
+
 ## 2. Running it
 
 On the machine that will keep the copy:
@@ -139,7 +141,7 @@ python loxodonta.py verify --log ~/.loxodonta/receiver/receipts-<session>.jsonl
 ```
 
 - `VALID`, exit 0: every batch that arrived continued the one before it. A retried batch left the file intact, because its lines were exact duplicates and were dropped.
-- `BROKEN at entry N`, exit 1, where `N` is the first line after the honest copy: a batch arrived whose entries carry an `n` the file already holds with a different hash. The writer's chain was regenerated after entries up to `N - 1` had left the machine, and the copy holds both the original and the replacement, in the order they arrived. That verdict is the collision the copy exists to show, and the file is the evidence: leave it as it lies.
+- `BROKEN at entry N`, exit 1, where `N` is the first line after the copy that arrived first: a batch arrived whose entries carry an `n` the file already holds with a different hash. Two versions of the chain reached the receiver, and the copy holds both, in the order they arrived. The order says which came first, not which is the original, since the writer holds the URL too; the published heads, each checked at its own `n` (docs/TOPOLOGY.md), tell which one was regenerated. That verdict is the collision the copy exists to show, and the file is the evidence: leave it as it lies.
 
 A sibling chain (`receipts-<session>-002.jsonl`) verifies on its own, as siblings do. The heads file is not a chain and is not walked; a head in it is checked against a chain with `verify --log CHAIN --expect-head HEAD` (ADR-0025 ruling 4).
 
@@ -164,5 +166,5 @@ What none of this survives (ADR-0031):
 
 - **The receiver's own operator.** Whoever runs the receiver can read and delete its files. When that is the operator on a second machine, the property holds. When it is anyone else, that is a trust relationship this design does not cover.
 - **The receiver's box, reached another way.** A receiver reachable from the writer's machine by a credential other than the URL (an SSH key on the box, a shared filesystem, a login in a browser) is reachable by the writer. The tool cannot enforce this; the operator's choice of box does.
-- **The tail since the last send.** Everything after the last acknowledged entry can still be rewritten consistently on the writer's machine. The keeper's cadence bounds the window; session end closes it for sessions that reach one.
+- **The tail since the last send.** Everything after the last acknowledged entry can still be rewritten consistently on the writer's machine. Session end closes the window for sessions that reach one; before that, the keeper sends nothing until the head has sat unchanged past its cadence, which covers a session killed before its end and leaves a busy session's tail unsent until it ends.
 - **Garbage in.** The copy is of what the writer said.
