@@ -1401,6 +1401,68 @@ def published_reading(witness, logs):
     return {"wired": wired, "sent": sent, "note": note}
 
 
+# The harness deletes its own transcripts (#260). Claude Code sweeps a
+# session transcript away once it is older than `cleanupPeriodDays`
+# days, 30 when the setting is absent, and the chain's transcript
+# commitments stay with nothing left to judge them against (ADR-0017).
+# The scan reads the number from the file it reads the wired matchers
+# from and says it, so the floor under the rich record is stated where
+# the operator looks. Nothing here keeps a transcript: a copy would
+# carry prompts and output off the harness's shelf, which this tool
+# never does.
+RETENTION_SETTING = "cleanupPeriodDays"
+RETENTION_DEFAULT_DAYS = 30   # the harness's documented default
+
+
+def transcript_retention(witness):
+    """How long the harness keeps session transcripts, read from the
+    settings beside the witness layout, as {"days", "set", "file",
+    "words"}, plus "value" when the setting is there. None when no
+    settings file can be read: that is not a state of its own, and the
+    witness already says what it says about it. `days` is the documented
+    default when the setting is absent, and None when the value is not
+    the whole number of days, 1 or more, that the harness documents:
+    that value is repeated as it stands, never guessed at. Only this one
+    file is read, and the words say so."""
+    settings_file = witness.parent / "settings.json"
+    try:
+        settings = json.loads(settings_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(settings, dict):
+        return None
+    where = settings_file.as_posix()
+    reading = {"days": RETENTION_DEFAULT_DAYS,
+               "set": RETENTION_SETTING in settings, "file": where}
+    if reading["set"]:
+        value = reading["value"] = settings[RETENTION_SETTING]
+        shown = clip(json.dumps(value))
+        # A whole number is one however JSON spells it: 45.0 is 45 days.
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            reading["days"] = None
+            reading["words"] = (
+                f"{RETENTION_SETTING} is {shown} in {where}: the harness "
+                "documents a whole number of days, 1 or more, so no number "
+                "of days is read from this one")
+            return reading
+        reading["days"] = value
+        source = f"{RETENTION_SETTING} is {shown} in {where}"
+    else:
+        source = (f"{RETENTION_SETTING} is not set in {where}, so the "
+                  f"harness default of {RETENTION_DEFAULT_DAYS}")
+    reading["words"] = (
+        "the harness deletes a session transcript once it is older than "
+        f"{reading['days']} days: {source}. The chain and its transcript "
+        "commitments stay after that, with no transcript left to judge "
+        "them against (ADR-0017). Only this file is read; project, local "
+        "and managed settings can say otherwise, and recent harness "
+        "versions keep Claude Desktop and Cowork sessions by a rule of "
+        "their own (desktopSessionCleanupPeriodDays)")
+    return reading
+
+
 def sessionend_epoch(remembered, witness, now):
     """Since when the exit commitment has been possible (ADR-0018): the
     calibration pattern's third use. First observation of a wired
@@ -1982,6 +2044,11 @@ def watch_completeness(root, witness, families, everywhere=False,
         watch["note"] = ("no recorder hook is wired into the harness "
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
+    # How long the harness keeps what this watch reads (#260): a fact
+    # beside the watch, never a judgment in it, and never the exit.
+    retention = transcript_retention(witness)
+    if retention:
+        watch["transcript_retention"] = retention
 
     def add(repo, session, state, tools, receipts, drawers=(), judge=None,
             transcript=None):
@@ -7402,6 +7469,13 @@ function render(report) {
   if (report.completeness.before_memory) {
     watch.appendChild(el("p", "claim",
       report.completeness.before_memory.words));
+  }
+  // #260: how long the harness keeps the transcripts this watch reads,
+  // as its settings say. A fact about the harness, one line, never a
+  // finding.
+  if (report.completeness.transcript_retention) {
+    watch.appendChild(el("p", "claim",
+      report.completeness.transcript_retention.words));
   }
 
   // The consumption watch (issue #67, OWASP LLM06 #8): sessions
