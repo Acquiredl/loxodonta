@@ -6,6 +6,7 @@ sits in the harness, outside the writer's volition. Tests drive the
 public CLI with stdin payloads, never internals.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -19,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
-def run_hook(payload, cwd, *args, extra_env=None):
+def run_hook(payload, cwd, *args, extra_env=None, timeout=None):
     # CLAUDE_PROJECT_DIR steers the default log dir; scrub the ambient one
     # so tests are deterministic wherever they run, and inject it only when
     # a test is exercising that resolution.
@@ -47,6 +48,7 @@ def run_hook(payload, cwd, *args, extra_env=None):
         input=stdin,
         capture_output=True,
         env=env,
+        timeout=timeout,
     )
     result.stdout = result.stdout.decode("utf-8", errors="replace")
     result.stderr = result.stderr.decode("utf-8", errors="replace")
@@ -247,6 +249,65 @@ class HookTest(unittest.TestCase):
         result = run_hook(
             payload(tool="Write", tool_input={"file_path": "never-written.md"}),
             cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.entries()[1]["files"], [])
+
+    def test_symlink_inside_project_is_fingerprinted_by_its_own_path(self):
+        # "Under the project" is judged on the path as given (SPEC §3,
+        # #224): a link inside it is followed wherever it points, and the
+        # receipt carries the link's path with the target's bytes.
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        target = Path(elsewhere.name) / "outside.md"
+        target.write_text("bytes that live outside the project\n",
+                          encoding="utf-8")
+        link = self.workdir / "link.md"
+        try:
+            os.symlink(str(target), str(link))
+        except OSError as e:
+            self.skipTest("symlinks cannot be created here "
+                          f"({e.strerror or type(e).__name__}); this test "
+                          "runs wherever they can")
+
+        result = run_hook(
+            payload(tool="Read", tool_input={"file_path": str(link)}),
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.entries()[1]["files"],
+            [{"path": "link.md",
+              "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}],
+        )
+
+    def test_directory_at_the_path_is_logged_without_fingerprint(self):
+        # Only a regular file is fingerprinted (docs/HOOK.md); anything
+        # else at the path is skipped like a file that is gone.
+        (self.workdir / "src").mkdir()
+
+        result = run_hook(
+            payload(tool="Read", tool_input={"file_path": "src"}),
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = self.entries()[1]
+        self.assertEqual(entry["files"], [])
+        self.assertIn("src", entry["action"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "os.mkfifo is POSIX only")
+    def test_fifo_at_the_path_is_logged_without_fingerprint(self):
+        # Opening a FIFO waits for a writer, so a hook that hashed one
+        # would hang the tool call; the timeout raises rather than stall
+        # the suite.
+        os.mkfifo(str(self.workdir / "pipe"))
+
+        result = run_hook(
+            payload(tool="Read", tool_input={"file_path": "pipe"}),
+            cwd=self.workdir, timeout=60,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
