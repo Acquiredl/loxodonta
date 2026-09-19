@@ -726,16 +726,11 @@ class TranscriptRetentionPanelTest(ServerFixture):
         witness.mkdir(parents=True)
         (home / ".claude" / "settings.json").write_text(
             json.dumps(settings), encoding="utf-8")
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8",
-               "LOXODONTA_HOME": str(home / ".loxodonta"),
-               "HOME": str(home), "USERPROFILE": str(home),
-               "CODEX_HOME": str(home / ".codex")}
-        env.pop("CLAUDE_PROJECT_DIR", None)
         self.proc = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
              "--witness", str(witness)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env=env)
+            env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
