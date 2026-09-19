@@ -99,7 +99,24 @@ list made the authority the default; every one made it an addition.
    file given, prints `stamp not judged: ...` as a note and never a
    verdict, ADR-0026's exact posture. `verify-package` judges the
    packaged sidecar the same way and its verdict line gains `+ STAMPED`
-   beside `+ ANCHORED` when the manifest is stamped.
+   beside `+ ANCHORED` when the manifest is stamped. *(Addendum
+   2026-09-18, #264: one rejection is the calendar's, not the token's.
+   `openssl ts -verify` checks the chain as of the moment it runs, so a
+   genuine token failed once the authority's certificate expired. When
+   expiry is openssl's reason, the recorder asks again with `-attime`
+   at the time the token states, its own signed time as `openssl ts
+   -reply -token_out -text` prints it, never the unsigned status text
+   beside it, so the token is still never parsed here. Holding then, it
+   is `stamp not judged: the authority's certificate expired after the
+   token was issued`, a note; in a package its seal line says so, and
+   the residual trust and the verdict too when it is the only token
+   over the manifest. Failing then too, or stating
+   no single time that can be read, it stays `STAMP-INVALID` or
+   `SEAL-INVALID`. An `openssl` with no `-attime` gets this ruling's
+   note for a tool that cannot judge. The note is never `STAMPED`: past
+   its certificate's end date nothing vouches for the key, and
+   long-term validation stays unbuilt, as "Certificate life" below
+   says.)*
 6. **What stands.** OpenTimestamps is the default and the only
    commitment at `timestamped` until an authority is named. "Anchoring
    without infrastructure" stays the positioning edge, and the README
