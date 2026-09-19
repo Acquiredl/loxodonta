@@ -33,7 +33,8 @@ from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
 from test_receiver import make_chain, run_recorder
 from test_supervisor import (ago, chain_head, chains_by_session,
-                             install_witness_hook, isolated_env, keeper_env,
+                             home_outside, install_witness_hook,
+                             isolated_env, keeper_env,
                              make_chain as make_store_chain, run_scan,
                              write_chain_row)
 
@@ -1015,9 +1016,13 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
         self.receiver = serve_fake(self)
+        # Outside the scanned root, a home of its own: the keeper reads
+        # the coverage marker, and at `full` would follow its remote
+        # (#242).
+        self.env = isolated_env(home_outside(self))
 
     def scan(self, *extra, **knobs):
-        return run_scan(self.root, *extra, env=keeper_env(**knobs))
+        return run_scan(self.root, *extra, env={**self.env, **knobs})
 
     def kinds(self):
         return [sent["content_type"] for sent in self.receiver.received]
@@ -1156,7 +1161,7 @@ class PublishChainKeeperTest(unittest.TestCase):
              "--publish-url", self.receiver.url,
              "--publish-chain", self.receiver.url],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env=keeper_env(PYTHONIOENCODING="utf-8"))
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
         def stop():
             if proc.poll() is None:
@@ -1556,9 +1561,8 @@ class FullProfileKeeperTest(unittest.TestCase):
              str(self.root), "--port", "0", "--witness", str(self.witness),
              "--calendar", self.calendar.url, *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env=keeper_env(LOXODONTA_HOME=str(self.store),
-                           CODEX_HOME=str(self.home / ".codex"),
-                           PYTHONIOENCODING="utf-8"))
+            env=isolated_env(self.home, LOXODONTA_HOME=str(self.store),
+                             PYTHONIOENCODING="utf-8"))
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
@@ -1640,9 +1644,8 @@ class FullProfileKeeperTest(unittest.TestCase):
              str(self.root), "--port", "0", "--witness", str(self.witness),
              *extra],
             capture_output=True, encoding="utf-8", timeout=60,
-            env=keeper_env(LOXODONTA_HOME=str(self.store),
-                           CODEX_HOME=str(self.home / ".codex"),
-                           PYTHONIOENCODING="utf-8"))
+            env=isolated_env(self.home, LOXODONTA_HOME=str(self.store),
+                             PYTHONIOENCODING="utf-8"))
 
     def test_uninstall_stands_both_keepers_down(self):
         # PRD #244 story 40: the receiver stops hearing from me when I say
@@ -1781,9 +1784,8 @@ class DrillUnderFullTest(unittest.TestCase):
             [sys.executable, str(SUPERVISOR), "drill", "--root",
              str(self.root), "--log", log, "--json"],
             capture_output=True, encoding="utf-8",
-            env=keeper_env(LOXODONTA_HOME=str(self.store),
-                           CODEX_HOME=str(self.home / ".codex"),
-                           PYTHONIOENCODING="utf-8"))
+            env=isolated_env(self.home, LOXODONTA_HOME=str(self.store),
+                             PYTHONIOENCODING="utf-8"))
 
     def test_a_rehearsal_names_the_tier_and_sends_nothing(self):
         subprocess.run(
@@ -2191,11 +2193,7 @@ class ChainRowsTravelNowhereTest(unittest.TestCase):
         self.witness = self.root / "no-witness"
         for folder in (self.home, self.work, self.witness):
             folder.mkdir()
-        self.env = {**clean_env(),
-                    "LOXODONTA_HOME": str(self.home / ".loxodonta"),
-                    "HOME": str(self.home),
-                    "USERPROFILE": str(self.home)}
-        self.env.pop("CLAUDE_PROJECT_DIR", None)
+        self.env = isolated_env(self.home, PYTHONIOENCODING="utf-8")
         self.receiver = serve_fake(self)
         self.log = make_store_chain(
             self.home / ".loxodonta" / "receipts" / "proj-1", self.SESSION)

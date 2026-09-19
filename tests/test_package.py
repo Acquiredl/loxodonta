@@ -41,13 +41,14 @@ def run(script, *args, env=None, cwd=None):
 
 def neutral_env(home):
     """The environment the packing machine runs under: the neutral home
-    is home, the store is its .loxodonta, and nothing of the test
-    process's own project leaks in."""
+    is home, the store is its .loxodonta, Codex's hooks are its .codex
+    (#242), and nothing of the test process's own project leaks in."""
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDE_PROJECT_DIR", "LOXODONTA_HOME",
                         "SOURCE_DATE_EPOCH")}
     env.update({"LOXODONTA_HOME": str(home / ".loxodonta"),
-                "HOME": str(home), "USERPROFILE": str(home)})
+                "HOME": str(home), "USERPROFILE": str(home),
+                "CODEX_HOME": str(home / ".codex")})
     return env
 
 

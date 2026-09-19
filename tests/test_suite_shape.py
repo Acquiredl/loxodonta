@@ -65,8 +65,8 @@ class EveryModuleRunsAlone(unittest.TestCase):
 # --- The tripwire (#242) ------------------------------------------------------
 # The supervisor verbs that read machine-wide state: the coverage marker,
 # the harness settings or the store's baseline. The recall verbs read the
-# store as well, but only the drawer of the `--repo` a test names, which
-# is a folder of the test's own.
+# store as well, looking for the drawer of the `--repo` a test names, but
+# neither the marker nor the settings, so they are not held to this.
 HOME_READERS = {"scan", "serve", "calibrate", "drill", "export", "package"}
 # Every home those verbs reach: the store, the user's home as either
 # platform spells it (Path.home() reads USERPROFILE on Windows and HOME
@@ -84,8 +84,8 @@ def inside_the_temp_root(value, cwd):
     A relative `value` is read from `cwd`, as the child will read it."""
     if not value:
         return False
-    temp = os.path.realpath(tempfile.gettempdir())
-    folder = os.path.realpath(os.path.join(cwd, value))
+    temp = os.path.normcase(os.path.realpath(tempfile.gettempdir()))
+    folder = os.path.normcase(os.path.realpath(os.path.join(cwd, value)))
     try:
         return os.path.commonpath([folder, temp]) == temp
     except ValueError:  # another drive, on Windows: not under it
@@ -154,7 +154,7 @@ sys.addaudithook(refuse_this_machines_home)
 
 class NoTestReadsThisMachinesHome(unittest.TestCase):
 
-    def test_a_home_reading_verb_started_with_the_inherited_home_is_refused(self):
+    def test_a_home_reading_start_with_the_inherited_home_is_refused(self):
         # `--help` reads no home even if the tripwire were not armed.
         command = [sys.executable, str(SUPERVISOR), "scan", "--help"]
 

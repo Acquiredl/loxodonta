@@ -55,6 +55,7 @@ class AnchoredStoreCase(PackageCase):
         self.work.mkdir()
         # The neutral home, and no proxy in the way of 127.0.0.1.
         self.env = {**clean_env(), **neutral_env(self.home)}
+        self.env.pop("CLAUDE_PROJECT_DIR", None)  # clean_env kept it (#242)
         for command in ("pytest -q", "git status"):
             self.hook(SESSION, "Bash", {"command": command})
         (drawer,) = [p for p in (self.home / ".loxodonta" / "receipts").iterdir()

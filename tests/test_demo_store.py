@@ -31,21 +31,26 @@ COMMITTED_BAD_DAY = REPO_ROOT / "docs" / "demo" / "bad-day-session.jsonl"
 
 
 def run(script, *args, env=None, cwd=None):
+    """`env`, when given, is the whole environment (see neutral_env), so
+    what it leaves out stays out."""
     return subprocess.run(
         [sys.executable, str(script), *args], cwd=cwd,
         capture_output=True, encoding="utf-8", errors="replace",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8", **(env or {})})
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8"})
 
 
 def neutral_env(home):
     """The environment a reader of the demo store runs under: the
-    neutral home is home, the store is its .loxodonta, and nothing of
-    the test process's own project leaks in."""
+    neutral home is home, the store is its .loxodonta, Codex's hooks are
+    its .codex (#242), and nothing of the test process's own project
+    leaks in."""
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDE_PROJECT_DIR", "LOXODONTA_HOME",
                         "SOURCE_DATE_EPOCH")}
     env.update({"LOXODONTA_HOME": str(home / ".loxodonta"),
-                "HOME": str(home), "USERPROFILE": str(home)})
+                "HOME": str(home), "USERPROFILE": str(home),
+                "CODEX_HOME": str(home / ".codex")})
     return env
 
 
@@ -226,7 +231,8 @@ class DemoStoreTest(unittest.TestCase):
             self.assertEqual(verify.returncode, 0, verify.stderr)
             self.assertIn("VALID", verify.stdout)
             drill = run(SUPERVISOR, "drill", "--root", str(root),
-                        "--log", str(copy), "--json")
+                        "--log", str(copy), "--json",
+                        env=neutral_env(root / "home"))
             self.assertEqual(drill.returncode, 0,
                              drill.stdout + drill.stderr)
             report = json.loads(drill.stdout)

@@ -39,8 +39,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
-from test_supervisor import (ago, chain_head, chains_by_session, keeper_env,
-                             make_chain, run_scan)
+from test_supervisor import (ago, chain_head, chains_by_session,
+                             home_outside, isolated_env, make_chain,
+                             run_scan)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -1473,7 +1474,7 @@ class ScanStampTest(unittest.TestCase):
              "budget": 3.0,
              "outcome": "the authority answered status 2 (rejection)"}])
 
-        result = run_scan(self.root, env=keeper_env())
+        result = run_scan(self.root, env=isolated_env(home_outside(self)))
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))

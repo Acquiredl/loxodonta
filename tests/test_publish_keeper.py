@@ -30,10 +30,10 @@ from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
 from test_stamp import reply, start_authority
 from test_supervisor import (ago, chain_head, chains_by_session,
-                             install_witness_hook, isolated_env, keeper_env,
-                             make_chain, run_scan, write_attempt_row,
-                             write_chain_row, write_completed_anchor,
-                             write_pending_anchor)
+                             home_outside, install_witness_hook,
+                             isolated_env, keeper_env, make_chain, run_scan,
+                             write_attempt_row, write_chain_row,
+                             write_completed_anchor, write_pending_anchor)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -56,12 +56,15 @@ def memo_of(log):
 
 class ReceiverFixture(unittest.TestCase):
     """A temp root of legacy repos and a fake webhook that keeps every
-    POST it was sent."""
+    POST it was sent, and a home of the test's own outside the root: a
+    keeper started in the machine's home reads its coverage marker, and
+    at `full` would follow its remote (#242)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
         self.receiver = FakeReceiver(("127.0.0.1", 0), FakeReceiverHandler)
         self.receiver.received = []
         self.receiver.delay = 0
@@ -178,7 +181,7 @@ class PublishKeeperTest(ReceiverFixture):
     anchor keeper. Off by default."""
 
     def scan(self, *extra, **knobs):
-        return run_scan(self.root, *extra, env=keeper_env(**knobs))
+        return run_scan(self.root, *extra, env={**self.env, **knobs})
 
     def publishing(self, *extra, **knobs):
         return self.scan("--publish-every", "0s",
@@ -459,7 +462,7 @@ class NeverPublishedTest(ReceiverFixture):
 
     def scan(self, *extra):
         return run_scan(self.root, "--witness", str(self.witness), *extra,
-                        env=keeper_env())
+                        env=self.env)
 
     def test_a_wired_publish_that_never_sent_is_one_sentence(self):
         self.wire('python loxodonta.py hook --publish "http://127.0.0.1:9/hook"')
@@ -498,7 +501,7 @@ class NeverPublishedTest(ReceiverFixture):
             [sys.executable, str(SUPERVISOR), "scan", "--root",
              str(self.root), "--witness", str(self.witness)],
             capture_output=True, encoding="utf-8",
-            env={**keeper_env(), "PYTHONIOENCODING": "utf-8"})
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
         self.assertEqual(plain.returncode, 0, plain.stdout + plain.stderr)
         self.assertEqual(json.loads(plain.stdout)["published"]["note"],
@@ -572,7 +575,7 @@ class DashboardLeftTest(ReceiverFixture):
             [sys.executable, str(SUPERVISOR), "serve", "--root",
              str(self.root), "--port", "0", *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env=keeper_env())
+            env=self.env)
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
@@ -718,9 +721,8 @@ class ProfileKeeperTest(unittest.TestCase):
              str(self.root), "--port", "0", "--witness", str(self.witness),
              "--calendar", self.calendar.url, *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env=keeper_env(LOXODONTA_HOME=str(self.store),
-                           CODEX_HOME=str(self.home / ".codex"),
-                           PYTHONIOENCODING="utf-8", **knobs))
+            env=isolated_env(self.home, LOXODONTA_HOME=str(self.store),
+                             PYTHONIOENCODING="utf-8", **knobs))
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
