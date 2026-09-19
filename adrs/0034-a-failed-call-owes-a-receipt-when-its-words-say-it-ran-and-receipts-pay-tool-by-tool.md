@@ -45,21 +45,34 @@ transcripts and subagent files both):
 | any other tool's failure with none of those | 140 | mcp tools 66, Read 52, WebFetch 8, Agent 5, Glob 3, Grep 3, WebSearch 2, Write 1; by their words, tools that started (a file not found, an MCP server's error, a refused fetch, a subagent that died) |
 
 Every permission denial in a main transcript carried `toolDenialKind`;
-in subagent files one of 67 did. No field in the transcript separates a
-non-shell tool that started and failed from a call a `PreToolUse` hook
-blocked: both are an error string on a flagged block.
+in subagent files one of 67 did.
 
-Two reviews shaped the rule. The first cut paired two totals and let a
-failure that might have fired loosen the surplus check, so a receipt the
-witness could not owe paid for a receipt another call lost. The writer
-is the adversary (ADR-0002), and the move is cheap: starve one command's
-hook (hold the chain lock past its timeout), run the command, then make
-a fetch fail against a server it controls; the failed-call event writes
-the fetch's receipt, and the session reads clean. Pairing tool by tool
-closed that across tools and left it open inside one: a starved fetch
-beside a failed fetch that fired read `OK`, exit 0, where dev reads
-`ALARM-SILENT`, exit 6. That is every non-shell tool whose failures fire
-the event, with the same attack kept inside one tool.
+**Is a block marked?** Measured on the same data, because the rule turns
+on it. Of 1,052 failed results (a later count of the same store), none
+opens with `PreToolUse` or `hook`; the 11 that mention a hook in their
+first lines are ten command outputs about hooks and one tool's error.
+The only blocks in the data are the desktop worktree guard's, 73 of
+them, all in subagent files: 70 bare, 3 wrapped in `<tool_use_error>`,
+none carrying `toolDenialKind`, each block holding the same keys a
+failed command's does. The hooks page routes a `PreToolUse` deny, or an
+exit 2, "the same way as deny", with the hook's own words as the reason,
+and names no prefix. Whether the record then carries `toolDenialKind`
+is not documented, and not measured here, since this machine runs no
+`PreToolUse` hook. So nothing the harness writes marks a block, and a
+non-shell call a hook blocked reads like one that started and failed.
+
+Three reviews shaped the rule. The first cut paired two totals, so a
+receipt the witness could not owe paid for a receipt another call lost.
+The writer is the adversary (ADR-0002), and the move is cheap: starve
+one command's hook (hold the chain lock past its timeout), run the
+command, then make a fetch fail against a server it controls; the
+failed-call event writes the fetch's receipt, and the session reads
+clean. The second cut paired tool by tool and left the same move open
+inside one tool: a starved fetch beside a failed fetch that fired read
+`OK`, exit 0, where dev reads `ALARM-SILENT`, exit 6. The third found
+the grace clock: once a failed call's possible receipt is counted first,
+the owed call left standing is an earlier one, and a deficit dated by it
+skipped the grace window every receipt gets.
 
 ## Decision
 
@@ -77,23 +90,31 @@ the event, with the same attack kept inside one tool.
    - **Owed** where the result opens `Exit code N`: a command that ran.
      The check is on the words, not the tool's name.
    - **`may_owe`**, any other tool's failure: one that started and
-     failed fired the event, one that was blocked or denied without its
-     marker fired nothing, and the transcript words them alike.
+     failed fired the event, one a hook blocked or a denial written
+     without its marker fired nothing, and the transcript words them
+     alike.
 2. **Receipts pay tool by tool, and `may_owe` calls are paid first.** For
    each tool, count its owed calls, its `may_owe` calls and its receipts,
    a receipt's tool being the one its action line names. Receipts go
-   first to the tool's `may_owe` calls, and only what is left pays its
-   owed calls, earliest first: the deficit is the sum over tools of owed
-   minus (receipts minus `may_owe`, not below zero), where positive, and
-   the surplus is the sum of receipts minus `may_owe` minus owed, where
-   positive. A receipt that may be the one a failed call left can then
-   never cover the one an owed call lost, in its own tool or in another.
-   The deficit clock keys on the first owed call still unpaid. What this
-   costs is a false deficit when a `may_owe` call did not in fact fire,
-   in a session with owed calls of the same tool, and the ruling takes
-   it: an alarm on a blocked call over a mask on a starved one, the
-   choice ADR-0029 ruling 5 made, because a harness that fired no hook
-   and a hook an attacker killed leave the same evidence.
+   first to the tool's `may_owe` calls, and only what is left, never
+   less than none, pays its owed calls, earliest first: the deficit is
+   the sum over tools of owed minus (receipts minus `may_owe`, not below
+   zero), where positive, and the surplus is the sum of receipts minus
+   `may_owe` minus owed, where positive. A receipt that may be the one a
+   failed call left can then never cover the one an owed call lost, in
+   its own tool or in another. The deficit clock keys on the first owed
+   call still unpaid, dated no earlier than its tool's newest `may_owe`
+   call, so a receipt still on its way from that call gets the grace
+   window any receipt gets.
+
+   **The price, stated plainly:** a non-shell call that a `PreToolUse`
+   hook blocked, or that was denied without its marker, fired nothing,
+   and in a session that used that tool otherwise it reads as a live
+   `ALARM-DEFICIT` that lasts until the session ends, and as
+   `ENDED-DEFICIT` after. The ruling takes that price: an alarm on a
+   blocked call over a mask on a starved one, the choice ADR-0029 ruling
+   5 made, because a harness that fired no hook and a hook an attacker
+   killed leave the same evidence.
 3. **A receipt whose line names no tool the transcript shows keeps the
    pooled reading.** A line written by hand with `loxodonta log`, a
    `run` line, another writer's line: it pays the earliest unpaid call
@@ -105,8 +126,9 @@ the event, with the same attack kept inside one tool.
    see a deficit and a surplus at once, because it compared two totals.
    Tool by tool it can, and then the state is the deficit's: a surplus
    in one tool never stands a missing receipt in another down. The
-   deficit words say what is true when the totals match and one tool is
-   short: a call the witness saw has no receipt of its tool.
+   deficit words say what holds in every case: a tool's receipts fall
+   short of the calls the witness saw it make, and the missing may be a
+   receipt lost, or a failed call that fired nothing.
 5. **The epoch carries the event.** The calibration observes
    `PostToolUseFailure` beside `PostToolUse`, and the coverage marker
    writes its matchers as `failures`, only when it was wired (ADR-0016,
@@ -120,13 +142,20 @@ the event, with the same attack kept inside one tool.
    as an attachment keyed by the tool call's id (`hook_success`,
    `hook_non_blocking_error`; #239's measurement used them, and #212
    asks what they say). With those, a later witness could tell a failed
-   call that fired from one that did not, and `may_owe` would shrink to
-   nothing. That reads the harness's bookkeeping, which the witness does
-   not read today, and whether it should is #212's to rule, so it is
-   held for that ruling rather than taken here.
+   call that fired from one that did not, and `may_owe`, with the price
+   in ruling 2, would go. That reads the harness's bookkeeping, which the
+   witness does not read today, and whether it should is #212's to rule,
+   so it is held for that ruling rather than taken here.
 
 ## What none of this survives
 
+- **A failed call alone in its tool whose own hook was starved.** A
+  non-shell failure is `may_owe`, and with no other call of its tool in
+  the session nothing is owed that its missing receipt could leave
+  unpaid. A writer that sends data out through a fetch to a server that
+  answers with an error, and starves that one call's hook, in a session
+  that made no other fetch, leaves a clean reading. Owing every non-shell
+  failure would catch it (see Alternatives).
 - **A line written by hand.** The pooled reading (ruling 3) lets a line
   naming a tool the session never used pay any deficit, and a line
   naming the starved tool pays that tool's deficit in any ruling that
@@ -153,7 +182,9 @@ the event, with the same attack kept inside one tool.
   in its own tool or another: the tests
   `test_a_may_owe_receipt_never_pays_another_calls_deficit` and
   `test_a_may_owe_receipt_never_pays_its_own_tools_deficit` read
-  `ALARM-DEFICIT`, exit 6, with the action lines the hook writes.
+  `ALARM-DEFICIT`, exit 6, with the action lines the hook writes, and
+  `test_a_may_owe_receipt_still_on_its_way_gets_the_grace` reads
+  `LAGGING` while the failed call's receipt is on its way.
 - A failed call under an install that never wired the event is judged
   as before (`test_an_install_from_before_the_event_is_judged_as_before`
   reads `ENDED-SURPLUS`, as dev does). Tool-by-tool pairing itself
@@ -164,35 +195,31 @@ the event, with the same attack kept inside one tool.
   pairing left every state as the totals had it; one ended session,
   already `ENDED-DEFICIT`, counts 8 missing where the totals counted 7,
   a surplus receipt of one tool having covered a loss in another. With
-  ruling 2's order and ruling 1's shell rule added, no state changed
-  either, since no epoch there wires the event yet.
+  ruling 2's order and ruling 1's shell rule added, no reading changed,
+  since no epoch there wires the event yet.
 
 **What gets harder or more constrained:**
 
-- **The false deficit ruling 2 accepts.** Measured by simulation on
-  copies of the same store (every epoch wired, every `Exit code N`
-  failure given its receipt, no other failure given one, so every
-  `may_owe` call counted as one that never fired, the worst case): 6 of
-  the 92 ended sessions turn from `ENDED-CLEAN` to `ENDED-DEFICIT`, and
-  one already short grows by one. Each is an unmarked non-shell failure
-  beside completed calls of its tool: Read in three sessions, Grep in
-  two, a browser MCP tool, a fetch, a subagent. Their words say they
-  started, so wired they would have fired and paid their own slot; the
-  simulation is the bound, not the forecast. The live session's state
-  is the same under both rules.
-- **Under-owing where the words cannot tell.** A non-shell tool that
-  started and failed, and whose own hook was starved, is `may_owe`, so
-  its absence is no deficit: 140 of the 1,041 failures here. Owing them
-  instead would raise a live alarm for every non-shell call a
-  `PreToolUse` hook blocks, and a siren that sounds for honest sessions
-  trains the operator to ignore it (ADR-0014).
+- **Ruling 2's price, bounded on this store.** By simulation on copies
+  of the same store (every epoch wired, every `Exit code N` failure given
+  its receipt, no other failure given one, so every `may_owe` call
+  counted as one that fired nothing, the worst case): 7 of the 92 ended
+  sessions read more missing than before, 6 of them turning from
+  `ENDED-CLEAN` to `ENDED-DEFICIT`, 24 missing in all and up to 12 in one
+  session; a review's run of the same method counted 29 across 7. Each
+  is an unmarked non-shell failure beside calls of its tool: Read, Grep,
+  a subagent, a fetch, browser MCP tools, a Write. By their words those
+  started and failed, so wired they would have fired and paid their own
+  receipts; the simulation bounds the price and does not forecast it.
+  Where a `PreToolUse` hook does block non-shell calls, the price is
+  real and live (ruling 2).
 - **One wording carries the owed class.** `Exit code N` is documented
   for the event's `error` and only "generally the same text" in the
   transcript. If the harness rewords it, owed failures owe nothing
   without a sound; the canary is what says so.
 - **`toolDenialKind` is not documented.** It only moves a call from
   `may_owe` to owing nothing. If the harness stops writing it, a
-  non-shell denial becomes `may_owe`, and ruling 2 can then read it as a
+  non-shell denial becomes `may_owe`, and ruling 2 then reads it as a
   false deficit in a session that used that tool.
 - **A session that spans the re-install.** The calibration dates the
   change by the settings file's mtime, clamped between the last
@@ -205,9 +232,10 @@ the event, with the same attack kept inside one tool.
   harness that did not pick the edit up would leave failed commands
   after the install owed and missing in that session, the edge a matcher
   change already has.
-- The completeness row gains `may_owe`, and a package's `witness.json`
-  carries it. The field-data export's allowlist does not (ADR-0021);
-  that is deferred to the author.
+- The completeness row gains `may_owe`, the dashboard's watch row says
+  it beside the totals with the count short, and a package's
+  `witness.json` carries it. The field-data export's allowlist does not
+  (ADR-0021); that is deferred to the author.
 - Codex is untouched. It has no failed-call event, its `PostToolUse`
   already fires after a Bash command that exits non-zero, and it has no
   witness (ADR-0020).
@@ -215,7 +243,7 @@ the event, with the same attack kept inside one tool.
 **What we'll have to revisit if:**
 
 - #212 rules that the witness may read the hook's attachments (ruling
-  7): `may_owe`, and the false deficit ruling 2 accepts, can then go.
+  7): `may_owe`, and ruling 2's price, can then go.
 - The harness marks a blocked or denied call in the transcript for every
   tool, in both files.
 - The canary speaks on a store where failures are known to have run:
@@ -223,9 +251,17 @@ the event, with the same attack kept inside one tool.
 
 ## Alternatives considered
 
-- **Owe every failed call.** One rule and no `may_owe` at all. Rejected:
-  every denial and every blocked call becomes a deficit, live ones
-  alarms.
+- **Owe every non-shell failure** (every failure the words do not rule
+  out, with no `may_owe` at all). Simpler by a concept, and it catches
+  the starved failing call alone in its tool that ruling 2 misses. Its
+  price is ruling 2's, widened: a live alarm for every non-shell call a
+  `PreToolUse` hook blocks, where ruling 2 alarms only when the session
+  used that tool otherwise. The two differ by exactly one case each way,
+  a blocked call alone in its tool against a starved one alone in its
+  tool. Held beside ruling 2 for the author's choice; on this store,
+  where no hook blocks a non-shell call, the two read alike.
+- **Owe every failed call.** Rejected: every denial, rejected input and
+  blocked shell call becomes a deficit, live ones alarms.
 - **Owe no failed call** (#239's option 2). Rejected by the ruling: the
   failure receipts then read as surplus in every session that fails a
   command, and a stripped failure hook is invisible.
@@ -236,15 +272,11 @@ the event, with the same attack kept inside one tool.
   review: inside one tool, the receipt a failed fetch left pays for the
   one a starved fetch lost.
 - **Read the hook's attachments now.** Held, not rejected (ruling 7).
-- **Owe unmarked non-shell failures in main transcripts**, where
-  permission denials are marked. Rejected: a `PreToolUse` hook's block is
-  unmarked everywhere, and operators who run blocking hooks are the ones
-  most likely to run this tool.
 
 ## References
 
 - Related ADRs: `0002-writer-as-adversary.md` (the writer as adversary,
-  and the limit named above), `0014-the-day-book.md` (a siren nobody
+  and the limits named above), `0014-the-day-book.md` (a siren nobody
   trusts), `0016-coverage-goes-wide.md` (ruling 1 amended: a failed call
   is covered where the event is wired; effective dating reused),
   `0020-recorder-adapters-speak-the-hook-contract.md` (Codex, no second
@@ -257,5 +289,5 @@ the event, with the same attack kept inside one tool.
 - Out of scope, upheld: `.out-of-scope/001-outcome-capture-in-hook.md`.
 - Glossary terms **sharpened**: *Coverage*, *Coverage marker*.
 - Raised: issue #239 (the gap, and the ruling to wire the event); the
-  spec and standards reviews of its first two cuts, 2026-09-18 and
+  spec and standards reviews of its first three cuts, 2026-09-18 and
   2026-09-19; #212 holds ruling 7.

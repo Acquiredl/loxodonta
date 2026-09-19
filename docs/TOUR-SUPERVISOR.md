@@ -198,16 +198,21 @@ tool's failure. Then `reconcile` pairs receipts with calls tool by tool
 rather than as two totals, and within a tool gives its `may_owe` calls
 their receipts first, so a receipt a failed call may have left never
 pays for one an owed call lost, in another tool or its own. The first
-two cuts of this let the writer do exactly that on purpose.
+two cuts of this let the writer do exactly that on purpose. The unpaid
+call is then an earlier one, so its deficit is dated no earlier than
+the tool's newest `may_owe` call, and a receipt still on its way gets
+its grace. The price is a live deficit for a non-shell call a hook
+blocked, in a session that used that tool otherwise.
 
 `classify` is the ratified state machine — a pure reading of the
 evidence: OK / QUIET / LAGGING (a 30-second grace, because an honest
 lock wait must never alarm) / ALARM-SILENT (recording stopped) /
-ALARM-DEFICIT (the fork-shaped hole: receipts arrive, and an owed call
-has none of its tool) / SURPLUS (an investigate flag, never a verdict)
-/ ENDED-CLEAN / ENDED-DEFICIT (missing forever; kept as evidence, not
-a siren) / ENDED-SURPLUS (a surplus does not become clean by the
-session ending) / UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY.
+ALARM-DEFICIT (the fork-shaped hole: receipts arrive, and a tool has
+fewer than the calls it made) / SURPLUS (an investigate flag, never a
+verdict) / ENDED-CLEAN / ENDED-DEFICIT (missing forever, unless a
+failed call fired nothing; kept as evidence, not a siren) /
+ENDED-SURPLUS (a surplus does not become clean by the session ending)
+/ UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY.
 Deficit is sticky — lost receipts never arrive later — and since
 pairing went tool by tool it also wins: a session short in one tool and
 over in another reads as the deficit, never the surplus (ADR-0034).
