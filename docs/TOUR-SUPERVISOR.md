@@ -182,18 +182,21 @@ a start claim says more calls owe receipts, an end claim says fewer,
 and "nothing was owed from here" is the silence the alarm exists to
 catch.
 
-A fifth finding reopened the second (#239). The harness does fire an
-event for a call that ran and failed, `PostToolUseFailure`, and
-`install-hook` now wires it beside `PostToolUse`, so such a call leaves
-a receipt like any other. What still fires nothing is a denial, or an
-input the harness rejects before it runs, and the transcript flags
-those with the same `is_error`. The one failure the transcript can
-vouch for is a shell command that ran, whose result begins
-`Exit code N`: `ran_and_failed` finds it, and it is owed only under an
-epoch that wired the failure event, which the calibration and the
-marker carry as `failures`. Every other failed call is `maybe`: `classify` lets a
-receipt for one pass without reading as surplus, and never counts one
-as owed.
+A fifth finding reopened the second (#239, ADR-0034). The harness does
+fire an event for a call that started and failed, `PostToolUseFailure`,
+and `install-hook` now wires it beside `PostToolUse`, so such a call
+leaves a receipt like any other. What still fires nothing is a denial,
+an input the harness rejects before it runs, or a call a `PreToolUse`
+hook blocks, and the transcript flags all of them with the same
+`is_error`; only the words tell some apart. `failed_call_owes` reads
+them under the epoch in force, which the calibration and the marker
+now carry as `failures`: nothing where the event was not wired, or
+where the result is a `<tool_use_error>` or the record a marked denial;
+owed where the result opens `Exit code N`, a command that ran; and
+`may_owe` for the rest. Then `reconcile` pairs receipts with calls tool
+by tool rather than as two totals, so a `may_owe` receipt excuses only
+its own tool's surplus and never pays for a receipt another call lost,
+which the first cut of this let the writer do on purpose.
 
 `classify` is the ratified state machine — a pure reading of the
 evidence: OK / QUIET / LAGGING (a 30-second grace, because an honest
@@ -203,7 +206,9 @@ ALARM-DEFICIT (the fork-shaped hole: receipts arrive, fewer than owed)
 ENDED-DEFICIT (missing forever; kept as evidence, not a siren) /
 ENDED-SURPLUS (a surplus does not become clean by the session ending) /
 UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY. Deficit is sticky
-— lost receipts never arrive later. ELSEWHERE belongs to legacy `--root`
+— lost receipts never arrive later — and since pairing went tool by
+tool it also wins: a session short in one tool and over in another
+reads as the deficit, never the surplus (ADR-0034). ELSEWHERE belongs to legacy `--root`
 mode alone (#117): a witnessed session whose chain is not under the
 root but *is* in the store has recorded fine, and the wrong universe
 is being scanned (ADR-0011). Naming it rather than charging it keeps

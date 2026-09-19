@@ -89,7 +89,7 @@ Why the README never prints the manifest's hash (ADR-0007 ruling 2). The manifes
 | `testimony` | one sentence saying what the file is and that the verifier draws no verdict from it |
 | `scanned` | when the packing scan ran, UTC |
 | `unit` | the manifest's `unit`, repeated |
-| `completeness` | a list, one row per session in the package's order, whatever the unit: the supervisor's completeness row (`repo`, `session`, `state`, `tools`, `receipts`, `deficit`, `words`). A session the scan gave no row is `{"session": "<id>"}` and nothing more. |
+| `completeness` | a list, one row per session in the package's order, whatever the unit: the supervisor's completeness row (`repo`, `session`, `state`, `tools`, `receipts`, `deficit`, `words`, and `may_owe` when some failed calls may or may not owe a receipt, ADR-0034). A session the scan gave no row is `{"session": "<id>"}` and nothing more. |
 | `scan` | `exit`, the scan's exit code, and `chains`: one row per packaged chain, `log`, `verdict`, `entries`, `anchored` |
 | `before_memory` | present only when the packing store holds sessions older than its supervisor's calibration memory (ADR-0029): `count`, `since`, and the words. The count travels; the rows never do. A recipient reading a `{"session": "<id>"}` row needs this to know one honest reason a row can be empty. |
 

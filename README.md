@@ -59,7 +59,7 @@ python loxodonta.py --version   # loxodonta 0.7.0 (format 0.1, commit unknown)
 
 ## Record real sessions
 
-`install-hook` adds hook entries to the harness's own settings file (`~/.claude/settings.json`, or `~/.codex/hooks.json` with `--codex`) and nothing else: no service, no scheduled job. The harness then runs the recorder as a child process after each tool call that completes or fails, and `uninstall-hook` removes the same entries. The OpenAI Agents SDK has no hooks; its adapter hands the SDK's spans to the same recorder ([docs/HOOK.md](docs/HOOK.md#other-harnesses)).
+`install-hook` adds hook entries to the harness's own settings file (`~/.claude/settings.json`, or `~/.codex/hooks.json` with `--codex`) and nothing else: no service, no scheduled job. The harness then runs the recorder as a child process after each completed tool call, and after each one that fails, and `uninstall-hook` removes the same entries. The OpenAI Agents SDK has no hooks; its adapter hands the SDK's spans to the same recorder ([docs/HOOK.md](docs/HOOK.md#other-harnesses)).
 
 ```
 python loxodonta.py install-hook            # Claude Code; then restart open sessions
