@@ -163,4 +163,6 @@ a flat "the transcript is tamper-evident".
   once it is older than `cleanupPeriodDays` days, 30 by default. The
   chain and its commitment entries outlast it, and `verify --transcript`
   then has nothing to judge; `supervisor scan` reads the setting and
-  reports the number. Nothing here copies or archives a transcript.)*
+  reports the number, and copies nothing:
+  `supervisor package --transcript` stays the one way to carry a
+  transcript past the sweep (ADR-0026).)*

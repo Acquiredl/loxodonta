@@ -1407,9 +1407,10 @@ def published_reading(witness, logs):
 # commitments stay with nothing left to judge them against (ADR-0017).
 # The scan reads the number from the file it reads the wired matchers
 # from and says it, so the floor under the rich record is stated where
-# the operator looks. Nothing here keeps a transcript: a copy would
-# carry prompts and output off the harness's shelf, which this tool
-# never does.
+# the operator looks. The scan copies and keeps no transcript: one
+# holds prompts, output and whatever secrets passed through them, and
+# `package --transcript` carries one only when the operator asks
+# (ADR-0026).
 RETENTION_SETTING = "cleanupPeriodDays"
 RETENTION_DEFAULT_DAYS = 30   # the harness's documented default
 
