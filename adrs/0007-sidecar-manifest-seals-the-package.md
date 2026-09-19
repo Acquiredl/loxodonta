@@ -24,7 +24,7 @@ The rulings, in dependency order:
 
 **2. Topology: sidecar, not closing entry.** The manifest is a separate small document, not a final chain entry. The closing-entry alternative dies on a timeline problem: the report is generated from the trail after the chain closes and prints the head (the operator ritual), so a closing entry committing the report's hash would need the report to exist before the chain closes while the report needs the head after it. The only escapes — stripping the head from the report, or hashing "the report minus its seal block" — reintroduce exactly the canonical-form ambiguity SPEC §4 exists to kill. The sidecar has no timeline problem because it is written last: last-written can point at everything, and nothing needs to point back at it.
 
-**Corollary (no cycles):** the report may print the assessment id and the chain head — both exist before the report is written. It must never print the manifest's own hash: the manifest lists the report, so it is written after the report, and anything sealed last is referenced by nothing. The manifest hash lives only outside the report (bundle readme, seal files, the anchor).
+**Corollary (no cycles):** the report may print the assessment id and the chain head — both exist before the report is written. It must never print the manifest's own hash: the manifest lists the report, so it is written after the report, and anything sealed last is referenced by nothing. The manifest hash lives only outside the report (package readme, seal files, the anchor).
 
 **3. One commitment home per fact.** Every fact is committed in exactly one place; the manifest never re-commits, only re-displays:
 
