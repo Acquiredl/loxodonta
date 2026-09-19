@@ -1232,6 +1232,24 @@ def openssl_date(epoch):
     return time.strftime("%y%m%d%H%M%SZ", time.gmtime(epoch))
 
 
+def openssl_print_time(epoch):
+    """A moment as `openssl ts -reply -text` prints a token's time."""
+    return time.strftime("%b %d %H:%M:%S %Y GMT", time.gmtime(epoch))
+
+
+def with_status_text(reply, text):
+    """The same TimeStampResp with `text` as its PKIStatusInfo's
+    statusString (RFC 3161 §2.4.2): the words around the token, which
+    nobody signed, so a writer can set them to anything without touching
+    a byte the authority's signature covers."""
+    _, response, _ = der_read(reply)
+    (_, info), *token = der_children(response)
+    (status_tag, status), *_ = der_children(info)
+    free_text = der(0x30, der(0x0C, text.encode("utf-8")))
+    return der(0x30, der(0x30, der(status_tag, status) + free_text)
+               + b"".join(der(tag, content) for tag, content in token))
+
+
 def dated_authority(folder, name, starts, ends):
     """An authority of its own, made here with openssl in `folder`, whose
     certificate is in date from `starts` to `ends` seconds either side
@@ -1470,10 +1488,9 @@ class OutlivedCertificateTest(unittest.TestCase):
         self.assertNotIn("not judged", out)
         self.assertNotRegex(out, r"(?m)^VALID$")
 
-    def test_a_token_issued_after_its_certificate_expired_is_stamp_invalid(self):
-        # An authority that signs under a certificate already past its
-        # end date: the time the token states is outside the
-        # certificate's life too, so no calendar excuses it.
+    def stamped_after_expiry(self):
+        """A fresh chain stamped today by an authority whose certificate
+        ran out yesterday. Returns (the chain's folder, the chain file)."""
         chain_file, _ = dated_authority(self.scratch / "lapsed", "lapsed",
                                         -2 * 86400, -86400)
         lapsed = start_authority(self, answer=answering(self.scratch / "lapsed"))
@@ -1485,6 +1502,13 @@ class OutlivedCertificateTest(unittest.TestCase):
         stamped = run_receipts("stamp", "--authority", lapsed.url, cwd=fresh)
         self.assertEqual(stamped.returncode, 0,
                          stamped.stdout + stamped.stderr)
+        return fresh, chain_file
+
+    def test_a_token_issued_after_its_certificate_expired_is_stamp_invalid(self):
+        # An authority that signs under a certificate already past its
+        # end date: the time the token states is outside the
+        # certificate's life too, so no calendar excuses it.
+        fresh, chain_file = self.stamped_after_expiry()
 
         result = run_receipts("verify", "--stamps", "--authority-chain",
                               str(chain_file), cwd=fresh)
@@ -1494,6 +1518,30 @@ class OutlivedCertificateTest(unittest.TestCase):
         self.assertIn("STAMP-INVALID", out)
         self.assertIn("certificate has expired", out)
         self.assertIn("as of the time the token states", out)
+        self.assertNotIn("not judged", out)
+        self.assertNotRegex(out, r"(?m)^VALID$")
+
+    def test_a_time_written_beside_the_token_is_not_the_time_it_states(self):
+        # The reply's status text is unsigned and sits in a sidecar the
+        # writer can edit. A second `Time stamp:` line written there,
+        # inside the certificate's life, must not become the moment the
+        # second check asks about: only the token's own signed time is.
+        fresh, chain_file = self.stamped_after_expiry()
+        sidecar = fresh / "receipts.jsonl.stamps.jsonl"
+        (row,) = rows_of(sidecar)
+        inside = time.time() - 1.5 * 86400
+        row["response"] = base64.b64encode(with_status_text(
+            base64.b64decode(row["response"]),
+            "ok\nTime stamp: " + openssl_print_time(inside))).decode()
+        sidecar.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        result = run_receipts("verify", "--stamps", "--authority-chain",
+                              str(chain_file), cwd=fresh)
+
+        out = result.stdout
+        self.assertEqual(result.returncode, 3, out + result.stderr)
+        self.assertIn("STAMP-INVALID", out)
+        self.assertIn("certificate has expired", out)
         self.assertNotIn("not judged", out)
         self.assertNotRegex(out, r"(?m)^VALID$")
 

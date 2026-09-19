@@ -41,7 +41,8 @@ from test_anchor import clean_env, start_calendar
 from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run
 from test_stamp import (GRANTED, MISSING_AUTHORITY_TOOLING,
                         MISSING_EXPIRY_TOOLING, REQ_CONFIG, TSA_CONFIG,
-                        answering, dated_authority, outlive, start_authority)
+                        answering, dated_authority, openssl_print_time,
+                        outlive, start_authority, with_status_text)
 
 SESSION = "d0d0d0d0-aaaa-bbbb-cccc-000000000002"
 SIDECAR = "manifest.json.stamps.jsonl"
@@ -757,11 +758,18 @@ class OutlivedPackageStampTest(PackageCase):
         self.assertIn("as of the time the token states", seal)
         self.assertTrue(lines[-1].startswith("SEAL-INVALID:"), lines[-1])
 
-    def test_a_manifest_token_issued_after_its_certificate_expired_fails(self):
-        # Packed today by an authority whose certificate ran out last
-        # year: the manifest's token is judged against a chain file
-        # holding both authorities, so the chain's older token is still
-        # the note, and the seal is SEAL-INVALID on its own account.
+    def two_authority_chain_file(self, other_chain):
+        """One chain file holding the fixture's authority and another."""
+        both = self.work / "both-authorities.pem"
+        both.write_text(self.chain_file.read_text("utf-8")
+                        + other_chain.read_text("utf-8"), "utf-8")
+        return both
+
+    def sealed_after_expiry(self):
+        """The same store packed today and sealed by an authority whose
+        certificate ran out yesterday. Returns (the package folder, a
+        chain file holding both authorities, so the chain's older token
+        is judged as well)."""
         lapsed_chain, _ = dated_authority(self.work / "lapsed", "lapsed",
                                           -2 * 86400, -86400)
         lapsed = start_authority(self, answer=answering(self.work / "lapsed"))
@@ -769,20 +777,84 @@ class OutlivedPackageStampTest(PackageCase):
         built = self.package(SESSION, "--folder", "--out", str(folder),
                              "--stamp", lapsed.url)
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
-        both = self.work / "both-authorities.pem"
-        both.write_text(self.chain_file.read_text("utf-8")
-                        + lapsed_chain.read_text("utf-8"), "utf-8")
+        return folder, self.two_authority_chain_file(lapsed_chain)
 
-        judged = self.judge(folder, both)
-
+    def assert_seal_invalid_on_expiry(self, judged):
         out = judged.stdout
         self.assertEqual(judged.returncode, 3, out + judged.stderr)
         lines = out.strip().splitlines()
+        # The chain's older token is still the note; the seal fails on
+        # its own account.
         self.assertIn(f"stamp not judged: {OUTLIVED}", out)
         seal = next((l for l in lines if l.startswith("seal stamp:")), "")
         self.assertTrue(seal.startswith("seal stamp: SEAL-INVALID:"), out)
         self.assertIn("certificate has expired", seal)
         self.assertTrue(lines[-1].startswith("SEAL-INVALID:"), lines[-1])
+
+    def test_a_manifest_token_issued_after_its_certificate_expired_fails(self):
+        folder, both = self.sealed_after_expiry()
+
+        self.assert_seal_invalid_on_expiry(self.judge(folder, both))
+
+    def test_a_time_written_beside_the_manifests_token_is_not_its_time(self):
+        # The reply's status text is unsigned and the stamps file is not
+        # listed by the manifest, so a writer can put a second `Time
+        # stamp:` line there, inside the certificate's life, without
+        # touching a seal byte. Only the token's own signed time counts.
+        folder, both = self.sealed_after_expiry()
+        sidecar = folder / SIDECAR
+        (record,) = [json.loads(line) for line in
+                     sidecar.read_text("utf-8").splitlines()]
+        inside = time.time() - 1.5 * 86400
+        record["response"] = base64.b64encode(with_status_text(
+            base64.b64decode(record["response"]),
+            "ok\nTime stamp: " + openssl_print_time(inside))).decode()
+        sidecar.write_text(json.dumps(record) + "\n", "utf-8")
+
+        self.assert_seal_invalid_on_expiry(self.judge(folder, both))
+
+    def test_a_token_that_holds_earns_the_rung_beside_one_that_outlived(self):
+        # Two tokens over the one manifest, only a hand-edited stamps
+        # file gets here: the fixture's, outlived by its certificate,
+        # and one from an authority still in date. The rung is the good
+        # token's, and the verdict does not say in the same sentence
+        # that the timestamp was not judged; the outlived one keeps its
+        # note on its own seal line.
+        current_chain, _ = dated_authority(self.work / "current", "current",
+                                           -3600, 86400)
+        digest = hashlib.sha256(
+            (self.folder / "manifest.json").read_bytes()).hexdigest()
+        asked = subprocess.run(
+            ["openssl", "ts", "-query", "-digest", digest, "-sha256",
+             "-cert", "-out", "manifest.tsq"],
+            cwd=str(self.work / "current"), capture_output=True,
+            encoding="utf-8", errors="replace")
+        self.assertEqual(asked.returncode, 0, asked.stderr)
+        reply = answering(self.work / "current")(
+            (self.work / "current" / "manifest.tsq").read_bytes())
+        with (self.folder / SIDECAR).open("a", encoding="utf-8") as out:
+            out.write(json.dumps({
+                "head": digest, "ts": "2026-09-18T12:00:00Z",
+                "authority": "https://current.example/tsr",
+                "response": base64.b64encode(reply).decode()}) + "\n")
+
+        judged = self.judge(chain_file=self.two_authority_chain_file(
+            current_chain))
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        lines = out.strip().splitlines()
+        seals = [l for l in lines if l.startswith("seal stamp:")]
+        self.assertEqual(len(seals), 2, out)
+        self.assertTrue(any(l.startswith(f"seal stamp: not judged: {OUTLIVED}")
+                            for l in seals), out)
+        self.assertTrue(any(l.startswith("seal stamp: STAMPED") for l in seals),
+                        out)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + STAMPED:"),
+                        lines[-1])
+        self.assertNotIn("not judged", lines[-1])
+        self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
+        self.assertNotIn("not judged", lines[-2])
 
 
 if __name__ == "__main__":
