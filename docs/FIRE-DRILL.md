@@ -16,7 +16,7 @@ python supervisor.py drill --root <your-repos-folder> --log <path-to-chain>
 ## The automated battery
 
 The drill copies one chain into the sandbox and runs the four-way tamper
-battery, verifying each copy through the public receipts CLI:
+battery, verifying each copy through the public loxodonta CLI:
 
 | Tamper | What it does to the copy | Expected alarm |
 |---|---|---|

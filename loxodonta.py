@@ -3751,7 +3751,7 @@ AUTHORITY_TIERS = ("timestamped", "full")
 def resolve_profile(profile, anchor, publish, publish_chain=None,
                     authority=None, remote=None):
     """The profile an install asks for, and the session-end opt-ins it
-    resolves to (ADR-0031 ruling 1). A profile is a bundle of the raw
+    resolves to (ADR-0031 ruling 1). A profile is a named set of the raw
     flags and nothing else: `local` wires none, `timestamped` is the
     session-end anchor under the beginner's word, `custom` is the raw
     flags exactly as given. With no profile named, the raw flags speak

@@ -535,7 +535,7 @@ class InstallPublishHeadTest(unittest.TestCase):
     wired SessionEnd command, the way `--anchor-at-session-end` writes
     `--anchor` (ADR-0024 ruling 1, ADR-0025 ruling 3): readable in the
     settings file, idempotent, removed by `uninstall-hook`. The profile
-    (ADR-0031 ruling 1) is the one word that bundles those flags, and
+    (ADR-0031 ruling 1) is the one word for a set of those flags, and
     its install cases live here too: each tier's wired command, the
     refusals, the ladder, and Codex's lines."""
 
