@@ -167,7 +167,7 @@ one-switch version.
 - **`local` / `local+` / `full security`.** The author's first names.
   `local+` says nothing about what the plus is; `full security` promises
   prevention. Plain `full` kept.
-- **Call the profile a posture, a mode, or a level.** Rejected: *posture*
+- **Call the bundle a posture, a mode, or a level.** Rejected: *posture*
   is this repo's word for an artifact's trust standing; the other two
   say nothing.
 - **S3 (or GCS, or Azure) direct from the recorder.** Rejected: one
