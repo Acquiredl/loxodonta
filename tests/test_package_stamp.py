@@ -23,6 +23,7 @@ judging (#264). No network, ever, and never internals.
 import base64
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -42,7 +43,8 @@ from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run
 from test_stamp import (GRANTED, MISSING_AUTHORITY_TOOLING,
                         MISSING_EXPIRY_TOOLING, REQ_CONFIG, TSA_CONFIG,
                         answering, dated_authority, openssl_print_time,
-                        outlive, start_authority, with_status_text)
+                        openssl_without_attime, outlive, start_authority,
+                        with_status_text)
 
 SESSION = "d0d0d0d0-aaaa-bbbb-cccc-000000000002"
 SIDECAR = "manifest.json.stamps.jsonl"
@@ -624,6 +626,8 @@ class JudgedPackageStampTest(StampedStoreCase):
 
 
 OUTLIVED = "the authority's certificate expired after the token was issued"
+NO_ATTIME = ("the authority's certificate has expired, and this openssl "
+             "cannot judge a token as of the time it states")
 # Seconds the fixture's certificate stays in date: room for a stamp, a
 # package and its seal to finish inside it on a slow runner (under three
 # seconds here, where the stamp suite's one stamp takes under one and a
@@ -757,6 +761,30 @@ class OutlivedPackageStampTest(PackageCase):
         self.assertTrue(seal.startswith("seal stamp: SEAL-INVALID:"), out)
         self.assertIn("as of the time the token states", seal)
         self.assertTrue(lines[-1].startswith("SEAL-INVALID:"), lines[-1])
+
+    @unittest.skipIf(os.name == "nt", "a stand-in openssl needs a shebang, "
+                     "which Windows does not run")
+    def test_an_openssl_without_attime_names_what_would_judge_the_seal(self):
+        # ADR-0026's posture for an ssh-keygen that predates -Y verify:
+        # the seal is not judged, its line names the tool that would,
+        # and the verdict says why the timestamp went unjudged.
+        path = openssl_without_attime(self.work / "old-bin")
+
+        judged = run(LOXODONTA, "verify-package", str(self.folder),
+                     "--authority-chain", str(self.chain_file),
+                     env={**self.env, "PATH": path}, cwd=str(self.work))
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        lines = out.strip().splitlines()
+        seal = next((l for l in lines if l.startswith("seal stamp:")), "")
+        self.assertTrue(seal.startswith(f"seal stamp: not judged: "
+                                        f"{NO_ATTIME}"), out)
+        self.assertIn("an openssl whose `ts -verify` takes `-attime`", seal)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT:"), lines[-1])
+        self.assertIn(f"its authority timestamp was not judged, since "
+                      f"{NO_ATTIME}", lines[-1])
+        self.assertNotIn("INVALID", out)
 
     def two_authority_chain_file(self, other_chain):
         """One chain file holding the fixture's authority and another."""

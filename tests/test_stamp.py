@@ -1300,6 +1300,37 @@ def answering(folder):
     return sign
 
 
+def openssl_without_attime(folder):
+    """A stand-in openssl in `folder` (created here) that hides -attime
+    from `ts -help` and refuses it the way OpenSSL 3 refuses an option
+    it lacks, handing everything else to the real one. Returns a PATH
+    with it first. POSIX only: a script needs a shebang."""
+    real = shutil.which("openssl")
+    folder.mkdir()
+    script = folder / "openssl"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys\n"
+        f"REAL = {real!r}\n"
+        "args = sys.argv[1:]\n"
+        'if args[:1] == ["ts"] and "-help" in args:\n'
+        "    shown = subprocess.run([REAL] + args, capture_output=True,\n"
+        "                           text=True)\n"
+        "    for stream, text in ((sys.stdout, shown.stdout),\n"
+        "                         (sys.stderr, shown.stderr)):\n"
+        '        stream.write("".join(line for line in\n'
+        "                             text.splitlines(True)\n"
+        '                             if "-attime" not in line))\n'
+        "    sys.exit(shown.returncode)\n"
+        'if "-attime" in args:\n'
+        '    print("ts: Unknown option: -attime", file=sys.stderr)\n'
+        '    print("ts: Use -help for summary.", file=sys.stderr)\n'
+        "    sys.exit(1)\n"
+        "os.execv(REAL, [REAL] + args)\n", encoding="utf-8")
+    script.chmod(0o755)
+    return str(folder) + os.pathsep + os.environ.get("PATH", "")
+
+
 def outlive(expires):
     """Wait out a certificate's life. openssl reads the time to the
     second, and a certificate is still in date during its last one."""
@@ -1552,35 +1583,9 @@ class OutlivedCertificateTest(unittest.TestCase):
         # question that would tell expiry from a reason of the token's
         # own. The tool is there and the check could not run, which is
         # ADR-0026's posture for an ssh-keygen that predates -Y verify:
-        # a note that says why, and never a verdict. The stand-in hides
-        # -attime from `ts -help` and refuses it the way OpenSSL 3 does.
-        real = shutil.which("openssl")
-        folder = self.scratch / "old-bin"
-        folder.mkdir()
-        script = folder / "openssl"
-        script.write_text(
-            f"#!{sys.executable}\n"
-            "import os, subprocess, sys\n"
-            f"REAL = {real!r}\n"
-            "args = sys.argv[1:]\n"
-            'if args[:1] == ["ts"] and "-help" in args:\n'
-            "    shown = subprocess.run([REAL] + args, capture_output=True,\n"
-            "                           text=True)\n"
-            "    for stream, text in ((sys.stdout, shown.stdout),\n"
-            "                         (sys.stderr, shown.stderr)):\n"
-            '        stream.write("".join(line for line in\n'
-            "                             text.splitlines(True)\n"
-            '                             if "-attime" not in line))\n'
-            "    sys.exit(shown.returncode)\n"
-            'if "-attime" in args:\n'
-            '    print("ts: Unknown option: -attime", file=sys.stderr)\n'
-            '    print("ts: Use -help for summary.", file=sys.stderr)\n'
-            "    sys.exit(1)\n"
-            "os.execv(REAL, [REAL] + args)\n", encoding="utf-8")
-        script.chmod(0o755)
-
+        # a note that says why, and never a verdict.
         result = self.verify(env={
-            "PATH": str(folder) + os.pathsep + os.environ.get("PATH", "")})
+            "PATH": openssl_without_attime(self.scratch / "old-bin")})
 
         out = result.stdout
         self.assertEqual(result.returncode, 0, out + result.stderr)

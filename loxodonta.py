@@ -2030,34 +2030,43 @@ def openssl_verify(head, token, chain_file, *more):
 
 
 def token_time(token):
-    """The moment a token states, in epoch seconds, from the `Time stamp:`
-    line `openssl ts -reply -text` prints; None when there is no such
-    line this can read. openssl reads the token and this reads one line
-    of what openssl printed, the way openssl_reason reads its errors, so
-    the recorder still never parses a token (ADR-0032 ruling 4)."""
-    shown = subprocess.run(["openssl", "ts", "-reply", "-in", token, "-text"],
+    """The moment a token states, in epoch seconds, from the one `Time
+    stamp:` line `openssl ts -reply -token_out -text` prints; None when
+    there is not exactly one such line this can read. openssl reads the
+    token and this reads one line of what openssl printed, the way
+    openssl_reason reads its errors, so the recorder still never parses
+    a token (ADR-0032 ruling 4).
+
+    `-token_out` is what keeps the writer from choosing the moment. The
+    reply around the token carries a status text nobody signed, kept in
+    a sidecar the writer can edit, and without the flag openssl prints
+    it first and verbatim, so a line break in it could set a `Time
+    stamp:` line of the writer's own ahead of the authority's (#264).
+    With it openssl prints the signed token alone, and a second such
+    line can only be one the authority signed or one that breaks the
+    signature, so two of them is a time nobody can read."""
+    shown = subprocess.run(["openssl", "ts", "-reply", "-in", token,
+                            "-token_out", "-text"],
                            capture_output=True, encoding="utf-8",
                            errors="replace")
-    for line in shown.stdout.splitlines():
-        label, _, stated = line.partition(":")
-        if label != "Time stamp":
-            continue
-        # "Sep 18 22:55:50 2026 GMT", with a fraction on the seconds when
-        # the authority's clock gives one, which -attime has no room for.
-        # The month is English whatever the machine's language: openssl
-        # prints it so, and Python reads %b in the C locale unless a
-        # program changes that, which this one never does.
-        words = stated.split()
-        if len(words) != 5 or words[4] != "GMT":
-            return None
-        words[2] = words[2].split(".")[0]
-        try:
-            stated_at = datetime.strptime(" ".join(words[:4]),
-                                          "%b %d %H:%M:%S %Y")
-        except ValueError:
-            return None
-        return int(stated_at.replace(tzinfo=timezone.utc).timestamp())
-    return None
+    stated = [line.partition(":")[2] for line in shown.stdout.splitlines()
+              if line.partition(":")[0] == "Time stamp"]
+    if len(stated) != 1:
+        return None
+    # "Sep 18 22:55:50 2026 GMT", with a fraction on the seconds when the
+    # authority's clock gives one, which -attime has no room for. The
+    # month is English whatever the machine's language: openssl prints
+    # it so, and Python reads %b in the C locale unless a program changes
+    # that, which this one never does.
+    words = stated[0].split()
+    if len(words) != 5 or words[4] != "GMT":
+        return None
+    words[2] = words[2].split(".")[0]
+    try:
+        stated_at = datetime.strptime(" ".join(words[:4]), "%b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
+    return int(stated_at.replace(tzinfo=timezone.utc).timestamp())
 
 
 def takes_attime():
@@ -2870,14 +2879,20 @@ def judge_manifest_stamp(folder, chain_file):
                     continue
                 if verdict == "not judged":
                     why = detail
-                    if detail in (STAMP_OUTLIVED, STAMP_NO_ATTIME):
-                        # This recipient has openssl and the chain file
-                        # already, so the usual pointer would send them
-                        # after what they hold (#264).
+                    # A recipient whose certificate has expired holds
+                    # openssl and the chain file already, so the usual
+                    # pointer would send them after what they hold (#264).
+                    if detail == STAMP_OUTLIVED:
                         after = ("no chain file earns it now: judging a "
                                  "token once its certificate has expired is "
                                  "long-term validation, which is not built "
                                  "(ADR-0032)")
+                    elif detail == STAMP_NO_ATTIME:
+                        after = ("an openssl whose `ts -verify` takes "
+                                 "`-attime` tells a certificate that "
+                                 "outlived the token from a token that "
+                                 "fails on its own, and this command asks "
+                                 "it once it can run it")
                     else:
                         after = ("openssl and the certificate chain you "
                                  "saved from that authority judge this "
@@ -2891,7 +2906,11 @@ def judge_manifest_stamp(folder, chain_file):
         print(f"seal stamp: SEAL-INVALID: {reason} — evidence that does "
               "not verify is not evidence")
         findings.append((3, "SEAL-INVALID"))
-    return findings, stamped, why
+    # A token that holds earns the rung whatever another one beside it
+    # says. The one nobody judged keeps its note on its own seal line
+    # above, and the verdict does not carry it too, or it would say in
+    # one sentence that the timestamp was judged and that it was not.
+    return findings, stamped, None if stamped else why
 
 
 def key_fingerprint(public_key):
