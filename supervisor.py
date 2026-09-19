@@ -1229,13 +1229,14 @@ WATCH_WORDS = {
                     "since the deficit began — recording stopped (disabled "
                     "hook? wedged lock?). An accident detector: investigate "
                     "while the session is live.",
-    "ALARM-DEFICIT": "receipts still arrive but fewer than the witness saw "
-                     "— the fork-shaped hole, where a chain reads intact "
-                     "with entries missing. An accident detector: "
-                     "investigate while the session is live.",
-    "ENDED-DEFICIT": "the session ended short of the witness's count — "
-                     "those receipts are missing forever; kept as "
-                     "evidence, not as a siren.",
+    "ALARM-DEFICIT": "receipts still arrive, but a call the witness saw "
+                     "has no receipt of its tool — the fork-shaped hole, "
+                     "where a chain reads intact with entries missing. An "
+                     "accident detector: investigate while the session is "
+                     "live.",
+    "ENDED-DEFICIT": "the session ended with calls the witness saw that "
+                     "have no receipt of their tool — those receipts are "
+                     "missing forever; kept as evidence, not as a siren.",
     "ENDED-SURPLUS": "the session ended with more receipts than witnessed "
                      "tools — witness lag frozen at end, or receipts that "
                      "arrived unwitnessed; kept as evidence, not as a "
@@ -1788,23 +1789,29 @@ def result_text(block):
 
 def failed_call_owes(record, block, name, epoch):
     """What one failed call owes under the coverage in force at its time
-    (ADR-0034): "owed", "may_owe", or None for nothing.
+    (ADR-0034): "owed", "may_owe", "unworded", or None. Only "owed" is
+    owed; "unworded" owes nothing and is counted for the canary.
 
     Nothing where the failed-call event was not wired for its tool, since
-    nothing could have fired; an install from before #239 is judged as
-    before. Nothing where the transcript says the call never ran: an
-    input rejected before it ran, or a permission denial, which the
-    record marks with `toolDenialKind`. Owed where the result begins
-    `Exit code N`, whatever the tool: a command that ran. Every other
-    failure may owe: a tool that started and failed fires the event,
-    while a call a PreToolUse hook blocked, or a denial written without
-    its marker, fires nothing, and the transcript words them alike."""
+    nothing could have fired; a failed call under an install from before
+    #239 is judged as before. Nothing where the transcript says the call
+    never ran: an input rejected before it ran, or a permission denial,
+    which the record marks with `toolDenialKind`. Owed where the result
+    begins `Exit code N`, whatever the tool: a command that ran. A Bash
+    or PowerShell failure without that line did not run a command: it
+    was denied or blocked, or, rarely, the shell never started, so it
+    owes nothing ("unworded"). Any other tool's failure may owe: one that
+    started and failed fires the event, while one a PreToolUse hook
+    blocked, or a denial written without its marker, fires nothing, and
+    the transcript words them alike."""
     if not owes_receipt(name, failures_of(epoch)):
         return None
     text = result_text(block)
     if text.startswith(REJECTED) or record.get("toolDenialKind") is not None:
         return None
-    return "owed" if RAN_AND_FAILED.match(text) else "may_owe"
+    if RAN_AND_FAILED.match(text):
+        return "owed"
+    return "unworded" if name in SHELL_TOOLS else "may_owe"
 
 
 def read_witness(transcript, calibration):
@@ -1832,9 +1839,10 @@ def read_witness(transcript, calibration):
     read before the coverage filter, and every owed failed one, because
     ADR-0029 asks when the session started working and not what it
     happened to owe — a session whose early calls all fell outside
-    coverage still began when it began. `worded` and `unworded` count
-    the failed calls read as owed and the failed shell calls left
-    may_owe, for the canary in watch_completeness()."""
+    coverage still began when it began. `worded` counts the failed calls
+    read as owed, and `unworded` the failed shell calls with no
+    `Exit code N` line, which owe nothing, for the canary in
+    watch_completeness()."""
     names = {}
     owed = []
     may_owe = {}
@@ -1895,8 +1903,8 @@ def read_witness(transcript, calibration):
                     owes = failed_call_owes(record, found, name, epoch)
                     if owes == "may_owe":
                         may_owe[name] = may_owe.get(name, 0) + 1
-                        if name in SHELL_TOOLS:
-                            unworded += 1
+                    elif owes == "unworded":
+                        unworded += 1
                     if owes != "owed":
                         continue
                     worded += 1
@@ -1920,26 +1928,30 @@ def reconcile(owed, may_owe, receipts, witnessed):
     tool)] in time order; `may_owe` and `receipts` count by tool, a
     receipt's tool being the one its action line names (tool_of).
 
-    A receipt pays only its own tool's owed calls, earliest first. A
-    failed call that may owe excuses one receipt of its own tool from
-    surplus and pays for nothing else, so the receipt a failed fetch
-    left can never cover the one a starved command lost. A receipt whose
-    line names no tool the transcript shows — a line written by hand
-    with `loxodonta log`, say — keeps the reading from before: it pays
-    the earliest unpaid call of any tool, and is surplus only when none
-    is left. Returns (deficit, surplus, the timestamp of the first call
-    still unpaid, or None)."""
+    A receipt pays only calls of its own tool. Within a tool, receipts
+    go first to the failed calls that may owe, and only what is left
+    pays the owed calls, earliest first: a receipt that may be the one a
+    failed call left can never cover the one an owed call lost, whether
+    the two calls share a tool (a starved fetch beside a failed one) or
+    not (a starved command beside a failed fetch). The price is a false
+    deficit when a failed call that may owe did not in fact fire, in a
+    session with owed calls of the same tool (ADR-0034 ruling 2). A
+    receipt whose line names no tool the transcript shows (a line
+    written by hand with `loxodonta log`, say) keeps the reading from
+    before: it pays the earliest unpaid call of any tool, and is surplus
+    only when none is left. Returns (deficit, surplus, the timestamp of
+    the first call still unpaid, or None)."""
     calls = {}
     for when, tool in owed:
         calls.setdefault(tool, []).append(when)
     unpaid, surplus = [], 0
-    for tool in witnessed | set(calls):
+    for tool in witnessed:
         mine = calls.get(tool, [])
-        paid = receipts.get(tool, 0)
-        unpaid.extend(mine[paid:])
-        surplus += max(0, paid - len(mine) - may_owe.get(tool, 0))
+        left = max(0, receipts.get(tool, 0) - may_owe.get(tool, 0))
+        unpaid.extend(mine[left:])
+        surplus += max(0, left - len(mine))
     pooled = sum(count for tool, count in receipts.items()
-                 if tool not in witnessed and tool not in calls)
+                 if tool not in witnessed)
     unpaid.sort(key=lambda when: when or "")
     deficit = max(0, len(unpaid) - pooled)
     surplus += max(0, pooled - len(unpaid))
@@ -2306,17 +2318,17 @@ def watch_completeness(root, witness, families, everywhere=False,
 
     # The canary for the one wording the witness leans on (ADR-0034): a
     # harness that stopped opening a failed command with `Exit code N`
-    # would turn every owed failure into one that may owe, silently. When
-    # failed shell calls were left may_owe and not one failure read as
-    # owed, one sentence says so. Context, never an alarm: a denial
-    # without its marker reads the same way.
+    # would turn every owed failure into one that owes nothing, silently.
+    # When failed shell calls carried no such line and not one failure
+    # read as owed, one sentence says so. Context, never an alarm: a
+    # denial without its marker reads the same way.
     unworded = sum(reading["unworded"] for reading in canary)
     if unworded and not sum(reading["worded"] for reading in canary):
         said.append(f"{unworded} failed shell call(s) under the failed-call "
                     "event carried no `Exit code N` line, and no failure "
                     "here did: a denial or a blocked call reads that way, "
                     "and so would a harness that reworded its failures, so "
-                    "they are counted as may_owe (ADR-0034)")
+                    "none of them is owed a receipt (ADR-0034)")
     if said:
         watch["calibration"] = {"epochs": calibration,
                                 "words": "; ".join(said)}
@@ -2390,11 +2402,16 @@ CONSUMPTION_WORDS = {
 
 
 def tool_of(action):
-    """The tool inside an action line, the way the hook writes one —
-    "Tool: summary" or a bare tool name. A line from any other writer
-    is its own label, whole: testimony rendered, never interpreted."""
-    head, sep, _ = str(action).partition(": ")
-    return head if sep else str(action)
+    """The tool an action line names: the label the hook writes before
+    the first colon (`Read: ...` -> `Read`), or the whole line when there
+    is none, which is how the hook writes a bare tool name. A prefix
+    rule, tool-agnostic on purpose: it cannot rot the way a tool taxonomy
+    would (#66). Three readers lean on it: the consumption watch's
+    dominant tool, the digest's collapse key, and the completeness
+    witness, which pairs each receipt with calls of the tool it names
+    (ADR-0034). A line from another writer is read by the same rule and
+    trusted no more than the rest of its testimony."""
+    return str(action).partition(":")[0].strip()
 
 
 def busiest_hour(moments):
@@ -3661,14 +3678,6 @@ def gather(logs):
     for row in rows:
         families[row["session"]]["final"] = row["entry"].get("entry_hash")
     return families, rows
-
-
-def tool_of(action):
-    """The collapse key for a digest row: the tool label the hook
-    writes before the first colon (`Read: ...` -> `Read`), or the
-    whole action when there is none. A prefix rule is tool-agnostic
-    on purpose — it cannot rot the way a tool taxonomy would (#66)."""
-    return str(action).partition(":")[0].strip()
 
 
 def collapse_runs(rows):
@@ -7556,8 +7565,13 @@ function render(report) {
     const live = LIVE.includes(s.state);
     const row = el("div", "watch-row " + (live ? "live" : "quiet"));
     row.appendChild(el("span", "chip", s.state));
+    // Paired tool by tool (ADR-0034), the totals can match while a call
+    // still has no receipt of its tool, so the count that decided the
+    // chip is said beside them.
     row.appendChild(el("span", "file", s.repo + " · " + s.session +
-      " · witnessed " + s.tools + ", received " + s.receipts));
+      " · witnessed " + s.tools + ", received " + s.receipts +
+      (s.deficit ? ", " + s.deficit + " without a receipt of their tool"
+                 : "")));
     if (s.words) row.appendChild(el("p", "claim", s.words));
     // A session whose receipts landed in more than one drawer is
     // counted once, against the whole family — say so, so the tally
