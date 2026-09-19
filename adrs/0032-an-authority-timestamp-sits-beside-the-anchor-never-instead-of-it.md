@@ -108,8 +108,9 @@ list made the authority the default; every one made it an addition.
    -reply -token_out -text` prints it, never the unsigned status text
    beside it, so the token is still never parsed here. Holding then, it
    is `stamp not judged: the authority's certificate expired after the
-   token was issued`, a note, and in a package the seal line, the
-   residual trust and the verdict say so. Failing then too, or stating
+   token was issued`, a note; in a package its seal line says so, and
+   the residual trust and the verdict too when it is the only token
+   over the manifest. Failing then too, or stating
    no single time that can be read, it stays `STAMP-INVALID` or
    `SEAL-INVALID`. An `openssl` with no `-attime` gets this ruling's
    note for a tool that cannot judge. The note is never `STAMPED`: past

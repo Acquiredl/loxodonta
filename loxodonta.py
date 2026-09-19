@@ -2909,10 +2909,11 @@ def judge_manifest_stamp(folder, chain_file):
         print(f"seal stamp: SEAL-INVALID: {reason} — evidence that does "
               "not verify is not evidence")
         findings.append((3, "SEAL-INVALID"))
-    # A token that holds earns the rung whatever another one beside it
-    # says. The one nobody judged keeps its note on its own seal line
-    # above, and the verdict does not carry it too, or it would say in
-    # one sentence that the timestamp was judged and that it was not.
+    # A token that holds earns the rung beside one nobody judged (one
+    # that failed is a finding, and the gravest finding is the verdict).
+    # The one nobody judged keeps its note on its own seal line above,
+    # and the verdict does not carry it too, or it would say in one
+    # sentence that the timestamp was judged and that it was not.
     return findings, stamped, None if stamped else why
 
 
