@@ -1,4 +1,4 @@
-"""Behavioral tests for the receipts CLI.
+"""Behavioral tests for the loxodonta CLI.
 
 Every test drives the public CLI surface (subprocess on loxodonta.py) and
 asserts on stdout, exit codes, and file state — never internals. See
@@ -30,7 +30,7 @@ def spec_hash(entry_without_hash):
 
 
 def run_receipts(*args, cwd):
-    """Invoke the receipts CLI as an operator would — with both ends of the
+    """Invoke the loxodonta CLI as an operator would — with both ends of the
     pipe pinned to UTF-8 (PYTHONIOENCODING for the child, encoding= for this
     parent). `text=True` alone decodes with the locale codec — cp1252 on
     Windows — which crashes on the UTF-8 the golden fixture emits."""
