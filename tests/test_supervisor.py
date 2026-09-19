@@ -118,17 +118,21 @@ def run_scan(root, *extra, env=None):
              "PYTHONIOENCODING": "utf-8"})
 
 
-def make_chain(log_dir, session, entries=2, action="step {i}"):
+def make_chain(log_dir, session, entries=2, action="step {i}", actions=None):
     """A real chain, built through the public CLI — not a hand-forged
-    fixture — so the supervisor is tested against what the tool writes."""
+    fixture — so the supervisor is tested against what the tool writes.
+    `actions`, when given, are the action lines themselves, one entry
+    each, spelled as the hook spells them ("Bash: pytest -q")."""
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"receipts-{session}.jsonl"
     subprocess.run([sys.executable, str(LOXODONTA), "init", "--log", str(log)],
                    capture_output=True, check=True)
-    for i in range(entries):
+    if actions is None:
+        actions = [action.format(i=i) for i in range(entries)]
+    for line in actions:
         subprocess.run(
             [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", action.format(i=i)],
+             "--actor", "claude-code", "--action", line],
             capture_output=True, check=True)
     return log
 
@@ -857,14 +861,17 @@ def install_witness_hook(witness, matcher="Edit|Write|NotebookEdit|Bash",
 
 def write_transcript(witness, project, session, event_times=(),
                      error_times=(), chatter=0, idle=0, tool="Bash",
-                     metadata=0, failure="Exit code 1\nboom"):
+                     metadata=0, failure="Exit code 1\nboom",
+                     failed_tool=None, denial=None):
     """A synthetic harness transcript shaped like the real one: each
     tool event is a tool_use block (carrying the tool's name) paired by
     id with a tool-result line (the witness signal). A failed result
-    owes a receipt only where the failure event is wired and the result
-    says the command ran (#239), and plain chatter lines are never
-    counted. `failure` is the failed result's text: by default a shell
-    command that ran and exited, as the harness words one."""
+    owes a receipt only where the failed-call event is wired and the
+    result says the call ran (ADR-0034), and plain chatter lines are
+    never counted. `failure` is the failed result's text, by default a
+    command that ran and exited, as the harness words one; `failed_tool`
+    names the tool that failed, by default `tool`; `denial` is the
+    `toolDenialKind` the harness writes on a permission denial."""
     folder = witness / munge(project)
     folder.mkdir(parents=True, exist_ok=True)
     lines = []
@@ -879,18 +886,21 @@ def write_transcript(witness, project, session, event_times=(),
         # the error flag sits on the tool_result block, not the result.
         result = "Error: " + failure if failed else {"stdout": "ok"}
         block = {"type": "tool_result", "tool_use_id": use_id}
+        record = {"type": "user", "timestamp": ts, "toolUseResult": result,
+                  "message": {"content": [block]}}
         if failed:
             block["is_error"] = True
             block["content"] = failure
-        lines.append({"type": "user", "timestamp": ts,
-                      "toolUseResult": result, "message": {
-                          "content": [block]}})
+            if denial:
+                record["toolDenialKind"] = denial
+        lines.append(record)
 
+    if failed_tool is None:
+        failed_tool = tool if isinstance(tool, str) else "Bash"
     for i, ts in enumerate(event_times):
         event(i, ts, tool if isinstance(tool, str) else tool[i], False)
     for i, ts in enumerate(error_times):
-        event(1000 + i, ts, tool if isinstance(tool, str) else "Bash",
-              True)
+        event(1000 + i, ts, failed_tool, True)
     for _ in range(chatter):
         lines.append({"type": "assistant", "timestamp": ago(10),
                       "message": "just talk"})
@@ -910,14 +920,16 @@ def write_transcript(witness, project, session, event_times=(),
 
 
 def write_subagent_transcript(witness, project, session, agent,
-                              event_times=(), error_times=(), tool="Bash"):
+                              event_times=(), error_times=(), tool="Bash",
+                              failure="Exit code 1\nboom"):
     """A subagent transcript as the harness really writes one (#211):
     `<slug>/<session>/subagents/agent-*.jsonl`, one file per subagent.
     The shape differs from the parent's in the way that matters — the
     result is a `tool_result` block carrying `is_error`, and the
     `toolUseResult` field the parent's records carry is absent. The
     harness fires PostToolUse for these calls under the *parent*
-    session id, so their receipts land in the parent's chain."""
+    session id, so their receipts land in the parent's chain. `failure`
+    is a failed result's text, a command that ran by default."""
     folder = witness / munge(project) / session / "subagents"
     folder.mkdir(parents=True, exist_ok=True)
     lines = []
@@ -927,9 +939,12 @@ def write_subagent_transcript(witness, project, session, agent,
         lines.append({"type": "assistant", "timestamp": ts, "message": {
             "content": [{"type": "tool_use", "id": use_id, "name": name}],
         }})
+        block = {"type": "tool_result", "tool_use_id": use_id,
+                 "is_error": failed}
+        if failed:
+            block["content"] = failure
         lines.append({"type": "user", "timestamp": ts, "message": {
-            "content": [{"type": "tool_result", "tool_use_id": use_id,
-                         "is_error": failed}]}})
+            "content": [block]}})
 
     for i, ts in enumerate(event_times):
         event(i, ts, tool if isinstance(tool, str) else tool[i], False)
@@ -1000,9 +1015,10 @@ class SubagentWitnessTest(unittest.TestCase):
         self.assertEqual(judged["state"], "ENDED-CLEAN")
 
     def test_a_failed_delegated_call_owes_nothing(self):
-        # The harness fires no hook for a failed call, and the witness
-        # counts by that same rule — in a subagent file the flag sits on
-        # the tool_result block, which is the only place it ever sits.
+        # Under an install that never wired the failed-call event, a
+        # failed call fired no hook, and the witness counts by that same
+        # rule (ADR-0034). In a subagent file the flag sits on the
+        # tool_result block, which is the only place it ever sits.
         make_chain(self.root / "alpha" / "receipts", "sess-fail", entries=2)
         write_transcript(self.witness, self.root / "alpha", "sess-fail",
                          event_times=[ago(6000)], tool="Agent")
@@ -1015,6 +1031,27 @@ class SubagentWitnessTest(unittest.TestCase):
 
         self.assertEqual(judged["tools"], 2)
         self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+    def test_a_failed_delegated_command_is_owed_once_the_event_is_wired(self):
+        # #239 in the #211 shape: the failed-call event fires for a
+        # subagent's command under the parent session id too, and the
+        # sidechain's block carries the same `Exit code N` line. A
+        # receipt lost there is a deficit like any other.
+        install_witness_hook(self.witness, matcher="*", failures="*")
+        prime_memory(self.root, matcher="*", failures="*")
+        make_chain(self.root / "alpha" / "receipts", "sess-sub-fail",
+                   actions=["Agent: delegate", "Bash: pytest -q"])
+        write_transcript(self.witness, self.root / "alpha", "sess-sub-fail",
+                         event_times=[ago(6000)], tool="Agent")
+        write_subagent_transcript(
+            self.witness, self.root / "alpha", "sess-sub-fail", "aaa",
+            event_times=[ago(5900)], error_times=[ago(5890)], tool="Bash")
+
+        judged = self.states(self.scan())["sess-sub-fail"]
+
+        self.assertEqual(judged["tools"], 3, "the failed command is owed")
+        self.assertEqual(judged["state"], "ENDED-DEFICIT")
+        self.assertEqual(judged["deficit"], 1)
 
     def test_a_subagents_calls_are_judged_by_their_own_coverage(self):
         # ADR-0016 reaches the sidechain too: a Read from before the
@@ -1901,14 +1938,15 @@ class CalibrationTest(unittest.TestCase):
 
 
 class FailedCallWitnessTest(unittest.TestCase):
-    """#239: the harness fires `PostToolUseFailure`, not `PostToolUse`,
-    for a tool call that ran and failed, and nothing at all for one it
-    denied or refused to start. Once install-hook wires the failure
-    event, the witness moves with it: a failed shell command owes a
-    receipt like a completed call, from the epoch that wired the event
-    and never before. The transcript marks a denial with the same
-    `is_error` flag as a failure, so any other failed call may owe a
-    receipt or may not, and is charged neither way."""
+    """#239, ruled in ADR-0034: the harness fires `PostToolUseFailure`,
+    not `PostToolUse`, for a tool call that started and failed, and
+    nothing at all for one it denied or rejected before it ran. Once
+    install-hook wires the event, the witness moves with it. A failed
+    call whose result begins `Exit code N` is owed like a completed one,
+    from the epoch that wired the event and never before. A rejected
+    input or a marked denial owes nothing. Any other failure may owe:
+    its receipt is excused from its own tool's surplus and pays for no
+    other call, because receipts are reconciled tool by tool."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1931,25 +1969,36 @@ class FailedCallWitnessTest(unittest.TestCase):
         return {s["session"]: s
                 for s in json.loads(result.stdout)["completeness"]["sessions"]}
 
-    def session(self, name, receipts, completed, failed, **transcript):
-        make_chain(self.root / "alpha" / "receipts", name, entries=receipts)
+    def words(self, result):
+        watch = json.loads(result.stdout)["completeness"]
+        return watch.get("calibration", {}).get("words", "")
+
+    def session(self, name, actions, completed, failed, **transcript):
+        """A chain holding `actions`, spelled as the hook spells them,
+        and a transcript with `completed` calls and `failed` ones."""
+        make_chain(self.root / "alpha" / "receipts", name, actions=actions)
         write_transcript(self.witness, self.root / "alpha", name,
                          event_times=completed, error_times=failed,
                          **transcript)
 
     def test_a_failed_command_owes_a_receipt_and_is_paid_by_it(self):
-        self.session("sess-paid", 3, [ago(6000), ago(5990)], [ago(5980)])
+        self.session("sess-paid", ["Bash: a", "Bash: b", "Bash: c"],
+                     [ago(6000), ago(5990)], [ago(5980)])
 
-        judged = self.states(self.scan())["sess-paid"]
+        result = self.scan()
 
+        judged = self.states(result)["sess-paid"]
         self.assertEqual(judged["tools"], 3, "the failed command is owed")
         self.assertEqual(judged["state"], "ENDED-CLEAN")
+        self.assertNotIn("Exit code N", self.words(result),
+                         "the canary is quiet while failures read as owed")
 
     def test_a_failed_command_with_no_receipt_alarms_while_live(self):
         # The hook that fires on success and not on failure is exactly
         # the gap #239 found; once the event is wired, a missing
         # failure receipt is a deficit like any other.
-        self.session("sess-short", 2, [ago(600), ago(500)], [ago(400)])
+        self.session("sess-short", ["Bash: a", "Bash: b"],
+                     [ago(600), ago(500)], [ago(400)])
 
         result = self.scan()
 
@@ -1958,34 +2007,63 @@ class FailedCallWitnessTest(unittest.TestCase):
         self.assertEqual(judged["state"], "ALARM-DEFICIT")
         self.assertEqual(judged["deficit"], 1)
 
-    def test_a_call_that_never_ran_owes_nothing(self):
-        # A denial and a rejected input carry the flag a failure does,
-        # and the harness fires no hook for either (its hooks page).
-        self.session("sess-denied", 2, [ago(6000), ago(5990)], [ago(5980)],
-                     failure="Permission to use Bash has been denied.")
-        self.session("sess-rejected", 2, [ago(5000), ago(4990)],
-                     [ago(4980)], tool="Edit",
+    def test_a_may_owe_receipt_never_pays_another_calls_deficit(self):
+        # The reviewers' probe (probe_mask), run the way the writer as
+        # adversary would (ADR-0002): starve one command's hook, then
+        # make a fetch fail against a server it controls, so the
+        # failed-call event writes a receipt the witness can only count
+        # as may_owe. Counted as one total, that receipt paid for the
+        # lost one and the session read OK with exit 0.
+        self.session("sess-masked", ["Bash: a", "WebFetch: example.com"],
+                     [ago(600), ago(500)], [ago(400)], failed_tool="WebFetch",
+                     failure="Claude Code is unable to fetch from "
+                             "example.com")
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        judged = self.states(result)["sess-masked"]
+        self.assertEqual(judged["state"], "ALARM-DEFICIT")
+        self.assertEqual(judged["deficit"], 1)
+        self.assertEqual(judged["may_owe"], 1)
+
+    def test_a_call_that_never_ran_owes_nothing_and_excuses_nothing(self):
+        # A rejected input and a marked denial fire no hook (the hooks
+        # page), so they owe nothing and may owe nothing either: a
+        # receipt planted under the rejected tool's name reads as the
+        # surplus it is, rather than as a slot the rejection opened.
+        self.session("sess-denied", ["Bash: a", "Bash: b"],
+                     [ago(6000), ago(5990)], [ago(5980)],
+                     failure="Permission to use Bash has been denied.",
+                     denial="user-rejected")
+        self.session("sess-rejected", ["Edit: a", "Edit: b", "Edit: planted"],
+                     [ago(5000), ago(4990)], [ago(4980)], tool="Edit",
                      failure="<tool_use_error>String to replace not found "
                              "in file.</tool_use_error>")
 
         rows = self.states(self.scan())
 
-        for name in ("sess-denied", "sess-rejected"):
-            self.assertEqual(rows[name]["tools"], 2, name)
-            self.assertEqual(rows[name]["state"], "ENDED-CLEAN", name)
+        denied, rejected = rows["sess-denied"], rows["sess-rejected"]
+        self.assertEqual((denied["tools"], denied["state"]),
+                         (2, "ENDED-CLEAN"))
+        self.assertNotIn("may_owe", denied)
+        self.assertEqual((rejected["tools"], rejected["state"]),
+                         (2, "ENDED-SURPLUS"))
+        self.assertNotIn("may_owe", rejected)
 
     def test_a_failed_call_that_may_have_run_is_never_surplus(self):
-        # A fetch that failed ran, and fired the failure event; a fetch
-        # that was denied reads the same in the transcript. Its receipt
-        # is welcome and never surplus, and its absence never a deficit.
-        self.session("sess-fetched", 3, [ago(6000), ago(5990)], [ago(5980)],
-                     tool="WebFetch",
-                     failure="Claude Code is unable to fetch from "
-                             "example.com")
-        self.session("sess-unfetched", 2, [ago(5000), ago(4990)],
-                     [ago(4980)], tool="WebFetch",
-                     failure="Claude Code is unable to fetch from "
-                             "example.com")
+        # A fetch that started and failed fired the event; one a
+        # PreToolUse hook blocked reads the same in the transcript and
+        # fired nothing. Its receipt is excused from its own tool's
+        # surplus, and its absence is not a deficit.
+        failed = "Claude Code is unable to fetch from example.com"
+        self.session("sess-fetched",
+                     ["WebFetch: a", "WebFetch: b", "WebFetch: c"],
+                     [ago(6000), ago(5990)], [ago(5980)], tool="WebFetch",
+                     failure=failed)
+        self.session("sess-unfetched", ["WebFetch: a", "WebFetch: b"],
+                     [ago(5000), ago(4990)], [ago(4980)], tool="WebFetch",
+                     failure=failed)
 
         rows = self.states(self.scan())
 
@@ -1996,32 +2074,64 @@ class FailedCallWitnessTest(unittest.TestCase):
                          "the row says why receipts outnumber the owed")
         self.assertEqual(unfetched["state"], "ENDED-CLEAN")
 
+    def test_an_install_from_before_the_event_is_judged_as_before(self):
+        # The reviewers' second probe (probe_old): nothing wires the
+        # event, in the settings or in the memory. A failed call owes
+        # nothing and may owe nothing, so a receipt for one reads as the
+        # surplus it read before #239.
+        install_witness_hook(self.witness, matcher="*")
+        prime_memory(self.root, matcher="*")
+        self.session("sess-old", ["Bash: a", "Bash: b", "Bash: c"],
+                     [ago(9600), ago(9500)], [ago(9400)],
+                     failure="Claude Code is unable to fetch from "
+                             "example.com")
+
+        judged = self.states(self.scan())["sess-old"]
+
+        self.assertEqual((judged["tools"], judged["state"]),
+                         (2, "ENDED-SURPLUS"))
+        self.assertNotIn("may_owe", judged)
+
     def test_a_failed_command_owes_nothing_before_the_event_was_wired(self):
         # Both sides of one upgrade. The memory began with completed
-        # calls wired alone; re-running install-hook added the failure
-        # event, dated by the settings file's mtime like any matcher
-        # change (ADR-0016). Before it, a failed command owes nothing,
-        # and a receipt for one (a change the supervisor dated late) is
-        # no surplus; after it, a failed command with no receipt is owed.
+        # calls wired alone; re-running install-hook added the event,
+        # dated by the settings file's mtime like any matcher change
+        # (ADR-0016). Before it, a failed command owes nothing; after
+        # it, a failed command with no receipt is owed.
         prime_memory(self.root, matcher="*")
         stamp = time.time() - 3000
         os.utime(self.witness.parent / "settings.json", (stamp, stamp))
-        self.session("sess-before", 2, [ago(6000), ago(5990)], [ago(5980)])
-        self.session("sess-dated-late", 3, [ago(5000), ago(4990)],
-                     [ago(4980)])
-        self.session("sess-after", 2, [ago(2600), ago(2590)], [ago(2580)])
+        self.session("sess-before", ["Bash: a", "Bash: b"],
+                     [ago(6000), ago(5990)], [ago(5980)])
+        self.session("sess-after", ["Bash: a", "Bash: b"],
+                     [ago(2600), ago(2590)], [ago(2580)])
 
         result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         rows = self.states(result)
-        self.assertEqual(rows["sess-before"]["tools"], 2)
-        self.assertEqual(rows["sess-before"]["state"], "ENDED-CLEAN")
-        self.assertEqual(rows["sess-dated-late"]["state"], "ENDED-CLEAN")
-        self.assertEqual(rows["sess-after"]["tools"], 3)
-        self.assertEqual(rows["sess-after"]["state"], "ENDED-DEFICIT")
-        words = json.loads(result.stdout)["completeness"]["calibration"]
-        self.assertIn("in force at its time", words["words"])
+        self.assertEqual((rows["sess-before"]["tools"],
+                          rows["sess-before"]["state"]), (2, "ENDED-CLEAN"))
+        self.assertNotIn("may_owe", rows["sess-before"])
+        self.assertEqual((rows["sess-after"]["tools"],
+                          rows["sess-after"]["state"]), (3, "ENDED-DEFICIT"))
+        self.assertIn("in force at its time", self.words(result))
+
+    def test_a_harness_that_rewords_its_failures_is_named(self):
+        # The canary (ADR-0034): the witness leans on one wording, and
+        # a harness that stopped opening a failed command with
+        # `Exit code N` would turn every owed failure into one that may
+        # owe. One sentence says so, and the exit stays where it was.
+        self.session("sess-reworded", ["Bash: a"], [ago(6000)],
+                     [ago(5990)], failure="Command failed with status 3")
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        judged = self.states(result)["sess-reworded"]
+        self.assertEqual((judged["state"], judged["may_owe"]),
+                         ("ENDED-CLEAN", 1))
+        self.assertIn("Exit code N", self.words(result))
 
 
 class BeforeMemoryTest(unittest.TestCase):

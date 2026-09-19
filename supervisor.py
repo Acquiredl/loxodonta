@@ -1761,56 +1761,87 @@ def witness_files(transcript):
     return files
 
 
-# The harness's own first line for a shell command that ran and exited
-# non-zero (Bash and PowerShell, on its hooks page). Of every failed
-# result a transcript holds, it is the one that says the tool ran: a
-# denial and a rejected input carry the same `is_error` flag and fire no
-# hook at all (#239).
+# How a failed call is read (ADR-0034). The harness fires its failed-call
+# event, PostToolUseFailure, for a tool that started and failed, and
+# nothing for a call it denied or rejected before it ran, and the
+# transcript sets the same `is_error` flag on all of them. Its words tell
+# some apart. `Exit code N` is the first line the hooks page documents
+# for a Bash or PowerShell command that ran and exited, in the event's
+# `error`, which is "generally the same text" the transcript records.
+# `<tool_use_error>` wraps an input rejected before it ran, documented to
+# fire neither PreToolUse nor the failed-call event.
 RAN_AND_FAILED = re.compile(r"Exit code -?\d+")
+REJECTED = "<tool_use_error>"
+SHELL_TOOLS = ("Bash", "PowerShell")
 
 
-def ran_and_failed(block):
-    """True when a failed tool_result is a shell command that ran — the
-    one failure the witness can be sure fired the failed-call event."""
+def result_text(block):
+    """The text a tool_result carries, in either shape the harness writes
+    it (a string, or a list of parts), or "" when it carries none."""
     content = block.get("content") if isinstance(block, dict) else None
     if isinstance(content, list):
         content = next((part.get("text") for part in content
                         if isinstance(part, dict)
                         and part.get("type") == "text"), None)
-    return isinstance(content, str) and bool(RAN_AND_FAILED.match(content))
+    return content if isinstance(content, str) else ""
+
+
+def failed_call_owes(record, block, name, epoch):
+    """What one failed call owes under the coverage in force at its time
+    (ADR-0034): "owed", "may_owe", or None for nothing.
+
+    Nothing where the failed-call event was not wired for its tool, since
+    nothing could have fired; an install from before #239 is judged as
+    before. Nothing where the transcript says the call never ran: an
+    input rejected before it ran, or a permission denial, which the
+    record marks with `toolDenialKind`. Owed where the result begins
+    `Exit code N`, whatever the tool: a command that ran. Every other
+    failure may owe: a tool that started and failed fires the event,
+    while a call a PreToolUse hook blocked, or a denial written without
+    its marker, fires nothing, and the transcript words them alike."""
+    if not owes_receipt(name, failures_of(epoch)):
+        return None
+    text = result_text(block)
+    if text.startswith(REJECTED) or record.get("toolDenialKind") is not None:
+        return None
+    return "owed" if RAN_AND_FAILED.match(text) else "may_owe"
 
 
 def read_witness(transcript, calibration):
-    """The witness signal: timestamps of tool events that owe a receipt.
-    A tool event is a tool_use block paired by id with its result line;
-    a completed result counts, and so does a failed shell command where
-    the failed-call event was wired at its time (#239), and only for
+    """The witness signal: the tool events that owe a receipt, as
+    (timestamp, tool) in time order. A tool event is a tool_use block
+    paired by id with its result line; a completed result counts, and so
+    does a failed call failed_call_owes() reads as owed, and only for
     tools covered at the event's own time (the calibration finding,
     effective-dated by ADR-0016: an all-tools witness over an
     Edit|Write|Bash hook manufactures deficits, and so does today's wide
-    matcher over yesterday's narrow sessions). Any other failed call is
-    `maybe`, counted and never owed: the harness fires the failed-call
-    event for a tool that ran and failed and nothing for one it denied,
-    and the transcript flags both alike, so a receipt for one is not
-    surplus and its absence is not a deficit. Chatter is never counted:
-    a chat-only session can never alarm. Returns (events, latest):
-    latest is the newest timestamped record of any conversational kind
-    — the session's liveness clock.
-    Chatter moves it (a chat-only session is alive); the harness's
-    timestamp-less metadata records (bridge-session, custom-title,
-    appended to ended transcripts by restart and resume) never do,
-    because an idle clock that resets on metadata re-presents an old
-    deficit as an immortal live alarm (issue #85). Also returns `first`:
-    the earliest completed tool event of any kind, read before the
-    coverage filter, because ADR-0029 asks when the session started
-    working and not what it happened to owe — a session whose early
-    calls all fell outside coverage still began when it began. And
-    `maybe`, the count of failed calls that may or may not owe."""
+    matcher over yesterday's narrow sessions). Chatter is never counted:
+    a chat-only session can never alarm.
+
+    Returns a dict. `owed` is those events. `may_owe` counts by tool the
+    failed calls that may or may not owe (ADR-0034), and `witnessed` is
+    every tool the transcript shows a result for, so reconcile() can
+    tell a receipt of a tool the session used from a line naming none.
+    `latest` is the newest timestamped record of any conversational
+    kind — the session's liveness clock. Chatter moves it (a chat-only
+    session is alive); the harness's timestamp-less metadata records
+    (bridge-session, custom-title, appended to ended transcripts by
+    restart and resume) never do, because an idle clock that resets on
+    metadata re-presents an old deficit as an immortal live alarm (issue
+    #85). `first` is the earliest working call: every completed one,
+    read before the coverage filter, and every owed failed one, because
+    ADR-0029 asks when the session started working and not what it
+    happened to owe — a session whose early calls all fell outside
+    coverage still began when it began. `worded` and `unworded` count
+    the failed calls read as owed and the failed shell calls left
+    may_owe, for the canary in watch_completeness()."""
     names = {}
-    events = []
+    owed = []
+    may_owe = {}
+    witnessed = set()
     latest = None
     first = None
-    maybe = 0
+    worded = unworded = 0
     for path in witness_files(transcript):
         with open(path, encoding="utf-8", errors="replace") as lines:
             for line in lines:
@@ -1857,64 +1888,104 @@ def read_witness(transcript, calibration):
                            and result.get("is_error"))
                           or (found is not None and found.get("is_error")))
                 name = names.get(found.get("tool_use_id")) if found else None
+                witnessed.add(name)
                 when = record.get("timestamp")
                 epoch = epoch_at(calibration, when)
                 if failed:
-                    if ran_and_failed(found) \
-                            and owes_receipt(name, failures_of(epoch)):
-                        events.append(when)
-                    else:
-                        maybe += 1
-                    continue
+                    owes = failed_call_owes(record, found, name, epoch)
+                    if owes == "may_owe":
+                        may_owe[name] = may_owe.get(name, 0) + 1
+                        if name in SHELL_TOOLS:
+                            unworded += 1
+                    if owes != "owed":
+                        continue
+                    worded += 1
+                    owed.append((when, name))
+                elif owes_receipt(name, epoch["matchers"]):
+                    owed.append((when, name))
                 if isinstance(when, str) and (first is None or when < first):
                     first = when
-                if owes_receipt(name, epoch["matchers"]):
-                    events.append(when)
     # Merged across files, so order is no longer a given, and the
-    # deficit clock reads `events[receipts]` — the first unpaired call
-    # — which names the right moment only in time order.
-    events.sort()
-    return events, latest, first, maybe
+    # deficit clock reads the first unpaired call, which names the right
+    # moment only in time order.
+    owed.sort(key=lambda call: call[0] or "")
+    return {"owed": owed, "may_owe": may_owe, "witnessed": witnessed,
+            "latest": latest, "first": first,
+            "worded": worded, "unworded": unworded}
 
 
-def classify(tools, receipts, ended, idle, deficit_age, silent, maybe=0):
+def reconcile(owed, may_owe, receipts, witnessed):
+    """Pair the witness with the chain tool by tool (ADR-0034), where
+    the reading before it paired two totals. `owed` is [(timestamp,
+    tool)] in time order; `may_owe` and `receipts` count by tool, a
+    receipt's tool being the one its action line names (tool_of).
+
+    A receipt pays only its own tool's owed calls, earliest first. A
+    failed call that may owe excuses one receipt of its own tool from
+    surplus and pays for nothing else, so the receipt a failed fetch
+    left can never cover the one a starved command lost. A receipt whose
+    line names no tool the transcript shows — a line written by hand
+    with `loxodonta log`, say — keeps the reading from before: it pays
+    the earliest unpaid call of any tool, and is surplus only when none
+    is left. Returns (deficit, surplus, the timestamp of the first call
+    still unpaid, or None)."""
+    calls = {}
+    for when, tool in owed:
+        calls.setdefault(tool, []).append(when)
+    unpaid, surplus = [], 0
+    for tool in witnessed | set(calls):
+        mine = calls.get(tool, [])
+        paid = receipts.get(tool, 0)
+        unpaid.extend(mine[paid:])
+        surplus += max(0, paid - len(mine) - may_owe.get(tool, 0))
+    pooled = sum(count for tool, count in receipts.items()
+                 if tool not in witnessed and tool not in calls)
+    unpaid.sort(key=lambda when: when or "")
+    deficit = max(0, len(unpaid) - pooled)
+    surplus += max(0, pooled - len(unpaid))
+    return deficit, surplus, (unpaid[pooled] if deficit else None)
+
+
+def classify(tools, deficit, surplus, ended, idle, deficit_age, silent):
     """The ratified alarm state machine (issue #22, from the #15
     prototype) — a pure reading of the evidence. Deficit is sticky:
     lost receipts never arrive later, so a session keeps its scar until
-    end-of-session reconciliation reports it as evidence. `maybe` is the
-    failed calls that may or may not owe (#239): receipts for them are
-    not surplus, and nothing is owed for them either."""
-    deficit = max(0, tools - receipts)
-    surplus = receipts > tools + maybe
+    end-of-session reconciliation reports it as evidence. Reconciled
+    tool by tool (ADR-0034), one session can hold a deficit in one tool
+    and a surplus in another, and the deficit wins: a surplus never
+    stands a missing receipt down."""
     if ended:
-        if surplus:
-            return "ENDED-SURPLUS"
-        return "ENDED-CLEAN" if deficit == 0 else "ENDED-DEFICIT"
+        if deficit:
+            return "ENDED-DEFICIT"
+        return "ENDED-SURPLUS" if surplus else "ENDED-CLEAN"
     if idle:
         return "IDLE-CLEAN" if deficit == 0 else "IDLE-DEFICIT"
-    if surplus:
-        return "SURPLUS"
-    if tools == 0:
-        return "QUIET"
     if deficit == 0:
-        return "OK"
+        if surplus:
+            return "SURPLUS"
+        return "QUIET" if tools == 0 else "OK"
     if deficit_age is not None and deficit_age < GRACE_SECONDS:
         return "LAGGING"
     return "ALARM-SILENT" if silent else "ALARM-DEFICIT"
 
 
 def watch_session(transcript, receipts, last_receipt, now, calibration):
-    """One session against its witness. deficit_since needs no stored
-    state: receipts pair with tool events in order, so the first
-    unpaired event's timestamp is when the deficit began. A session
-    older than the calibration memory is handed back unjudged
-    (ADR-0029): the tool count stands as what the witness saw, and the
-    state says the coverage behind that number is unknown. Returns
-    (state, tools, maybe)."""
-    events, latest, first, maybe = read_witness(transcript, calibration)
-    tools = len(events)
-    if before_memory(calibration, first):
-        return "BEFORE-MEMORY", tools, 0
+    """One session against its witness. `receipts` counts the session's
+    receipts by the tool each action line names, reconciled tool by tool
+    (ADR-0034). deficit_since needs no stored state: receipts pay a
+    tool's calls in time order, so the first unpaid call's timestamp is
+    when the deficit began. A session older than the calibration memory
+    is handed back unjudged (ADR-0029): the tool count stands as what
+    the witness saw, the state says the coverage behind that number is
+    unknown, and no deficit and no may_owe count are named for it.
+    Returns a dict: state, tools, deficit, may_owe, and the worded and
+    unworded counts the canary in watch_completeness() reads."""
+    seen = read_witness(transcript, calibration)
+    tools = len(seen["owed"])
+    if before_memory(calibration, seen["first"]):
+        return {"state": "BEFORE-MEMORY", "tools": tools, "deficit": 0,
+                "may_owe": 0, "worded": 0, "unworded": 0}
+    latest = seen["latest"]
     # The idle clock reads the newest timestamped record, not file
     # mtime: the harness touches ended transcripts with timestamp-less
     # metadata, and an mtime clock resets on every touch (issue #85).
@@ -1928,16 +1999,19 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     # long ⇒ session treated as ended"); they separate if the harness
     # ever writes an explicit end marker.
     ended = idle = quiet_for >= IDLE_END_SECONDS
-    deficit_since = (parse_when(events[receipts])
-                     if tools > receipts else None)
+    deficit, surplus, unpaid = reconcile(seen["owed"], seen["may_owe"],
+                                         receipts, seen["witnessed"])
+    deficit_since = parse_when(unpaid) if unpaid else None
     deficit_age = ((now - deficit_since).total_seconds()
                    if deficit_since else None)
     arrived = parse_when(last_receipt)
     silent = arrived is None or (deficit_since is not None
                                  and arrived < deficit_since)
-    state = classify(tools, receipts, ended, idle, deficit_age, silent,
-                     maybe)
-    return state, tools, maybe
+    return {"state": classify(tools, deficit, surplus, ended, idle,
+                              deficit_age, silent),
+            "tools": tools, "deficit": deficit,
+            "may_owe": sum(seen["may_owe"].values()),
+            "worded": seen["worded"], "unworded": seen["unworded"]}
 
 
 def keep_tails(sessions):
@@ -2020,6 +2094,7 @@ def watch_completeness(root, witness, families, everywhere=False,
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
     unjudged = []
+    canary = []  # every judged session's reading, for the wording canary
     ours = munge(root)
     if calibration is None:
         calibration = [coverage_epoch(
@@ -2057,9 +2132,6 @@ def watch_completeness(root, witness, families, everywhere=False,
                         f"{whose}, from {min(told[source])} — sessions "
                         "judged by one are judged on that word, not on "
                         "anything this supervisor watched")
-    if said:
-        watch["calibration"] = {"epochs": calibration,
-                                "words": "; ".join(said)}
     transcripts = {}
     if witness.is_dir():
         transcripts = {t.stem: t for t in sorted(witness.glob("*/*.jsonl"))}
@@ -2073,17 +2145,20 @@ def watch_completeness(root, witness, families, everywhere=False,
                          "receipt, so completeness has nothing to watch")
 
     def add(repo, session, state, tools, receipts, drawers=(), judge=None,
-            transcript=None, maybe=0):
+            transcript=None, deficit=0, may_owe=0):
         entry = {"repo": repo, "session": session, "state": state,
                  "tools": tools, "receipts": receipts}
         if state != "BEFORE-MEMORY":
             # A session older than the memory has no deficit to name:
             # the word is the claim ADR-0029 refuses to make about it.
-            entry["deficit"] = max(0, tools - receipts)
-        if maybe:
-            # Failed calls that may or may not owe (#239): why receipts
-            # can outnumber the owed without the row reading surplus.
-            entry["may_owe"] = maybe
+            # Reconciled tool by tool (ADR-0034), so it can differ from
+            # tools minus receipts.
+            entry["deficit"] = deficit
+        if may_owe:
+            # Failed calls that may or may not owe (ADR-0034): why a
+            # tool's receipts can outnumber its owed calls without the
+            # row reading surplus.
+            entry["may_owe"] = may_owe
         if len(drawers) > 1:
             entry["drawers"] = list(drawers)
         if state in WATCH_WORDS:
@@ -2117,8 +2192,13 @@ def watch_completeness(root, witness, families, everywhere=False,
     # and judge the session once.
     sessions = {}
     for (repo, session), family in sorted(families.items()):
-        group = sessions.setdefault(session, {"drawers": [], "last": None})
+        group = sessions.setdefault(session, {"drawers": [], "last": None,
+                                              "by_tool": {}})
         group["drawers"].append((family["receipts"], repo))
+        # The same receipts counted by the tool each action line names,
+        # for the reconciliation tool by tool (ADR-0034).
+        for _, tool in family.get("moments", ()):
+            group["by_tool"][tool] = group["by_tool"].get(tool, 0) + 1
         if family["last"]:
             was_newest = group["last"] is None or family["last"] > group["last"]
             group["last"] = max(group["last"] or "", family["last"])
@@ -2152,9 +2232,8 @@ def watch_completeness(root, witness, families, everywhere=False,
                 transcript=transcript)
             continue
         try:
-            state, tools, maybe = watch_session(transcript, receipts,
-                                                group["last"], now,
-                                                calibration)
+            reading = watch_session(transcript, group["by_tool"],
+                                    group["last"], now, calibration)
         except OSError:
             # A transcript that cannot be read (vanished mid-scan, or a
             # path that is not a readable file) costs this one session
@@ -2169,8 +2248,11 @@ def watch_completeness(root, witness, families, everywhere=False,
             judge = (f'python "{LOXODONTA.as_posix()}" verify '
                      f'--log "{group["judge_log"]}" '
                      f'--transcript "{transcript.as_posix()}"')
-        row = add(repo, session, state, tools, receipts, spans, judge=judge,
-                  transcript=transcript, maybe=maybe)
+        state = reading["state"]
+        canary.append(reading)
+        row = add(repo, session, state, reading["tools"], receipts, spans,
+                  judge=judge, transcript=transcript,
+                  deficit=reading["deficit"], may_owe=reading["may_owe"])
         # The lifecycle facts (ADR-0018), quiet fields on the row.
         tier = lifecycle_tier(group.get("last_grew"), now)
         if tier:
@@ -2212,13 +2294,32 @@ def watch_completeness(root, witness, families, everywhere=False,
             elsewhere += 1
             continue
         try:
-            state, tools, maybe = watch_session(transcript, 0, None, now,
-                                                calibration)
+            reading = watch_session(transcript, {}, None, now, calibration)
         except OSError:
             continue  # unreadable and chainless: nothing to say about it
+        canary.append(reading)
         name = (folder if everywhere
                 else folder[len(ours):].strip("-") or root.name)
-        add(name, stem, state, tools, 0, transcript=transcript, maybe=maybe)
+        add(name, stem, reading["state"], reading["tools"], 0,
+            transcript=transcript, deficit=reading["deficit"],
+            may_owe=reading["may_owe"])
+
+    # The canary for the one wording the witness leans on (ADR-0034): a
+    # harness that stopped opening a failed command with `Exit code N`
+    # would turn every owed failure into one that may owe, silently. When
+    # failed shell calls were left may_owe and not one failure read as
+    # owed, one sentence says so. Context, never an alarm: a denial
+    # without its marker reads the same way.
+    unworded = sum(reading["unworded"] for reading in canary)
+    if unworded and not sum(reading["worded"] for reading in canary):
+        said.append(f"{unworded} failed shell call(s) under the failed-call "
+                    "event carried no `Exit code N` line, and no failure "
+                    "here did: a denial or a blocked call reads that way, "
+                    "and so would a harness that reworded its failures, so "
+                    "they are counted as may_owe (ADR-0034)")
+    if said:
+        watch["calibration"] = {"epochs": calibration,
+                                "words": "; ".join(said)}
 
     if elsewhere and "note" not in watch:
         watch["note"] = (f"{elsewhere} witnessed session(s) under this "
@@ -4597,8 +4698,10 @@ SIGNATURE_PRINCIPAL = "issuer"
 # The completeness row travels with these fields only: no judge command,
 # no transcript path, no home. Paths the recipient cannot follow are
 # noise, and the project record already carries the one that matters.
+# `may_owe` travels so a recipient can read why a session's receipts
+# outnumber its owed calls without it reading surplus (ADR-0034).
 WITNESS_FIELDS = ("repo", "session", "state", "tools", "receipts",
-                  "deficit", "words")
+                  "deficit", "may_owe", "words")
 WITNESS_WORDS = (
     "testimony: the supervisor's completeness reading of each session "
     "packaged and the scan's verdicts at packaging, as the packing "

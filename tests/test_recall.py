@@ -718,10 +718,19 @@ class ScanSummaryTest(RecallBase):
 
 class InstallerTest(RecallBase):
     def run_installer(self, *args):
+        """The installer against a home inside the test, with no ambient
+        store or Codex home: an exported LOXODONTA_HOME or CODEX_HOME
+        would otherwise take the coverage marker, or the Codex hooks,
+        out of the test and into that home."""
         home = self.root / "home"
         home.mkdir(exist_ok=True)
-        return run_py(LOXODONTA, *args, env_extra={
-            "HOME": str(home), "USERPROFILE": str(home)}), home
+        env = {name: value for name, value in os.environ.items()
+               if name not in ("LOXODONTA_HOME", "CODEX_HOME")}
+        env.update(PYTHONIOENCODING="utf-8", HOME=str(home),
+                   USERPROFILE=str(home))
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), *args], capture_output=True,
+            encoding="utf-8", env=env), home
 
     def settings(self, home):
         return json.loads((home / ".claude" / "settings.json").read_text(
