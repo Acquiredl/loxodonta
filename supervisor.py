@@ -5607,6 +5607,39 @@ def metrics_text(report, age_seconds):
 # tripwire event between them. The env knob is the test suite's handle.
 SCAN_TTL_SECONDS = float(os.environ.get("SUPERVISOR_SCAN_TTL_SECONDS", 3))
 
+# How often `serve` asks for a scan of its own when a keeper cadence is
+# in force (#271). Both keepers run inside the scan, and a scan used to
+# happen only when a request asked for one, so a `serve` run as a
+# background service with no page open and no scrape pointed at it
+# anchored and published nothing, however long it ran. The session
+# killed before its end is the one the keeper covers (ADR-0025), and it
+# was the one a headless `serve` left uncovered. A minute is short
+# enough that a ripe head does not wait long past its cadence and long
+# enough that an idle machine is not walked constantly; the env knob is
+# the test suite's handle, as it is above.
+KEEPER_TICK_SECONDS = float(
+    os.environ.get("SUPERVISOR_KEEPER_TICK_SECONDS", 60))
+
+
+def keep_turning(server, stop):
+    """The keeper's own clock: ask for a fresh scan until `stop` is set,
+    starting at once so a ripe head does not wait out a whole tick after
+    the server starts. It asks through `fresh_scan`, the routes' own
+    door, so a turn and a request share one hold of the scan lock and
+    the store is never walked twice at once. Every failure is swallowed
+    here: what a turn tried is already in the next scan's report and in
+    the attempt rows beside the chains, and a thread that died on one
+    bad tick would stand both keepers down for the life of the process,
+    quietly, which is what an adversary would want from it."""
+    while not stop.is_set():
+        try:
+            server.fresh_scan()
+        except Exception:  # never take the keeper down, or the server
+            pass
+        # The wait is on the event, not the clock, so Ctrl-C stops the
+        # thread now rather than at the end of a tick.
+        stop.wait(KEEPER_TICK_SECONDS)
+
 
 class Watchtower(ThreadingHTTPServer):
     """The threading server, with its one scan serialized: requests
@@ -5885,11 +5918,27 @@ def cmd_serve(args):
                        publish_head, publish_chain, publish_source,
                        authority),
           flush=True)
+    # With a cadence in force, the keepers get a clock of their own
+    # (#271): a daemon thread asking for a scan on the tick, so what
+    # leaves this machine never depends on somebody having the page
+    # open. With no cadence, no thread starts and nothing changes.
+    stop = threading.Event()
+    keeper = None
+    if anchor_every is not None or publish_every is not None:
+        keeper = threading.Thread(target=keep_turning, args=(server, stop),
+                                  daemon=True)
+        keeper.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
+        if keeper is not None:
+            # A turn waiting on the event returns at once; one already
+            # inside a scan gets a moment to finish rather than being
+            # stopped mid-walk.
+            keeper.join(5)
         server.server_close()
     return 0
 

@@ -29,11 +29,12 @@ from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
 from test_stamp import reply, start_authority
-from test_supervisor import (ago, chain_head, chains_by_session,
-                             home_outside, install_witness_hook,
-                             isolated_env, keeper_env, make_chain, run_scan,
-                             write_attempt_row, write_chain_row,
-                             write_completed_anchor, write_pending_anchor)
+from test_supervisor import (BASELINE_NAME, ago, chain_head,
+                             chains_by_session, home_outside,
+                             install_witness_hook, isolated_env, keeper_env,
+                             make_chain, run_scan, write_attempt_row,
+                             write_chain_row, write_completed_anchor,
+                             write_pending_anchor)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -643,6 +644,105 @@ class DashboardLeftTest(ReceiverFixture):
         self.assertIn("last failed", tiles)
 
 
+class HeadlessKeeperTest(ReceiverFixture):
+    """`serve` turns its keepers on a clock of its own (#271). Both
+    keepers run inside the scan, and a scan used to happen only when a
+    request asked for one, so a `serve` run as a background service with
+    no page open and no scrape pointed at it published nothing, ever.
+    The session killed before its end is the one the keeper exists to
+    cover (ADR-0025), and it is the one a headless `serve` left
+    uncovered. Every test here makes no request at all."""
+
+    def serve(self, *extra, **knobs):
+        """Start `serve` and read both startup lines before anything
+        stops the process: they are two flushes, and a kill sent the
+        instant the first arrives can land before the second is
+        written."""
+        self.proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--root",
+             str(self.root), "--port", "0", *extra],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env={**self.env, "PYTHONIOENCODING": "utf-8", **knobs})
+        self.addCleanup(self._stop)
+        line = self.proc.stdout.readline()
+        if not re.search(r"http://127\.0\.0\.1:\d+", line):
+            self.proc.kill()
+            _, err = self.proc.communicate()
+            self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        self.said = self.proc.stdout.readline()
+
+    def _stop(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.communicate()
+
+    def wait_for_sends(self, count, within=60):
+        """Wait for the remote to hold `count` posts, polling to a bound
+        rather than sleeping a fixed time: a slow runner gets longer and
+        a quick one does not wait."""
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            if len(self.receiver.received) >= count:
+                return
+            time.sleep(0.1)
+        self.fail(f"the remote held {len(self.receiver.received)} posts, "
+                  f"not {count}, after {within}s")
+
+    def test_a_ripe_head_reaches_the_remote_with_nobody_watching(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-headless")
+        head = chain_head(log)
+
+        self.serve("--publish-every", "0s", "--publish-url",
+                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5")
+        self.wait_for_sends(1)
+
+        self.assertIn("publish head every", self.said)
+        body = self.body()
+        self.assertEqual(body["head"], head)
+        self.assertEqual(body["event"], "cadence")
+        self.assertEqual([m["head"] for m in memo_of(log) if "head" in m],
+                         [head])
+
+    def test_the_clock_keeps_turning_and_a_grown_chain_goes_on_a_later_tick(self):
+        # One send proves only that `serve` scanned once as it started.
+        # A chain that grows after that send, and a second head that
+        # arrives with no request behind it, is the clock itself.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-ticking")
+        first = chain_head(log)
+
+        self.serve("--publish-every", "0s", "--publish-url",
+                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        self.wait_for_sends(1)
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "step 3"],
+            capture_output=True, check=True, env=clean_env())
+        self.wait_for_sends(2)
+
+        self.assertEqual([self.body(i)["head"] for i in range(2)],
+                         [first, chain_head(log)])
+
+    def test_with_no_cadence_in_force_no_tick_turns_at_all(self):
+        # No flag, and a store whose marker names no profile: nothing is
+        # sent, and the baseline is never written, which is the proof
+        # that no scan ran — a `serve` nobody polls does what it always
+        # did, exactly nothing.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-quiet")
+
+        self.serve(SUPERVISOR_KEEPER_TICK_SECONDS="0.2")
+        quiet_until = time.monotonic() + 3
+        while time.monotonic() < quiet_until:
+            self.assertEqual(self.receiver.received, [])
+            time.sleep(0.1)
+
+        self.assertIn("anchor off", self.said)
+        self.assertIn("publish off", self.said)
+        self.assertEqual(memo_of(log), [])
+        self.assertFalse((self.root / BASELINE_NAME).exists(),
+                         "a scan ran with no keeper cadence to run it for")
+
+
 class ProfileKeeperTest(unittest.TestCase):
     """`serve` reads the coverage marker's newest epoch (ADR-0031 ruling
     1): with no `--anchor-every` and a `timestamped` profile, the anchor
@@ -1005,10 +1105,14 @@ class ProfileKeeperTest(unittest.TestCase):
         self.assertEqual(self.tokens_of(log), [])
 
     def test_a_refused_token_is_asked_for_again_on_the_next_turn(self):
-        # The control for the throttle test below: with no throttle, two
-        # ticks are two turns, and a refusal leaves no token for the
-        # dedupe to stop at, so the authority is asked twice. Without
-        # this the one query below could be a scan that never ran.
+        # The control for the throttle test below: with no throttle,
+        # each tick is a turn of its own, and a refusal leaves no token
+        # for the dedupe to stop at, so the authority is asked more than
+        # once. Without this the one query below could be a scan that
+        # never ran. How many turns there are is not the reading: since
+        # #271 `serve` turns the keeper on a clock of its own beside the
+        # requests, and this asserts that a refused token is asked for
+        # again, not which clock asked.
         authority = self.authority()
         authority.answer = reply(2)   # rejection, and no token
         self.install("--profile", "timestamped", "--authority", authority.url)
@@ -1020,7 +1124,7 @@ class ProfileKeeperTest(unittest.TestCase):
         self.tick()
         self.said_at_startup()
 
-        self.assertEqual(len(authority.received), 2)
+        self.assertGreaterEqual(len(authority.received), 2)
         self.assertEqual(self.tokens_of(log), [])
 
     def test_two_ticks_inside_one_window_ask_a_refusing_authority_once(self):
