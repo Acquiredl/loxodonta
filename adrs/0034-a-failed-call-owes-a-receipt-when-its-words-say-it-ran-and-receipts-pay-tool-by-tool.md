@@ -48,7 +48,8 @@ Every permission denial in a main transcript carried `toolDenialKind`;
 in subagent files one of 67 did.
 
 **Is a block marked?** Measured on the same data, because the rule turns
-on it. Of 1,052 failed results (a later count of the same store), none
+on it. Of 1,052 failed results (a later count of the same store; a review's
+own survey counted 1,055, the same structure), none
 opens with `PreToolUse` or `hook`; the 11 that mention a hook in their
 first lines are ten command outputs about hooks and one tool's error.
 The only blocks in the data are the desktop worktree guard's, 73 of
@@ -105,7 +106,14 @@ skipped the grace window every receipt gets.
    its own tool or in another. The deficit clock keys on the first owed
    call still unpaid, dated no earlier than its tool's newest `may_owe`
    call, so a receipt still on its way from that call gets the grace
-   window any receipt gets.
+   window any receipt gets. That floor is held to what could be on its
+   way: at most one unpaid call per `may_owe` call, and none at all for
+   a tool with no receipt. Unheld, it costs the alarm itself, since a
+   call failing every few seconds dates every older unpaid call of its
+   tool forward, and a session whose recording had stopped reads
+   `LAGGING` for as long as the failures keep coming. Held, a tool with
+   no receipt keeps its own dates and alarms, and three starved calls
+   behind one failure stay three.
 
    **The price, stated plainly:** a non-shell call that a `PreToolUse`
    hook blocked, or that was denied without its marker, fired nothing,
@@ -156,6 +164,14 @@ skipped the grace window every receipt gets.
   answers with an error, and starves that one call's hook, in a session
   that made no other fetch, leaves a clean reading. Owing every non-shell
   failure would catch it (see Alternatives).
+- **A writer whose failure receipts flow while one owed receipt is
+  starved.** The grace floor (ruling 2) dates one unpaid call per
+  `may_owe` call forward while the tool has receipts, so a writer that
+  starves one fetch's receipt and keeps failing fetches whose receipts
+  do land holds that tool at `LAGGING` rather than an alarm, for as long
+  as it keeps them coming. The floor is what gives an honest receipt its
+  30 seconds; this is what that costs. A tool with no receipt at all,
+  and every unpaid call past the first per failure, alarm as before.
 - **A line written by hand.** The pooled reading (ruling 3) lets a line
   naming a tool the session never used pay any deficit, and a line
   naming the starved tool pays that tool's deficit in any ruling that
@@ -185,6 +201,13 @@ skipped the grace window every receipt gets.
   `ALARM-DEFICIT`, exit 6, with the action lines the hook writes, and
   `test_a_may_owe_receipt_still_on_its_way_gets_the_grace` reads
   `LAGGING` while the failed call's receipt is on its way.
+- A stream of failing calls cannot quiet a session whose recording
+  stopped, or a starved receipt of the same tool:
+  `test_a_stream_of_failures_never_quiets_a_session_that_stopped` reads
+  `ALARM-SILENT` and
+  `test_a_stream_of_failures_never_quiets_a_starved_receipt` reads
+  `ALARM-DEFICIT`, at 20 seconds and at 90, and three starved calls
+  behind one failure stay three.
 - A failed call under an install that never wired the event is judged
   as before (`test_an_install_from_before_the_event_is_judged_as_before`
   reads `ENDED-SURPLUS`, as dev does). Tool-by-tool pairing itself
