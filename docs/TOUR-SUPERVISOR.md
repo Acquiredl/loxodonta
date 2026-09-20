@@ -329,7 +329,9 @@ issue #271: the keepers live inside the scan, so while only a request
 could start one, a `serve` run as a background service with nobody
 looking at the page anchored and published nothing. With a cadence in
 force, a daemon thread now asks for the same scan the routes ask for,
-about once a minute, through the same door and the same lock.
+a minute after the last walk finished, through the same door and the
+same lock — and asks not to be remembered in the day book, because a
+machine talking to itself is not somebody looking (ADR-0014).
 The bind is 127.0.0.1 and the posture is *nothing is ever offered
 off-machine* — which includes off-machine by trickery: a Host header
 that is not localhost is refused (DNS rebinding makes a stranger's

@@ -108,12 +108,12 @@ scrape_configs:
 
 Reaching it from another box is your tunnel or your reverse proxy, the same as the dashboard: an SSH forward, or a proxy that presents the route under a name this machine answers to. The supervisor offers no way to do that for you, deliberately.
 
-Two alerts worth having on day one, in words rather than in anyone's query language: page when `loxodonta_scan_age_seconds` climbs past a few multiples of your scrape interval, because the numbers are then stale and saying so; and page when the scrape itself disappears, because that is the case the numbers cannot cover.
+One alert worth having on day one, in words rather than in anyone's query language: page when the scrape itself disappears, because that is the case the numbers cannot cover. An alert on `loxodonta_scan_age_seconds` is not the second one it looks like: the route walks the store again as soon as the held scan is older than the few seconds it is kept for, so the gauge is bounded by that window and says how fresh this answer is, never how long the supervisor has been unwell.
 
 ## 6. What a gauge does not survive
 
 - **The machine it runs on.** The supervisor is writer-reachable, and so is its scrape. Verdicts still come from `verify` and its inputs, never from a number on this route.
-- **The gap between scans.** A gauge is as fresh as the last scan. `loxodonta_scan_age_seconds` says how fresh, and an alert on it is the honest guard.
+- **The gap between scans.** A gauge is as fresh as the last scan. `loxodonta_scan_age_seconds` says how fresh this answer is, within the few seconds a scan is held for; the honest guard against a supervisor that has stopped saying anything is the alert on the scrape disappearing (§5).
 - **Anything the chain does not hold.** The route counts receipts, not outcomes, not health, not errors. "This session is erroring" is somebody else's product, and `.out-of-scope/001` still says so.
 
 ## 7. See also

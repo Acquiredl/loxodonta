@@ -51,6 +51,24 @@ The ratified shape, recorded because the trade-offs were argued:
 - **An unwatched day is drawn as absence, never as quiet.** A day with
   no scan carries no claim in the report — no worst, no counts — and
   the band hatches it. A day nobody read is not a day that was fine.
+  *(Addendum 2026-09-20, #271, for the author to confirm: a scan is a
+  day's evidence that somebody looked only while somebody asks for
+  every scan. `serve` now keeps a clock of its own when a keeper
+  cadence is in force, and a machine asking itself every minute is not
+  somebody looking — a day whose only rows came from that clock would
+  paint all-quiet and the lapse line would say fourteen of fourteen
+  days watched, which is the Ch. 32 hole with the alarm switched off,
+  and switched off for exactly the operators who run `serve` as a
+  service. So the rule is kept by naming who asked: a scan somebody
+  asked for goes in the day book, and the keeper's own turn does not.
+  A person at the page counts, by the poll behind it as well as the
+  `looks` this decision already records; a monitoring scrape counts
+  too, since ADR-0033 made `/metrics` the siren and a scrape is a
+  reading somebody set up and watches — nothing was changed to make
+  that so, it falls out of a scrape being a request. The one edge: a
+  request inside the few seconds a keeper's reading is held for is
+  answered from that reading and writes no row of its own, so a
+  scraper's day is marked by its next scrape rather than that one.)*
 - **Gaps only count after the first watched day.** A fresh install is
   not scolded for the fortnight before it existed.
 - **Bounded by date, not by row count.** A season (90 days). A book

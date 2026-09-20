@@ -99,8 +99,8 @@ certainty. Completeness stays the integration's job (SPEC §8).
    kept no cadence at all, and the session this ruling covers — the one
    that never reached its end — was the one left uncovered. #271 gave
    `serve` a clock of its own: with a cadence in force it takes a fresh
-   reading of the store about once a minute, through the same door a
-   request goes through.)*
+   reading of the store a minute after the last reading finished,
+   through the same door a request goes through.)*
 4. **The check: every published head is an entry hash inside the chain.**
    A regenerated chain fails on the earlier heads. A fake head the writer
    posts matches nothing and arrives after the real session end, which is
