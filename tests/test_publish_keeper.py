@@ -19,6 +19,7 @@ import threading
 import time
 import unittest
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 # This folder on sys.path, so the sibling imports below also resolve
@@ -651,7 +652,9 @@ class HeadlessKeeperTest(ReceiverFixture):
     no page open and no scrape pointed at it published nothing, ever.
     The session killed before its end is the one the keeper exists to
     cover (ADR-0025), and it is the one a headless `serve` left
-    uncovered. Every test here makes no request at all."""
+    uncovered. Every test here runs `serve` with nothing polling it; the
+    day-book test opens the page at the end, which is the difference it
+    is about."""
 
     def serve(self, *extra, **knobs):
         """Start `serve` and read both startup lines before anything
@@ -665,10 +668,12 @@ class HeadlessKeeperTest(ReceiverFixture):
             env={**self.env, "PYTHONIOENCODING": "utf-8", **knobs})
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
-        if not re.search(r"http://127\.0\.0\.1:\d+", line):
+        found = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if found is None:
             self.proc.kill()
             _, err = self.proc.communicate()
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        self.url = found.group()
         self.said = self.proc.stdout.readline()
 
     def _stop(self):
@@ -676,32 +681,58 @@ class HeadlessKeeperTest(ReceiverFixture):
             self.proc.kill()
             self.proc.communicate()
 
-    def wait_for_sends(self, count, within=60):
-        """Wait for the remote to hold `count` posts, polling to a bound
-        rather than sleeping a fixed time: a slow runner gets longer and
-        a quick one does not wait."""
+    def get(self, path):
+        with OPENER.open(self.url + path, timeout=30) as answer:
+            return answer.read().decode("utf-8")
+
+    def wait_for(self, done, within=60, missing="the turn never came"):
+        """Wait for `done()`, polling to a bound rather than sleeping a
+        fixed time: a slow runner gets longer and a quick one does not
+        wait. Nothing here asks `serve` for anything — the clock is what
+        makes these tests pass or fail."""
         deadline = time.monotonic() + within
         while time.monotonic() < deadline:
-            if len(self.receiver.received) >= count:
+            if done():
                 return
             time.sleep(0.1)
-        self.fail(f"the remote held {len(self.receiver.received)} posts, "
-                  f"not {count}, after {within}s")
+        self.fail(f"{missing} within {within}s")
+
+    def wait_for_sends(self, count, within=60):
+        self.wait_for(lambda: len(self.receiver.received) >= count,
+                      within=within,
+                      missing=f"the remote held fewer than {count} posts")
+
+    def heads_in_memo(self, log, within=30):
+        """The memo's head rows, waited for: the recorder writes the row
+        when its POST returns, so a test reading the memo the instant
+        the remote saw the request can read an empty file."""
+        rows = []
+
+        def written():
+            rows[:] = [m["head"] for m in memo_of(log) if "head" in m]
+            return bool(rows)
+
+        self.wait_for(written, within=within,
+                      missing="the memo kept no head row")
+        return rows
 
     def test_a_ripe_head_reaches_the_remote_with_nobody_watching(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-headless")
         head = chain_head(log)
 
+        # The scan cache off beside the tick: with it on, five ticks in
+        # six are answered from the held scan and the test would be
+        # timing the cache rather than the clock under it.
         self.serve("--publish-every", "0s", "--publish-url",
-                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5")
+                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
         self.wait_for_sends(1)
 
         self.assertIn("publish head every", self.said)
         body = self.body()
         self.assertEqual(body["head"], head)
         self.assertEqual(body["event"], "cadence")
-        self.assertEqual([m["head"] for m in memo_of(log) if "head" in m],
-                         [head])
+        self.assertEqual(self.heads_in_memo(log), [head])
 
     def test_the_clock_keeps_turning_and_a_grown_chain_goes_on_a_later_tick(self):
         # One send proves only that `serve` scanned once as it started.
@@ -712,6 +743,7 @@ class HeadlessKeeperTest(ReceiverFixture):
 
         self.serve("--publish-every", "0s", "--publish-url",
                    self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0",
                    SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
         self.wait_for_sends(1)
         subprocess.run(
@@ -722,6 +754,109 @@ class HeadlessKeeperTest(ReceiverFixture):
 
         self.assertEqual([self.body(i)["head"] for i in range(2)],
                          [first, chain_head(log)])
+
+    def start_calendar(self):
+        """A calendar of the test's own, answering a poll of a pending
+        proof with "pending" and writing down that it was asked."""
+        calendar = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
+        calendar.mode = "pending"
+        calendar.nonce = b"fake-nonce"
+        calendar.submitted = []
+        calendar.polled = []
+        calendar.url = f"http://127.0.0.1:{calendar.server_address[1]}"
+        threading.Thread(target=calendar.serve_forever, daemon=True).start()
+        self.addCleanup(calendar.server_close)
+        self.addCleanup(calendar.shutdown)
+        return calendar
+
+    def test_a_pending_proof_is_upgraded_on_the_turn_and_the_line_says_so(self):
+        # `anchor off` stops fresh heads going to the calendars; it never
+        # stopped a turn finishing a proof already submitted, which is a
+        # request to a calendar too. With the clock turning unwatched,
+        # the startup line has to say so: it is the operator's read-back
+        # of what leaves this machine.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-pending")
+        calendar = self.start_calendar()
+        write_pending_anchor(log, chain_head(log), submitted=ago(100000),
+                             calendar=calendar.url)
+
+        # A publish cadence in force, so the clock turns, and a day's
+        # cadence, so no head in this fresh root is ripe: what reaches
+        # the calendar reaches it on the anchor keeper's upgrade alone.
+        self.serve("--publish-every", "1d", "--publish-url",
+                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        self.wait_for(lambda: bool(calendar.polled),
+                      missing="the calendar was never asked")
+
+        self.assertIn("anchor off", self.said)
+        self.assertIn("pending proofs still upgraded on each turn", self.said)
+        self.assertEqual(calendar.submitted, [], "a head was anchored")
+        self.assertEqual(self.receiver.received, [])
+
+    def test_the_clock_is_not_somebody_looking_and_the_page_is(self):
+        # ADR-0014's whole point: a day nobody looked at must not paint
+        # like a quiet day. The clock talks to the machine, not to the
+        # operator, so its turns stay out of the day book; a page opened
+        # puts the day in it. The day book is the supervisor's own
+        # memory, read here the way the baseline is elsewhere.
+        make_chain(self.root / "alpha" / "receipts", "sess-daybook")
+        book = self.root / ".supervisor-daybook.json"
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        self.serve("--publish-every", "1d", "--publish-url",
+                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        # The baseline is what says a turn walked the store, since the
+        # day book is exactly what these turns must not write.
+        self.wait_for(lambda: (self.root / BASELINE_NAME).exists(),
+                      missing="no turn ever walked the store")
+        self._stop()
+
+        self.assertFalse(book.exists(),
+                         "the keeper's own clock wrote the day book")
+
+        self.serve()
+        self.get("/")                      # somebody opens the page
+        report = json.loads(self.get("/api/status"))   # which then polls
+        self._stop()
+
+        row = [day for day in report["history"] if day["day"] == today]
+        self.assertEqual([(day["watched"], day["looks"]) for day in row],
+                         [(True, 1)])
+        self.assertTrue(book.is_file())
+
+    def test_a_scan_that_cannot_finish_is_said_once_and_the_clock_runs_on(self):
+        # A keeper step that fails leaves an attempt row beside the
+        # chain and a note in the next scan's report. A scan that cannot
+        # finish at all leaves neither, and on the headless machine this
+        # clock exists for nothing else is looking, so it is said: one
+        # line on stderr, no traceback, and not again on every tick.
+        # The server and the clock both live through it.
+        make_chain(self.root / "alpha" / "receipts", "sess-unreadable")
+        (self.root / BASELINE_NAME).mkdir()  # the scan cannot write it
+
+        # A cadence in force, so the clock turns, and a day's cadence, so
+        # no head in this fresh root is ripe and nothing is ever sent.
+        self.serve("--publish-every", "1d", "--publish-url",
+                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.1",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        said = self.proc.stderr.readline()
+        time.sleep(2)  # many more turns, each failing the same way
+        alive = self.proc.poll() is None
+        self.proc.kill()
+        _, rest = self.proc.communicate()
+
+        self.assertIn("the keeper's scan did not finish", said)
+        self.assertIn("PermissionError", said, "the line names no kind")
+        self.assertNotIn("Traceback", said)
+        # The kind and the reason, never the exception whole: a failure
+        # carrying a command line would carry the remote's URL with it.
+        self.assertNotIn(BASELINE_NAME, said)
+        self.assertNotIn(str(self.root), said)
+        self.assertTrue(alive, "the failure took the server down")
+        self.assertEqual(rest, "", "the same failure said on every tick")
+        self.assertEqual(self.receiver.received, [])
 
     def test_with_no_cadence_in_force_no_tick_turns_at_all(self):
         # No flag, and a store whose marker names no profile: nothing is

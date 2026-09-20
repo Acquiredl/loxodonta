@@ -791,8 +791,15 @@ def keeper_words(anchor_every, anchor_source, publish_every,
     says whom the operator chose to trust (ADR-0032 ruling 4) — where a
     webhook URL is, which is why the publish clause names routes and
     never URLs; one that failed the installer's rule is never printed."""
+    # An anchor cadence that is off stops fresh heads going to the
+    # calendars; it does not stop a turn finishing the proofs already
+    # submitted, which is a request to a calendar too (`keep_anchors`).
+    # The line is the read-back of what leaves the machine, and since
+    # #271 the clock can turn with nobody at the page, so it says both.
     anchor = (f"anchor every {cadence_words(anchor_every)} ({anchor_source})"
-              if anchor_every is not None else f"anchor off ({anchor_source})")
+              if anchor_every is not None
+              else f"anchor off ({anchor_source}), pending proofs still "
+                   "upgraded on each turn")
     if anchor_every is not None and authority is not None:
         url, named_by, off = authority
         if off:
@@ -2301,11 +2308,19 @@ def watch_consumption(families, now):
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
               publish_every=None, publish_url=None, publish_chain=None,
               store=False, tick=True, show_before_memory=False,
-              authority=None):
+              authority=None, remember=True):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict — what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
     diffing, so an alarm belongs to the tick that caught it.
+
+    `remember=False` reads the day book instead of writing to it, for
+    the one caller nobody asked for a reading: `serve`'s keeper clock
+    (#271). The day book answers "did anybody look?" (ADR-0014), and a
+    machine talking to itself every minute is not somebody looking —
+    a day whose only rows came from the clock would paint as watched
+    and silence the lapse line, which is the one failure the chains
+    themselves can never report.
 
     Two universes, one walk: the store (ADR-0011 — root is the store's
     receipts folder, drawers name their repos, the baseline lives
@@ -2554,11 +2569,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # — worst already raised by the tripwire and the completeness watch.
     alarms = len([s for s in completeness["sessions"]
                   if s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")])
-    days = remember_day(daybook, now, {
+    tally = {
         "worst": worst, "chains": len(census), "broken": damaged,
         "events": len(events), "alarms": alarms,
         "reawakenings": len(awakened),
-    })
+    }
+    days = (remember_day(daybook, now, tally) if remember
+            else read_daybook(daybook))
 
     baseline = {"file": baseline_path.as_posix(), "events": events}
     if note:
@@ -5616,26 +5633,55 @@ SCAN_TTL_SECONDS = float(os.environ.get("SUPERVISOR_SCAN_TTL_SECONDS", 3))
 # was the one a headless `serve` left uncovered. A minute is short
 # enough that a ripe head does not wait long past its cadence and long
 # enough that an idle machine is not walked constantly; the env knob is
-# the test suite's handle, as it is above.
-KEEPER_TICK_SECONDS = float(
-    os.environ.get("SUPERVISOR_KEEPER_TICK_SECONDS", 60))
+# the test suite's handle, as it is above. A tenth of a second is the
+# floor under it: `SUPERVISOR_SCAN_TTL_SECONDS=0` is an idiom in this
+# suite, and the same 0 typed here would spin a core, since a cached
+# scan returns at once and the turn would do nothing but take the lock.
+KEEPER_TICK_SECONDS = max(
+    float(os.environ.get("SUPERVISOR_KEEPER_TICK_SECONDS", 60)), 0.1)
+
+
+def trouble_words(failure):
+    """One short line for a failure, its kind and the reason the system
+    gave — never the exception whole. `subprocess.TimeoutExpired` prints
+    the command it ran, and the keeper's commands carry the remote's
+    URL, which is a credential (ADR-0025); no path reaches this with one
+    today, and the rule holds anyway."""
+    reason = getattr(failure, "strerror", None)
+    return f"{type(failure).__name__}: {reason}" if reason else (
+        type(failure).__name__)
 
 
 def keep_turning(server, stop):
     """The keeper's own clock: ask for a fresh scan until `stop` is set,
     starting at once so a ripe head does not wait out a whole tick after
-    the server starts. It asks through `fresh_scan`, the routes' own
-    door, so a turn and a request share one hold of the scan lock and
-    the store is never walked twice at once. Every failure is swallowed
-    here: what a turn tried is already in the next scan's report and in
-    the attempt rows beside the chains, and a thread that died on one
-    bad tick would stand both keepers down for the life of the process,
-    quietly, which is what an adversary would want from it."""
+    the server starts, and a tick after the last walk finished from
+    then on. It asks through `fresh_scan`, the routes' own door, so a
+    turn and a request take the scan lock one after the other and the
+    store is never walked twice at once — and it asks not to be
+    remembered, because a machine talking to itself is not somebody
+    looking at the page (ADR-0014).
+
+    A failure here never stops the clock and never takes the server
+    down, and it is said rather than swallowed: a keeper *step* that
+    fails is caught deeper and leaves an attempt row beside the chain,
+    but a scan that cannot finish at all leaves nothing anywhere, and
+    on the headless machine this clock exists for nothing else is
+    looking. One line to stderr names its kind, and a failure that
+    keeps happening is said once rather than every tick, so a store the
+    supervisor cannot read does not bury the operator's terminal; a
+    turn that works again makes the next failure news again."""
+    said = None
     while not stop.is_set():
         try:
-            server.fresh_scan()
-        except Exception:  # never take the keeper down, or the server
-            pass
+            server.fresh_scan(remember=False)
+            said = None
+        except Exception as failure:  # never take the keeper down
+            trouble = ("error: the keeper's scan did not finish: "
+                       + trouble_words(failure))
+            if trouble != said:
+                print(trouble, file=sys.stderr, flush=True)
+                said = trouble
         # The wait is on the event, not the clock, so Ctrl-C stops the
         # thread now rather than at the end of a tick.
         stop.wait(KEEPER_TICK_SECONDS)
@@ -5668,10 +5714,14 @@ class Watchtower(ThreadingHTTPServer):
         return (self.root.parent / "views.json" if self.store
                 else self.root / VIEWS_NAME)
 
-    def fresh_scan(self):
+    def fresh_scan(self, remember=True):
         """The newest scan no older than the tick, and its age in
         seconds, read under one hold of the lock so the age belongs to
-        the body it comes with."""
+        the body it comes with.
+
+        `remember=False` is the keeper clock's turn (#271): it walks the
+        store like any other tick and keeps out of the day book, which
+        counts the days somebody looked (ADR-0014)."""
         with self.scan_lock:
             if (self.scan_body is None
                     or time.monotonic() - self.scan_at >= SCAN_TTL_SECONDS):
@@ -5682,7 +5732,7 @@ class Watchtower(ThreadingHTTPServer):
                                    publish_url=self.publish_url,
                                    publish_chain=self.publish_chain,
                                    authority=self.authority,
-                                   store=self.store)
+                                   store=self.store, remember=remember)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
             return self.scan_body, time.monotonic() - self.scan_at
@@ -5935,9 +5985,12 @@ def cmd_serve(args):
     finally:
         stop.set()
         if keeper is not None:
-            # A turn waiting on the event returns at once; one already
-            # inside a scan gets a moment to finish rather than being
-            # stopped mid-walk.
+            # What five seconds buys: a turn waiting on the event ends
+            # now, and a short walk ends tidily. It does not buy a walk
+            # of a large store finishing — that one goes with the
+            # process, as a request thread's walk always has, and the
+            # baseline it was rewriting is the cost (the file is
+            # truncated and written, not swapped in).
             keeper.join(5)
         server.server_close()
     return 0
