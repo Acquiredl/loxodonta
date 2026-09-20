@@ -3250,6 +3250,161 @@ class RecorderDriftTest(unittest.TestCase):
 
         self.assertEqual(recorder["state"], "unwired")
 
+
+class TranscriptRetentionTest(unittest.TestCase):
+    """The harness deletes its own transcripts (#260): Claude Code
+    sweeps a session transcript once it is older than
+    `cleanupPeriodDays`, 30 when the setting is absent, and the chain's
+    commitments outlast it with nothing left to judge. The scan reads
+    the number from the settings beside the witness and says it, in one
+    field; it never copies a transcript and never moves the exit. Every
+    home is inside the test's own folder, so no scan here reads this
+    machine's settings."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name).resolve() / "home"
+        self.witness = self.home / ".claude" / "projects"
+        self.witness.mkdir(parents=True)
+
+    def settings(self, **keys):
+        """The harness settings beside the witness: a wired recorder,
+        plus whatever keys the test sets."""
+        install_witness_hook(self.witness)
+        path = self.witness.parent / "settings.json"
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        settings.update(keys)
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        return path
+
+    def scan(self, *extra):
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "scan", "--witness",
+             str(self.witness), *extra],
+            capture_output=True, encoding="utf-8",
+            env={**isolated_env(self.home), "PYTHONIOENCODING": "utf-8"})
+        self.assertEqual(result.returncode, 0,
+                         "the harness's retention never moves the exit:\n"
+                         + result.stdout + result.stderr)
+        return result
+
+    def report(self):
+        """`scan --json` read as JSON and nothing looser. Python's own
+        reader also takes `Infinity` and `NaN`, which no browser's does,
+        so a report holding one would pass a plain `json.loads` here and
+        still take the dashboard down."""
+        def refuse(word):
+            raise ValueError(f"{word} in the scan's output is not JSON")
+        return json.loads(self.scan("--json").stdout, parse_constant=refuse)
+
+    def retention(self):
+        return self.report()["completeness"].get("transcript_retention")
+
+    def assert_caveat(self, words):
+        # Every line says what it did not read (#260 review).
+        self.assertIn("Only this file is read", words)
+        self.assertIn("claude --settings", words)
+        self.assertIn("desktopSessionCleanupPeriodDays", words)
+
+    def test_an_unset_period_reads_as_the_harness_default_of_30(self):
+        path = self.settings()
+
+        retention = self.retention()
+
+        self.assertEqual(retention["days"], 30)
+        self.assertFalse(retention["set"])
+        self.assertNotIn("value", retention)
+        self.assertEqual(retention["file"], path.as_posix())
+        self.assertIn("cleanupPeriodDays", retention["words"])
+        self.assertIn("not set", retention["words"])
+        self.assertIn("the harness default of 30", retention["words"])
+        self.assert_caveat(retention["words"])
+
+    def test_a_set_period_is_reported_as_the_number_it_is(self):
+        for value, days in ((90, 90), (1, 1), (45.0, 45)):
+            with self.subTest(value=value):
+                self.settings(cleanupPeriodDays=value)
+
+                retention = self.retention()
+
+                self.assertEqual(retention["days"], days)
+                self.assertTrue(retention["set"])
+                self.assertEqual(retention["value"], value)
+                self.assertIn(f"older than {days} days", retention["words"])
+                self.assertIn("cleanupPeriodDays", retention["words"])
+                self.assertNotIn("not set", retention["words"])
+                self.assert_caveat(retention["words"])
+
+    def test_a_value_that_is_no_number_of_days_is_repeated_not_guessed(self):
+        # The harness documents a whole number, 1 or more. Anything else
+        # is said as it stands in the file, and no number of days is
+        # read from it: not the default, not a rounding. What the
+        # harness does then is its own documented rule, and the line
+        # says it: the sweep pauses, unless managed settings set one.
+        for value in ("forever", -5, 0, 2.5, None):
+            with self.subTest(value=value):
+                self.settings(cleanupPeriodDays=value)
+
+                retention = self.retention()
+
+                self.assertIsNone(retention["days"])
+                self.assertTrue(retention["set"])
+                self.assertEqual(retention["value"], value)
+                self.assertIn(json.dumps(value), retention["words"])
+                self.assertNotIn("older than", retention["words"])
+                self.assertNotIn("default of 30", retention["words"])
+                self.assertIn("pauses", retention["words"])
+                self.assertIn("managed", retention["words"])
+                self.assert_caveat(retention["words"])
+
+    def test_infinity_or_nan_makes_the_file_unreadable_to_every_reader(self):
+        # Python's reader takes three words JSON does not have (#260
+        # review). The harness cannot read a settings file holding one,
+        # so no hook in it is wired and no retention in it is set; and a
+        # report that copied one would stop being JSON, and the
+        # dashboard with it. json.dumps writes these as the bare words.
+        for value in (float("inf"), float("-inf"), float("nan")):
+            with self.subTest(value=value):
+                self.settings(cleanupPeriodDays=value)
+
+                completeness = self.report()["completeness"]
+
+                self.assertNotIn("transcript_retention", completeness)
+                self.assertIn("no recorder hook is wired",
+                              completeness.get("note", ""))
+
+    def test_a_number_past_a_float_is_said_in_words_and_left_out_of_value(self):
+        # 1e999 is JSON, and the harness reads it as Infinity, which is
+        # no whole number of days. The file stays readable, its hook
+        # stays wired, and the one value a JSON report cannot carry is
+        # said in the words and left out of `value`.
+        path = self.settings()
+        path.write_text(path.read_text(encoding="utf-8")[:-1]
+                        + ', "cleanupPeriodDays": 1e999}', encoding="utf-8")
+
+        completeness = self.report()["completeness"]
+
+        retention = completeness["transcript_retention"]
+        self.assertIsNone(retention["days"])
+        self.assertTrue(retention["set"])
+        self.assertNotIn("value", retention)
+        self.assertIn("cleanupPeriodDays is Infinity", retention["words"])
+        self.assertNotIn("no recorder hook is wired",
+                         completeness.get("note", ""))
+
+    def test_no_settings_file_adds_nothing_new(self):
+        # No file to read is not a new state: the scan already says what
+        # it says about the witness, and says nothing about retention.
+        self.assertIsNone(self.retention())
+
+    def test_a_settings_file_that_is_not_json_adds_nothing_new(self):
+        (self.witness.parent / "settings.json").write_text(
+            "{not json", encoding="utf-8")
+
+        self.assertIsNone(self.retention())
+
+
 class ConsumptionTest(unittest.TestCase):
     """The consumption watch (issue #67; OWASP GenAI LLM06 mitigation
     #8): tool tempo per session against the store's own norm, read
