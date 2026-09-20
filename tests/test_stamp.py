@@ -810,7 +810,11 @@ class SessionEndStampTest(PublishBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(elapsed, self.authority.delay)
         (note,) = attempt_rows(self.stamps())
-        self.assertEqual(note["outcome"], "no answer within 1.5 seconds")
+        # The row says what the session-end window had left when the
+        # step began, to a tenth, and a busy machine spends a tenth
+        # before it: the wording holds the same tolerance the budget does.
+        self.assertRegex(note["outcome"],
+                         r"^no answer within 1\.[456] seconds$")
         self.assertAlmostEqual(note["budget"], 1.5, delta=0.1)
 
     def test_an_unreachable_authority_is_quiet_and_the_row_names_no_url(self):
