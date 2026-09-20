@@ -20,7 +20,7 @@
 - `adapters/` — per-harness recorder adapters (ADR-0020).
 - `tools/` — repo tooling; `house_check.py` enforces the vocabulary.
 - `tests/` — the suite, through the public CLI: `python -m unittest discover -s tests`.
-- `docs/` — START, SPEC, HOOK, ANCHORING, PACKAGE, RECEIVER, METRICS, MCP, OWASP, FIRE-DRILL, EXPERIMENTS, FIELD-DATA, the tours, HISTORY.
+- `docs/` — START, TOPOLOGY, SPEC, HOOK, ANCHORING, PACKAGE, RECEIVER, METRICS, MCP, OWASP, FIRE-DRILL, EXPERIMENTS, FIELD-DATA, the tours, HISTORY.
 - `adrs/` — decisions that are hard to reverse; `.out-of-scope/` — what was deliberately not built.
 - The store: `~/.loxodonta/receipts/<project-slug>/`, one drawer per project (ADR-0011, `docs/HOOK.md`).
 
