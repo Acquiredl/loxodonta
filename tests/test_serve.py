@@ -714,6 +714,44 @@ class DashboardTest(ServerFixture):
                          r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
+class TranscriptRetentionPanelTest(ServerFixture):
+    """#260 on the page: the watch panel already carries the witness's
+    one-line facts, so it carries how long the harness keeps the
+    transcripts it reads, as the settings say. Every home the server
+    reads is inside the test's folder, and the witness too."""
+
+    def serve_isolated(self, settings):
+        home = self.root / "home"
+        witness = home / ".claude" / "projects"
+        witness.mkdir(parents=True)
+        (home / ".claude" / "settings.json").write_text(
+            json.dumps(settings), encoding="utf-8")
+        self.proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
+             "--witness", str(witness)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
+        self.addCleanup(self._stop)
+        line = self.proc.stdout.readline()
+        match = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if match is None:
+            self.proc.kill()
+            _, err = self.proc.communicate()
+            self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        self.url = match.group()
+
+    def test_the_watch_panel_carries_the_retention_line(self):
+        self.serve_isolated({"cleanupPeriodDays": 60})
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        retention = json.loads(body)["completeness"]["transcript_retention"]
+        self.assertEqual(retention["days"], 60)
+        self.assertIn("older than 60 days", retention["words"])
+        self.assertIn("report.completeness.transcript_retention.words", page)
+
+
 class FortnightTest(ServerFixture):
     """The third question a monitoring surface owes its operator: is
     this a trend or a one-off? Fourteen days sit under the strip, one
