@@ -9,7 +9,7 @@ The supervisor's alarm band lives on a page, and a page has one failure mode tha
 Three things it is not.
 
 - **It is not a push.** Nothing leaves the machine on the route's account. A push would want a vendor's wire in the supervisor and a credential for a monitoring service sitting on the writer's machine, and this repo puts neither there (ADR-0033 ruling 3). The route answers when something on this machine asks.
-- **It is not a second reading.** The body is one pure function over the scan report the status endpoint already holds. A scrape starts no walk of its own: it is answered from the newest scan no older than the tick, exactly as the dashboard's poll is, so a scraper and a browser watching the same supervisor share one walk rather than causing two. The hook still records nothing new (`.out-of-scope/001`); the reader still counts only what the chain holds (ADR-0027).
+- **It is not a second reading.** The body is one pure function over the scan report the status endpoint already holds. A scrape starts no walk of its own: it is answered from the scan the server already holds, walked again only once that one has aged past the few seconds it is kept for, exactly as the dashboard's poll is, so a scraper and a browser watching the same supervisor share one walk rather than causing two. The hook still records nothing new (`.out-of-scope/001`); the reader still counts only what the chain holds (ADR-0027).
 - **It is not the verdict.** `verify` owns those, as it did before. A gauge is the supervisor's reading of `verify`'s output, rendered for a pager.
 
 ## 2. Turning it on
@@ -108,12 +108,12 @@ scrape_configs:
 
 Reaching it from another box is your tunnel or your reverse proxy, the same as the dashboard: an SSH forward, or a proxy that presents the route under a name this machine answers to. The supervisor offers no way to do that for you, deliberately.
 
-Two alerts worth having on day one, in words rather than in anyone's query language: page when `loxodonta_scan_age_seconds` climbs past a few multiples of your tick, because the numbers are then stale and saying so; and page when the scrape itself disappears, because that is the case the numbers cannot cover.
+One alert worth having on day one, in words rather than in anyone's query language: page when the scrape itself disappears, because that is the case the numbers cannot cover. An alert on `loxodonta_scan_age_seconds` is not the second one it looks like: the route walks the store again as soon as the held scan is older than the few seconds it is kept for, so the gauge is bounded by that window and says how fresh this answer is, never how long the supervisor has been unwell.
 
 ## 6. What a gauge does not survive
 
 - **The machine it runs on.** The supervisor is writer-reachable, and so is its scrape. Verdicts still come from `verify` and its inputs, never from a number on this route.
-- **The gap between scans.** A gauge is as fresh as the last tick. `loxodonta_scan_age_seconds` says how fresh, and an alert on it is the honest guard.
+- **The gap between scans.** A gauge is as fresh as the last scan. `loxodonta_scan_age_seconds` says how fresh this answer is, within the few seconds a scan is held for; the honest guard against a supervisor that has stopped saying anything is the alert on the scrape disappearing (§5).
 - **Anything the chain does not hold.** The route counts receipts, not outcomes, not health, not errors. "This session is erroring" is somebody else's product, and `.out-of-scope/001` still says so.
 
 ## 7. See also

@@ -350,17 +350,24 @@ does not fire is the loudest thing the drill can say.
 **`serve`** is serialization only, zero decisions (ADR-0005). One scan
 per tick under a lock — never one per request, because a scan diffs
 the baseline and then rewrites it, and two racing scans could swallow
-a tripwire event between them. The bind is 127.0.0.1 and the posture
-is *nothing is ever offered off-machine* — which includes off-machine
-by trickery: a Host header that is not localhost is refused (DNS
-rebinding makes a stranger's page read as same-origin, and CORS never
-enters it), and a POST carrying a foreign Origin is refused (no
-stranger's page pokes the drill, or saves a view). The write path
-carries a second lock: a body this face will read must declare a
-small length and `application/json`, which a cross-origin form post
-cannot set without a preflight nothing here answers. `/api/chain`
-and `/api/drill` only resolve chains under the root; sidecars and
-path escapes get 404.
+a tripwire event between them. What starts a tick is the point of
+issue #271: the keepers live inside the scan, so while only a request
+could start one, a `serve` run as a background service with nobody
+looking at the page anchored and published nothing. With a cadence in
+force, a daemon thread now asks for the same scan the routes ask for,
+a minute after the last walk finished, through the same door and the
+same lock — and asks not to be remembered in the day book, because a
+machine talking to itself is not somebody looking (ADR-0014).
+The bind is 127.0.0.1 and the posture is *nothing is ever offered
+off-machine* — which includes off-machine by trickery: a Host header
+that is not localhost is refused (DNS rebinding makes a stranger's
+page read as same-origin, and CORS never enters it), and a POST
+carrying a foreign Origin is refused (no stranger's page pokes the
+drill, or saves a view). The write path carries a second lock: a body
+this face will read must declare a small length and
+`application/json`, which a cross-origin form post cannot set without
+a preflight nothing here answers. `/api/chain` and `/api/drill` only
+resolve chains under the root; sidecars and path escapes get 404.
 
 **The page** is one inline HTML file, no framework, no build step,
 nothing fetched from anywhere but this machine. Writer-supplied text
