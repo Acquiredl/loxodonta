@@ -324,7 +324,12 @@ does not fire is the loudest thing the drill can say.
 **`serve`** is serialization only, zero decisions (ADR-0005). One scan
 per tick under a lock — never one per request, because a scan diffs
 the baseline and then rewrites it, and two racing scans could swallow
-a tripwire event between them. The bind is 127.0.0.1 and the posture
+a tripwire event between them. What starts a tick is the point of
+issue #271: the keepers live inside the scan, so while only a request
+could start one, a `serve` run as a background service with nobody
+looking at the page anchored and published nothing. With a cadence in
+force, a daemon thread now asks for the same scan the routes ask for,
+about once a minute, through the same door and the same lock. The bind is 127.0.0.1 and the posture
 is *nothing is ever offered off-machine* — which includes off-machine
 by trickery: a Host header that is not localhost is refused (DNS
 rebinding makes a stranger's page read as same-origin, and CORS never
