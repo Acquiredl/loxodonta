@@ -3370,11 +3370,14 @@ def cmd_explain(args):
 # --- Harness hook (Stage C) ---------------------------------------------------
 #
 # `loxodonta hook` turns one Claude Code PostToolUse payload (JSON on stdin)
-# into one chained entry. This is the completeness mechanism of SPEC §8:
-# the harness fires the hook on every tool call, so the log call sits
-# outside the writer's volition — the agent cannot skip its own receipt.
-# One chain per session (SPEC §8: one writer per log; parallel sessions
-# are sibling chains, never a shared file).
+# into one chained entry — or a PostToolUseFailure payload, the harness's
+# event for a call that ran and failed, which carries the same tool_name
+# and tool_input and so leaves the same receipt (#239). This is the
+# completeness mechanism of SPEC §8: the harness fires the hook on every
+# tool call, so the log call sits outside the writer's volition — the
+# agent cannot skip its own receipt. One chain per session (SPEC §8: one
+# writer per log; parallel sessions are sibling chains, never a shared
+# file).
 
 # The most descriptive scalar a tool call has, in preference order. The
 # last, `summary`, is the adapters' fallback (ADR-0020): a harness whose
@@ -3793,10 +3796,11 @@ def cmd_hook(args):
 # --- Hook installer -----------------------------------------------------------
 # `loxodonta install-hook` wires this machine's Claude Code into the
 # recorder: a PostToolUse hook so every completed tool call leaves a
-# receipt, a SessionEnd hook so a clean exit seals the transcript's
-# tail (issue #79), and — when supervisor.py sits beside this file — a
-# SessionStart hook so every session starts with a recall digest of
-# its repo's recent history.
+# receipt and a PostToolUseFailure hook beside it so every call that ran
+# and failed does too (#239), a SessionEnd hook so a clean exit seals
+# the transcript's tail (issue #79), and — when supervisor.py sits
+# beside this file — a SessionStart hook so every session starts with a
+# recall digest of its repo's recent history.
 
 def load_settings(path):
     """The user-level settings, or None with the complaint printed —
@@ -4222,7 +4226,7 @@ def coverage_path():
 
 
 def record_coverage(harness, matchers, profile, remote=None,
-                    authority=None):
+                    authority=None, failures=None):
     """Append what this install just wired, unless it wired what the
     last one did — the `heal()` rule, applied to matchers, to the
     profile and to both remotes, so re-running the installer never
@@ -4234,7 +4238,11 @@ def record_coverage(harness, matchers, profile, remote=None,
     cadences; `remote` is where publishing goes — at `full` the one URL
     both routes were wired to, and under `custom` the chain's URL when
     one was given, else the head's — and `authority` who stamps the head
-    when one is named (ADR-0032), each written only then. `serve`
+    when one is named (ADR-0032), each written only then. `failures` is
+    the matchers the failed-call event was wired on (#239), written only
+    when it was, so the witness owes a failed command a receipt from the
+    install that wired the event and never before it; an epoch without
+    it, Codex's and every one from before #239, wired none. `serve`
     follows the remote only at `full`, since that is the tier that asked
     the keeper for a cadence (#246). The marker never travels (the
     export allowlists it out, the package does not carry it), so unlike
@@ -4244,8 +4252,10 @@ def record_coverage(harness, matchers, profile, remote=None,
     over a bookkeeping file would be a worse trade than a memory that
     starts late, and the operator has louder ways to learn the store is
     unwritable. Returns whether an entry was appended."""
-    entry = {"since": now_ts(), "matchers": list(matchers),
-             "harness": harness, "profile": profile}
+    entry = {"since": now_ts(), "matchers": list(matchers)}
+    if failures:
+        entry["failures"] = list(failures)
+    entry.update({"harness": harness, "profile": profile})
     if remote:
         entry["remote"] = remote
     if authority:
@@ -4263,6 +4273,7 @@ def record_coverage(harness, matchers, profile, remote=None,
         last = next((epoch for epoch in reversed(epochs)
                      if epoch.get("harness") == harness), None)
         if last and last.get("matchers") == entry["matchers"] \
+                and last.get("failures") == entry.get("failures") \
                 and last.get("profile") == profile \
                 and last.get("remote") == entry.get("remote") \
                 and last.get("authority") == entry.get("authority"):
@@ -4358,6 +4369,21 @@ def cmd_install_hook(args):
                   'than the current default "*" — uncovered tool calls '
                   "leave no receipts (see docs/HOOK.md)")
 
+    # A call that ran and failed fires its own event (#239): the harness
+    # sends PostToolUseFailure for it, never PostToolUse, and nothing at
+    # all for a call it denied or never started. Wired beside
+    # PostToolUse with the same command on the same matcher, so the
+    # receipt is the same receipt — the action attempted, never whether
+    # it worked (.out-of-scope/001). An install from before this gains
+    # the event on re-run, as it gains any hook it is missing.
+    failed = hooks.setdefault("PostToolUseFailure", [])
+    healed += heal(failed, RECORDER_MARKERS, record)
+    if not any(ours(b) for b in failed):
+        matcher = next((b.get("matcher", "*") for b in post if ours(b)), "*")
+        failed.append({"matcher": matcher,
+                       "hooks": [{"type": "command", "command": record}]})
+        installed.append(f"PostToolUseFailure: {record}")
+
     # The tail commitment (ADR-0017, issue #79): SessionEnd runs the
     # same recorder command — the payload's hook_event_name is the
     # branch. The explicit timeout matters: the harness gives SessionEnd
@@ -4413,7 +4439,9 @@ def cmd_install_hook(args):
     marked = record_coverage("claude-code", wired, args.profile,
                              remote=(args.publish_chain
                                      or args.publish_head),
-                             authority=args.authority)
+                             authority=args.authority,
+                             failures=[block.get("matcher", "*")
+                                       for block in failed if ours(block)])
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -4473,7 +4501,8 @@ def cmd_uninstall_hook(args):
     path = (codex_hooks_path() if args.codex
             else os.path.join(os.path.expanduser("~"), ".claude",
                               "settings.json"))
-    events = ("PostToolUse", "SessionStart", "SessionEnd")
+    events = ("PostToolUse", "PostToolUseFailure", "SessionStart",
+              "SessionEnd")
     markers = RECORDER_MARKERS + (DIGEST_MARKER,)
     settings = load_settings(path)
     if settings is None:

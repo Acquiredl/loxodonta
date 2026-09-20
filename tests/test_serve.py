@@ -231,6 +231,17 @@ class DashboardTest(ServerFixture):
         self.assertIn("RECEIPTS STOPPED ARRIVING", page)
         self.assertIn("all quiet", page)
 
+    def test_a_watch_row_says_the_counts_that_decided_its_chip(self):
+        # ADR-0034: paired tool by tool, the totals can match while a
+        # tool is short, and failed calls that may owe take their tool's
+        # receipts first, so "witnessed 3, received 3" can sit beside a
+        # deficit chip. The row says both counts beside the totals.
+        page = self.page()
+        self.assertIn('(s.deficit ? ", " + s.deficit + " short" : "")',
+                      page)
+        self.assertIn('(s.may_owe ? ", " + s.may_owe + " may owe" : "")',
+                      page)
+
     def test_the_rail_carries_status_and_the_attention_queue(self):
         # The redesign's shell (#48, ratified 2026-09-01): a sticky rail
         # holds the status block, the attention queue, and the fortnight;
@@ -712,6 +723,44 @@ class DashboardTest(ServerFixture):
         report = json.loads(body)
         self.assertRegex(report["scanned"],
                          r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+class TranscriptRetentionPanelTest(ServerFixture):
+    """#260 on the page: the watch panel already carries the witness's
+    one-line facts, so it carries how long the harness keeps the
+    transcripts it reads, as the settings say. Every home the server
+    reads is inside the test's folder, and the witness too."""
+
+    def serve_isolated(self, settings):
+        home = self.root / "home"
+        witness = home / ".claude" / "projects"
+        witness.mkdir(parents=True)
+        (home / ".claude" / "settings.json").write_text(
+            json.dumps(settings), encoding="utf-8")
+        self.proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
+             "--witness", str(witness)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
+        self.addCleanup(self._stop)
+        line = self.proc.stdout.readline()
+        match = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if match is None:
+            self.proc.kill()
+            _, err = self.proc.communicate()
+            self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        self.url = match.group()
+
+    def test_the_watch_panel_carries_the_retention_line(self):
+        self.serve_isolated({"cleanupPeriodDays": 60})
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        retention = json.loads(body)["completeness"]["transcript_retention"]
+        self.assertEqual(retention["days"], 60)
+        self.assertIn("older than 60 days", retention["words"])
+        self.assertIn("report.completeness.transcript_retention.words", page)
 
 
 class FortnightTest(ServerFixture):
