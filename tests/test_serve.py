@@ -231,6 +231,17 @@ class DashboardTest(ServerFixture):
         self.assertIn("RECEIPTS STOPPED ARRIVING", page)
         self.assertIn("all quiet", page)
 
+    def test_a_watch_row_says_the_counts_that_decided_its_chip(self):
+        # ADR-0034: paired tool by tool, the totals can match while a
+        # tool is short, and failed calls that may owe take their tool's
+        # receipts first, so "witnessed 3, received 3" can sit beside a
+        # deficit chip. The row says both counts beside the totals.
+        page = self.page()
+        self.assertIn('(s.deficit ? ", " + s.deficit + " short" : "")',
+                      page)
+        self.assertIn('(s.may_owe ? ", " + s.may_owe + " may owe" : "")',
+                      page)
+
     def test_the_rail_carries_status_and_the_attention_queue(self):
         # The redesign's shell (#48, ratified 2026-09-01): a sticky rail
         # holds the status block, the attention queue, and the fortnight;
