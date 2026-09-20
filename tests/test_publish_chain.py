@@ -784,10 +784,15 @@ class SessionEndWindowTest(PublishBase):
 
         self.assertLess(took, 3, "Codex would have killed the hook")
         self.assertGreater(took, 1, "the head was never waited on")
-        self.assertEqual(self.rows_by_step(), {
-            "publish-head": (1.5, "no answer within 1.5 seconds"),
-            "publish-chain": (0.0, WINDOW_CLOSED),
-            "stamp": (0.0, WINDOW_CLOSED)})
+        rows = self.rows_by_step()
+        self.assertEqual(set(rows), {"publish-head", "publish-chain", "stamp"})
+        # The head's row says what the window had left when it began, to
+        # a tenth, and a busy machine spends a tenth before it.
+        budget, outcome = rows["publish-head"]
+        self.assertAlmostEqual(budget, 1.5, delta=0.1)
+        self.assertRegex(outcome, r"^no answer within 1\.[456] seconds$")
+        self.assertEqual(rows["publish-chain"], (0.0, WINDOW_CLOSED))
+        self.assertEqual(rows["stamp"], (0.0, WINDOW_CLOSED))
         self.assertEqual((len(chain.received), len(stamp.received)), (0, 0),
                          "a step the window closed on never starts")
         last = json.loads(self.chain().read_text(
