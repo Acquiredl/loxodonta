@@ -19,17 +19,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_recall`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import home_outside, isolated_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
-def run_py(script, *args, env_extra=None, cwd=None):
+def run_py(script, *args, env_extra=None, cwd=None, env=None):
+    """`env`, when given, is the whole environment the child starts
+    from (isolated_env's, for a verb that reads the machine's home);
+    `env_extra` lands on top of either."""
     return subprocess.run(
         [sys.executable, str(script), *args],
         capture_output=True, encoding="utf-8", cwd=cwd,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8",
-             **(env_extra or {})})
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8", **(env_extra or {})})
 
 
 def spec_hash(entry_without_hash):
@@ -66,6 +75,11 @@ class RecallBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name).resolve()
         self.addCleanup(self._tmp.cleanup)
+
+    def scan_env(self, **knobs):
+        """Where a scan here runs: a home of the test's own, outside the
+        root (#242), with any store or project the test names."""
+        return isolated_env(home_outside(self), **knobs)
 
     def repo(self, name):
         path = self.root / name
@@ -207,7 +221,8 @@ class DigestTest(RecallBase):
         witness = self.root / "no-witness"
         witness.mkdir()
         scan = run_py(SUPERVISOR, "scan", "--root", str(self.root),
-                      "--witness", str(witness), "--json")
+                      "--witness", str(witness), "--json",
+                      env=self.scan_env())
         self.assertEqual(scan.returncode, 0, scan.stdout + scan.stderr)
         out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
         self.assertIn("last scan:", out)
@@ -382,7 +397,7 @@ class StoreRecallTest(RecallBase):
         witness = self.root / "no-witness"
         witness.mkdir(exist_ok=True)
         scan = run_py(SUPERVISOR, "scan", "--witness", str(witness),
-                      "--json", env_extra=env)
+                      "--json", env=self.scan_env(**env))
         self.assertEqual(scan.returncode, 0, scan.stdout + scan.stderr)
         out = run_py(SUPERVISOR, "digest", "--repo", str(project),
                      env_extra=env).stdout
@@ -658,7 +673,7 @@ class ScanSummaryTest(RecallBase):
         witness = self.root / "no-witness"
         witness.mkdir()
         run_py(SUPERVISOR, "scan", "--root", str(self.root),
-               "--witness", str(witness), "--json")
+               "--witness", str(witness), "--json", env=self.scan_env())
         baseline = json.loads(
             (self.root / ".supervisor-baseline.json").read_text(
                 encoding="utf-8"))
@@ -672,7 +687,8 @@ class ScanSummaryTest(RecallBase):
         witness = self.root / "no-witness"
         witness.mkdir(exist_ok=True)
         scan = run_py(SUPERVISOR, "scan", "--root", str(self.root),
-                      "--witness", str(witness), "--json")
+                      "--witness", str(witness), "--json",
+                      env=self.scan_env())
         out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
         line = out.split("last scan:")[1].splitlines()[0]
         return scan, line

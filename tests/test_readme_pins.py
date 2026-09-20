@@ -32,6 +32,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_readme_pins`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import isolated_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 README = REPO_ROOT / "README.md"
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -137,12 +143,16 @@ class Runner:
         source = (REPO_ROOT / log)
         if not source.is_file():
             self.fail(f"drill --log {log} is not in the repo")
+        # The drill reads the coverage marker to name the tier, so it
+        # runs in a home of its own beside the copy, never the
+        # machine's (#242).
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / source.name
             copy.write_bytes(source.read_bytes())
             return subprocess.run(
                 [sys.executable, str(SUPERVISOR), "drill", "--root", tmp,
-                 "--log", str(copy)], capture_output=True, text=True)
+                 "--log", str(copy)], capture_output=True, text=True,
+                env=isolated_env(Path(tmp) / "home"))
 
 
 class TranscriptPinTest(unittest.TestCase):

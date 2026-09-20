@@ -19,6 +19,12 @@ import unittest
 import zipfile
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_export`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import isolated_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 SUPERVISOR = REPO_ROOT / "supervisor.py"
@@ -32,11 +38,14 @@ OTHER_SESSION = "e2e2e2e2-aaaa-bbbb-cccc-000000000002"
 
 
 def run(script, *args, stdin=None, env=None, cwd=None):
+    """`env`, when given, is the whole environment, so what it leaves out
+    (the test process's own project, say) stays out."""
     return subprocess.run(
         [sys.executable, str(script), *args], cwd=cwd,
         input=stdin.encode("utf-8") if isinstance(stdin, str) else stdin,
         capture_output=True, encoding=None,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8", **(env or {})})
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8"})
 
 
 def text(result):
@@ -62,10 +71,8 @@ class ExportBase(unittest.TestCase):
         self.witness.mkdir()
         self.work = self.root / "work"
         self.work.mkdir()
-        self.env = {k: v for k, v in os.environ.items()
-                    if k not in ("CLAUDE_PROJECT_DIR", "LOXODONTA_HOME")}
-        self.env.update({"LOXODONTA_HOME": str(self.store),
-                         "HOME": str(self.home), "USERPROFILE": str(self.home)})
+        # Every home is the secret-named one, the store its .loxodonta.
+        self.env = isolated_env(self.home)
         self.hook(SESSION, "Bash", {"command": f"echo {COMMAND_SECRET}"})
         self.hook(SESSION, "Bash", {"command": "pytest -q"})
         self.hook(SESSION, "Edit", {"file_path": str(self.project / FILE_SECRET)})

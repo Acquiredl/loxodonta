@@ -26,7 +26,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package_anchor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import (FakeCalendar, FakeCalendarHandler, clean_env,
+from test_anchor import (FakeCalendar, FakeCalendarHandler,
                          expected_merkle_root, start_calendar)
 from test_package import (LOXODONTA, SUPERVISOR, PackageCase, completed_anchor,
                           neutral_env, run)
@@ -54,7 +54,7 @@ class AnchoredStoreCase(PackageCase):
         self.work = self.root / "work"
         self.work.mkdir()
         # The neutral home, and no proxy in the way of 127.0.0.1.
-        self.env = {**clean_env(), **neutral_env(self.home)}
+        self.env = neutral_env(self.home)
         for command in ("pytest -q", "git status"):
             self.hook(SESSION, "Bash", {"command": command})
         (drawer,) = [p for p in (self.home / ".loxodonta" / "receipts").iterdir()
