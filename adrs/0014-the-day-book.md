@@ -65,10 +65,23 @@ The ratified shape, recorded because the trade-offs were argued:
   `looks` this decision already records; a monitoring scrape counts
   too, since ADR-0033 made `/metrics` the siren and a scrape is a
   reading somebody set up and watches — nothing was changed to make
-  that so, it falls out of a scrape being a request. The one edge: a
-  request inside the few seconds a keeper's reading is held for is
-  answered from that reading and writes no row of its own, so a
-  scraper's day is marked by its next scrape rather than that one.)*
+  that so, it falls out of a scrape being a request. With one
+  exception, which the rule above is the reason for: a turn nobody
+  asked for stays out of the book while it has nothing to report, and
+  goes in the moment it catches something read once — a baseline event
+  or a reawakening, both consumed by the diff that finds them. A turn
+  that swallowed a tripwire and wrote no row would leave the day
+  painting quiet with the event recorded nowhere, which is this
+  decision's sticky worst turned on its head. The price is named: a day
+  whose only row came from such a turn reads as watched, because a row
+  carrying a claim is what "watched" means here, so a fired tripwire
+  costs that day's place in the lapse count. A coloured cell nobody
+  read beats a quiet one, and the alternative is a third state the band
+  has no way to draw. The other edge: a request inside the few seconds
+  a keeper's reading is held for is answered from that reading and
+  writes no row of its own, so a scraper's day is marked by its next
+  scrape rather than that one, and the band's tooltip says the page was
+  opened with no reading recorded instead of "nobody looked".)*
 - **Gaps only count after the first watched day.** A fresh install is
   not scolded for the fortnight before it existed.
 - **Bounded by date, not by row count.** A season (90 days). A book
