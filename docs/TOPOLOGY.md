@@ -44,7 +44,7 @@ The line down the middle is the one that matters. Everything left of it is the w
 
 ## The agent's machine
 
-**What runs there.** The harness, and the hook it fires after each completed tool call, which runs `loxodonta.py` to append one receipt to the session's chain in the store, `~/.loxodonta/receipts/<project>-<hash>/` ([HOOK.md](HOOK.md)). Beside it, `supervisor.py`: `scan`; `serve`, with the dashboard and `/metrics` bound to `127.0.0.1` ([METRICS.md](METRICS.md)); recall and its read-only MCP server ([MCP.md](MCP.md)); the keeper's anchor and publish cadences; and `package`.
+**What runs there.** The harness, and the hook it fires after each tool call that completes or fails (#239, ADR-0034), which runs `loxodonta.py` to append one receipt to the session's chain in the store, `~/.loxodonta/receipts/<project>-<hash>/` ([HOOK.md](HOOK.md)). Beside it, `supervisor.py`: `scan`; `serve`, with the dashboard and `/metrics` bound to `127.0.0.1` ([METRICS.md](METRICS.md)); recall and its read-only MCP server ([MCP.md](MCP.md)); the keeper's anchor and publish cadences; and `package`.
 
 **What it holds.** The chains; beside each chain its anchor sidecar, its stamps sidecar and the publish memo; beside the store, the supervisor's baseline and day book, and the coverage marker that records the profile.
 
@@ -52,7 +52,7 @@ The line down the middle is the one that matters. Everything left of it is the w
 
 ## What leaves on its own
 
-Chosen once, at `install-hook`, by the profile (ADR-0031), though a cadence flag typed at `serve` or `scan` overrides it at any profile: `serve --anchor-every 1h` sends digests even at `local`. The hook sends at session end. `supervisor serve`, while it runs, is the keeper: it sends a chain's head, or its entries, only once that chain's last entry is older than the cadence, six hours at `timestamped` and `full`. So it covers a session killed before its end, and a session whose entries keep arriving inside the cadence sends nothing until it ends ([HOOK.md](HOOK.md)).
+Chosen once, at `install-hook`, by the profile (ADR-0031), though a cadence flag typed at `serve` or `scan` overrides it at any profile: `serve --anchor-every 1h` sends digests even at `local`. The hook sends at session end. `supervisor serve`, with a cadence in force, is the keeper: it takes a fresh reading of the store a minute after the last one finished, with nobody watching the page (#271), and sends a chain's head, or its entries, only once that chain's last entry is older than the cadence, six hours at `timestamped` and `full`. So it covers a session killed before its end, and a session whose entries keep arriving inside the cadence sends nothing until it ends. Its own turns stay out of the day book, which answers whether anybody looked, unless a turn catches something read-once ([HOOK.md](HOOK.md), ADR-0014).
 
 | Profile | What leaves | Where it goes |
 |---|---|---|
