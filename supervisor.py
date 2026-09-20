@@ -1944,7 +1944,11 @@ def reconcile(owed, may_owe, receipts, witnessed):
     (ADR-0034 ruling 2). The unpaid call is then an earlier one, so its
     deficit is dated no earlier than the tool's newest failed call that
     may owe: a receipt still on its way from that call gets the grace
-    window any receipt gets. A receipt whose line names no tool the
+    window any receipt gets. That floor is held to what could be on its
+    way — at most one unpaid call per failed call that may owe, and
+    nothing at all for a tool with no receipt — so a stream of failing
+    calls cannot hold a tool's alarm open after its recording stopped.
+    A receipt whose line names no tool the
     transcript shows (a line written by hand with `loxodonta log`, say)
     keeps the reading from before: it pays the earliest unpaid call of
     any tool, and is surplus only when none is left. Returns (deficit,
@@ -1956,9 +1960,21 @@ def reconcile(owed, may_owe, receipts, witnessed):
     for tool in witnessed:
         mine = calls.get(tool, [])
         its_may_owe = may_owe.get(tool, [])
-        left = max(0, receipts.get(tool, 0) - len(its_may_owe))
-        newest = max((when or "" for when in its_may_owe), default="")
-        unpaid.extend(max(when or "", newest) for when in mine[left:])
+        paid = receipts.get(tool, 0)
+        left = max(0, paid - len(its_may_owe))
+        standing = [when or "" for when in mine[left:]]
+        # A receipt still on its way from a failed call that may owe
+        # would pay this tool's earliest unpaid call, so that call's
+        # deficit is dated no earlier than the newest such failure. The
+        # floor reaches no further than that: never more calls than
+        # could have a receipt coming, and none at all for a tool with
+        # no receipt, whose silence is the alarm the witness exists for.
+        floored = min(len(its_may_owe), paid)
+        if floored:
+            newest = max(its_may_owe, key=lambda when: when or "") or ""
+            standing[:floored] = [max(when, newest)
+                                  for when in standing[:floored]]
+        unpaid.extend(standing)
         surplus += max(0, left - len(mine))
     pooled = sum(count for tool, count in receipts.items()
                  if tool not in witnessed)

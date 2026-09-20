@@ -2092,6 +2092,53 @@ class FailedCallWitnessTest(unittest.TestCase):
         self.assertEqual(rows["sess-lag-fetch"]["state"], "LAGGING")
         self.assertEqual(rows["sess-lag-bash"]["state"], "LAGGING")
 
+    def test_a_stream_of_failures_never_quiets_a_session_that_stopped(self):
+        # The grace the failed call's receipt gets is held to what could
+        # be on its way: a tool with no receipt at all has nothing
+        # coming, so a fetch failing every few seconds cannot date an
+        # old unpaid call forward and hold the alarm open. Recording
+        # stopped here, which is the case the witness exists for.
+        self.session("sess-silent", [], [ago(900), ago(800)], [ago(15)],
+                     tool="WebFetch",
+                     failure="Claude Code is unable to fetch from "
+                             "example.com")
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        judged = self.states(result)["sess-silent"]
+        self.assertEqual((judged["state"], judged["deficit"]),
+                         ("ALARM-SILENT", 2))
+
+    def test_a_stream_of_failures_never_quiets_a_starved_receipt(self):
+        # The same floor, with receipts still arriving for another tool:
+        # a starved fetch receipt stays a deficit however recently the
+        # next fetch failed, since the fetch itself has no receipt that
+        # could be on its way.
+        failed = "Claude Code is unable to fetch from example.com"
+        for name, when in (("sess-starved", ago(20)),
+                           ("sess-starved-stale", ago(90))):
+            self.session(name, ["Bash: a"], [ago(700), ago(600)], [when],
+                         tool=["Bash", "WebFetch"], failed_tool="WebFetch",
+                         failure=failed)
+        # And where the tool does have a receipt, the floor reaches one
+        # unpaid call per failed call that may owe, not the whole tool:
+        # three starved fetches behind one failure stay an alarm.
+        self.session("sess-starved-many", ["WebFetch: a"],
+                     [ago(700), ago(690), ago(680)], [ago(20)],
+                     tool="WebFetch", failure=failed)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+        rows = self.states(result)
+        for name in ("sess-starved", "sess-starved-stale"):
+            self.assertEqual((rows[name]["state"], rows[name]["deficit"]),
+                             ("ALARM-DEFICIT", 1), name)
+        many = rows["sess-starved-many"]
+        self.assertEqual((many["state"], many["deficit"]),
+                         ("ALARM-DEFICIT", 3))
+
     def test_fewer_receipts_than_may_owe_calls_leave_every_owed_call_unpaid(self):
         # The floor: two failed fetches that may owe and one receipt of
         # the tool. The receipt goes to them, none is left over, and all
