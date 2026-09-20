@@ -847,8 +847,20 @@ class HeadlessKeeperTest(ReceiverFixture):
                       missing="no turn ever walked the store")
         self.assertFalse(book.exists(), "a quiet turn wrote the day book")
 
-        log.unlink()                       # the adversary's best move:
-        make_chain(log_dir, "sess-tripwire", entries=1)   # a new history
+        # The adversary's best move, a new history in place of the old.
+        # Tried for a moment rather than once: on Windows a turn that
+        # has the chain open refuses the unlink, and the next turn is
+        # half a second away.
+        def rewritten():
+            try:
+                log.unlink()
+            except OSError:
+                return False
+            make_chain(log_dir, "sess-tripwire", entries=1)
+            return True
+
+        self.wait_for(rewritten, within=30,
+                      missing="the chain could not be rewritten")
 
         self.wait_for(book.is_file, missing="the day book stayed unwritten")
         self._stop()
@@ -879,8 +891,12 @@ class HeadlessKeeperTest(ReceiverFixture):
         self.proc.kill()
         _, rest = self.proc.communicate()
 
-        self.assertIn("the keeper's scan did not finish", said)
-        self.assertIn("PermissionError", said, "the line names no kind")
+        # The line's promise is its shape: the failure named by kind.
+        # Which kind is the platform's to say — a directory where a file
+        # belongs is `PermissionError` on Windows and `IsADirectoryError`
+        # on POSIX — so the test pins the promise, not one spelling.
+        self.assertRegex(
+            said, r"^error: the keeper's scan did not finish: \w*Error")
         self.assertNotIn("Traceback", said)
         # The kind and the reason, never the exception whole: a failure
         # carrying a command line would carry the remote's URL with it.
