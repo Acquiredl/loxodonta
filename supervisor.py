@@ -2657,7 +2657,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     machine talking to itself every minute is not somebody looking —
     a day whose only rows came from the clock would paint as watched
     and silence the lapse line, which is the one failure the chains
-    themselves can never report.
+    themselves can never report. A turn that catches something
+    read-once writes its row anyway; the rule and its reason are at
+    the call below.
 
     Two universes, one walk: the store (ADR-0011 — root is the store's
     receipts folder, drawers name their repos, the baseline lives
@@ -2911,7 +2913,18 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "events": len(events), "alarms": alarms,
         "reawakenings": len(awakened),
     }
-    days = (remember_day(daybook, now, tally) if remember
+    # A turn nobody asked for stays out of the book while it has
+    # nothing to report (ADR-0014): a machine asking itself every
+    # minute is not somebody looking. It goes in the moment it catches
+    # something read-once — a baseline event or a reawakening, both
+    # consumed by the diff that found them — because a turn that
+    # swallowed a tripwire and wrote nothing would leave the day
+    # painting quiet with the event recorded nowhere at all, and the
+    # day's worst is sticky exactly so that a morning reader sees what
+    # fired while they were away. Everything else in the tally is
+    # derived afresh by the next scan somebody does ask for.
+    caught = bool(events or awakened)
+    days = (remember_day(daybook, now, tally) if remember or caught
             else read_daybook(daybook))
 
     baseline = {"file": baseline_path.as_posix(), "events": events}
@@ -7440,8 +7453,15 @@ function renderFortnight(report) {
                     (i === history.length - 1 ? " today" : ""));
     cell.appendChild(el("span", "mark", MARK[rung]));
     cell.appendChild(el("span", "num", row.day.slice(8)));
-    cell.title = row.day + " — " + DAY_WORDS[rung] +
-      (row.looks ? " · opened " + row.looks + " time(s)" : "");
+    // A day can carry opens and still no claim: the page was opened
+    // inside the few seconds a keeper's reading is held for, so the
+    // poll behind it was answered from that reading and no row was
+    // written (#271). Say that, rather than "nobody looked" beside a
+    // count of the times somebody did.
+    cell.title = row.day + " — " + (rung === "unwatched" && row.looks
+      ? "opened " + row.looks + " time(s), no reading of the store recorded"
+      : DAY_WORDS[rung] +
+        (row.looks ? " · opened " + row.looks + " time(s)" : ""));
     band.appendChild(cell);
   });
 

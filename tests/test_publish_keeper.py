@@ -826,6 +826,38 @@ class HeadlessKeeperTest(ReceiverFixture):
                          [(True, 1)])
         self.assertTrue(book.is_file())
 
+    def test_a_tripwire_the_clock_catches_still_colours_the_day(self):
+        # The other half of the rule above, and the one that matters on
+        # the bad day: the baseline diff is read once. A turn that
+        # caught a rewritten chain and wrote no row would consume the
+        # event and leave the morning page painting the day all quiet,
+        # with the tripwire recorded nowhere. So a turn with something
+        # to report goes in the book even though nobody asked for it.
+        log_dir = self.root / "alpha" / "receipts"
+        log = make_chain(log_dir, "sess-tripwire")
+        book = self.root / ".supervisor-daybook.json"
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        self.serve("--publish-every", "1d", "--publish-url",
+                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        # The first turns remember the head and say nothing, so the
+        # book is still unwritten when the chain is rewritten under it.
+        self.wait_for(lambda: (self.root / BASELINE_NAME).exists(),
+                      missing="no turn ever walked the store")
+        self.assertFalse(book.exists(), "a quiet turn wrote the day book")
+
+        log.unlink()                       # the adversary's best move:
+        make_chain(log_dir, "sess-tripwire", entries=1)   # a new history
+
+        self.wait_for(book.is_file, missing="the day book stayed unwritten")
+        self._stop()
+
+        row = json.loads(book.read_text(encoding="utf-8"))["days"][today]
+        self.assertGreaterEqual(row["events"], 1)
+        self.assertNotEqual(row["worst"], 0,
+                            "the day the tripwire fired paints quiet")
+
     def test_a_scan_that_cannot_finish_is_said_once_and_the_clock_runs_on(self):
         # A keeper step that fails leaves an attempt row beside the
         # chain and a note in the next scan's report. A scan that cannot
