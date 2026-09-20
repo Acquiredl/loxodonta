@@ -19,17 +19,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_recall`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import home_outside, isolated_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
-def run_py(script, *args, env_extra=None, cwd=None):
+def run_py(script, *args, env_extra=None, cwd=None, env=None):
+    """`env`, when given, is the whole environment the child starts
+    from (isolated_env's, for a verb that reads the machine's home);
+    `env_extra` lands on top of either."""
     return subprocess.run(
         [sys.executable, str(script), *args],
         capture_output=True, encoding="utf-8", cwd=cwd,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8",
-             **(env_extra or {})})
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8", **(env_extra or {})})
 
 
 def spec_hash(entry_without_hash):
@@ -66,6 +75,11 @@ class RecallBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name).resolve()
         self.addCleanup(self._tmp.cleanup)
+
+    def scan_env(self, **knobs):
+        """Where a scan here runs: a home of the test's own, outside the
+        root (#242), with any store or project the test names."""
+        return isolated_env(home_outside(self), **knobs)
 
     def repo(self, name):
         path = self.root / name
@@ -207,7 +221,8 @@ class DigestTest(RecallBase):
         witness = self.root / "no-witness"
         witness.mkdir()
         scan = run_py(SUPERVISOR, "scan", "--root", str(self.root),
-                      "--witness", str(witness), "--json")
+                      "--witness", str(witness), "--json",
+                      env=self.scan_env())
         self.assertEqual(scan.returncode, 0, scan.stdout + scan.stderr)
         out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
         self.assertIn("last scan:", out)
@@ -382,7 +397,7 @@ class StoreRecallTest(RecallBase):
         witness = self.root / "no-witness"
         witness.mkdir(exist_ok=True)
         scan = run_py(SUPERVISOR, "scan", "--witness", str(witness),
-                      "--json", env_extra=env)
+                      "--json", env=self.scan_env(**env))
         self.assertEqual(scan.returncode, 0, scan.stdout + scan.stderr)
         out = run_py(SUPERVISOR, "digest", "--repo", str(project),
                      env_extra=env).stdout
@@ -658,7 +673,7 @@ class ScanSummaryTest(RecallBase):
         witness = self.root / "no-witness"
         witness.mkdir()
         run_py(SUPERVISOR, "scan", "--root", str(self.root),
-               "--witness", str(witness), "--json")
+               "--witness", str(witness), "--json", env=self.scan_env())
         baseline = json.loads(
             (self.root / ".supervisor-baseline.json").read_text(
                 encoding="utf-8"))
@@ -672,7 +687,8 @@ class ScanSummaryTest(RecallBase):
         witness = self.root / "no-witness"
         witness.mkdir(exist_ok=True)
         scan = run_py(SUPERVISOR, "scan", "--root", str(self.root),
-                      "--witness", str(witness), "--json")
+                      "--witness", str(witness), "--json",
+                      env=self.scan_env())
         out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
         line = out.split("last scan:")[1].splitlines()[0]
         return scan, line
@@ -718,10 +734,19 @@ class ScanSummaryTest(RecallBase):
 
 class InstallerTest(RecallBase):
     def run_installer(self, *args):
+        """The installer against a home inside the test, with no ambient
+        store or Codex home: an exported LOXODONTA_HOME or CODEX_HOME
+        would otherwise take the coverage marker, or the Codex hooks,
+        out of the test and into that home."""
         home = self.root / "home"
         home.mkdir(exist_ok=True)
-        return run_py(LOXODONTA, *args, env_extra={
-            "HOME": str(home), "USERPROFILE": str(home)}), home
+        env = {name: value for name, value in os.environ.items()
+               if name not in ("LOXODONTA_HOME", "CODEX_HOME")}
+        env.update(PYTHONIOENCODING="utf-8", HOME=str(home),
+                   USERPROFILE=str(home))
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), *args], capture_output=True,
+            encoding="utf-8", env=env), home
 
     def settings(self, home):
         return json.loads((home / ".claude" / "settings.json").read_text(
@@ -744,6 +769,57 @@ class InstallerTest(RecallBase):
         self.assertIn("digest", start)
         self.assertIn("startup|clear|compact",
                       json.dumps(settings["hooks"]["SessionStart"]))
+
+    def test_install_wires_failed_calls_beside_completed_ones(self):
+        # #239: the harness fires PostToolUseFailure, not PostToolUse,
+        # for a call that ran and failed. Same command, same matcher, so
+        # the receipt is the same receipt: the action attempted.
+        result, home = self.run_installer("install-hook")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hooks = self.settings(home)["hooks"]
+        (completed,) = hooks["PostToolUse"]
+        (failed,) = hooks["PostToolUseFailure"]
+        self.assertEqual(failed, completed)
+        self.assertIn("PostToolUseFailure", result.stdout)
+
+    def test_a_rerun_adds_the_failure_event_to_an_older_install(self):
+        # An install from before #239 wired PostToolUse alone, perhaps
+        # on a matcher of the operator's own. A re-run adds the failure
+        # event on that same matcher, once.
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        del settings["hooks"]["PostToolUseFailure"]
+        settings["hooks"]["PostToolUse"][0]["matcher"] = "Edit|Write|Bash"
+        path.write_text(json.dumps(settings), encoding="utf-8")
+
+        again, _ = self.run_installer("install-hook")
+        once_more, _ = self.run_installer("install-hook")
+
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("PostToolUseFailure", again.stdout)
+        hooks = self.settings(home)["hooks"]
+        (failed,) = hooks["PostToolUseFailure"]
+        self.assertEqual(failed["matcher"], "Edit|Write|Bash")
+        self.assertEqual(failed["hooks"], hooks["PostToolUse"][0]["hooks"])
+        self.assertIn("already installed", once_more.stdout)
+
+    def test_uninstall_removes_the_failure_event_and_leaves_others(self):
+        _, home = self.run_installer("install-hook")
+        path = home / ".claude" / "settings.json"
+        settings = self.settings(home)
+        settings["hooks"]["PostToolUseFailure"].append(
+            {"matcher": "Bash", "hooks": [{"type": "command",
+                                           "command": "somebody-else"}]})
+        path.write_text(json.dumps(settings), encoding="utf-8")
+
+        result, _ = self.run_installer("uninstall-hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PostToolUseFailure", result.stdout)
+        failed = json.dumps(self.settings(home)["hooks"]["PostToolUseFailure"])
+        self.assertNotIn("loxodonta.py", failed)
+        self.assertIn("somebody-else", failed)
 
     def test_install_can_opt_in_to_session_end_anchoring(self):
         # ADR-0024: the opt-in lives at install, on the wired SessionEnd

@@ -1,4 +1,4 @@
-"""Behavioral tests for the receipts CLI.
+"""Behavioral tests for the loxodonta CLI.
 
 Every test drives the public CLI surface (subprocess on loxodonta.py) and
 asserts on stdout, exit codes, and file state — never internals. See
@@ -30,7 +30,7 @@ def spec_hash(entry_without_hash):
 
 
 def run_receipts(*args, cwd):
-    """Invoke the receipts CLI as an operator would — with both ends of the
+    """Invoke the loxodonta CLI as an operator would — with both ends of the
     pipe pinned to UTF-8 (PYTHONIOENCODING for the child, encoding= for this
     parent). `text=True` alone decodes with the locale codec — cp1252 on
     Windows — which crashes on the UTF-8 the golden fixture emits."""
@@ -556,6 +556,50 @@ class FileReferenceTest(ReceiptsCliTest):
             self.assertIn("error", result.stderr.lower())
 
         self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
+
+    def test_symlink_is_followed_and_recorded_by_its_own_path(self):
+        # SPEC §3: the path rule is about spelling, not containment (#224).
+        # A link inside the project that points outside it passes; the
+        # reference carries the link's path and the target's bytes, and
+        # `verify --files` follows the link the same way.
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        target = Path(elsewhere.name) / "outside.md"
+        target.write_text("bytes that live outside the project\n",
+                          encoding="utf-8")
+        link = self.workdir / "link.md"
+        try:
+            os.symlink(str(target), str(link))
+        except OSError as e:
+            self.skipTest("symlinks cannot be created here "
+                          f"({e.strerror or type(e).__name__}); this test "
+                          "runs wherever they can")
+
+        result = run_receipts(
+            "log", "--actor", "agent", "--action", "read through a link",
+            "--file", "link.md", cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.last_entry()["files"],
+            [{"path": "link.md",
+              "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}],
+        )
+        current = run_receipts("verify", "--files", cwd=self.workdir)
+        self.assertEqual(current.returncode, 0, current.stdout)
+        self.assertIn("CURRENT: link.md", current.stdout)
+
+        # A checkout without the link: where symlinks are off, git writes
+        # one as a plain file holding the target's path, other bytes.
+        link.unlink()
+        link.write_text(str(target), encoding="utf-8")
+        diverged = run_receipts("verify", "--files", cwd=self.workdir)
+        self.assertEqual(diverged.returncode, 2,
+                         diverged.stdout + diverged.stderr)
+        self.assertIn("MODIFIED-SINCE-LOGGED: link.md", diverged.stdout)
+        self.assertIn("FILES-DIVERGED", diverged.stdout)
+        self.assertNotIn("BROKEN", diverged.stdout)
 
     def test_multiple_files_sorted_by_path_bytes(self):
         for name in ("b.md", "a.md", "sub/c.md"):

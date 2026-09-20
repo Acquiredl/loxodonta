@@ -36,7 +36,7 @@ settle where vendor code lives: the producer on the untrusted box speaks
 one dumb wire, and the pluggable exporters live in a separate collector
 process. **Filebeat**'s registry is the cursor pattern: a per-file
 position, batches, retries, and duplicates tolerated at the receiver.
-For the bundle of choices: **Tor Browser's Security Level** (Standard,
+For the set of choices: **Tor Browser's Security Level** (Standard,
 Safer, Safest) and **Firefox's Enhanced Tracking Protection** (Standard,
 Strict, Custom) give people who cannot judge individual settings a
 ladder, with the raw settings still open to those who can; **Cloudflare's

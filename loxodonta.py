@@ -2005,16 +2005,122 @@ def openssl_reason(stderr):
     return "; ".join(said) or "openssl gave no reason"
 
 
+# openssl's words when a certificate in the chain it checks is past its
+# end date, as of the moment it verifies (X509_V_ERR_CERT_HAS_EXPIRED).
+CERT_EXPIRED = "certificate has expired"
+# The notes a token leaves when that is why openssl refused it (#264):
+# the same check as of the time the token states passed, or this openssl
+# cannot be asked about any moment but now.
+STAMP_OUTLIVED = ("the authority's certificate expired after the token "
+                  "was issued")
+STAMP_NO_ATTIME = ("the authority's certificate has expired, and this "
+                   "openssl cannot judge a token as of the time it states")
+
+
+def openssl_verify(head, token, chain_file, *more):
+    """`openssl ts -verify` on one token file: `-in` reads the whole
+    TimeStampResp the sidecar keeps; `-digest` is the head, the sha256
+    imprint the token must carry; `-CAfile` is the authority's chain the
+    operator saved. `more` is `-attime` and a moment, when the question
+    is about some other moment than now."""
+    return subprocess.run(
+        ["openssl", "ts", "-verify", "-digest", head, "-sha256",
+         "-in", token, "-CAfile", chain_file, *more],
+        capture_output=True, encoding="utf-8", errors="replace")
+
+
+def token_time(token):
+    """The moment a token states, in epoch seconds, from the one `Time
+    stamp:` line `openssl ts -reply -token_out -text` prints; None when
+    there is not exactly one such line this can read. openssl reads the
+    token and this reads one line of what openssl printed, the way
+    openssl_reason reads its errors, so the recorder still never parses
+    a token (ADR-0032 ruling 4).
+
+    `-token_out` is what keeps the writer from choosing the moment. The
+    reply around the token carries a status text nobody signed, kept in
+    a sidecar the writer can edit, and without the flag openssl prints
+    it first and verbatim, so a line break in it could set a `Time
+    stamp:` line of the writer's own ahead of the authority's (#264).
+    With it openssl prints the signed token alone, and a second such
+    line can only be one the authority signed or one that breaks the
+    signature, so two of them is a time nobody can read."""
+    shown = subprocess.run(["openssl", "ts", "-reply", "-in", token,
+                            "-token_out", "-text"],
+                           capture_output=True, encoding="utf-8",
+                           errors="replace")
+    stated = [line.partition(":")[2] for line in shown.stdout.splitlines()
+              if line.partition(":")[0] == "Time stamp"]
+    if len(stated) != 1:
+        return None
+    # "Sep 18 22:55:50 2026 GMT", with a fraction on the seconds when the
+    # authority's clock gives one, which -attime has no room for. The
+    # month is English whatever the machine's language: openssl prints
+    # it so, and Python reads %b in the C locale unless a program changes
+    # that, which this one never does.
+    words = stated[0].split()
+    if len(words) != 5 or words[4] != "GMT":
+        return None
+    words[2] = words[2].split(".")[0]
+    try:
+        stated_at = datetime.strptime(" ".join(words[:4]), "%b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
+    return int(stated_at.replace(tzinfo=timezone.utc).timestamp())
+
+
+def takes_attime():
+    """Whether this openssl can judge a token as of a given moment: its
+    `ts -help` lists `-attime` when `ts -verify` takes it."""
+    shown = subprocess.run(["openssl", "ts", "-help"], capture_output=True,
+                           encoding="utf-8", errors="replace")
+    return "-attime" in shown.stdout + shown.stderr
+
+
+def judge_outlived(head, token, chain_file, refused):
+    """A token openssl refused because a certificate in the authority's
+    chain has expired (#264). openssl checks the chain as of the moment
+    it verifies, so a genuine token fails this way on the calendar alone;
+    and it checks the certificate before the signature, so a token
+    tampered with fails this way too. The same check as of the time the
+    token states tells them apart. Passing, the certificate was in date
+    when the token was issued and the calendar is the only reason: that
+    is a note and never a verdict, and never STAMPED either, since a key
+    whose certificate has run out is vouched for by nobody now, and
+    whoever holds it could sign any past time they liked (long-term
+    validation is not built, ADR-0032). Failing, the token has a reason
+    of its own, and that is the verdict.
+
+    An openssl that can be asked about no moment but now gets ADR-0026's
+    posture for an ssh-keygen that predates `-Y verify`, before anything
+    else is read: nothing could be judged, so it is not judged, and why.
+    A token whose time cannot be read keeps openssl's first refusal:
+    openssl decoded it to check its chain, and every token carries
+    exactly one time, so a time printed as `Bad time value`, or missing,
+    or twice over, is the token's fault and not this machine's."""
+    if not takes_attime():
+        return "not judged", STAMP_NO_ATTIME
+    stated = token_time(token)
+    if stated is None:
+        return "invalid", (f"{openssl_reason(refused.stderr)}; the time the "
+                           "token states could not be read, so nothing shows "
+                           "the certificate was in date then")
+    then = openssl_verify(head, token, chain_file, "-attime", str(stated))
+    if then.returncode == 0:
+        return "not judged", STAMP_OUTLIVED
+    return "invalid", (f"{openssl_reason(then.stderr)} (judged as of the "
+                       "time the token states)")
+
+
 def judge_stamp(head, reply, chain_file):
     """One token against the head it claims, through `openssl ts -verify`
-    and never this file (ADR-0032 ruling 5, in ADR-0026's posture): the
-    stored reply is the whole TimeStampResp, which is what `-in` reads
-    by default; `-digest` is the head, the sha256 imprint the token must
-    carry; `-CAfile` is the authority's chain the operator saved. Nothing
-    is fetched. Returns (verdict, detail): ("stamped", None) when
-    openssl accepted it, ("invalid", openssl's reason) when it refused,
-    or ("not judged", why) when nobody judged it, which is a note and
-    never a verdict."""
+    and never this file (ADR-0032 ruling 5, in ADR-0026's posture), with
+    the arguments openssl_verify names. Nothing is fetched. Returns
+    (verdict, detail): ("stamped", None) when openssl accepted it,
+    ("invalid", openssl's reason) when it refused, or ("not judged",
+    why) when nobody judged it, which is a note and never a verdict: no
+    tool, no chain file, or a certificate that has expired since the
+    token was issued (judge_outlived)."""
     if chain_file is None:
         return "not judged", "no --authority-chain FILE given"
     if not os.path.isfile(chain_file):
@@ -2024,10 +2130,9 @@ def judge_stamp(head, reply, chain_file):
             token = os.path.join(scratch, "stamp.tsr")
             with open(token, "wb") as f:
                 f.write(reply)
-            judged = subprocess.run(
-                ["openssl", "ts", "-verify", "-digest", head, "-sha256",
-                 "-in", token, "-CAfile", chain_file],
-                capture_output=True, encoding="utf-8", errors="replace")
+            judged = openssl_verify(head, token, chain_file)
+            if judged.returncode != 0 and CERT_EXPIRED in judged.stderr:
+                return judge_outlived(head, token, chain_file, judged)
     except FileNotFoundError:
         return "not judged", "openssl is not on PATH"
     except PermissionError:
@@ -2727,7 +2832,8 @@ def judge_manifest_stamp(folder, chain_file):
     over this manifest's sha256, and openssl must accept it against the
     certificate chain the recipient saved. Returns (findings, stamped,
     why): whether the rung is earned, and why nobody judged the seal
-    when nobody did. A token this machine cannot judge is a note and
+    when nobody did. A token this machine cannot judge, or one whose
+    certificate has expired since it was issued (#264), is a note and
     never a verdict, the issuer signature's exact posture — the rung is
     neither earned nor failed. Only the manifest's own token can earn
     the package rung; the chains' tokens printed above are detail, since
@@ -2776,18 +2882,39 @@ def judge_manifest_stamp(folder, chain_file):
                     continue
                 if verdict == "not judged":
                     why = detail
+                    # A recipient whose certificate has expired holds
+                    # openssl and the chain file already, so the usual
+                    # pointer would send them after what they hold (#264).
+                    if detail == STAMP_OUTLIVED:
+                        after = ("no chain file earns it now: judging a "
+                                 "token once its certificate has expired is "
+                                 "long-term validation, which is not built "
+                                 "(ADR-0032)")
+                    elif detail == STAMP_NO_ATTIME:
+                        after = ("an openssl whose `ts -verify` takes "
+                                 "`-attime` tells a certificate that "
+                                 "outlived the token from a token that "
+                                 "fails on its own, and this command asks "
+                                 "it once it can run it")
+                    else:
+                        after = ("openssl and the certificate chain you "
+                                 "saved from that authority judge this "
+                                 "seal, and `verify-package "
+                                 "--authority-chain FILE` judges it once it "
+                                 "has both")
                     print(f"seal stamp: not judged: {detail} — the rung is "
-                          "neither earned nor failed; openssl and the "
-                          "certificate chain you saved from that authority "
-                          "judge this seal, and `verify-package "
-                          "--authority-chain FILE` judges it once it has "
-                          "both")
+                          f"neither earned nor failed; {after}")
                     continue
                 reason = detail
         print(f"seal stamp: SEAL-INVALID: {reason} — evidence that does "
               "not verify is not evidence")
         findings.append((3, "SEAL-INVALID"))
-    return findings, stamped, why
+    # A token that holds earns the rung beside one nobody judged (one
+    # that failed is a finding, and the gravest finding is the verdict).
+    # The one nobody judged keeps its note on its own seal line above,
+    # and the verdict does not carry it too, or it would say in one
+    # sentence that the timestamp was judged and that it was not.
+    return findings, stamped, None if stamped else why
 
 
 def key_fingerprint(public_key):
@@ -3243,11 +3370,14 @@ def cmd_explain(args):
 # --- Harness hook (Stage C) ---------------------------------------------------
 #
 # `loxodonta hook` turns one Claude Code PostToolUse payload (JSON on stdin)
-# into one chained entry. This is the completeness mechanism of SPEC §8:
-# the harness fires the hook on every tool call, so the log call sits
-# outside the writer's volition — the agent cannot skip its own receipt.
-# One chain per session (SPEC §8: one writer per log; parallel sessions
-# are sibling chains, never a shared file).
+# into one chained entry — or a PostToolUseFailure payload, the harness's
+# event for a call that ran and failed, which carries the same tool_name
+# and tool_input and so leaves the same receipt (#239). This is the
+# completeness mechanism of SPEC §8: the harness fires the hook on every
+# tool call, so the log call sits outside the writer's volition — the
+# agent cannot skip its own receipt. One chain per session (SPEC §8: one
+# writer per log; parallel sessions are sibling chains, never a shared
+# file).
 
 # The most descriptive scalar a tool call has, in preference order. The
 # last, `summary`, is the adapters' fallback (ADR-0020): a harness whose
@@ -3666,10 +3796,11 @@ def cmd_hook(args):
 # --- Hook installer -----------------------------------------------------------
 # `loxodonta install-hook` wires this machine's Claude Code into the
 # recorder: a PostToolUse hook so every completed tool call leaves a
-# receipt, a SessionEnd hook so a clean exit seals the transcript's
-# tail (issue #79), and — when supervisor.py sits beside this file — a
-# SessionStart hook so every session starts with a recall digest of
-# its repo's recent history.
+# receipt and a PostToolUseFailure hook beside it so every call that ran
+# and failed does too (#239), a SessionEnd hook so a clean exit seals
+# the transcript's tail (issue #79), and — when supervisor.py sits
+# beside this file — a SessionStart hook so every session starts with a
+# recall digest of its repo's recent history.
 
 def load_settings(path):
     """The user-level settings, or None with the complaint printed —
@@ -3751,7 +3882,7 @@ AUTHORITY_TIERS = ("timestamped", "full")
 def resolve_profile(profile, anchor, publish, publish_chain=None,
                     authority=None, remote=None):
     """The profile an install asks for, and the session-end opt-ins it
-    resolves to (ADR-0031 ruling 1). A profile is a bundle of the raw
+    resolves to (ADR-0031 ruling 1). A profile is a named set of the raw
     flags and nothing else: `local` wires none, `timestamped` is the
     session-end anchor under the beginner's word, `custom` is the raw
     flags exactly as given. With no profile named, the raw flags speak
@@ -4095,7 +4226,7 @@ def coverage_path():
 
 
 def record_coverage(harness, matchers, profile, remote=None,
-                    authority=None):
+                    authority=None, failures=None):
     """Append what this install just wired, unless it wired what the
     last one did — the `heal()` rule, applied to matchers, to the
     profile and to both remotes, so re-running the installer never
@@ -4107,7 +4238,11 @@ def record_coverage(harness, matchers, profile, remote=None,
     cadences; `remote` is where publishing goes — at `full` the one URL
     both routes were wired to, and under `custom` the chain's URL when
     one was given, else the head's — and `authority` who stamps the head
-    when one is named (ADR-0032), each written only then. `serve`
+    when one is named (ADR-0032), each written only then. `failures` is
+    the matchers the failed-call event was wired on (#239), written only
+    when it was, so the witness owes a failed command a receipt from the
+    install that wired the event and never before it; an epoch without
+    it, Codex's and every one from before #239, wired none. `serve`
     follows the remote only at `full`, since that is the tier that asked
     the keeper for a cadence (#246). The marker never travels (the
     export allowlists it out, the package does not carry it), so unlike
@@ -4117,8 +4252,10 @@ def record_coverage(harness, matchers, profile, remote=None,
     over a bookkeeping file would be a worse trade than a memory that
     starts late, and the operator has louder ways to learn the store is
     unwritable. Returns whether an entry was appended."""
-    entry = {"since": now_ts(), "matchers": list(matchers),
-             "harness": harness, "profile": profile}
+    entry = {"since": now_ts(), "matchers": list(matchers)}
+    if failures:
+        entry["failures"] = list(failures)
+    entry.update({"harness": harness, "profile": profile})
     if remote:
         entry["remote"] = remote
     if authority:
@@ -4136,6 +4273,7 @@ def record_coverage(harness, matchers, profile, remote=None,
         last = next((epoch for epoch in reversed(epochs)
                      if epoch.get("harness") == harness), None)
         if last and last.get("matchers") == entry["matchers"] \
+                and last.get("failures") == entry.get("failures") \
                 and last.get("profile") == profile \
                 and last.get("remote") == entry.get("remote") \
                 and last.get("authority") == entry.get("authority"):
@@ -4231,6 +4369,21 @@ def cmd_install_hook(args):
                   'than the current default "*" — uncovered tool calls '
                   "leave no receipts (see docs/HOOK.md)")
 
+    # A call that ran and failed fires its own event (#239): the harness
+    # sends PostToolUseFailure for it, never PostToolUse, and nothing at
+    # all for a call it denied or never started. Wired beside
+    # PostToolUse with the same command on the same matcher, so the
+    # receipt is the same receipt — the action attempted, never whether
+    # it worked (.out-of-scope/001). An install from before this gains
+    # the event on re-run, as it gains any hook it is missing.
+    failed = hooks.setdefault("PostToolUseFailure", [])
+    healed += heal(failed, RECORDER_MARKERS, record)
+    if not any(ours(b) for b in failed):
+        matcher = next((b.get("matcher", "*") for b in post if ours(b)), "*")
+        failed.append({"matcher": matcher,
+                       "hooks": [{"type": "command", "command": record}]})
+        installed.append(f"PostToolUseFailure: {record}")
+
     # The tail commitment (ADR-0017, issue #79): SessionEnd runs the
     # same recorder command — the payload's hook_event_name is the
     # branch. The explicit timeout matters: the harness gives SessionEnd
@@ -4286,7 +4439,9 @@ def cmd_install_hook(args):
     marked = record_coverage("claude-code", wired, args.profile,
                              remote=(args.publish_chain
                                      or args.publish_head),
-                             authority=args.authority)
+                             authority=args.authority,
+                             failures=[block.get("matcher", "*")
+                                       for block in failed if ours(block)])
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -4346,7 +4501,8 @@ def cmd_uninstall_hook(args):
     path = (codex_hooks_path() if args.codex
             else os.path.join(os.path.expanduser("~"), ".claude",
                               "settings.json"))
-    events = ("PostToolUse", "SessionStart", "SessionEnd")
+    events = ("PostToolUse", "PostToolUseFailure", "SessionStart",
+              "SessionEnd")
     markers = RECORDER_MARKERS + (DIGEST_MARKER,)
     settings = load_settings(path)
     if settings is None:

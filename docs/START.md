@@ -62,7 +62,7 @@ Every new session on this machine now leaves a chain of receipts under
 `~/.loxodonta/receipts/`, one drawer per project (`C:\Users\<you>\.loxodonta\`
 on Windows). There is no daemon and no scheduled job. The command writes one
 entry into your harness's settings file, and the harness runs the recorder as
-a child process after each completed tool call.
+a child process after each tool call that completes or fails.
 
 On its own that is the lowest tier, `local`. An edit, a deletion, or a
 reorder of a receipt is caught unconditionally; a chain regenerated from

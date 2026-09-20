@@ -64,7 +64,9 @@ MCP tools included. A sensor with an allowlist has blind spots an
 attacker can enumerate by reading this public repo. "Completed" is
 load-bearing: the harness fires no hook for failed or denied calls, so
 they sit outside coverage by harness design — the same boundary the
-witness already counts by.
+witness already counts by. *(Amended 2026-09-18 by ADR-0034: a call
+that ran and failed fires `PostToolUseFailure`, which `install-hook`
+now wires, and what a failed call owes is ruled there.)*
 
 **2. Calibration is effective-dated.** The witness judges each session
 against the matchers in force at that session's time, as best the
