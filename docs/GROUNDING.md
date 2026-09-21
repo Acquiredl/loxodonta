@@ -228,17 +228,24 @@ for that, and nowhere else in this repository.
   The Model Context Protocol says only that a client should log tool
   usage.
 
-## 6. Words that mean something else elsewhere
+## 6. Crosswalk: this project's terms and the standards'
 
-- **Receipt.** In RFC 9943 a receipt is a signed proof, issued by a
-  transparency service, that a statement was registered. Here a receipt
-  is an [entry](../GLOSSARY.md#entry): one line the recorder wrote,
-  signed by nobody.
-- **Witness.** In the transparency-log community a witness checks that a
-  log's new checkpoint is consistent with the one it saw before, and
-  cosigns it (C2SP, `tlog-witness`). Here the witness is the supervisor's
-  role of counting receipts against a second record. The nearest thing
-  here to a transparency-log witness is the [receiver](../GLOSSARY.md#receiver).
+The rule is in [DIRECTION.md](DIRECTION.md) section 8: where a standard
+names the same concept its name is used or cross-referenced, and where a
+word is only shared with a standard it is scoped and never used in the
+standard's sense.
+
+| Term here | Nearest standard term | How they differ | What the glossary does |
+|---|---|---|---|
+| [Recipient](../GLOSSARY.md#recipient) | Relying party (PKI; RFC 9943 section 3) | Same role: the party that checks the proofs before relying on what they cover. | Cross-references it. |
+| [Issuer](../GLOSSARY.md#issuer) | Issuer (RFC 9943 section 3) | Same role: the party that secures a statement under its own name. | Cross-references it. |
+| [Published head](../GLOSSARY.md#published-head) | Checkpoint (C2SP `tlog-checkpoint`); signed tree head (RFC 6962) | A checkpoint is signed by the log. A published head is signed by nobody, and rests on a remote that cannot unsay it. | Cross-references it, and says so. |
+| [Seal](../GLOSSARY.md#seal) | Electronic seal (Regulation (EU) 910/2014, article 3(24) and 3(25)) | An electronic seal is a legal person's data ensuring origin and integrity. A seal here is any outer commitment to the manifest hash; only the issuer signature could be an electronic seal. | Scopes it. |
+| [Witness](../GLOSSARY.md#witness) | Witness (C2SP `tlog-witness`); witness (PeerReview) | A transparency-log witness checks that a new checkpoint is consistent with the last and cosigns it. PeerReview's witness audits another node's log. Here it counts receipts against a second record: completeness, not consistency. The nearest thing here to the first is the [receiver](../GLOSSARY.md#receiver). | Scopes it. |
+| What the witness does | Reconciliation, a control for completeness (ISA 315, appendix 3, paragraph 20) | None. | Section 3 says it in those words. |
+| [Second record](../GLOSSARY.md#second-record) | Underlying documents, in direction of testing (ISA 500, paragraph A27) | Auditing theory grades that source by its independence; here the grade is called reach. | States reach wherever a count is shown. |
+| The completeness alarm | Response to a failure of the logging process (NIST SP 800-53, AU-5) | AU-5 asks for the alert and leaves the detection to the organization. | Goes on the control-mapping page. |
+| [Receipt](../GLOSSARY.md#entry) | Receipt (RFC 9943 section 3; RFC 9942) | There, a signed proof from a transparency service that a statement was registered. Here, a line the recorder wrote, signed by nobody. The word has other settled senses as well, so no one standard owns it. | Scopes it. |
 
 ## 7. Not verified
 
@@ -303,7 +310,8 @@ Nothing above depends on these.
 - Haeberlen, Kuznetsov and Druschel, "PeerReview", SOSP 2007.
 - Bates, Tian, Butler and Moyer, "Trustworthy Whole-System Provenance for
   the Linux Kernel", USENIX Security 2015.
-- C2SP, `tlog-witness`, c2sp.org/tlog-witness.
+- C2SP, `tlog-witness`, c2sp.org/tlog-witness, and `tlog-checkpoint`,
+  c2sp.org/tlog-checkpoint.
 
 **Evidence and standards**
 

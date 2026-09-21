@@ -147,7 +147,30 @@ a bound on when it existed. Never forward integrity, never resistance to
 a cut tail without a published head, never protection at the moment of
 the call, never who wrote it, and never that anything is prevented.
 
-## 8. Open rulings
+## 8. How it names things
+
+Where naming conflicts, the established standard wins over this project's
+own word. Applied in three tiers:
+
+1. **The same concept, and a standard names it: use the standard's name.**
+   No homegrown synonym is kept beside it. Where the project's word is
+   already settled, the glossary entry carries the standard's term.
+2. **A word shared with a standard that scopes it differently: keep it
+   only with an explicit scoping sentence**, in the glossary and wherever
+   the two senses could meet, and never use the word here in the
+   standard's sense. No single standard owns *receipt* or *witness*, which
+   is why both are scoped and neither is renamed; the frozen format
+   carries `"actor":"receipts"` in every chain besides.
+3. **A surface that implements a standard speaks that standard's terms.**
+   If a part of this project ever speaks SCITT, that part says *entry*,
+   and *Receipt* there means what RFC 9943 says it means.
+
+The crosswalk from each term to the nearest standard term is
+[GROUNDING.md](GROUNDING.md) section 6. A rename that touches a contract
+(the package's `witness.json`, the completeness state words) is cheap only
+before 1.0 freezes it.
+
+## 9. Open rulings
 
 - Whether an append is followed by an `fsync`. Measured on the author's
   machine at 2.2 ms where the store lives, against about 55 ms of
@@ -158,7 +181,7 @@ the call, never who wrote it, and never that anything is prevented.
   file go, the result is two entries claiming one `n` in the middle of
   the file, and no sibling chain starts because the tail still parses.
 
-## 9. Where the decisions live
+## 10. Where the decisions live
 
 - `adrs/0035-the-recipients-verifier-is-copied-out-of-the-recorder-never-imported-by-it.md`
 - `adrs/0022-the-tool-gets-a-version-tag-and-release.md`, the addendum
