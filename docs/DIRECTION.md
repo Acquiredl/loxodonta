@@ -170,16 +170,33 @@ The crosswalk from each term to the nearest standard term is
 (the package's `witness.json`, the completeness state words) is cheap only
 before 1.0 freezes it.
 
-## 9. Open rulings
+## 9. Ruled, and not yet built
 
-- Whether an append is followed by an `fsync`. Measured on the author's
-  machine at 2.2 ms where the store lives, against about 55 ms of
-  interpreter start per hook call. An ADR either way: a refusal to spend
-  the call is fine, an unrecorded window is not.
-- What SPEC section 8 says about a lock taken from a holder that was
-  paused and not dead. Tested: where the operating system lets the lock
-  file go, the result is two entries claiming one `n` in the middle of
-  the file, and no sibling chain starts because the tail still parses.
+- **A forked chain ends like a torn one.** A lock can be taken from a
+  holder that was paused and not dead (ADR-0004 names the trade). Tested
+  on 2026-09-20: where the operating system lets the lock file go, the
+  result is two entries claiming one `n`, and because the tail still
+  parses no sibling chain starts, so an innocent race is buried under
+  later receipts and reads as tampering in the middle of the file. Ruled
+  2026-09-21: a chain whose tail's `n` is not its line count less one
+  cannot be extended either. The hook starts a sibling, and `log` and
+  `run` refuse as they do for a torn tail. Damage ends a chain, never the
+  recording, and innocent damage stays at the tail where the glossary
+  says it lives. SPEC section 8 states the race and this bound; ADR-0004
+  takes an addendum when the code lands.
+- **An append reaches the disk before it is reported.** Today `logged
+  entry N` can sit in the operating system's cache, while the receiver
+  already syncs before it answers. Measured on the author's machine on
+  2026-09-20: 2.2 ms per append where the store lives, 0.6 ms on a second
+  drive, 6.1 ms on Linux, against about 135 ms for a hook call end to
+  end. The published work says nothing specific about it
+  ([GROUNDING.md](GROUNDING.md) section 2). Ruled 2026-09-21: every
+  append, the genesis included, is followed by an `fsync` inside the
+  lock. A crash that loses receipts reads at the witness exactly as a
+  killed hook does, and an innocent loss should not wear that face. SPEC
+  section 1 gains the sentence beside its single-write rule, and names
+  what is left: on POSIX, the directory entry of a chain created a moment
+  before the power went.
 
 ## 10. Where the decisions live
 
