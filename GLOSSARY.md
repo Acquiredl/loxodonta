@@ -178,7 +178,7 @@ A repo-level visibility declaration for cross-repo [recall](#recall): a marker f
 
 ### Store
 
-The one machine-wide home of every hook-written chain: `~/.loxodonta/receipts/<project-slug>/` (override: `LOXODONTA_HOME`), one subfolder per project, slug = `<basename>-<8 hex of the normalized project path's SHA256>` so two same-named projects can never share a drawer (ADR-0011). The store is the read side's unnamed default universe — `scan` with no arguments sweeps it; `--root` remains the explicit legacy mode. Chains in the store outlive their projects: the sessions most worth keeping are exactly the ones whose folder got deleted. **One session, one drawer:** every receipt of a session goes to the drawer its first receipt chose, whatever the project directory resolves to later (ADR-0023); a repository's recall also reads the drawers of its harness worktrees (`<repo>/.claude/worktrees/`). The quickstart's cwd-local log is the deliberate exception — the sandbox stays touchable. Deleting the store is itself detectable from outside it: the baseline sits beside it, the witness lives at a different address, the anchor is unreachable.
+The one machine-wide home of every hook-written chain: `~/.loxodonta/receipts/<project-slug>/` (override: `LOXODONTA_HOME`), one subfolder per project, slug = `<basename>-<8 hex of the normalized project path's SHA256>` so two same-named projects can never share a drawer (ADR-0011). The store is the read side's unnamed default universe — `scan` with no arguments sweeps it; `--root` remains the explicit legacy mode. Chains in the store outlive their projects: the sessions most worth keeping are exactly the ones whose folder got deleted. **One session, one drawer:** every receipt of a session goes to the drawer its first receipt chose, whatever the project directory resolves to later (ADR-0023); a repository's recall also reads the drawers of its harness worktrees (`<repo>/.claude/worktrees/`). The quickstart's cwd-local log is the deliberate exception — the sandbox stays touchable. Deleting the store is itself detectable from outside it: the baseline sits beside it, the [second record](#second-record) lives at a different address, the anchor is unreachable.
 
 ### Project record
 
@@ -212,9 +212,17 @@ The set of tool calls that owe a receipt: defined by the matchers wired into the
 
 The property the tool deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`loxodonta run`, pipeline gate scripts, the Stage C harness hook) — and is judged against [coverage](#coverage). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
 
+### Witness
+
+The [supervisor](#supervisor)'s checking role: it reads a session's [second record](#second-record), counts the tool events that owed a receipt under the [coverage](#coverage) in force at the time, and reconciles that count against the chain, tool by tool (ADR-0034). It judges [completeness](#completeness) and nothing else; verdicts about the chain stay with [verify](#verify). Not the transparency-log sense of the word, where a witness cosigns a log's checkpoints; the nearest thing here to that role is the [receiver](#receiver).
+
+### Second record
+
+A record of a session's tool events produced by something other than the recorder's own path, so that a fault which silences the hook does not silence it. It is [testimony](#testimony). Its **reach** is stated wherever the [witness](#witness)'s count is shown: *writer-reachable*, or *out of reach* by the [head record](#head-record) test (ADR-0025). A writer-reachable second record catches faults: the disabled hook, the wedged lock, the silent fork. It gives no guarantee against a writer shaping both records. One exists today: the Claude Code transcript, writer-reachable.
+
 ### Adapter
 
-The integration for one harness: whatever turns that harness's tool-call events into the hook payload and hands it to `loxodonta hook` (ADR-0020). An adapter never writes the chain format itself. Three ship: the Claude Code hook and the Codex hook, both processes the harness spawns after each call, and the OpenAI Agents SDK trace processor, which runs inside the agent program. That difference is the adapter's *trust position*: a harness hook sits outside the agent program entirely; an in-process processor cannot be skipped by the model but can be by the program's author. Every adapter's docs name its position. [Coverage](#coverage) is read per harness (Codex fires after a failed command; Claude Code does not), and the completeness witness exists for Claude Code's transcript layout only.
+The integration for one harness: whatever turns that harness's tool-call events into the hook payload and hands it to `loxodonta hook` (ADR-0020). An adapter never writes the chain format itself. Three ship: the Claude Code hook and the Codex hook, both processes the harness spawns after each call, and the OpenAI Agents SDK trace processor, which runs inside the agent program. That difference is the adapter's *trust position*: a harness hook sits outside the agent program entirely; an in-process processor cannot be skipped by the model but can be by the program's author. Every adapter's docs name its position. [Coverage](#coverage) is read per harness (Codex fires after a failed command; Claude Code does not), and the [witness](#witness) reads one [second record](#second-record) today, Claude Code's transcript.
 
 ### Field-data export
 
@@ -285,4 +293,4 @@ A second commitment of the chain head, made beside the [anchor](#anchor-stage-b)
 
 ---
 
-*Last updated: 2026-09-15*
+*Last updated: 2026-09-21*
