@@ -98,7 +98,7 @@ The single append-only JSON Lines file holding a chain of entries. Default filen
 
 ### Entry
 
-One line of the receipt log: a JSON object with exactly `n`, `ts`, `actor`, `action`, `files`, `prev`, `entry_hash`. An entry *is* a receipt — the two words are interchangeable; "entry" is the code-facing term, "receipt" the human-facing one.
+One line of the receipt log: a JSON object with exactly `n`, `ts`, `actor`, `action`, `files`, `prev`, `entry_hash`. An entry *is* a receipt — the two words are interchangeable; "entry" is the code-facing term, "receipt" the human-facing one. Not the SCITT sense of the word (RFC 9943), where a receipt is a signed proof from a transparency service that a statement was registered; a receipt here is a line the recorder wrote, signed by nobody.
 
 ### Genesis
 
