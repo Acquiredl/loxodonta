@@ -42,7 +42,7 @@ An operator-held copy of the chain head, stored **outside the writer's reach** �
 
 ### Published head
 
-One chain head sent off the machine to a remote that passes the [head record](#head-record) test, by the hook at session end (after the tail commitment, before the anchor) and by the supervisor's keeper on a cadence, once the operator opts in (`install-hook --publish-head URL`). It carries the head, the entry count, the session id, the time, and the event kind, and one readable line repeating them; never a path, a project name, an action line, or chain bytes. The check it enables: every published head must be an entry hash inside its chain, so a regenerated chain fails on the earlier heads and a fake head the writer posts matches nothing. It says a chain of that length with that head existed at that time; it never says what the chain held. In this release the check is the operator's ritual with `verify --expect-head` (ADR-0025). Beside the chain, the recorder keeps a **memo** of what left (`<log>.published.jsonl`: head, entry count, time, event kind, never the URL), written by the hook at session end and by `loxodonta publish` on the keeper's turn; it is writer-reachable and therefore testimony, kept so no head is posted twice, never to prove anything.
+One chain head sent off the machine to a remote that passes the [head record](#head-record) test, by the hook at session end (after the tail commitment, before the anchor) and by the supervisor's keeper on a cadence, once the operator opts in (`install-hook --publish-head URL`). It carries the head, the entry count, the session id, the time, and the event kind, and one readable line repeating them; never a path, a project name, an action line, or chain bytes. The check it enables: every published head must be an entry hash inside its chain, so a regenerated chain fails on the earlier heads and a fake head the writer posts matches nothing. It says a chain of that length with that head existed at that time; it never says what the chain held. In this release the check is the operator's ritual with `verify --expect-head` (ADR-0025). Beside the chain, the recorder keeps a **memo** of what left (`<log>.published.jsonl`: head, entry count, time, event kind, never the URL), written by the hook at session end and by `loxodonta publish` on the keeper's turn; it is writer-reachable and therefore testimony, kept so no head is posted twice, never to prove anything. The nearest standard object is a transparency log's *checkpoint* (C2SP `tlog-checkpoint`; the signed tree head of RFC 6962): an origin, a size and a root hash, signed by the log. A published head carries the same kind of fact and is signed by nobody; what it has instead is a remote that cannot unsay it.
 
 ### Published chain
 
@@ -82,11 +82,11 @@ The supervisor's counts rendered for a monitoring stack the operator already run
 
 ### Issuer
 
-The party who seals a [package](#package) and ships it across a trust boundary under its own name — the one taking responsibility for the deliverable. The issuer holds the signing key **out of the writer's reach** (the head-record property, applied to a second object) and applies the [issuer signature](#issuer-signature) at package close, after the manifest is written. In a solo deployment the operator and issuer are the same person wearing two hats; the roles diverge the moment issuing becomes a service, exactly as writer and operator diverged to found this project (ADR-0008).
+The party who seals a [package](#package) and ships it across a trust boundary under its own name — the one taking responsibility for the deliverable. The issuer holds the signing key **out of the writer's reach** (the head-record property, applied to a second object) and applies the [issuer signature](#issuer-signature) at package close, after the manifest is written. In a solo deployment the operator and issuer are the same person wearing two hats; the roles diverge the moment issuing becomes a service, exactly as writer and operator diverged to found this project (ADR-0008). The same role SCITT names an *Issuer* (RFC 9943).
 
 ### Recipient
 
-The party across the trust boundary who receives a [package](#package) and verifies it with nothing running: checks the seals, walks the chain, and owns the one job the verifier cannot do — comparing the printed key fingerprint against a channel the package cannot rewrite. Math is the verifier's job; identity is the recipient's (ADR-0008).
+The party across the trust boundary who receives a [package](#package) and verifies it with nothing running: checks the seals, walks the chain, and owns the one job the verifier cannot do — comparing the printed key fingerprint against a channel the package cannot rewrite. Math is the verifier's job; identity is the recipient's (ADR-0008). In the word of PKI and of SCITT (RFC 9943), a *relying party*.
 
 ---
 
@@ -98,7 +98,7 @@ The single append-only JSON Lines file holding a chain of entries. Default filen
 
 ### Entry
 
-One line of the receipt log: a JSON object with exactly `n`, `ts`, `actor`, `action`, `files`, `prev`, `entry_hash`. An entry *is* a receipt — the two words are interchangeable; "entry" is the code-facing term, "receipt" the human-facing one.
+One line of the receipt log: a JSON object with exactly `n`, `ts`, `actor`, `action`, `files`, `prev`, `entry_hash`. An entry *is* a receipt — the two words are interchangeable; "entry" is the code-facing term, "receipt" the human-facing one. Not the SCITT sense of the word (RFC 9943), where a receipt is a signed proof from a transparency service that a statement was registered; a receipt here is a line the recorder wrote, signed by nobody.
 
 ### Genesis
 
@@ -154,7 +154,7 @@ The package's sidecar list: a small document, **written last**, holding the chai
 
 ### Seal
 
-An outer commitment applied to the [manifest](#manifest) hash from beyond the package. Three kinds, answering two questions: the **anchor** (ADR-0003, pointed at the manifest hash) says *when* — the only seal the issuer cannot forge later, because a signature has no clock and no one can anchor into the past; the [**authority timestamp**](#authority-timestamp) (ADR-0032, pointed at the same hash) answers *when* too, but on a party's word, so it sits beside the anchor and never in its place; the [**issuer signature**](#issuer-signature) says *who* (ADR-0008). The manifest commits its declared seal set, so a stripped seal is `SEAL-MISSING`, never a silent downgrade. An unsealed package can verify at most `SELF-CONSISTENT` — indistinguishable from a wholesale regeneration. Package verdicts name the mechanism, never the conclusion — see Anti-terms. Anti-use: the [transcript commitment](#transcript-commitment) is not a seal — it is writer-authored and inner, protected only by the chain; the word stays reserved for outer commitments (ADR-0017).
+An outer commitment applied to the [manifest](#manifest) hash from beyond the package. Three kinds, answering two questions: the **anchor** (ADR-0003, pointed at the manifest hash) says *when* — the only seal the issuer cannot forge later, because a signature has no clock and no one can anchor into the past; the [**authority timestamp**](#authority-timestamp) (ADR-0032, pointed at the same hash) answers *when* too, but on a party's word, so it sits beside the anchor and never in its place; the [**issuer signature**](#issuer-signature) says *who* (ADR-0008). The manifest commits its declared seal set, so a stripped seal is `SEAL-MISSING`, never a silent downgrade. An unsealed package can verify at most `SELF-CONSISTENT` — indistinguishable from a wholesale regeneration. Package verdicts name the mechanism, never the conclusion — see Anti-terms. Anti-use: the [transcript commitment](#transcript-commitment) is not a seal — it is writer-authored and inner, protected only by the chain; the word stays reserved for outer commitments (ADR-0017). Broader than the *electronic seal* of eIDAS (Regulation (EU) 910/2014, article 3(25)), which is data a legal person attaches to other data to ensure its origin and integrity: of the three kinds here only the issuer signature could be one, and only where the issuer is a legal person.
 
 ### Issuer signature
 
@@ -178,7 +178,7 @@ A repo-level visibility declaration for cross-repo [recall](#recall): a marker f
 
 ### Store
 
-The one machine-wide home of every hook-written chain: `~/.loxodonta/receipts/<project-slug>/` (override: `LOXODONTA_HOME`), one subfolder per project, slug = `<basename>-<8 hex of the normalized project path's SHA256>` so two same-named projects can never share a drawer (ADR-0011). The store is the read side's unnamed default universe — `scan` with no arguments sweeps it; `--root` remains the explicit legacy mode. Chains in the store outlive their projects: the sessions most worth keeping are exactly the ones whose folder got deleted. **One session, one drawer:** every receipt of a session goes to the drawer its first receipt chose, whatever the project directory resolves to later (ADR-0023); a repository's recall also reads the drawers of its harness worktrees (`<repo>/.claude/worktrees/`). The quickstart's cwd-local log is the deliberate exception — the sandbox stays touchable. Deleting the store is itself detectable from outside it: the baseline sits beside it, the witness lives at a different address, the anchor is unreachable.
+The one machine-wide home of every hook-written chain: `~/.loxodonta/receipts/<project-slug>/` (override: `LOXODONTA_HOME`), one subfolder per project, slug = `<basename>-<8 hex of the normalized project path's SHA256>` so two same-named projects can never share a drawer (ADR-0011). The store is the read side's unnamed default universe — `scan` with no arguments sweeps it; `--root` remains the explicit legacy mode. Chains in the store outlive their projects: the sessions most worth keeping are exactly the ones whose folder got deleted. **One session, one drawer:** every receipt of a session goes to the drawer its first receipt chose, whatever the project directory resolves to later (ADR-0023); a repository's recall also reads the drawers of its harness worktrees (`<repo>/.claude/worktrees/`). The quickstart's cwd-local log is the deliberate exception — the sandbox stays touchable. Deleting the store is itself detectable from outside it: the baseline sits beside it, the [second record](#second-record) lives at a different address, the anchor is unreachable.
 
 ### Project record
 
@@ -212,9 +212,17 @@ The set of tool calls that owe a receipt: defined by the matchers wired into the
 
 The property the tool deliberately does **not** guarantee: that every action produced an entry. The chain proves integrity of *what was logged*; a writer that never calls `log` leaves no break to detect. Completeness comes from the integration — placing the `log` call outside the writer's volition (`loxodonta run`, pipeline gate scripts, the Stage C harness hook) — and is judged against [coverage](#coverage). Slogan form: *integrity is the tool's job; completeness is the integration's job.*
 
+### Witness
+
+The [supervisor](#supervisor)'s checking role: it reads a session's [second record](#second-record), counts the tool events that owed a receipt under the [coverage](#coverage) in force at the time, and reconciles that count against the chain, tool by tool (ADR-0034). It judges [completeness](#completeness) and nothing else; verdicts about the chain stay with [verify](#verify). Not the transparency-log sense of the word, where a witness cosigns a log's checkpoints; the nearest thing here to that role is the [receiver](#receiver).
+
+### Second record
+
+A record of a session's tool events produced by something other than the recorder's own path, so that a fault which silences the hook does not silence it. It is [testimony](#testimony). Its **reach** is stated wherever the [witness](#witness)'s count is shown: *writer-reachable*, or *out of reach* by the [head record](#head-record) test (ADR-0025). A writer-reachable second record catches faults: the disabled hook, the wedged lock, the silent fork. It gives no guarantee against a writer shaping both records. One exists today: the Claude Code transcript, writer-reachable.
+
 ### Adapter
 
-The integration for one harness: whatever turns that harness's tool-call events into the hook payload and hands it to `loxodonta hook` (ADR-0020). An adapter never writes the chain format itself. Three ship: the Claude Code hook and the Codex hook, both processes the harness spawns after each call, and the OpenAI Agents SDK trace processor, which runs inside the agent program. That difference is the adapter's *trust position*: a harness hook sits outside the agent program entirely; an in-process processor cannot be skipped by the model but can be by the program's author. Every adapter's docs name its position. [Coverage](#coverage) is read per harness (Codex fires after a failed command; Claude Code does not), and the completeness witness exists for Claude Code's transcript layout only.
+The integration for one harness: whatever turns that harness's tool-call events into the hook payload and hands it to `loxodonta hook` (ADR-0020). An adapter never writes the chain format itself. Three ship: the Claude Code hook and the Codex hook, both processes the harness spawns after each call, and the OpenAI Agents SDK trace processor, which runs inside the agent program. That difference is the adapter's *trust position*: a harness hook sits outside the agent program entirely; an in-process processor cannot be skipped by the model but can be by the program's author. Every adapter's docs name its position. [Coverage](#coverage) is read per harness (Codex fires after a failed command; Claude Code does not), and the [witness](#witness) reads one [second record](#second-record) today, Claude Code's transcript.
 
 ### Field-data export
 
@@ -285,4 +293,4 @@ A second commitment of the chain head, made beside the [anchor](#anchor-stage-b)
 
 ---
 
-*Last updated: 2026-09-15*
+*Last updated: 2026-09-21*
