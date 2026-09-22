@@ -26,7 +26,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package_anchor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import (FakeCalendar, FakeCalendarHandler, clean_env,
+from test_anchor import (FakeCalendar, FakeCalendarHandler,
                          expected_merkle_root, start_calendar)
 from test_package import (LOXODONTA, SUPERVISOR, PackageCase, completed_anchor,
                           neutral_env, run)
@@ -54,7 +54,7 @@ class AnchoredStoreCase(PackageCase):
         self.work = self.root / "work"
         self.work.mkdir()
         # The neutral home, and no proxy in the way of 127.0.0.1.
-        self.env = {**clean_env(), **neutral_env(self.home)}
+        self.env = neutral_env(self.home)
         for command in ("pytest -q", "git status"):
             self.hook(SESSION, "Bash", {"command": command})
         (drawer,) = [p for p in (self.home / ".loxodonta" / "receipts").iterdir()
@@ -317,6 +317,32 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertTrue(lines[-1].startswith("SELF-CONSISTENT:"), lines[-1])
         self.assertIn("since no seal is declared", lines[-1])
         self.assertEqual(self.server.submitted, [])
+
+    def test_attempt_rows_ride_in_the_packaged_sidecar_and_are_not_judged(self):
+        # #240: the hook's note on how a session-end anchor went sits in
+        # the chain's sidecar beside the proof. The package carries the
+        # sidecar as it is, and the verifier reads the note as a note:
+        # the chain's anchor still prints as detail, nothing is invalid,
+        # and the verdict is what it was without the row.
+        sidecar = self.chain.with_name(self.chain.name + ".anchors.jsonl")
+        with sidecar.open("a", encoding="utf-8") as out:
+            out.write(json.dumps({
+                "kind": "attempt", "step": "anchor",
+                "ts": "2026-09-16T05:35:42Z", "budget": 12.0,
+                "outcome": "no calendar answered within 12 seconds"}) + "\n")
+        folder = self.work / "noted"
+        result = self.package(SESSION, "--folder", "--out", str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertIn(self.CHAIN_DETAIL, judged.stdout)
+        self.assertNotIn("INVALID", judged.stdout)
+        self.assertNotIn("MISMATCH", judged.stdout)
+        packed = (folder / sidecar.name).read_text("utf-8").splitlines()
+        self.assertEqual(len(packed), 2, "the sidecar travels as it is")
+        self.assertIn('"kind": "attempt"', packed[-1])
 
     def test_a_calendar_that_accepts_nothing_leaves_no_package(self):
         # A package declaring a seal it does not carry would only ever

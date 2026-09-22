@@ -5,7 +5,7 @@
 
 [![tests](https://github.com/Acquiredl/loxodonta/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Acquiredl/loxodonta/actions/workflows/tests.yml) [![python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/downloads/) [![no dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#install) [![license MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-loxodonta writes one receipt per completed tool call an AI coding agent makes, into a plain JSON-lines file, and tells you afterwards whether that file was touched. Each receipt carries the SHA256 of the receipt before it, so an edit, a deletion, or a reorder anywhere breaks the chain and `verify` names the entry. Two Python files, standard library only: `loxodonta.py` records and judges, `supervisor.py` reads the record back. Claude Code and Codex CLI are wired with one command, the OpenAI Agents SDK through a small adapter, and any program that can run a command through `run`.
+loxodonta writes one receipt per completed tool call an AI coding agent makes, into a plain JSON-lines file, and tells you afterwards whether that file was touched. Each receipt carries the SHA256 of the receipt before it, so an edit, a deletion, or a reorder anywhere before the end breaks the chain and `verify` names the entry; a chain cut short at its end is caught against a head kept where the agent cannot reach it. Three Python files, standard library only: `loxodonta.py` records and judges, `supervisor.py` reads the record back, and `receiver.py`, optional, keeps a copy on a machine the agent cannot reach. Claude Code and Codex CLI are wired with one command, the OpenAI Agents SDK through a small adapter, and any program that can run a command through `run`.
 
 The adversary it is designed around is the agent itself ([ADR-0002](adrs/0002-writer-as-adversary.md)): it has the same access to its log as to everything else on the machine, and a session that reads a prompt injection can act on it and then rewrite the log to hide that it did. Receipts are written by a hook the harness fires after each tool call, outside the agent's control, and a rewrite afterwards shows.
 
@@ -42,23 +42,39 @@ python loxodonta.py head   # the chain head; keep a copy where the agent cannot 
 
 ## Install
 
-Python 3.9 or newer, nothing to install. Download `loxodonta.py`, `supervisor.py`, and `SHA256SUMS` from the [releases page](https://github.com/Acquiredl/loxodonta/releases) into one folder, check the sums, and ask the file which version it is:
+Python 3.9 or newer, nothing to install. Download what you need from the [releases page](https://github.com/Acquiredl/loxodonta/releases) into one folder, with `SHA256SUMS`:
+
+- `loxodonta.py` records each session and judges the record. Every machine that runs an agent needs it.
+- `supervisor.py` reads the record back: the dashboard, the scan, recall. It sits beside `loxodonta.py`, which it runs.
+- `receiver.py` keeps a copy on a second machine, for the `full` tier below. Only that machine needs it.
+
+Check the sums of what you downloaded, and ask the file which version it is:
 
 ```
-sha256sum -c SHA256SUMS         # Windows: certutil -hashfile loxodonta.py SHA256, then compare by eye
-python loxodonta.py --version   # loxodonta 0.7.0 (format 0.1, commit unknown)
+sha256sum -c --ignore-missing SHA256SUMS   # Windows: certutil -hashfile loxodonta.py SHA256, then compare by eye
+python loxodonta.py --version   # loxodonta 0.8.0 (format 0.1, commit unknown)
 ```
 
 `commit unknown` is the expected answer for a download; inside a clone the same line names the commit. Releases are cut from `main`, where the suite runs on Linux, macOS, and Windows; day-to-day work lands on `dev`.
 
 ## Record real sessions
 
-`install-hook` adds hook entries to the harness's own settings file (`~/.claude/settings.json`, or `~/.codex/hooks.json` with `--codex`) and nothing else: no service, no scheduled job. The harness then runs the recorder as a child process after each completed tool call, and `uninstall-hook` removes the same entries. The OpenAI Agents SDK has no hooks; its adapter hands the SDK's spans to the same recorder ([docs/HOOK.md](docs/HOOK.md#other-harnesses)).
+`install-hook` adds hook entries to the harness's own settings file (`~/.claude/settings.json`, or `~/.codex/hooks.json` with `--codex`) and nothing else: no service, no scheduled job. The harness then runs the recorder as a child process after each completed tool call, and after each one that fails, and `uninstall-hook` removes the same entries. The OpenAI Agents SDK has no hooks; its adapter hands the SDK's spans to the same recorder ([docs/HOOK.md](docs/HOOK.md#other-harnesses)).
 
 ```
 python loxodonta.py install-hook            # Claude Code; then restart open sessions
 python loxodonta.py install-hook --codex    # Codex CLI; then trust the new hooks once with /hooks
 ```
+
+With no profile named you are at `local`, and the installer ends with the ladder, one row per tier and the flag that reaches it:
+
+```
+  local        receipts stay on this machine. Edits to history are caught; a regenerated chain only against a head you keep (`head`, then `verify --expect-head`).
+  timestamped  --profile timestamped   a 32-byte digest leaves at each session end; regeneration is caught once the anchor matures.
+  full         --profile full --remote URL   head and receipts go to a remote you name; a wiped log survives there as of the last send.
+```
+
+What `full` buys is that last line: a wiped log survives at your remote as of the last send. What it costs is that every entry leaves, command lines included, and the installer says so before it writes anything. The third file is one such remote: `python receiver.py serve` on a second machine prints the URL to pass as `--remote` ([docs/RECEIVER.md](docs/RECEIVER.md)). The raw flags under `custom`, and what differs on Codex, are in [docs/HOOK.md](docs/HOOK.md).
 
 Every session from then on leaves a chain under `~/.loxodonta/receipts/<project>-<hash>/`, one drawer per project folder and one `receipts-<session>.jsonl` per session. A receipt is one JSON line: sequence number, UTC time, actor, a one-line action such as `Edit: todo.py` or `Bash: python -m unittest -q`, the SHA256 of each project file the call touched, the previous receipt's hash, and its own. Tool output and file contents are never recorded; commands and URLs are, so treat the store the way you treat logs. Every 25 receipts the hook also commits a hash of the harness transcript so far, which `verify --transcript` judges. To read the store:
 
@@ -67,6 +83,10 @@ python supervisor.py scan      # every chain, one verdict each; the exit code is
 python supervisor.py digest    # this project's recent history, the text a new session is handed at start
 python supervisor.py serve     # the dashboard, bound to 127.0.0.1 only
 ```
+
+`serve` also answers `/metrics` in the Prometheus text format, on the same address, so the supervisor works with Grafana and Elastic through Prometheus ([docs/METRICS.md](docs/METRICS.md)).
+
+The supervisor reads the store on the machine the agent works on, so what it says is a reason to look and never proof; [docs/TOPOLOGY.md](docs/TOPOLOGY.md) draws where each of the three files runs and what a verdict is worth there.
 
 ## A bad day, on record
 
@@ -107,7 +127,9 @@ python supervisor.py drill --root docs/demo --log docs/demo/bad-day-session.json
 
 Usage errors exit 64; `4` is a receipt format this verifier does not speak, `5` a harness transcript that no longer matches what the chain committed. The verdict line says why, the code says how grave.
 
-The anchor is the one piece kept off the machine. `loxodonta anchor` posts the 32-byte chain head to the public OpenTimestamps calendars, which commit it to Bitcoin; `anchor --upgrade` completes the proof a few hours later and `verify --anchors` judges it offline, so everything up to an anchored head is on record as of that block. Off by default; `install-hook --anchor-at-session-end` opts in for every session end ([docs/ANCHORING.md](docs/ANCHORING.md)).
+The anchor is the one piece kept off the machine at `timestamped`. `loxodonta anchor` posts the 32-byte chain head to the public OpenTimestamps calendars, which commit it to Bitcoin; `anchor --upgrade` completes the proof a few hours later and `verify --anchors` judges it offline, so everything up to an anchored head is on record as of that block. Off by default; `install-hook --profile timestamped` opts in for every session end ([docs/ANCHORING.md](docs/ANCHORING.md)).
+
+The authority timestamp is the addition for operators who need seconds or standing: `--authority URL` beside `--profile timestamped` or `full` asks an RFC 3161 authority you name for a token over the same head, beside the anchor and never instead of it, and `verify --stamps --authority-chain FILE` judges the token through `openssl` ([docs/ANCHORING.md](docs/ANCHORING.md#6-the-authority-timestamp-which-is-not-an-anchor)).
 
 ## Reading it back
 

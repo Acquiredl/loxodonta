@@ -248,6 +248,16 @@ class CodexInstallTest(unittest.TestCase):
         # The Claude Code settings are not touched by a Codex install.
         self.assertFalse((self.home / ".claude").exists())
 
+    def test_codex_wires_no_failure_event(self):
+        # #239 wired PostToolUseFailure for Claude Code. Codex has no
+        # such event: its PostToolUse already fires after a shell
+        # command that exits non-zero, so the one block covers both.
+        result = self.install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("PostToolUseFailure", self.hooks()["hooks"])
+        self.assertNotIn("PostToolUseFailure", result.stdout)
+
     def test_is_idempotent_and_keeps_foreign_hooks(self):
         self.hooks_path.write_text(json.dumps({"hooks": {
             "PreToolUse": [{"matcher": "Bash", "hooks": [

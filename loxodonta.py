@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.7.0"
+TOOL_VERSION = "0.8.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -75,6 +76,25 @@ def entry_line(entry):
     The two never conflict: verification re-parses the JSON and re-derives
     the canonical form fresh, never comparing file bytes."""
     return json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def write_line_to_disk(path, mode, line):
+    """One line, written and pushed through the operating system's cache
+    to the disk before this returns, so that "logged entry N" means the
+    entry is there (SPEC §1). A crash that loses a written receipt reads
+    at the witness exactly as a killed hook does, and an innocent loss
+    should not wear that face. The sync costs about 2 ms where the store
+    lives, against ~135 ms for a hook call. If the sync itself fails the
+    line is still written and the failure is said, never hidden, since
+    the entry is on its way to the disk either way."""
+    with open(path, mode, encoding="utf-8", newline="\n") as f:
+        f.write(line)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError as e:
+            print(f"warning: {path}: written, but not synced to disk: {e}",
+                  file=sys.stderr)
 
 
 def read_log(path):
@@ -189,7 +209,16 @@ def locked_out(log):
 
 
 def tail_entry(lines):
-    """The chain's final entry, or None if the tail is damaged."""
+    """The chain's final entry, or None if the tail is damaged. Two shapes
+    of damage, both innocent (ADR-0004): a torn tail, the line left
+    partial by a crash or an overlapping append; and a forked tail, a
+    well-formed entry whose `n` is not its line number, which is what a
+    lock taken from a paused holder leaves behind: two entries claiming
+    one `n`. Neither can be built on. A new entry laid over a fork would
+    bury an innocent race under later receipts until it read as
+    tampering in the middle of the file, so the fork ends the chain the
+    way a tear does, and damage stays at the tail, where the readers
+    that name it honestly expect it (SPEC §6, §8)."""
     if not lines:
         return None
     try:
@@ -197,6 +226,8 @@ def tail_entry(lines):
     except json.JSONDecodeError:
         return None
     if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+        return None
+    if last["n"] != len(lines) - 1:
         return None
     return last
 
@@ -220,8 +251,7 @@ def genesis_entry():
 
 def cmd_init(args):
     try:
-        with open(args.log, "x", encoding="utf-8", newline="\n") as f:
-            f.write(entry_line(genesis_entry()))
+        write_line_to_disk(args.log, "x", entry_line(genesis_entry()))
     except FileExistsError:
         print(f"error: {args.log} already exists; refusing to overwrite", file=sys.stderr)
         return 1
@@ -312,6 +342,23 @@ def append_entry(log, actor, action, file_paths):
         return locked_out(log)
 
 
+def referenced_paths(lines):
+    """Every path the chain's entries reference, read tolerantly: this
+    feeds a write-time warning, and a line that is not an entry is
+    `verify`'s to name, not a reason for `log` to crash."""
+    paths = set()
+    for line in lines:
+        try:
+            refs = json.loads(line).get("files")
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(refs, list):
+            paths.update(ref["path"] for ref in refs
+                         if isinstance(ref, dict)
+                         and isinstance(ref.get("path"), str))
+    return paths
+
+
 def append_locked(log, actor, action, files):
     """The critical section of `append_entry` — callers must hold the lock."""
     try:
@@ -324,7 +371,7 @@ def append_locked(log, actor, action, files):
     # A new entry chains to the tail; a damaged tail cannot anchor one.
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {log} has a damaged final line — run `loxodonta verify` "
+        print(f"error: {log} has a damaged tail — run `loxodonta verify` "
               "(appending would bury the damage)", file=sys.stderr)
         return 1
 
@@ -336,8 +383,7 @@ def append_locked(log, actor, action, files):
     # none, and those append without paying for it (#222; 19 ms on a
     # 3,878-entry chain, against 55 ms of interpreter start).
     if files:
-        known_paths = {ref["path"] for line in lines
-                       for ref in json.loads(line)["files"]}
+        known_paths = referenced_paths(lines)
         for ref in files:
             for known in known_paths:
                 if ref["path"] != known and ref["path"].lower() == known.lower():
@@ -354,9 +400,9 @@ def append_locked(log, actor, action, files):
     }
     entry["entry_hash"] = entry_hash(entry)
     # Single write of one complete line (SPEC §1): a crash can at worst
-    # truncate this line, never damage earlier entries.
-    with open(log, "a", encoding="utf-8", newline="\n") as f:
-        f.write(entry_line(entry))
+    # truncate this line, never damage earlier entries. Synced before it
+    # is reported, so the report is true when it is printed.
+    write_line_to_disk(log, "a", entry_line(entry))
     print(f"logged entry {entry['n']}")
     return 0
 
@@ -394,7 +440,7 @@ def cmd_head(args):
         return 1
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged final line — run "
+        print(f"error: {args.log} has a damaged tail — run "
               "`loxodonta verify` (a torn tail has no head to record)",
               file=sys.stderr)
         return 1
@@ -593,11 +639,12 @@ def append_sidecar_record(path, record):
         f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 
 
-def read_anchor_records(log):
-    """Sidecar records, or [] when no sidecar exists (anchoring is optional).
-    A record is (parsed_dict_or_None, raw_line)."""
+def read_sidecar_records(path):
+    """The records of one sidecar, or None when the file does not exist
+    (every sidecar is optional). A line that is not a JSON object reads
+    as None, so a judge can name it rather than skip it."""
     try:
-        lines = read_log(anchors_path(log))
+        lines = read_log(path)
     except FileNotFoundError:
         return None
     records = []
@@ -610,6 +657,11 @@ def read_anchor_records(log):
             record = None
         records.append(record)
     return records
+
+
+def read_anchor_records(log):
+    """The anchor sidecar's records, or None when there is no sidecar."""
+    return read_sidecar_records(anchors_path(log))
 
 
 def append_anchor_record(log, head, n, calendar, proof_bytes):
@@ -644,6 +696,47 @@ def calendar_request(url, data=None, timeout=15):
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read(MAX_PROOF_BYTES)
+
+
+# --- Attempt records (#240, PRD #244) ----------------------------------------
+# Every session-end step that reaches off the machine is quiet on failure
+# (ADR-0024 ruling 3, ADR-0025): an exit hook that complains is noise
+# nobody can act on. Quiet at the moment and silent in the record are
+# different choices, so after each step the recorder writes down how it
+# went, in the sidecar the step already owns: the anchors sidecar for the
+# anchor, the publish memo for the head. One row of kind `attempt`,
+# carrying the step, the time, the budget it had, and the outcome, which
+# is `submitted` or `sent`, or the one line the bounded call produced.
+# Never the URL: a webhook URL is a credential. The row is testimony and
+# never a proof: every reader that judges (`verify --anchors`, the
+# keeper, `verify-package`) skips it by its kind, and the supervisor
+# reads it to say when a head last left the machine and when the last
+# attempt failed. The chain's schema is untouched.
+
+ATTEMPT_KIND = "attempt"
+STEP_ANCHOR = "anchor"
+STEP_PUBLISH_HEAD = "publish-head"
+STEP_PUBLISH_CHAIN = "publish-chain"
+
+
+def is_attempt(record):
+    """True for a row of kind `attempt`: a note on how a session-end
+    step went, never a proof and never a sent head. Readers that judge
+    skip these rows; readers that report use them."""
+    return isinstance(record, dict) and record.get("kind") == ATTEMPT_KIND
+
+
+def append_attempt_record(sidecar, step, budget, outcome):
+    """One attempt row in `sidecar`: the step, the time, the budget in
+    seconds, the outcome. Never raises: the row is the note after the
+    step, and an exit hook that fails over its own bookkeeping is noise."""
+    try:
+        append_sidecar_record(sidecar, {"kind": ATTEMPT_KIND, "step": step,
+                                        "ts": now_ts(),
+                                        "budget": round(budget, 1),
+                                        "outcome": outcome})
+    except OSError:
+        return
 
 
 # --- The session-end anchor (ADR-0024) ---------------------------------------
@@ -708,8 +801,9 @@ def anchor_and_upgrade(log, calendars, budget):
         return  # a damaged tail cannot be anchored
     head, n = last["entry_hash"], last["n"]
     anchored = {r["head"] for r in (read_anchor_records(log) or [])
-                if isinstance(r, dict) and "head" in r}
+                if isinstance(r, dict) and "head" in r and not is_attempt(r)}
     if head not in anchored:
+        submitted = False
         for calendar in calendars:
             if remaining() <= 0:
                 break
@@ -720,8 +814,15 @@ def anchor_and_upgrade(log, calendars, budget):
                                          timeout=remaining())
                 judge_proof(head, proof)
                 append_anchor_record(log, head, n, url, proof)
+                submitted = True
             except (OSError, ProofError, ValueError):
                 continue
+        # How it went, written down beside the proofs (#240): a head
+        # already anchored was not a step, so it leaves no row.
+        append_attempt_record(
+            anchors_path(log), STEP_ANCHOR, budget,
+            "submitted" if submitted
+            else f"no calendar answered within {budget:.0f} seconds")
     upgrade_pending_proofs(os.path.dirname(os.path.abspath(log)), remaining,
                            deadline)
 
@@ -735,7 +836,7 @@ def upgrade_pending_proofs(folder, remaining, deadline):
         chain = os.path.join(folder, name[:-len(".anchors.jsonl")])
         completed, pending = set(), []
         for record in (read_anchor_records(chain) or []):
-            if not isinstance(record, dict):
+            if not isinstance(record, dict) or is_attempt(record):
                 continue
             try:
                 verdict = judge_proof(record["head"],
@@ -778,27 +879,67 @@ SESSION_END_PUBLISH = 3.0   # seconds for the one POST; the anchor gets the rest
 CODEX_ACTOR = "codex"       # the actor the Codex installer writes
 # Codex caps the whole SessionEnd hook at three seconds (its docs);
 # asking for more is asking to be killed mid-seal, so the installer
-# wires this as the block's timeout and a Codex hook waits half of it
-# for its POST. Measured (#183, the tables in docs/HOOK.md): the seal
-# costs a fifth of a second on a 2 MB transcript and the POST a
-# twentieth over it, so the worst failure path lands near 1.8 seconds,
-# where the full three-second wait ran to 3.2 and past the cap. A POST
-# cut off early is the keeper's to finish (supervisor --publish-every).
+# wires this as the block's timeout, and every quick step of a Codex
+# session end shares half of it: the head, the chain and the stamp
+# together, in that order, never half each (#262). Measured (#183 and
+# #262, the tables in docs/HOOK.md): the seal costs a fifth of a
+# second on a 2 MB transcript, so the worst failure path lands near
+# 1.8 seconds however many remotes sit silent, where one budget per
+# step put two silent remotes at 3.2 and past the cap. What the window
+# cuts off is the keeper's to finish (supervisor --publish-every).
 # Nothing bounds the seal, so a very large transcript eats the margin:
 # half a gigabyte of it leaves half a second.
 CODEX_SESSION_END_TIMEOUT = 3
 CODEX_SESSION_END_PUBLISH = CODEX_SESSION_END_TIMEOUT / 2
+WINDOW_CLOSED = "the session-end window closed before this step"
+
+
+def is_codex(actor):
+    """The installer writes CODEX_ACTOR exactly; a hand-wired hook is
+    matched case-blind, since what a missed match costs is a killed
+    hook."""
+    return (actor or "").casefold() == CODEX_ACTOR
 
 
 def publish_budget(actor):
-    """The seconds a session-end POST may take, by the harness that
+    """The seconds one session-end POST may take, by the harness that
     wired the hook: the harness's own cap on the whole hook is what
-    bounds it, and only Codex's is short enough to matter. The
-    installer writes CODEX_ACTOR exactly; a hand-wired hook is matched
-    case-blind, since what a missed match costs is a killed hook."""
-    return (CODEX_SESSION_END_PUBLISH
-            if (actor or "").casefold() == CODEX_ACTOR
-            else SESSION_END_PUBLISH)
+    bounds it, and only Codex's is short enough to matter."""
+    return CODEX_SESSION_END_PUBLISH if is_codex(actor) \
+        else SESSION_END_PUBLISH
+
+
+def quick_window(actor):
+    """The seconds the quick session-end steps share, all of them
+    together (#262): the head, the chain, the stamp, in that order.
+    One window and not one budget per step, because the harness caps
+    the hook and not the step, and a step it kills never writes the
+    attempt row that says how it went (#240).
+
+    On Codex that is half the cap, the rule #183 set for one POST now
+    applied to every POST of the session end. On Claude Code it is the
+    twelve-second window the anchor has always shared with them, and
+    Claude Code's budgets are unchanged, because its worst case already
+    fits: three silent quick steps at three seconds each spend nine of
+    the twelve, the anchor takes what they leave (three seconds at
+    worst, as it always has, since it never had twelve of its own), and
+    the whole run after the seal ends inside twelve seconds, well inside
+    the twenty the installer writes on the SessionEnd hook. The window's
+    one new effect there is that a batch of the chain can no longer run
+    past its step's three seconds."""
+    return CODEX_SESSION_END_PUBLISH if is_codex(actor) \
+        else SESSION_END_BUDGET
+
+
+def step_wait(bound, window):
+    """The seconds a quick step's POST may wait: its own bound, or what
+    is left of the window when that is less, to the tenth of a second
+    the attempt rows are written in. 0 means the window has closed and
+    the step does not start. `window` is a deadline on the monotonic
+    clock, or None for no window (the operator's own commands)."""
+    if window is None:
+        return bound
+    return max(0.0, round(min(bound, window - time.monotonic()), 1))
 
 
 def published_head(head, n, session, event="session-end"):
@@ -845,48 +986,116 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def post_once(url, body, timeout):
-    """One POST. Returns None when the remote took it, else one line
-    naming what went wrong; never raises. The line never carries the
-    URL: a webhook URL is a credential, and this line reaches stderr."""
+MAX_REPLY_BYTES = 1 << 16   # what a POST reads back; a token with its
+                            # certificates is a few kilobytes
+
+
+def no_answer(timeout):
+    """The one line for a POST that ran out of time, whichever timer
+    fired first: the socket's, urllib's, or the helper thread's below.
+    One wording, so the sidecar says the same thing on every platform
+    (CI on macOS showed the socket's timer winning where Linux's did
+    not)."""
+    return f"no answer within {timeout:g} seconds"
+
+
+def post_for_reply(url, body, timeout, content_type, want_reply=False,
+                   headers=None):
+    """One POST, and what came back. Returns (the reply's bytes, None)
+    when the remote took it, else (None, one line naming what went
+    wrong); never raises. The line never carries the URL: a webhook URL
+    is a credential, and this line reaches stderr and the publish memo,
+    which rides in every package. A URLError's reason is socket-level
+    text (refused, a certificate that does not match the public
+    hostname); a timeout is `no_answer`'s line however it surfaced; any
+    other exception is named by its type alone, because http.client
+    quotes the request path in its own messages and the path is where a
+    token lives.
+
+    `headers` is what a chain batch adds (ADR-0031): the four headers
+    named for the tool, beside a content type of its own.
+
+    `want_reply` is the difference between the callers, and it has
+    to be a choice rather than a default. The head publish is done the
+    moment the status line arrives: the body is a chat service's
+    bookkeeping that nobody here reads, and waiting for it would let a
+    remote that answers and then dawdles over its body spend the whole
+    timeout and be written down as a head that never left. The chain send is the head
+    publish again: the receiver's `{"appended": k}` is bookkeeping this
+    end does not read, and the memo advances on the status line. The
+    stamp is the opposite: the body *is* the token, so it waits. Only
+    `ask_authority` passes True."""
     try:
         request = urllib.request.Request(
             url, data=body,
-            headers={"Content-Type": "application/json",
-                     "User-Agent": "loxodonta"})
+            headers={"Content-Type": content_type,
+                     "User-Agent": "loxodonta", **(headers or {})})
         with urllib.request.build_opener(NoRedirect).open(
-                request, timeout=timeout):
-            return None
+                request, timeout=timeout) as response:
+            if not want_reply:
+                return b"", None
+            reply = response.read(MAX_REPLY_BYTES + 1)
+            if len(reply) > MAX_REPLY_BYTES:
+                # Our cap, not the authority's fault: say whose it is, so
+                # the operator looks here rather than at the token.
+                return None, (f"the reply is larger than "
+                              f"{MAX_REPLY_BYTES // 1024} KiB")
+            return reply, None
     except urllib.error.HTTPError as e:
         # A refused redirect lands here too, as its 3xx status.
-        return f"the remote answered {e.code}"
+        return None, f"the remote answered {e.code}"
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, socket.timeout):
+            return None, no_answer(timeout)
+        return None, str(e.reason) or type(e.reason).__name__
+    except socket.timeout:  # TimeoutError on 3.10+, its own class on 3.9
+        return None, no_answer(timeout)
     except Exception as e:  # noqa: BLE001 - what failed is reported, not raised
-        return str(e) or type(e).__name__
+        return None, type(e).__name__
 
 
-def post_bounded(url, body, timeout):
-    """`post_once`, bounded by `timeout` seconds with name lookup
-    included. urlopen's timeout starts once the name has resolved, and a
-    stalled resolver has no timeout of its own, so the POST runs on a
-    helper thread that is left behind when its time is up: the process
-    ends soon after, and a daemon thread ends with the process. Returns
-    what `post_once` returned, or the abandonment when time ran out."""
+def post_once(url, body, timeout, content_type="application/json",
+              headers=None):
+    """One POST whose reply nobody reads: None when the remote took it,
+    else `post_for_reply`'s line. The head publish sends JSON and the
+    chain send NDJSON with the four tool headers; both are done when
+    the status line arrives."""
+    return post_for_reply(url, body, timeout, content_type,
+                          headers=headers)[1]
+
+
+def bounded(work, timeout, late):
+    """`work()`, bounded by `timeout` seconds with name lookup included.
+    urlopen's timeout starts once the name has resolved, and a stalled
+    resolver has no timeout of its own, so the call runs on a helper
+    thread that is left behind when its time is up: the process ends
+    soon after, and a daemon thread ends with the process. Returns what
+    `work` returned, or `late` when time ran out."""
     outcome = []
-    worker = threading.Thread(
-        target=lambda: outcome.append(post_once(url, body, timeout)),
-        daemon=True)
+    worker = threading.Thread(target=lambda: outcome.append(work()),
+                              daemon=True)
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
-        return f"no answer within {timeout:g} seconds"
+        return late
     return outcome[0]
 
 
-def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
+def post_bounded(url, body, timeout, content_type="application/json",
+                 headers=None):
+    """`post_once`, bounded: its line, or the abandonment's."""
+    return bounded(lambda: post_once(url, body, timeout, content_type,
+                                     headers),
+                   timeout, no_answer(timeout))
+
+
+def publish_head(log, url, session, timeout=SESSION_END_PUBLISH,
+                 window=None):
     """POST `log`'s head to `url`, waiting at most `timeout` seconds,
-    name lookup included. Never raises, never prints: a slow or
-    unreachable remote costs nothing else, and staleness is the
-    supervisor's to surface."""
+    name lookup included, and never past the session-end `window`
+    (#262): with none of it left, the step does not start and its row
+    says so. Never raises, never prints: a slow or unreachable remote
+    costs nothing else, and staleness is the supervisor's to surface."""
     if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
         # The installer refuses these; a hand-edited settings file gets
         # a quiet skip rather than a local file opened by urllib.
@@ -897,17 +1106,27 @@ def publish_head(log, url, session, timeout=SESSION_END_PUBLISH):
         return
     if last is None:
         return
+    timeout = step_wait(timeout, window)
+    if not timeout:
+        append_attempt_record(published_path(log), STEP_PUBLISH_HEAD, 0.0,
+                              WINDOW_CLOSED)
+        return
     body = published_head(last["entry_hash"], last["n"], session)
     failure = post_bounded(url, json.dumps(body).encode("utf-8"), timeout)
-    if failure is not None:
-        return  # an exit hook that complains is noise
-    # The memo says one was sent, the same note the publish command
-    # leaves, so the keeper never posts this head again.
-    try:
-        append_published_record(log, body["head"], body["n"], body["ts"],
-                                body["event"])
-    except OSError:
-        return
+    if failure is None:
+        # The memo says one was sent, the same note the publish command
+        # leaves, so the keeper never posts this head again.
+        try:
+            append_published_record(log, body["head"], body["n"], body["ts"],
+                                    body["event"])
+        except OSError:
+            pass
+    # How it went, written down in the same memo (#240): `sent`, or the
+    # one line the bounded POST produced. An exit hook that complains
+    # is noise; a record that stays silent is a gap the supervisor
+    # cannot read.
+    append_attempt_record(published_path(log), STEP_PUBLISH_HEAD, timeout,
+                          failure or "sent")
 
 
 # --- The publish command (ADR-0025 ruling 3, the keeper's half) --------------
@@ -952,7 +1171,326 @@ def chain_session(log):
     return stem
 
 
+# --- The published chain (ADR-0031 rulings 2 and 3) --------------------------
+# Where the published head says a chain of that length existed, the
+# published chain holds what it held: the chain's lines exactly as they
+# sit on disk, newline-delimited, sent to a remote that can only add,
+# never delete (the receiver, docs/RECEIVER.md). The first send starts at
+# genesis; every later one starts after the last entry the remote
+# acknowledged, which the memo beside the chain remembers as a row of
+# kind `chain` carrying the range and the remote's fingerprint. The
+# cursor is per remote (#263): a remote the chain was never sent to gets
+# it from genesis, because a receiver's file that starts mid-chain can
+# never verify, and a row that names no remote, written before rows
+# named one, counts for none. The session id, the chain's file name,
+# the n range and the head ride in request headers named for the tool,
+# so what the receiver appends is chain bytes and nothing else. One
+# batch stays under the receiver's cap; a longer tail goes in several,
+# each acknowledged on its own, and whatever a budget cuts off is the
+# keeper's on its next turn, resumed from the cursor.
+
+CHAIN_TYPE = "application/x-ndjson"
+CHAIN_KIND = "chain"
+# Bytes per batch: the receiver's cap (docs/RECEIVER.md section 4),
+# which refuses a longer body on its Content-Length before reading any
+# of it. The env knob is the test suite's handle -- a batching rule that
+# only runs above 8 MiB is a contract no test could reach.
+CHAIN_BATCH_CAP = 8 * 1024 * 1024   # override: LOXODONTA_CHAIN_BATCH_BYTES
+
+
+def chain_batch_cap():
+    """The cap, read when a send needs it and not at import: a knob that
+    only the publish path reads must not be able to stop `verify` or
+    `--version`. A value that is not a positive number is the default,
+    the way `lock_timeout` treats its own knob."""
+    try:
+        cap = int(os.environ.get("LOXODONTA_CHAIN_BATCH_BYTES",
+                                 CHAIN_BATCH_CAP))
+    except ValueError:
+        return CHAIN_BATCH_CAP
+    return cap if cap > 0 else CHAIN_BATCH_CAP
+
+
+def is_chain_record(record):
+    """True for a row of kind `chain`: a batch of entries the remote
+    acknowledged, with its range. Not a head row, so the head keeper's
+    ripeness test ignores it; not a proof of anything, like every row
+    in the memo."""
+    return isinstance(record, dict) and record.get("kind") == CHAIN_KIND
+
+
+def entries_on_disk(log):
+    """The chain's complete lines as (n, entry_hash, bytes), read raw so
+    what is sent is what sits on disk. Reading stops at the first line
+    that is not an entry, a torn tail or damage, because the receiver
+    refuses a batch whole when any line is not one: the torn line stays
+    here as the damage `verify` reports."""
+    with open(log, "rb") as f:
+        raw = f.read()
+    entries = []
+    for line in raw.splitlines(keepends=True):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            break
+        n, digest = (entry.get("n"), entry.get("entry_hash")) \
+            if isinstance(entry, dict) else (None, None)
+        if isinstance(n, bool) or not isinstance(n, int) \
+                or not isinstance(digest, str):
+            break
+        entries.append((n, digest, line))
+    return entries
+
+
+def remote_id(url):
+    """Which remote a chain row went to, without the URL (#263): the
+    first 16 hex characters of the SHA-256 of the URL exactly as it was
+    sent to. The receiver's URL carries its token, so the memo never
+    holds it (ADR-0025); a fingerprint of it names the remote and
+    reveals nothing usable. The supervisor computes the same thing from
+    the same URL, the rule written twice, since the two files never
+    import each other."""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def chain_cursor(log, url):
+    """The last entry number the remote at `url` acknowledged, from the
+    memo's chain rows that name it (#263); -1 when none does, so the
+    send starts at genesis (entry 0). A row that names no remote was
+    written before rows named one, and counts for none: after the
+    upgrade each chain goes once more from genesis, and a receiver that
+    already holds it drops every line as an exact duplicate, its file
+    unchanged. Read tolerantly: the memo is bookkeeping, and a torn line
+    in it means a resend the receiver drops, never a stuck keeper. A
+    memo that exists and cannot be read at all is the caller's to
+    handle: raised, not guessed at, because guessing -1 would send the
+    whole chain again on every session end."""
+    try:
+        lines = read_log(published_path(log))
+    except FileNotFoundError:
+        return -1
+    mine = remote_id(url)
+    cursor = -1
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if is_chain_record(record) and isinstance(record.get("last"), int) \
+                and record.get("remote_id") == mine:
+            cursor = max(cursor, record["last"])
+    return cursor
+
+
+def chain_batch(entries, cursor, cap):
+    """The next batch after `cursor`: (body, first, last, head), or None
+    when nothing is left to send. Lines are taken in order while the
+    body stays under the cap. The first line goes in whatever its size,
+    because a batch of nothing would read as a chain fully sent; the
+    caller refuses an oversized first line before it ever gets here
+    (`oversized_entry`)."""
+    body, first, last, head = b"", None, None, None
+    for n, digest, line in entries:
+        if n <= cursor:
+            continue
+        if body and len(body) + len(line) > cap:
+            break
+        body += line
+        first = n if first is None else first
+        last, head = n, digest
+    if not body:
+        return None
+    return body, first, last, head
+
+
+def chain_headers(log, session, first, last, head):
+    """The four headers a chain batch carries (docs/RECEIVER.md section
+    4): the chain's file name, which the receiver reads to name the
+    file, and the session, the range and the head, which ride along.
+    The content type rides beside them, as the POST helper's own
+    argument."""
+    return {"X-Loxodonta-Chain": os.path.basename(log),
+            "X-Loxodonta-Session": str(session),
+            "X-Loxodonta-Range": f"{first}-{last}",
+            "X-Loxodonta-Head": head}
+
+
+def oversized_entry(entries, cursor, cap):
+    """The first entry after `cursor` whose own line is longer than the
+    cap, or None. It can never be sent: the receiver refuses a body past
+    its cap on the Content-Length and closes, which reaches the sender
+    as a bare connection error, and since the cursor cannot advance past
+    a line that never landed, every later send would retry that same
+    line forever. Named here instead, so the operator reads which entry
+    it is rather than an opaque socket word."""
+    for n, _, line in entries:
+        if n > cursor:
+            return n if len(line) > cap else None
+    return None
+
+
+def append_chain_record(log, first, last, head, event, url):
+    """The memo's chain row: what left and up to which entry, the head
+    after that entry, the time, the event kind, and the fingerprint of
+    the remote that took it (#263). Never the URL. Written only once the
+    remote has acknowledged the batch, so the cursor never passes an
+    entry that did not land."""
+    append_sidecar_record(published_path(log),
+                          {"kind": CHAIN_KIND, "first": first, "last": last,
+                           "head": head, "ts": now_ts(), "event": event,
+                           "remote_id": remote_id(url)})
+
+
+def publish_chain(log, url, session, timeout, event):
+    """Send the chain's entries after `url`'s cursor in the memo to
+    `url`, one bounded POST per batch, `timeout` seconds in all: a
+    remote that has acknowledged nothing gets them from genesis (#263),
+    and each batch waits
+    at most what is left of them, and none begins once they are spent
+    (#262), so a batch that starts late can never carry the call past
+    its total. Returns
+    (sent, failure): `sent` is the (first, last) range the remote
+    acknowledged in this call, or None when nothing was; `failure` is
+    the one line the bounded POST produced for the batch that did not
+    land, or None. Both None means there was nothing after the cursor.
+    Never raises, never prints: the callers say what they will."""
+    try:
+        entries = entries_on_disk(log)
+    except OSError:
+        return None, None
+    try:
+        cursor = chain_cursor(log, url)
+    except (OSError, ValueError):
+        # A memo that exists and cannot be read — a directory in its
+        # place, a permission, bytes that are not UTF-8 — must not turn
+        # the quiet session-end path into a traceback and a failed
+        # hook. Without the cursor there is no send: say so, and the
+        # attempt row carries it (the head route guards its read the
+        # same way).
+        return None, "the memo could not be read"
+    cap = chain_batch_cap()
+    deadline = time.monotonic() + timeout
+    sent = None
+    while True:
+        too_big = oversized_entry(entries, cursor, cap)
+        if too_big is not None:
+            return sent, f"entry {too_big} is larger than the receiver's cap"
+        batch = chain_batch(entries, cursor, cap)
+        if batch is None:
+            return sent, None
+        body, first, last, head = batch
+        wait = step_wait(timeout, deadline)
+        if not wait:
+            return sent, (f"the budget of {timeout:g} seconds ran out "
+                          f"before entry {first}")
+        failure = post_bounded(
+            url, body, wait, CHAIN_TYPE,
+            chain_headers(log, session, first, last, head))
+        if failure:
+            return sent, failure
+        try:
+            append_chain_record(log, first, last, head, event, url)
+        except OSError:
+            # Sent and not written down: the next send carries these
+            # lines again and the receiver drops them as duplicates.
+            return sent, "the memo could not be written"
+        sent = (sent[0] if sent else first, last)
+        cursor = last
+
+
+def chain_unsent(log, url):
+    """Whether anything sits after `url`'s cursor in the memo, so a
+    chain step the window closed on can tell a step it skipped from one
+    it never owed. A memo that cannot be read counts as owing: the step
+    did not run, and the row should say why."""
+    try:
+        cursor = chain_cursor(log, url)
+        return any(n > cursor for n, _, _ in entries_on_disk(log))
+    except (OSError, ValueError):
+        return True
+
+
+def session_end_publish_chain(log, url, session, timeout, window=None):
+    """The hook's chain send: quiet, best-effort, under the head's
+    budget rule and inside what the head left of the session-end window
+    (#262), and written down in the memo as an attempt row of step
+    `publish-chain` (#240): `sent`, or the one line the bounded POST
+    produced, or the window closed before it began. A chain with
+    nothing after the cursor was not a step and leaves no row."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        return  # the installer refuses these; a hand-edited file skips
+    timeout = step_wait(timeout, window)
+    if not timeout:
+        if chain_unsent(log, url):
+            append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN,
+                                  0.0, WINDOW_CLOSED)
+        return
+    sent, failure = publish_chain(log, url, session, timeout, "session-end")
+    if sent is None and failure is None:
+        return
+    append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN, timeout,
+                          failure or "sent")
+
+
+def damaged_tail_after(log, entries):
+    """The `n` of the last entry before a damaged tail, or None when the
+    file ends cleanly: anything on disk past the last complete entry is
+    the tear. Said out loud by the command, because an operator sending
+    a chain by hand should not learn from a byte count that part of it
+    is gone."""
+    intact = sum(len(line) for _, _, line in entries)
+    try:
+        return entries[-1][0] if os.path.getsize(log) > intact else None
+    except OSError:
+        return None
+
+
+def publish_chain_command(args):
+    """`publish --chain`: the operator's, and the keeper's, send of the
+    chain by hand. Speaks, because the answer can be acted on: what was
+    published, or that nothing was left to send, or why the batch was
+    refused, and whether the file ends in damage. A damaged tail is not
+    a refusal here, as it is for the head (the head after a tear is not
+    the chain's): the intact prefix is exactly what a remote that can
+    only add should be holding, and the line says where the tear is.
+    Exit 1 only when a batch did not land."""
+    try:
+        entries = entries_on_disk(args.log)
+    except FileNotFoundError:
+        return missing_log(args.log)
+    if not entries:
+        print(f"error: {args.log} holds no entry — run `loxodonta init` "
+              "first", file=sys.stderr)
+        return 1
+    torn = damaged_tail_after(args.log, entries)
+    damage = f"; the tail after {torn} is damaged" if torn is not None else ""
+    sent, failure = publish_chain(args.log, args.url, chain_session(args.log),
+                                  PUBLISH_TIMEOUT, "cadence")
+    if sent:
+        first, last = sent
+        head = next(digest for n, digest, _ in entries if n == last)
+        print(f"published chain entries {first}-{last} "
+              f"(head {head[:12]}…){damage}")
+    elif failure is None:
+        print(f"nothing to send: the remote has every entry through entry "
+              f"{chain_cursor(args.log, args.url)}{damage}")
+    if failure:
+        # The same note the head route leaves, under this route's own
+        # step: a batch the keeper could not send is written down where
+        # the memo already carries the session end's attempts. A partial
+        # send keeps its chain rows and gains this one, the shape the
+        # session-end half already has.
+        append_attempt_record(published_path(args.log), STEP_PUBLISH_CHAIN,
+                              PUBLISH_TIMEOUT, failure)
+        print(f"error: the chain was not published: {failure}",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_publish(args):
+    if args.chain:
+        return publish_chain_command(args)
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -963,7 +1501,7 @@ def cmd_publish(args):
         return 1
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged final line — run "
+        print(f"error: {args.log} has a damaged tail — run "
               "`loxodonta verify` before publishing", file=sys.stderr)
         return 1
     head, n = last["entry_hash"], last["n"]
@@ -971,6 +1509,15 @@ def cmd_publish(args):
     failure = post_bounded(args.url, json.dumps(body).encode("utf-8"),
                            PUBLISH_TIMEOUT)
     if failure:
+        # The note and no head row, the rule `stamp` follows for the
+        # same reason (#251): this verb is what the keeper's cadence
+        # runs, so a head it could not publish is one the supervisor
+        # should still read as unpublished and lately tried. Without the
+        # row a keeper-driven failure left nothing behind at all, and
+        # `last_failed` and its metric answered for the session-end half
+        # alone. Never the URL.
+        append_attempt_record(published_path(args.log), STEP_PUBLISH_HEAD,
+                              PUBLISH_TIMEOUT, failure)
         print(f"error: the head was not published: {failure}",
               file=sys.stderr)
         return 1
@@ -978,6 +1525,295 @@ def cmd_publish(args):
     # for a POST that never landed would stand the keeper down for good.
     append_published_record(args.log, head, n, body["ts"], body["event"])
     print(f"published head {head[:12]}… (entry {n})")
+    return 0
+
+
+# --- The authority timestamp (ADR-0032) --------------------------------------
+# A second commitment of the chain head, made beside the anchor and never
+# instead of it, when the operator names an RFC 3161 timestamp authority:
+# `stamp --authority URL` by hand, or the hook at session end once
+# `--stamp URL` is wired. What it adds over the anchor is speed, one
+# round trip rather than hours, and standing, since a qualified
+# authority's token is recognized evidence where a block header formally
+# is not. What it costs is the difference in kind: an anchor's proof is
+# nobody's product and replays offline; a token is somebody's signed
+# word, trusted exactly as far as the authority's certificate. So the
+# sidecar, the verb, the verdict and every message say stamp, and never
+# anchor. The recorder encodes the request itself, reads only whether the
+# authority granted it, and keeps the whole reply verbatim in its own
+# sidecar, `<log>.stamps.jsonl`; it never parses the token and never
+# claims to know what is inside. Judging is `verify --stamps`, through
+# `openssl` (check_stamps, beside check_anchors below) or an honest note
+# that nobody judged it.
+
+STEP_STAMP = "stamp"
+STAMP_TIMEOUT = 15.0   # seconds; an operator's turn, like `publish`
+STAMP_QUERY_TYPE = "application/timestamp-query"
+# The one hash algorithm the request names, as DER writes its object
+# identifier: 2.16.840.1.101.3.4.2.1 is sha256, the chain's own digest.
+SHA256_OID = bytes.fromhex("608648016503040201")
+# PKIStatus (RFC 3161 §2.4.2), in order: the first two come with a token.
+STAMP_STATUS_WORDS = ("granted", "granted with modifications", "rejection",
+                      "waiting", "revocation warning",
+                      "revocation notification")
+STAMP_GRANTED = (0, 1)
+
+
+def der(tag, content):
+    """One DER element: the tag byte, the length (one byte under 128,
+    else a count byte and then the length itself, big-endian), and the
+    content."""
+    length = len(content)
+    if length < 0x80:
+        return bytes([tag, length]) + content
+    size = (length.bit_length() + 7) // 8
+    return bytes([tag, 0x80 | size]) + length.to_bytes(size, "big") + content
+
+
+def der_integer(value):
+    """A non-negative INTEGER: big-endian, in as few bytes as hold it,
+    with a leading zero byte when the top bit is set so the number does
+    not read as negative."""
+    return der(0x02, value.to_bytes(value.bit_length() // 8 + 1, "big"))
+
+
+def stamp_request(head_hex, nonce):
+    """The RFC 3161 TimeStampReq for a chain head, DER by hand (ADR-0032
+    ruling 4): version 1; a message imprint naming sha256, with the NULL
+    parameters its algorithm identifier carries, over the 32-byte head;
+    a nonce, so a reply can be told from a replayed one; and certReq
+    true, so the token carries the certificate that signed it and can be
+    judged later from the authority's chain file alone."""
+    algorithm = der(0x30, der(0x06, SHA256_OID) + der(0x05, b""))
+    imprint = der(0x30, algorithm + der(0x04, bytes.fromhex(head_hex)))
+    return der(0x30, der_integer(1) + imprint + der_integer(nonce)
+               + der(0x01, b"\xff"))
+
+
+def der_element(data, at=0):
+    """The DER element that starts at `data[at]`: (tag, content, the
+    offset after it). Definite lengths only, which is all DER has; a
+    reply cut short or shaped some other way is a ValueError, since
+    bytes that are not DER are not a timestamp response."""
+    if at + 2 > len(data):
+        raise ValueError("the reply is cut short")
+    tag, length = data[at], data[at + 1]
+    at += 2
+    if length & 0x80:
+        size = length & 0x7F
+        if not 0 < size <= 4 or at + size > len(data):
+            raise ValueError("a length is not definite")
+        length = int.from_bytes(data[at:at + size], "big")
+        at += size
+    if at + length > len(data):
+        raise ValueError("the reply is cut short")
+    return tag, data[at:at + length], at + length
+
+
+def der_expect(data, tag, what):
+    """The content of the first element in `data`, which must carry `tag`."""
+    found, content, _ = der_element(data)
+    if found != tag:
+        raise ValueError(f"{what} is not the element RFC 3161 puts there")
+    return content
+
+
+def stamp_status(reply):
+    """The PKIStatus of a TimeStampResp, and nothing else of it: the
+    first INTEGER of the first SEQUENCE of the outer SEQUENCE. Whatever
+    follows, the token, is kept verbatim and read by nobody here."""
+    response = der_expect(reply, 0x30, "the response")
+    info = der_expect(response, 0x30, "its status")
+    status = der_expect(info, 0x02, "the status code")
+    if not 0 < len(status) <= 4:
+        raise ValueError("the status code is not a small integer")
+    return int.from_bytes(status, "big", signed=True)
+
+
+def stamps_path(log):
+    return sidecar_path(log, ".stamps.jsonl")
+
+
+def read_stamp_records(log):
+    """The stamps sidecar's records, or None when there is no sidecar."""
+    return read_sidecar_records(stamps_path(log))
+
+
+def append_stamp_record(log, head, n, authority, reply):
+    """One stamp record beside `log`: the head, its entry number, the
+    time asked, the authority's URL, and the authority's whole reply in
+    base64, the token inside it untouched. The URL is written down
+    because it is not a credential, unlike a webhook's: it says whom the
+    operator chose to trust, which is the one thing a reader of the
+    token needs to know (ADR-0032 ruling 4). `n` is the stamped entry's
+    number; a package manifest's stamp has none (ADR-0026 ruling 4), and
+    its record then carries no `n` at all rather than a null, exactly as
+    the manifest's anchor record does."""
+    record = {"head": head, "ts": now_ts(), "authority": authority,
+              "response": base64.b64encode(reply).decode("ascii")}
+    if n is not None:
+        record["n"] = n
+    append_sidecar_record(stamps_path(log), record)
+
+
+def stamped_heads(log):
+    """The heads this log's sidecar already holds a token for. An
+    attempt row is a note on how a query went and never a token, so it
+    says nothing about whether a head was stamped.
+
+    A sidecar this machine cannot open at all answers "none known": the
+    dedupe then asks the authority again rather than skipping a head on
+    the word of a file nobody could read, which is the safe direction,
+    and the write that follows is what reports the real trouble, in the
+    outcome and on stderr. It matters that this never raises, because
+    the session-end step promises the same."""
+    try:
+        records = read_stamp_records(log) or []
+    except OSError:
+        return set()
+    return {record.get("head") for record in records
+            if isinstance(record, dict) and not is_attempt(record)}
+
+
+def ask_authority(url, head, timeout):
+    """One timestamp query for `head` to the authority at `url`, bounded
+    like a head publish, name lookup included. Returns (the reply's
+    bytes, None) when the authority granted a token, else (None, one
+    line naming what went wrong): the bounded POST's own line, or the
+    authority's status when it answered and did not grant. Never
+    raises."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        # The installer refuses these; a hand-edited settings file gets
+        # a quiet line rather than a local file opened by urllib.
+        return None, "the authority URL is not http or https"
+    body = stamp_request(head, int.from_bytes(os.urandom(8), "big"))
+    reply, failure = bounded(
+        lambda: post_for_reply(url, body, timeout, STAMP_QUERY_TYPE,
+                               want_reply=True),
+        timeout, (None, no_answer(timeout)))
+    if failure:
+        return None, failure
+    try:
+        status = stamp_status(reply)
+    except ValueError as e:
+        return None, f"the reply is not a timestamp response: {e}"
+    if status not in STAMP_GRANTED:
+        word = (STAMP_STATUS_WORDS[status]
+                if 0 <= status < len(STAMP_STATUS_WORDS) else "unknown")
+        return None, f"the authority answered status {status} ({word})"
+    return reply, None
+
+
+def stamp_head(log, url, timeout=SESSION_END_PUBLISH, window=None):
+    """The session-end stamp (ADR-0032 ruling 3): ask the authority for
+    a token over `log`'s head, waiting at most `timeout` seconds and
+    never past the session-end `window` (#262), and write down how it
+    went. Never raises, never prints: an exit hook
+    that complains is noise nobody can act on. A head that already has
+    a token is not asked for again and leaves no row, like the anchor."""
+    try:
+        last = tail_entry(read_log(log))
+    except OSError:
+        return
+    if last is None:
+        return  # a damaged tail cannot be stamped
+    head, n = last["entry_hash"], last["n"]
+    if head in stamped_heads(log):
+        return
+    timeout = step_wait(timeout, window)
+    if not timeout:
+        append_attempt_record(stamps_path(log), STEP_STAMP, 0.0,
+                              WINDOW_CLOSED)
+        return
+    reply, failure = ask_authority(url, head, timeout)
+    if reply is not None:
+        try:
+            append_stamp_record(log, head, n, url, reply)
+        except OSError:
+            # A token the authority granted and this machine could not
+            # keep is not a granted stamp: `granted` is an outcome the
+            # supervisor reads as the head having left (SENT_OUTCOMES),
+            # and a full or read-only disk would then be written down as
+            # success while the sidecar holds nothing.
+            failure = "the token could not be written"
+    # How it went, written down beside the tokens (#240): `granted`, or
+    # the one line the bounded POST, the authority's status, or the
+    # write produced.
+    append_attempt_record(stamps_path(log), STEP_STAMP, timeout,
+                          failure or "granted")
+
+
+def cmd_stamp(args):
+    if args.manifest and args.log != DEFAULT_LOG:
+        print("error: --manifest stamps a file's digest and --log a chain's "
+              "head; give one of them", file=sys.stderr)
+        return EX_USAGE
+    if args.manifest:
+        # A package manifest (ADR-0026 ruling 4, ADR-0032 ruling 4): the
+        # digest stamped is the file's sha256, the token lands beside the
+        # manifest, and the record has no entry number, because a
+        # manifest has no entries. The same shape `anchor --manifest`
+        # has, so `supervisor package` drives the two seals alike.
+        try:
+            head = sha256_file(args.manifest)
+        except OSError as e:
+            print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
+            return 1
+        return stamp_digest(args.manifest, head, None, args.authority)
+    try:
+        lines = read_log(args.log)
+    except FileNotFoundError:
+        return missing_log(args.log)
+    if not lines:
+        print(f"error: {args.log} is empty — run `loxodonta init` first",
+              file=sys.stderr)
+        return 1
+    last = tail_entry(lines)
+    if last is None:
+        print(f"error: {args.log} has a damaged tail — run "
+              "`loxodonta verify` before stamping", file=sys.stderr)
+        return 1
+    return stamp_digest(args.log, last["entry_hash"], last["n"],
+                        args.authority)
+
+
+def stamp_digest(target, head, n, url):
+    """Ask `url` for a token over `head` and keep the reply beside
+    `target`: a chain (`n` is the entry number) or a package manifest
+    (`n` is None). One query, one record, and the note on how it went."""
+    if head in stamped_heads(target):
+        # The same rule the session-end step follows, and for a sharper
+        # reason here: #251 puts this verb on the keeper's cadence, and
+        # a cadence that re-stamped the same head every tick would ask
+        # the authority for a fresh token over an unchanged head all day
+        # and fill the sidecar with them. Nothing to do is exit 0.
+        print(f"already stamped {record_label(head, n)}")
+        return 0
+    reply, failure = ask_authority(url, head, STAMP_TIMEOUT)
+    if failure:
+        # A query that was refused leaves the note and no token row:
+        # nothing was granted, so there is nobody's word to keep, and
+        # what the store learns is that this head was asked about and
+        # came back empty (#240). Written from here as well as from the
+        # hook, unlike the anchor's and the publish's notes, because a
+        # head this verb failed to stamp is a head the supervisor should
+        # still be able to read as unstamped and lately tried.
+        append_attempt_record(stamps_path(target), STEP_STAMP,
+                              STAMP_TIMEOUT, failure)
+        print(f"error: the head was not stamped: {failure}", file=sys.stderr)
+        return 1
+    try:
+        append_stamp_record(target, head, n, url, reply)
+    except OSError as e:
+        # A token granted and not kept is not a stamp, and the note says
+        # so rather than `granted` (which the supervisor reads as a head
+        # that left).
+        append_attempt_record(stamps_path(target), STEP_STAMP,
+                              STAMP_TIMEOUT, "the token could not be written")
+        print(f"error: the authority granted a token and it could not be "
+              f"written: {e.strerror or e}", file=sys.stderr)
+        return 1
+    print(f"stamped {record_label(head, n)} via {url}")
     return 0
 
 
@@ -1009,7 +1845,7 @@ def cmd_anchor(args):
         return 1
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged final line — run "
+        print(f"error: {args.log} has a damaged tail — run "
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
     return submit_digest(args.log, last["entry_hash"], last["n"],
@@ -1060,7 +1896,7 @@ def upgrade_anchors(args):
     settled_heads = set()
     pending = []
     for record in records:
-        if record is None:
+        if record is None or is_attempt(record):
             continue
         try:
             verdict = judge_proof(record["head"],
@@ -1145,6 +1981,8 @@ def check_anchors(log, entries):
 
     judged = []
     for record in records:
+        if is_attempt(record):
+            continue  # a note on how a step went, not evidence (#240)
         if record is None:
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
@@ -1204,11 +2042,281 @@ def check_anchors(log, entries):
     return bad
 
 
+def openssl_reason(stderr):
+    """Why openssl refused, in its own words and on one line. Its error
+    lines are colon-separated fields (an id, `error`, a code, a library,
+    a function, the reason, the source file and line, then any words
+    the check added), innermost first, so the last one is the summary
+    and its reason field is what a reader needs. Anything else it said
+    is kept whole, except the line naming the configuration file it
+    loaded, which says nothing about the token."""
+    said = [line.strip() for line in stderr.splitlines()
+            if line.strip() and not line.startswith("Using configuration")]
+    errors = [line for line in said if line.split(":")[1:2] == ["error"]]
+    if errors:
+        fields = errors[-1].split(":")
+        if len(fields) > 8:
+            tail = ": ".join(f.strip() for f in fields[8:] if f.strip())
+            return fields[5] + (f": {tail}" if tail else "")
+        return errors[-1]
+    return "; ".join(said) or "openssl gave no reason"
+
+
+# openssl's words when a certificate in the chain it checks is past its
+# end date, as of the moment it verifies (X509_V_ERR_CERT_HAS_EXPIRED).
+CERT_EXPIRED = "certificate has expired"
+# The notes a token leaves when that is why openssl refused it (#264):
+# the same check as of the time the token states passed, or this openssl
+# cannot be asked about any moment but now.
+STAMP_OUTLIVED = ("the authority's certificate expired after the token "
+                  "was issued")
+STAMP_NO_ATTIME = ("the authority's certificate has expired, and this "
+                   "openssl cannot judge a token as of the time it states")
+
+
+def openssl_verify(head, token, chain_file, *more):
+    """`openssl ts -verify` on one token file: `-in` reads the whole
+    TimeStampResp the sidecar keeps; `-digest` is the head, the sha256
+    imprint the token must carry; `-CAfile` is the authority's chain the
+    operator saved. `more` is `-attime` and a moment, when the question
+    is about some other moment than now."""
+    return subprocess.run(
+        ["openssl", "ts", "-verify", "-digest", head, "-sha256",
+         "-in", token, "-CAfile", chain_file, *more],
+        capture_output=True, encoding="utf-8", errors="replace")
+
+
+def token_time(token):
+    """The moment a token states, in epoch seconds, from the one `Time
+    stamp:` line `openssl ts -reply -token_out -text` prints; None when
+    there is not exactly one such line this can read. openssl reads the
+    token and this reads one line of what openssl printed, the way
+    openssl_reason reads its errors, so the recorder still never parses
+    a token (ADR-0032 ruling 4).
+
+    `-token_out` is what keeps the writer from choosing the moment. The
+    reply around the token carries a status text nobody signed, kept in
+    a sidecar the writer can edit, and without the flag openssl prints
+    it first and verbatim, so a line break in it could set a `Time
+    stamp:` line of the writer's own ahead of the authority's (#264).
+    With it openssl prints the signed token alone, and a second such
+    line can only be one the authority signed or one that breaks the
+    signature, so two of them is a time nobody can read."""
+    shown = subprocess.run(["openssl", "ts", "-reply", "-in", token,
+                            "-token_out", "-text"],
+                           capture_output=True, encoding="utf-8",
+                           errors="replace")
+    stated = [line.partition(":")[2] for line in shown.stdout.splitlines()
+              if line.partition(":")[0] == "Time stamp"]
+    if len(stated) != 1:
+        return None
+    # "Sep 18 22:55:50 2026 GMT", with a fraction on the seconds when the
+    # authority's clock gives one, which -attime has no room for. The
+    # month is English whatever the machine's language: openssl prints
+    # it so, and Python reads %b in the C locale unless a program changes
+    # that, which this one never does.
+    words = stated[0].split()
+    if len(words) != 5 or words[4] != "GMT":
+        return None
+    words[2] = words[2].split(".")[0]
+    try:
+        stated_at = datetime.strptime(" ".join(words[:4]), "%b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
+    return int(stated_at.replace(tzinfo=timezone.utc).timestamp())
+
+
+def takes_attime():
+    """Whether this openssl can judge a token as of a given moment: its
+    `ts -help` lists `-attime` when `ts -verify` takes it."""
+    shown = subprocess.run(["openssl", "ts", "-help"], capture_output=True,
+                           encoding="utf-8", errors="replace")
+    return "-attime" in shown.stdout + shown.stderr
+
+
+def judge_outlived(head, token, chain_file, refused):
+    """A token openssl refused because a certificate in the authority's
+    chain has expired (#264). openssl checks the chain as of the moment
+    it verifies, so a genuine token fails this way on the calendar alone;
+    and it checks the certificate before the signature, so a token
+    tampered with fails this way too. The same check as of the time the
+    token states tells them apart. Passing, the certificate was in date
+    when the token was issued and the calendar is the only reason: that
+    is a note and never a verdict, and never STAMPED either, since a key
+    whose certificate has run out is vouched for by nobody now, and
+    whoever holds it could sign any past time they liked (long-term
+    validation is not built, ADR-0032). Failing, the token has a reason
+    of its own, and that is the verdict.
+
+    An openssl that can be asked about no moment but now gets ADR-0026's
+    posture for an ssh-keygen that predates `-Y verify`, before anything
+    else is read: nothing could be judged, so it is not judged, and why.
+    A token whose time cannot be read keeps openssl's first refusal:
+    openssl decoded it to check its chain, and every token carries
+    exactly one time, so a time printed as `Bad time value`, or missing,
+    or twice over, is the token's fault and not this machine's."""
+    if not takes_attime():
+        return "not judged", STAMP_NO_ATTIME
+    stated = token_time(token)
+    if stated is None:
+        return "invalid", (f"{openssl_reason(refused.stderr)}; the time the "
+                           "token states could not be read, so nothing shows "
+                           "the certificate was in date then")
+    then = openssl_verify(head, token, chain_file, "-attime", str(stated))
+    if then.returncode == 0:
+        return "not judged", STAMP_OUTLIVED
+    return "invalid", (f"{openssl_reason(then.stderr)} (judged as of the "
+                       "time the token states)")
+
+
+def judge_stamp(head, reply, chain_file):
+    """One token against the head it claims, through `openssl ts -verify`
+    and never this file (ADR-0032 ruling 5, in ADR-0026's posture), with
+    the arguments openssl_verify names. Nothing is fetched. Returns
+    (verdict, detail): ("stamped", None) when openssl accepted it,
+    ("invalid", openssl's reason) when it refused, or ("not judged",
+    why) when nobody judged it, which is a note and never a verdict: no
+    tool, no chain file, or a certificate that has expired since the
+    token was issued (judge_outlived)."""
+    if chain_file is None:
+        return "not judged", "no --authority-chain FILE given"
+    if not os.path.isfile(chain_file):
+        return "not judged", f"--authority-chain {chain_file} not found"
+    try:
+        with tempfile.TemporaryDirectory() as scratch:
+            token = os.path.join(scratch, "stamp.tsr")
+            with open(token, "wb") as f:
+                f.write(reply)
+            judged = openssl_verify(head, token, chain_file)
+            if judged.returncode != 0 and CERT_EXPIRED in judged.stderr:
+                return judge_outlived(head, token, chain_file, judged)
+    except FileNotFoundError:
+        return "not judged", "openssl is not on PATH"
+    except PermissionError:
+        return "not judged", "openssl cannot run here (permission denied)"
+    if judged.returncode == 0:
+        return "stamped", None
+    return "invalid", openssl_reason(judged.stderr)
+
+
+def check_stamps(log, entries, chain_file):
+    """The --stamps half of verify (ADR-0032 ruling 5): every row of the
+    stamps sidecar against the chain, offline, and its token through
+    openssl when this machine has it and the operator gave the
+    authority's chain file. Returns True if any row is evidence against
+    this log (STAMP-INVALID, the exit-3 tier beside ANCHOR-INVALID). A
+    token nobody judged is a note, never a verdict: the exit stays the
+    chain's."""
+    records = read_stamp_records(log)
+    if records is None:
+        print(f"NO-STAMPS: {stamps_path(log)} not found — the authority "
+              "timestamp is optional; run `loxodonta stamp --authority URL` "
+              "to add one")
+        return False
+    hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
+    bad = False
+    for record in records:
+        if is_attempt(record):
+            continue  # a note on how a step went, not evidence (#240)
+        head = record.get("head") if record else None
+        if not isinstance(head, str) or \
+                not isinstance(record.get("response"), str):
+            bad = True
+            print("STAMP-INVALID: sidecar line is not a stamp record — "
+                  "evidence that does not verify is not evidence")
+            continue
+        if head not in hash_to_n:
+            bad = True
+            print(f"STAMP-INVALID: stamped head {head} appears nowhere in "
+                  "this log — this log is not the stamped history")
+            continue
+        n = hash_to_n[head]
+        label = record_label(head, n)
+        try:
+            reply = base64.b64decode(record["response"], validate=True)
+        except ValueError:
+            bad = True
+            print(f"STAMP-INVALID: {label}: the response is not base64 — "
+                  "evidence that does not verify is not evidence")
+            continue
+        verdict, detail = judge_stamp(head, reply, chain_file)
+        if verdict == "stamped":
+            # What openssl checked, and nothing it did not: that a key
+            # the chain file certifies signed this head under its own
+            # clock. The record's `authority` is the writer's note of
+            # whom it asked, in a file the writer can edit, so it is
+            # named as testimony and never as the signer (the trap
+            # ADR-0008 ruling 4 closes for the signature).
+            print(f"STAMPED: entries 0..{n} existed when a key certified "
+                  f"by {chain_file} signed this head under its own clock "
+                  f"(the record names {record.get('authority')}, "
+                  "testimony) — the time inside the token is that key's "
+                  "word, not this machine's (`openssl ts -reply -text` "
+                  "prints it)")
+        elif verdict == "invalid":
+            bad = True
+            print(f"STAMP-INVALID: {label}: {detail} — evidence that does "
+                  "not verify is not evidence")
+        else:
+            print(f"stamp not judged: {detail} — {label} holds a token, "
+                  "present and not judged here (ADR-0032)")
+    return bad
+
+
+class KeyGivenTwice(ValueError):
+    """A JSON object that names one key twice. A last-wins reader (this
+    one) and a first-wins reader see two different lines, and a hash that
+    holds under one reading says nothing under the other; no reading of
+    such a line is an entry (SPEC §6 step 1)."""
+
+    def __init__(self, key):
+        super().__init__(key)
+        self.key = key
+
+
+def object_with_each_key_once(pairs):
+    """The dict of a JSON object's pairs, refusing a key given twice at
+    any depth (json's object_pairs_hook is called for every object)."""
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise KeyGivenTwice(key)
+        seen[key] = value
+    return seen
+
+
+def shape_problem(entry):
+    """The first way `entry`'s values fail SPEC §2's types, named; None
+    when each is of its type. Type only: whether a string is hex, or a
+    timestamp well-formed, is the hash comparison's and the reader's
+    business, and a mistyped value is what makes a reader crash."""
+    n = entry.get("n")
+    if isinstance(n, bool) or not isinstance(n, int):
+        return "n is not an integer"
+    for field in ("ts", "actor", "action"):
+        value = entry.get(field)
+        if not isinstance(value, str) or not value:
+            return f"{field} is not a non-empty string"
+    if not isinstance(entry.get("entry_hash"), str):
+        return "entry_hash is not a string"
+    prev = entry.get("prev")
+    if prev is not None and not isinstance(prev, str):
+        return "prev is not a string or null"
+    files = entry.get("files")
+    if not isinstance(files, list):
+        return "files is not an array"
+    for ref in files:
+        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}                 or not all(isinstance(value, str) for value in ref.values()):
+            return "files holds something that is not a reference"
+    return None
+
+
 def walk(lines):
     """The mechanical walk of SPEC §6, shared by verify (which judges) and
     report (which narrates). Returns (entries, breaks, warns): entries[n] is
-    the parsed entry or None where the line is unparseable; breaks and warns
-    are (n, message) lists in walk order."""
+    the parsed entry or None where the line is unparseable or is not the
+    shape of an entry; breaks and warns are (n, message) lists in walk
+    order."""
     entries = []
     breaks = []
     warns = []
@@ -1216,7 +2324,13 @@ def walk(lines):
     prev_ts = None
     for n, line in enumerate(lines):
         try:
-            entry = json.loads(line)
+            entry = json.loads(line, object_pairs_hook=object_with_each_key_once)
+        except KeyGivenTwice as twice:
+            breaks.append((n, f"BROKEN at entry {n}: key {twice.key!r} "
+                              "given twice"))
+            entries.append(None)
+            prev_hash = None
+            continue
         except json.JSONDecodeError:
             if n == len(lines) - 1:
                 # The one honest damage signature: a crash mid-append can
@@ -1233,12 +2347,26 @@ def walk(lines):
             entries.append(None)
             prev_hash = None
             continue
-        entries.append(entry)
         expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
         if set(entry) != expected_fields:
             odd = set(entry) ^ expected_fields
             breaks.append((n, f"BROKEN at entry {n}: schema mismatch: "
                               f"{', '.join(sorted(odd))}"))
+        # The right field names and the right hash do not make an entry
+        # when a value is the wrong type (SPEC §6 step 1): a `files` that
+        # is a string would crash every reader that resolves references.
+        # The line is refused by name and carried as None, so nothing
+        # downstream touches it; the chain rule carries on from its
+        # stored hash where that is a string, so the next line is judged
+        # on its own account.
+        wrong = shape_problem(entry)
+        if wrong is not None:
+            breaks.append((n, f"BROKEN at entry {n}: {wrong}"))
+            entries.append(None)
+            stored = entry.get("entry_hash")
+            prev_hash = stored if isinstance(stored, str) else None
+            continue
+        entries.append(entry)
         if entry.get("n") != n:
             breaks.append((n, f"BROKEN at entry {n}: sequence number is "
                               f"{entry.get('n')}, expected {n}"))
@@ -1374,7 +2502,13 @@ def check_transcript(entries, transcript_path):
     return diverged
 
 
-def cmd_verify(args):
+def cmd_verify(args, mechanisms=None):
+    """`verify PATH`: the walk, then whatever the flags add, then the
+    verdict as the exit code. `mechanisms` is the package judge's out-
+    parameter and nobody else's: it collects the exit-3 findings' words,
+    because a package names the mechanism in its own verdict line and
+    "anchor" is never the word for an authority timestamp (ADR-0032
+    ruling 1)."""
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -1442,10 +2576,15 @@ def cmd_verify(args):
     # judged on every walk; the prefix hashes only under --transcript.
     transcript_diverged = check_transcript(entries, args.transcript)
 
-    # Anchor and head-record findings share the exit-3 tier: both mean
-    # "this is not the recorded history", the graver verdict, never masked
-    # by a files divergence (SPEC §6, docs/ANCHORING.md §3).
+    # Anchor, stamp and head-record findings share the exit-3 tier: all
+    # mean "this is not the recorded history", the graver verdict, never
+    # masked by a files divergence (SPEC §6, docs/ANCHORING.md §3 and §6).
     anchors_bad = args.anchors and check_anchors(args.log, entries)
+    stamps_bad = args.stamps and check_stamps(args.log, entries,
+                                              args.authority_chain)
+    if mechanisms is not None:
+        mechanisms += (["ANCHOR-MISMATCH"] if anchors_bad else []) \
+            + (["STAMP-INVALID"] if stamps_bad else [])
 
     if transcript_diverged:
         # Printed after the anchor chatter so that when this verdict
@@ -1462,7 +2601,7 @@ def cmd_verify(args):
         print(f"HEAD-MISMATCH: chain head is {chain_head}, expected "
               f"{args.expect_head} — this is not the recorded history")
         return 3
-    if anchors_bad:
+    if anchors_bad or stamps_bad:
         return 3
     if transcript_diverged:
         # Graver than a files divergence (working-tree drift is usually
@@ -1505,6 +2644,8 @@ PACKAGE_WORDS = {
                     "above say where)",
     "ANCHOR-MISMATCH": "an anchor packaged with a chain is not evidence for "
                        "that chain (its lines above say which)",
+    "STAMP-INVALID": "an authority timestamp packaged with a chain is not "
+                     "evidence for that chain (its lines above say which)",
     "SEAL-INVALID": "a seal this package carries does not hold for its "
                     "manifest (the seal line above says why)",
     "SEAL-MISSING": "a seal the manifest declares is not in this package "
@@ -1518,6 +2659,10 @@ PACKAGE_WORDS = {
     "SELF-CONSISTENT": "every chain walks clean and every artifact matches "
                        "the manifest",
 }
+# The exit-3 tier holds two mechanisms now, the anchor's and the
+# authority timestamp's, and a chain's verify exit alone cannot say which
+# fired; `cmd_verify` hands the word back through `mechanisms`, and this
+# table is the fallback for an exit with no word beside it.
 CHAIN_WORDS = {1: "CHAIN-BROKEN", 3: "ANCHOR-MISMATCH",
                4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED"}
 # The issuer signature (ADR-0008, ADR-0026 ruling 4) is made and judged
@@ -1644,11 +2789,14 @@ def walked_listing(log):
     return head, len(lines), references, commitments
 
 
-def judge_chain(folder, listing):
-    """One chain of the package: the recorder's own verify, anchors
-    included, verbatim; then its walked head and length against the
-    manifest's. Returns (findings, file references counted); a finding
-    is (exit code, verdict word)."""
+def judge_chain(folder, listing, chain_file=None):
+    """One chain of the package: the recorder's own verify, anchors and
+    authority timestamps included, verbatim; then its walked head and
+    length against the manifest's. `chain_file` is the authority's
+    certificate chain the recipient saved, which `--authority-chain`
+    gives and without which a packaged token is present and not judged.
+    Returns (findings, file references counted); a finding is (exit code,
+    verdict word)."""
     name, head = listing["path"], listing["head"]
     print(f"chain: {name} (manifest: head {head[:12]}…, "
           f"{listing['entries']} entries)")
@@ -1667,10 +2815,30 @@ def judge_chain(folder, listing):
         print(f"{named}: MISSING (named on this chain, not in the package); "
               "its commitments go unjudged")
         transcript = None
+    # Every flag `cmd_verify` reads is named here, the package judge
+    # being the one caller that builds its own arguments: a flag left
+    # out is an attribute error mid-verdict rather than a default. The
+    # packaged stamps sidecar is judged exactly as `verify --stamps`
+    # judges one (ADR-0032 ruling 5): through openssl against the chain
+    # file the recipient named, or as an honest note when they named
+    # none. Only when the manifest lists it, though: a sidecar the
+    # manifest does not vouch for is named `unlisted` and judged by
+    # nobody, which is the rule every other unlisted file follows, and
+    # a package from before stamps travelled verifies as it always did,
+    # with no NO-STAMPS line pointing a recipient at a temporary copy.
+    # `mechanisms` carries back which of the two exit-3 findings fired,
+    # since the package names it.
+    mechanisms = []
     code = cmd_verify(argparse.Namespace(log=log, files=False,
                                          expect_head=None,
-                                         transcript=transcript, anchors=True))
-    findings = [(code, CHAIN_WORDS[code])] if code in CHAIN_WORDS else []
+                                         transcript=transcript, anchors=True,
+                                         stamps=bool(listing.get("stamps")),
+                                         authority_chain=chain_file),
+                      mechanisms)
+    if mechanisms:
+        findings = [(3, word) for word in mechanisms]
+    else:
+        findings = [(code, CHAIN_WORDS[code])] if code in CHAIN_WORDS else []
     walked, count, references, commitments = walked_listing(log)
     if transcript is None and commitments and code != 5:
         # The chain committed a transcript this package does not carry:
@@ -1726,6 +2894,10 @@ def judge_manifest_anchor(folder):
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
     records = read_anchor_records(manifest)
+    if records:
+        # Attempt rows are notes, never proofs (#240): a sidecar holding
+        # only notes holds no record, the same as an empty one.
+        records = [r for r in records if not is_attempt(r)]
     if not records:
         what = "is not in this package" if records is None else "holds no record"
         print(f"seal anchor: SEAL-MISSING: {anchors_path('manifest.json')} "
@@ -1778,6 +2950,97 @@ def judge_manifest_anchor(folder):
               "manifest.json>` after a few hours; the rung is not earned "
               "until the proof completes")
     return findings, height
+
+
+def judge_manifest_stamp(folder, chain_file):
+    """The stamp seal (ADR-0032 rulings 4 and 5, in ADR-0026 ruling 6's
+    shape): every record of manifest.json.stamps.jsonl must be a token
+    over this manifest's sha256, and openssl must accept it against the
+    certificate chain the recipient saved. Returns (findings, stamped,
+    why): whether the rung is earned, and why nobody judged the seal
+    when nobody did. A token this machine cannot judge, or one whose
+    certificate has expired since it was issued (#264), is a note and
+    never a verdict, the issuer signature's exact posture — the rung is
+    neither earned nor failed. Only the manifest's own token can earn
+    the package rung; the chains' tokens printed above are detail, since
+    they stamp a different object."""
+    manifest = os.path.join(folder, "manifest.json")
+    digest = sha256_file(manifest)
+    records = read_stamp_records(manifest)
+    if records:
+        # Attempt rows are notes, never tokens (#240).
+        records = [r for r in records if not is_attempt(r)]
+    if not records:
+        what = "is not in this package" if records is None else "holds no record"
+        print(f"seal stamp: SEAL-MISSING: {stamps_path('manifest.json')} "
+              f"{what} — the manifest declares an authority timestamp it "
+              "does not carry")
+        return [(3, "SEAL-MISSING")], False, None
+    findings = []
+    stamped = False
+    why = None
+    for record in records:
+        head = record.get("head") if record else None
+        if not isinstance(head, str) or \
+                not isinstance(record.get("response"), str):
+            reason = "sidecar line is not a stamp record"
+        elif head != digest:
+            reason = (f"the token is over digest {head[:12]}…, and this "
+                      f"manifest's sha256 is {digest[:12]}…")
+        else:
+            try:
+                reply = base64.b64decode(record["response"], validate=True)
+            except ValueError:
+                reason = "the response is not base64"
+            else:
+                verdict, detail = judge_stamp(head, reply, chain_file)
+                if verdict == "stamped":
+                    # The signer is the key the recipient's chain file
+                    # certifies; the name in the record sits in a file
+                    # the manifest does not list, so it is testimony.
+                    print(f"seal stamp: STAMPED: a key certified by "
+                          f"{chain_file} signed this manifest's sha256 under "
+                          "its own clock (the record names "
+                          f"{record.get('authority')}, testimony) — the time "
+                          "inside the token is that key's word, not this "
+                          "machine's (`openssl ts -reply -text` prints it)")
+                    stamped = True
+                    continue
+                if verdict == "not judged":
+                    why = detail
+                    # A recipient whose certificate has expired holds
+                    # openssl and the chain file already, so the usual
+                    # pointer would send them after what they hold (#264).
+                    if detail == STAMP_OUTLIVED:
+                        after = ("no chain file earns it now: judging a "
+                                 "token once its certificate has expired is "
+                                 "long-term validation, which is not built "
+                                 "(ADR-0032)")
+                    elif detail == STAMP_NO_ATTIME:
+                        after = ("an openssl whose `ts -verify` takes "
+                                 "`-attime` tells a certificate that "
+                                 "outlived the token from a token that "
+                                 "fails on its own, and this command asks "
+                                 "it once it can run it")
+                    else:
+                        after = ("openssl and the certificate chain you "
+                                 "saved from that authority judge this "
+                                 "seal, and `verify-package "
+                                 "--authority-chain FILE` judges it once it "
+                                 "has both")
+                    print(f"seal stamp: not judged: {detail} — the rung is "
+                          f"neither earned nor failed; {after}")
+                    continue
+                reason = detail
+        print(f"seal stamp: SEAL-INVALID: {reason} — evidence that does "
+              "not verify is not evidence")
+        findings.append((3, "SEAL-INVALID"))
+    # A token that holds earns the rung beside one nobody judged (one
+    # that failed is a finding, and the gravest finding is the verdict).
+    # The one nobody judged keeps its note on its own seal line above,
+    # and the verdict does not carry it too, or it would say in one
+    # sentence that the timestamp was judged and that it was not.
+    return findings, stamped, None if stamped else why
 
 
 def key_fingerprint(public_key):
@@ -1865,19 +3128,25 @@ def judge_manifest_signature(folder):
     return [], fingerprint, None
 
 
-def judge_seals(folder, manifest):
+def judge_seals(folder, manifest, chain_file=None):
     """Each declared seal against what the package carries, in the
-    declared order: the anchor and the signature are judged; a kind this
-    verifier does not know is named as such and adds nothing to the
-    verdict, so the recipient is never told a seal was checked when it
-    was not. Returns (findings, earned): what the seals earned toward
-    the rungs, as ceiling_lines reads it."""
+    declared order: the anchor, the authority timestamp and the
+    signature are judged; a kind this verifier does not know is named as
+    such and adds nothing to the verdict, so the recipient is never told
+    a seal was checked when it was not. Returns (findings, earned): what
+    the seals earned toward the rungs, as ceiling_lines reads it."""
     findings = []
-    earned = {"height": None, "key": None, "unjudged": []}
+    earned = {"height": None, "key": None, "stamped": False, "unjudged": []}
     for kind in manifest["seals"]:
         found = []
         if kind == "anchor":
             found, earned["height"] = judge_manifest_anchor(folder)
+        elif kind == "stamp":
+            found, earned["stamped"], why = judge_manifest_stamp(folder,
+                                                                 chain_file)
+            if why:
+                earned["unjudged"].append(
+                    f"its authority timestamp was not judged, since {why}")
         elif kind == "signature":
             found, earned["key"], why = judge_manifest_signature(folder)
             if why:
@@ -1896,6 +3165,8 @@ def seal_files(manifest):
     files = set()
     if "anchor" in manifest["seals"]:
         files.add(anchors_path("manifest.json"))
+    if "stamp" in manifest["seals"]:
+        files.add(stamps_path("manifest.json"))
     if "signature" in manifest["seals"]:
         files.update(("manifest.json.sig", "manifest.json.pub"))
     return files
@@ -1933,15 +3204,20 @@ def series(items):
 def ceiling_lines(manifest, earned):
     """The two closing lines of a package with no finding, the residual
     trust and then the verdict, built from what the declared seals
-    earned: `height`, the block the manifest anchor reached; `key`, the
-    fingerprint the signature verified under; `unjudged`, the seals this
-    machine could not judge. Each rung adds its words in ADR-0007's
-    order, the anchor (when) before the signature (which key), the
-    signature's in ADR-0008's caged sentence and no other; what no seal
-    earned is named as resting on the issuer's word (ADR-0026 ruling 6).
-    The ceiling verdict carries its limit: what a regeneration would
-    also produce, and why the rung is unearned."""
+    earned: `height`, the block the manifest anchor reached; `stamped`,
+    whether openssl accepted the authority's token over the manifest;
+    `key`, the fingerprint the signature verified under; `unjudged`, the
+    seals this machine could not judge. Each rung adds its words in
+    ADR-0007's order, the two *when* seals before the signature (which
+    key), and the anchor before the authority timestamp, because an
+    anchor's proof is nobody's product where a token is somebody's
+    signed word (ADR-0032 ruling 1); the signature's words are
+    ADR-0008's caged sentence and no other. What no seal earned is named
+    as resting on the issuer's word (ADR-0026 ruling 6). The ceiling
+    verdict carries its limit: what a regeneration would also produce,
+    and why the rung is unearned."""
     height, key, seals = earned["height"], earned["key"], manifest["seals"]
+    stamped = earned["stamped"]
     rungs, given, trusted = "", "", ""
     unsaid = ["the record inside is true and complete"]
     if height is not None:
@@ -1949,8 +3225,25 @@ def ceiling_lines(manifest, earned):
         given += f", and the manifest existed by Bitcoin block {height}"
         trusted += (f", and it existed by Bitcoin block {height} if the "
                     "merkle root printed beside that block is the block's")
-    else:
+    elif not stamped:
         unsaid.append("that it existed before today")
+    if stamped:
+        # With a token and no anchor, when is not unsaid: it is said by
+        # whoever holds the key that signed it, and what it rests on is
+        # that holder's word, which the residual trust states as the
+        # condition it is rather than letting the rung sound like the
+        # anchor's. The manifest names no authority, and the name in the
+        # stamps record is testimony, so the verdict says what openssl
+        # checked and no name at all, as ADR-0008 ruling 4 has it for
+        # the signature.
+        rungs += " + STAMPED"
+        given += (", and a key certified by the --authority-chain file "
+                  "signed the manifest's sha256 under its own clock")
+        trusted += (", and it existed by the time inside that token if the "
+                    "holder of that key keeps an honest clock and sole "
+                    "custody of the key; whose key it is rests on where you "
+                    "got the chain file, never on the name the stamps "
+                    "record gives")
     if key is not None:
         rungs += f" + SIGNED (key: {key})"
         given += (", and the manifest, and transitively every artifact it "
@@ -1985,12 +3278,15 @@ def ceiling_lines(manifest, earned):
     return trust, verdict
 
 
-def judge_package(shown, folder):
+def judge_package(shown, folder, chain_file=None):
     """The ladder, in ADR-0026 ruling 5's order: the manifest's summary,
     each chain, the file references, each artifact, each declared seal,
     the unlisted files, one line of residual trust when the ladder allows
     it, and the package verdict last, so the last line is the verdict as
-    it is for `verify`."""
+    it is for `verify`. `chain_file` is `--authority-chain`: the
+    certificate chain the recipient saved from the authority, which every
+    token in this package is judged against and without which each is a
+    note (ADR-0032 ruling 5)."""
     manifest, refusal = read_manifest(folder)
     if refusal:
         print(refusal)
@@ -1999,7 +3295,7 @@ def judge_package(shown, folder):
     findings = []
     references = 0
     for listing in manifest["chains"]:
-        found, counted = judge_chain(folder, listing)
+        found, counted = judge_chain(folder, listing, chain_file)
         findings += found
         references += counted
     # Off the machine the project record points nowhere and FILES-
@@ -2009,7 +3305,7 @@ def judge_package(shown, folder):
           "machine")
     if any([judge_artifact(folder, a) for a in manifest["artifacts"]]):
         findings.append((2, "ARTIFACT-DIVERGED"))
-    found, earned = judge_seals(folder, manifest)
+    found, earned = judge_seals(folder, manifest, chain_file)
     findings += found
     print_unlisted(folder, manifest)
     code, word = gravest(findings)
@@ -2035,7 +3331,7 @@ def cmd_verify_package(args):
     import zipfile  # only this command reads zips; the hook never pays for it
     path = args.path
     if os.path.isdir(path):
-        return judge_package(path, path)
+        return judge_package(path, path, args.authority_chain)
     if not os.path.isfile(path):
         print(f"error: {path} not found", file=sys.stderr)
         return 1
@@ -2057,7 +3353,7 @@ def cmd_verify_package(args):
             print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked ({e}); "
                   "not a loxodonta package")
             return 4
-        return judge_package(path, unpacked)
+        return judge_package(path, unpacked, args.authority_chain)
 
 
 def timeline_lines(entries, breaks, warns):
@@ -2200,11 +3496,14 @@ def cmd_explain(args):
 # --- Harness hook (Stage C) ---------------------------------------------------
 #
 # `loxodonta hook` turns one Claude Code PostToolUse payload (JSON on stdin)
-# into one chained entry. This is the completeness mechanism of SPEC §8:
-# the harness fires the hook on every tool call, so the log call sits
-# outside the writer's volition — the agent cannot skip its own receipt.
-# One chain per session (SPEC §8: one writer per log; parallel sessions
-# are sibling chains, never a shared file).
+# into one chained entry — or a PostToolUseFailure payload, the harness's
+# event for a call that ran and failed, which carries the same tool_name
+# and tool_input and so leaves the same receipt (#239). This is the
+# completeness mechanism of SPEC §8: the harness fires the hook on every
+# tool call, so the log call sits outside the writer's volition — the
+# agent cannot skip its own receipt. One chain per session (SPEC §8: one
+# writer per log; parallel sessions are sibling chains, never a shared
+# file).
 
 # The most descriptive scalar a tool call has, in preference order. The
 # last, `summary`, is the adapters' fallback (ADR-0020): a harness whose
@@ -2404,7 +3703,8 @@ def record_project(log_dir, project):
 
 
 def chain_is_damaged(log):
-    """True when the log exists but cannot be extended — a torn tail."""
+    """True when the log exists but cannot be extended: a torn tail, or
+    a forked one (`tail_entry`)."""
     try:
         lines = read_log(log)
     except OSError:
@@ -2438,8 +3738,7 @@ def ensure_chain(log):
     """
     with ChainLock(log):
         if not os.path.exists(log) or os.path.getsize(log) == 0:
-            with open(log, "w", encoding="utf-8", newline="\n") as f:
-                f.write(entry_line(genesis_entry()))
+            write_line_to_disk(log, "w", entry_line(genesis_entry()))
 
 
 def cmd_hook(args):
@@ -2512,15 +3811,31 @@ def cmd_hook(args):
         if not os.path.exists(log):
             return 0
         code = seal_session(log, payload.get("transcript_path"))
-        # The commitment first, then the published head, then the anchor
-        # (ADR-0024, ADR-0025): the head that leaves the machine is the
-        # sealed one, and a slow calendar can never cost the commitment
-        # nor the one POST, so the anchor takes what is left of the
-        # budget.
-        deadline = time.monotonic() + SESSION_END_BUDGET
+        # Five steps, in this order: the commitment, the published
+        # head, the published chain, the stamp, the anchor (ADR-0024,
+        # ADR-0025, ADR-0031, ADR-0032). What leaves the machine is the
+        # sealed head and the sealed chain, each opt-in bounded by the
+        # same budget rule, and a slow calendar can never cost the
+        # commitment nor the three quick steps, so the anchor takes
+        # what is left of the budget. The quick steps share one window
+        # (#262): each POST waits its own bound or what the steps before
+        # it left, whichever is less, and a step with nothing left writes
+        # that down and does not start, so the harness's cap is never
+        # what stops a step before its row is written.
+        started = time.monotonic()
+        deadline = started + SESSION_END_BUDGET
+        window = started + quick_window(args.actor)
+        bound = publish_budget(args.actor)
         if args.publish:
-            publish_head(log, args.publish, session,
-                         timeout=publish_budget(args.actor))
+            publish_head(log, args.publish, session, timeout=bound,
+                         window=window)
+        if args.publish_chain:
+            # The entries after the cursor (ADR-0031 ruling 3); what
+            # does not fit the window is the keeper's.
+            session_end_publish_chain(log, args.publish_chain, session,
+                                      timeout=bound, window=window)
+        if args.stamp:
+            stamp_head(log, args.stamp, timeout=bound, window=window)
         if args.anchor:
             session_end_anchor(log, args.calendar or DEFAULT_CALENDARS,
                                budget=deadline - time.monotonic())
@@ -2607,10 +3922,11 @@ def cmd_hook(args):
 # --- Hook installer -----------------------------------------------------------
 # `loxodonta install-hook` wires this machine's Claude Code into the
 # recorder: a PostToolUse hook so every completed tool call leaves a
-# receipt, a SessionEnd hook so a clean exit seals the transcript's
-# tail (issue #79), and — when supervisor.py sits beside this file — a
-# SessionStart hook so every session starts with a recall digest of
-# its repo's recent history.
+# receipt and a PostToolUseFailure hook beside it so every call that ran
+# and failed does too (#239), a SessionEnd hook so a clean exit seals
+# the transcript's tail (issue #79), and — when supervisor.py sits
+# beside this file — a SessionStart hook so every session starts with a
+# recall digest of its repo's recent history.
 
 def load_settings(path):
     """The user-level settings, or None with the complaint printed —
@@ -2645,23 +3961,105 @@ DIGEST_MARKER = "supervisor.py"
 # the fingerprint the widening below keys on.
 PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 
-def recorder_command(actor=None, anchor=False, publish=None):
+def recorder_command(actor=None, anchor=False, publish=None,
+                     publish_chain=None, stamp=None):
     """The hook command the installers write: this interpreter, this
     file, no shell expansion — the hook resolves the project itself, so
     one command works on every platform. `actor` names the harness the
     receipts will say acted (ADR-0020); `anchor` is the session-end
-    anchor opt-in and `publish` the URL the session's head is published
-    to, both carried on the SessionEnd command so the choice is readable
-    in the settings file (ADR-0024, ADR-0025)."""
+    anchor opt-in, `publish` the URL the session's head is published
+    to, `publish_chain` the URL its entries go to, and `stamp` the
+    authority the head is stamped by, all carried on the SessionEnd
+    command so the choice is readable in the settings file (ADR-0024,
+    ADR-0025, ADR-0031, ADR-0032)."""
     python = sys.executable.replace(os.sep, "/")
     self_path = os.path.abspath(__file__).replace(os.sep, "/")
     command = f'"{python}" "{self_path}" hook'
     command += f" --actor {actor}" if actor else ""
     command += " --anchor" if anchor else ""
-    return command + (f' --publish "{publish}"' if publish else "")
+    command += f' --publish "{publish}"' if publish else ""
+    command += f' --publish-chain "{publish_chain}"' if publish_chain else ""
+    return command + (f' --stamp "{stamp}"' if stamp else "")
 
 
-def session_end_choices(anchor, publish):
+PROFILES = ("local", "timestamped", "full", "custom")
+
+# What `--profile full` says when it arrives without a remote
+# (ADR-0031 ruling 1): the tier is the two publishes to a URL the
+# operator names, so there is no such tier without one. The two ways
+# to get one, because "pick a remote" is the step a beginner stalls
+# on and the refusal is where they are standing.
+REMOTE_WAYS = (
+    "--profile full sends the head and the entries to a remote you "
+    "name: add --remote URL. Two ways to have one. Run `receiver.py "
+    "serve` on a second machine the credentials here cannot reach and "
+    "paste the URL it prints (docs/RECEIVER.md). Or name any URL that "
+    "appends what it is sent and refuses delete.")
+
+# The tiers `--authority` composes with (ADR-0032 ruling 2). Every other
+# raw flag is refused beside a tier, because the tier already says what
+# leaves the machine; the authority is the exception because a tier can
+# name the mechanism and never the authority — whom to trust is the whole
+# choice, so no tier bakes one in and the URL stays the operator's to
+# type.
+AUTHORITY_TIERS = ("timestamped", "full")
+
+
+def resolve_profile(profile, anchor, publish, publish_chain=None,
+                    authority=None, remote=None):
+    """The profile an install asks for, and the session-end opt-ins it
+    resolves to (ADR-0031 ruling 1). A profile is a named set of the raw
+    flags and nothing else: `local` wires none, `timestamped` is the
+    session-end anchor under the beginner's word, `custom` is the raw
+    flags exactly as given. With no profile named, the raw flags speak
+    for themselves — an install scripted before profiles existed still
+    works and is written down as `custom` — and none at all is `local`.
+    `full` is the anchor and both publishes to the one URL `--remote`
+    names: the head record and the entries themselves, told apart at
+    the far end by content type, so one remote serves both and the
+    operator names it once. A raw flag beside `local`, `timestamped`
+    or `full` is a command spoken wrong, because the profile already
+    says what leaves the machine: refused with the way out, `custom`;
+    so is `--remote` beside any profile but `full`, which would
+    otherwise name a remote nothing sends to. `full` with no remote is
+    refused with the two ways to get one. The one raw flag a tier does
+    take is `--authority`, beside `timestamped` or `full`, the tiers
+    that commit the head (ADR-0032 ruling 2); beside `local`, where
+    nothing leaves at all, it is refused with the rest. Returns
+    (profile, anchor, publish, publish_chain, authority)."""
+    raw = bool(anchor or publish or publish_chain or authority)
+    if remote and profile != "full":
+        raise ValueError(
+            "--remote is where --profile full sends; name that profile, "
+            "or compose --publish-head and --publish-chain yourself "
+            "under --profile custom")
+    if profile is None:
+        return (("custom" if raw else "local"), anchor, publish,
+                publish_chain, authority)
+    if profile == "custom":
+        return profile, anchor, publish, publish_chain, authority
+    if profile in AUTHORITY_TIERS:
+        # The authority is the one raw flag a tier takes beside its own
+        # (ADR-0032 ruling 2), so it drops out of what is refused here.
+        # Every other raw flag beside a tier is still a command spoken
+        # wrong, and beside `local`, where nothing leaves at all, this
+        # one is refused with the rest.
+        raw = bool(anchor or publish or publish_chain)
+    if raw:
+        raise ValueError(
+            f"--profile {profile} already says what leaves the machine; "
+            "to compose --anchor-at-session-end, --publish-head, "
+            "--publish-chain and --authority yourself, choose "
+            "--profile custom (--authority alone also composes with "
+            "--profile timestamped and --profile full)")
+    if profile == "full":
+        if not remote:
+            raise ValueError(REMOTE_WAYS)
+        return profile, True, remote, remote, authority
+    return profile, profile == "timestamped", None, None, authority
+
+
+def session_end_choices(anchor, publish, publish_chain=None, authority=None):
     """What the wired SessionEnd command does beyond the seal, for the
     installer's notice, so the operator reads their choice back."""
     choices = []
@@ -2669,6 +4067,12 @@ def session_end_choices(anchor, publish):
         choices.append("anchors at session end")
     if publish:
         choices.append(f"publishes the head to {publish}")
+    if publish_chain:
+        choices.append(f"publishes the chain to {publish_chain}")
+    if authority:
+        choices.append(f"stamps the head with {authority}")
+    if len(choices) > 2:
+        return ", ".join(choices[:-1]) + " and " + choices[-1]
     return " and ".join(choices)
 
 
@@ -2678,29 +4082,78 @@ def session_end_notice(old, new, choices):
     flag left out of the install command never goes quiet (ADR-0024,
     ADR-0025: the install command states the choice each time)."""
     dropped = [name for flag, name in ((" --anchor", "anchors at session end"),
-                                       (" --publish ", "publishes the head"))
+                                       (" --publish ", "publishes the head"),
+                                       (" --publish-chain ",
+                                        "publishes the chain"),
+                                       (" --stamp ", "stamps the head"))
                if flag in old and flag not in new]
     parts = ([f"now {choices}"] if choices else []) + \
             (["no longer " + " or ".join(dropped)] if dropped else [])
     return f" ({'; '.join(parts)})" if parts else ""
 
 
-def head_record_notice(anchor, publish, codex=False):
-    """The line a flagless install prints, on first install and on every
-    re-run. A chain with no head record wired is the lower tier of
+def chain_notice(url, profile):
+    """What leaves at every session end once the chain is wired, said
+    before anything is written (ADR-0031): every entry, and action lines
+    are command lines. The export's `--raw` stance (ADR-0021), told to
+    the operator in the same breath as the choice. And what leaves
+    besides the sessions still to come: the keeper walks every chain
+    in the store and sends each from genesis, so last month's command
+    lines go too, once `serve` publishes — at `full` with no flag
+    typed, under `custom` when it is given `--publish-chain`."""
+    past = ("`supervisor serve`, when it runs, then also sends every "
+            "chain already in the store, from its first entry."
+            if profile == "full" else
+            "A `supervisor serve` run with --publish-chain also sends "
+            "every chain already in the store, from its first entry.")
+    return ("every entry will leave this machine at session end, to "
+            f"{url}: the timestamp, the actor, the action line and the "
+            "file references. Action lines are command lines and can "
+            "carry anything the agent typed, a pasted secret included. "
+            + past)
+
+
+def profile_notice(profile, matchers, codex=False):
+    """What the installer prints last, on first install and on every
+    re-run: one line reading the choice back (the harness, the coverage,
+    the profile) and, at `local`, the ladder — one row per tier, each
+    saying what leaves the machine, the row above naming the flag that
+    reaches it (ADR-0031 ruling 1). `local` is the lower tier of
     ADR-0002: an edit, a deletion, or a reorder is caught unconditionally,
-    a regenerated chain only against a head kept off the machine. Nothing
-    leaves the machine without the opt-in (ADR-0024), so the installer
-    says which tier this is rather than defaulting the other (#221).
-    Codex has no session-end anchor (ADR-0024), so its line names the one
-    opt-in it has."""
-    if anchor or publish:
-        return ""
-    opt_ins = ("--publish-head URL" if codex
-               else "--publish-head URL or --anchor-at-session-end")
-    return ("note: no head record wired — a regenerated chain is caught only "
-            "against a head you keep (`head`, then `verify --expect-head`). "
-            f"Opt in with {opt_ins}; docs/HOOK.md says which remotes count.")
+    a regenerated chain only against a head kept off the machine (#221's
+    sentence, kept). `timestamped` is the anchor at each session end, and
+    `full` the head and the entries themselves to a remote the operator
+    names, which is what makes a wiped log survive somewhere as of the
+    last send. On Codex the session-end anchor stays refused (ADR-0024),
+    so its row, and its line at either tier above `local`, say the
+    supervisor anchors on its cadence instead; the two publishes are
+    wired there all the same, on Codex's shorter clock. Never a prompt:
+    the installer reads no stdin."""
+    harness = "Codex" if codex else "Claude Code"
+    coverage = ("every tool call" if all(m in ("*", ".*") for m in matchers)
+                else "matcher " + ", ".join(f'"{m}"' for m in matchers))
+    wired = f"wired: {harness}, {coverage}, profile {profile}"
+    if profile in ("timestamped", "full") and codex:
+        return (wired + " (the session-end anchor stays refused for Codex, "
+                "ADR-0024, so the supervisor anchors on its cadence: "
+                "`supervisor serve` reads the profile and anchors every "
+                "six hours)")
+    if profile != "local":
+        return wired
+    leaves = ("a 32-byte digest leaves on the supervisor's cadence, never "
+              "at session end, since Codex caps its SessionEnd hook (ADR-0024)"
+              if codex else "a 32-byte digest leaves at each session end")
+    return "\n".join([
+        wired,
+        "  local        receipts stay on this machine. Edits to history are "
+        "caught; a regenerated chain only against a head you keep (`head`, "
+        "then `verify --expect-head`).",
+        f"  timestamped  --profile timestamped   {leaves}; regeneration is "
+        "caught once the anchor matures.",
+        "  full         --profile full --remote URL   head and receipts "
+        "go to a remote you name; a wiped log survives there as of the "
+        "last send.",
+    ])
 
 
 def supervisor_path():
@@ -2760,7 +4213,8 @@ def codex_hooks_path():
     return os.path.join(home, "hooks.json")
 
 
-def install_codex_hooks(publish=None):
+def install_codex_hooks(publish=None, profile="local",
+                        publish_chain=None, authority=None):
     """The Codex half of install-hook (ADR-0020): the same PostToolUse,
     SessionEnd, and SessionStart blocks, in Codex's hooks.json, with the
     actor named so recall rows say which harness acted. Codex's matcher
@@ -2768,15 +4222,32 @@ def install_codex_hooks(publish=None):
     plain-text stdout to the model's context, so the digest ships
     unchanged — told to take the repo from the payload, since Codex
     sets no CLAUDE_PROJECT_DIR. `publish` is the published-head opt-in
-    (ADR-0025), riding on the SessionEnd command as it does for Claude
-    Code; the hook cuts its POST off at half Codex's cap (#183)."""
+    (ADR-0025) and `publish_chain` the published-chain one (ADR-0031),
+    both riding on the SessionEnd command as they do for Claude Code
+    and sharing half Codex's cap between them (#183, #262): the chain
+    send stops where the window closes and leaves the rest at the
+    cursor, which is what the window and the cursor are for.
+    `authority` is the session-end stamp (ADR-0032), last of the quick
+    steps in that same window, taking what the two publishes leave; its
+    one POST was measured inside the cap before the flag was granted
+    here (#251; the numbers are in docs/HOOK.md). `profile` is written
+    to the coverage marker (ADR-0031 ruling 1); the session-end anchor
+    it would wire stays refused here (ADR-0024), since a calendar round
+    trip has no cursor to resume from, so the supervisor's keeper
+    anchors on its cadence instead."""
     path = codex_hooks_path()
     settings = load_settings(path)
     if settings is None:
         return 1
+    if publish_chain:
+        # Said before anything is written (ADR-0031): what leaves, and
+        # that action lines are command lines.
+        print(chain_notice(publish_chain, profile))
     had_backup = backup_settings(path)
     record = recorder_command(CODEX_ACTOR)
-    record_end = recorder_command(CODEX_ACTOR, publish=publish)
+    record_end = recorder_command(CODEX_ACTOR, publish=publish,
+                                  publish_chain=publish_chain,
+                                  stamp=authority)
     hooks = settings.setdefault("hooks", {})
     installed = []
 
@@ -2789,11 +4260,11 @@ def install_codex_hooks(publish=None):
         installed.append(f"PostToolUse: {record}")
     end = hooks.setdefault("SessionEnd", [])
     healed += heal_hooks(end, RECORDER_MARKERS, record_end)
-    # The published head rides on this command, and the install command
-    # states the choice each time: a re-run without the flag turns it
-    # off and says so (ADR-0025 ruling 3), as on Claude Code.
-    choices = session_end_choices(False, publish)
-    tier = head_record_notice(False, publish, codex=True)
+    # The two publishes ride on this command, and the install command
+    # states the choice each time: a re-run without a flag turns that
+    # step off and says so (ADR-0025 ruling 3), as on Claude Code.
+    choices = session_end_choices(False, publish, publish_chain,
+                                  authority)
     for block in end:
         for wired in block.get("hooks", []):
             old = wired.get("command", "")
@@ -2822,7 +4293,10 @@ def install_codex_hooks(publish=None):
     # first time a recorder that knows how walks past.
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
-    marked = record_coverage(CODEX_ACTOR, wired)
+    marked = record_coverage(CODEX_ACTOR, wired, profile,
+                             remote=publish_chain or publish,
+                             authority=authority)
+    tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
         if marked:
@@ -2877,19 +4351,41 @@ def coverage_path():
     return os.path.join(store_home(), COVERAGE_NAME)
 
 
-def record_coverage(harness, matchers):
+def record_coverage(harness, matchers, profile, remote=None,
+                    authority=None, failures=None):
     """Append what this install just wired, unless it wired what the
-    last one did — the `heal()` rule, applied to matchers, so re-running
-    the installer never grows the file (ADR-0030 ruling 1). Scoped by
-    harness because `--codex` wires `.*` into a different settings file
-    and must never speak for the Claude Code witness.
+    last one did — the `heal()` rule, applied to matchers, to the
+    profile and to both remotes, so re-running the installer never
+    grows the file (ADR-0030 ruling 1). Scoped by harness because
+    `--codex` wires `.*` into a different settings file and must never
+    speak for the Claude Code witness. The profile is written beside the
+    matchers (ADR-0031 ruling 1) so a profile that changes is as visible
+    to the supervisor as a matcher change, and so `serve` can follow its
+    cadences; `remote` is where publishing goes — at `full` the one URL
+    both routes were wired to, and under `custom` the chain's URL when
+    one was given, else the head's — and `authority` who stamps the head
+    when one is named (ADR-0032), each written only then. `failures` is
+    the matchers the failed-call event was wired on (#239), written only
+    when it was, so the witness owes a failed command a receipt from the
+    install that wired the event and never before it; an epoch without
+    it, Codex's and every one from before #239, wired none. `serve`
+    follows the remote only at `full`, since that is the tier that asked
+    the keeper for a cadence (#246). The marker never travels (the
+    export allowlists it out, the package does not carry it), so unlike
+    the publish memo it may hold a URL.
 
     Every failure is a silent skip. An installer that refused to finish
     over a bookkeeping file would be a worse trade than a memory that
     starts late, and the operator has louder ways to learn the store is
     unwritable. Returns whether an entry was appended."""
-    entry = {"since": now_ts(), "matchers": list(matchers),
-             "harness": harness}
+    entry = {"since": now_ts(), "matchers": list(matchers)}
+    if failures:
+        entry["failures"] = list(failures)
+    entry.update({"harness": harness, "profile": profile})
+    if remote:
+        entry["remote"] = remote
+    if authority:
+        entry["authority"] = authority
     try:
         os.makedirs(store_home(), exist_ok=True)
         try:
@@ -2902,7 +4398,11 @@ def record_coverage(harness, matchers):
                   and isinstance(epoch.get("matchers"), list)]
         last = next((epoch for epoch in reversed(epochs)
                      if epoch.get("harness") == harness), None)
-        if last and last.get("matchers") == entry["matchers"]:
+        if last and last.get("matchers") == entry["matchers"] \
+                and last.get("failures") == entry.get("failures") \
+                and last.get("profile") == profile \
+                and last.get("remote") == entry.get("remote") \
+                and last.get("authority") == entry.get("authority"):
             return False
         body = json.dumps({"purpose": COVERAGE_PURPOSE,
                            "epochs": epochs + [entry]}, indent=2)
@@ -2923,17 +4423,27 @@ def cmd_install_hook(args):
     Restart open sessions afterwards: hooks load at start. With
     --codex, the Codex half runs instead (install_codex_hooks)."""
     if args.codex:
-        if args.anchor_at_session_end:
+        if args.anchor_at_session_end and args.profile == "custom":
             # Codex caps a SessionEnd hook at three seconds, too short
-            # for a calendar round trip with any margin (ADR-0024).
+            # for a calendar round trip with any margin (ADR-0024). The
+            # raw flag asked for it by name and is refused; `--profile
+            # timestamped` asked for the tier, which on Codex is the
+            # profile written down and the supervisor anchoring on its
+            # cadence, so it goes through with the anchor left unwired.
             print("error: --anchor-at-session-end is not wired for Codex: "
                   "its SessionEnd hook is capped at three seconds, too "
                   "short to reach a calendar with margin. Use the "
                   "supervisor's --anchor-every instead.", file=sys.stderr)
             return 1
-        # --publish-head is wired: #183 measured one POST inside the same
-        # three seconds, and the hook cuts it off at half the cap.
-        return install_codex_hooks(args.publish_head)
+        # All three quick steps are wired: #183 measured one POST
+        # inside the same three seconds for the head, and #251 measured
+        # the stamp's (docs/HOOK.md, under Codex CLI). The hook gives
+        # the three half the cap between them, one window and not one
+        # each (#262), the stamp taking what the publishes leave. The
+        # chain resumes from its cursor, so a short clock costs
+        # batches, never entries.
+        return install_codex_hooks(args.publish_head, args.profile,
+                                   args.publish_chain, args.authority)
     supervisor = supervisor_path()
     record = recorder_command()
     digest = digest_command()
@@ -2942,6 +4452,10 @@ def cmd_install_hook(args):
     settings = load_settings(path)
     if settings is None:
         return 1
+    if args.publish_chain:
+        # Said before anything is written (ADR-0031): what leaves, and
+        # that action lines are command lines.
+        print(chain_notice(args.publish_chain, args.profile))
     had_backup = backup_settings(path)
 
     hooks = settings.setdefault("hooks", {})
@@ -2981,6 +4495,21 @@ def cmd_install_hook(args):
                   'than the current default "*" — uncovered tool calls '
                   "leave no receipts (see docs/HOOK.md)")
 
+    # A call that ran and failed fires its own event (#239): the harness
+    # sends PostToolUseFailure for it, never PostToolUse, and nothing at
+    # all for a call it denied or never started. Wired beside
+    # PostToolUse with the same command on the same matcher, so the
+    # receipt is the same receipt — the action attempted, never whether
+    # it worked (.out-of-scope/001). An install from before this gains
+    # the event on re-run, as it gains any hook it is missing.
+    failed = hooks.setdefault("PostToolUseFailure", [])
+    healed += heal(failed, RECORDER_MARKERS, record)
+    if not any(ours(b) for b in failed):
+        matcher = next((b.get("matcher", "*") for b in post if ours(b)), "*")
+        failed.append({"matcher": matcher,
+                       "hooks": [{"type": "command", "command": record}]})
+        installed.append(f"PostToolUseFailure: {record}")
+
     # The tail commitment (ADR-0017, issue #79): SessionEnd runs the
     # same recorder command — the payload's hook_event_name is the
     # branch. The explicit timeout matters: the harness gives SessionEnd
@@ -2988,15 +4517,18 @@ def cmd_install_hook(args):
     # deserves the read.
     end = hooks.setdefault("SessionEnd", [])
     record_end = recorder_command(anchor=args.anchor_at_session_end,
-                                  publish=args.publish_head)
+                                  publish=args.publish_head,
+                                  publish_chain=args.publish_chain,
+                                  stamp=args.authority)
     healed += heal(end, RECORDER_MARKERS, record_end)
     # The session-end opt-ins ride on this command: the anchor
-    # (ADR-0024) and the published head (ADR-0025). The install command
-    # states the choice each time: a re-run without a flag turns that
-    # step off, and says so.
+    # (ADR-0024), the published head (ADR-0025), the published chain
+    # (ADR-0031) and the authority timestamp (ADR-0032). The install
+    # command states the choice each time: a re-run without a flag
+    # turns that step off, and says so.
     choices = session_end_choices(args.anchor_at_session_end,
-                                  args.publish_head)
-    tier = head_record_notice(args.anchor_at_session_end, args.publish_head)
+                                  args.publish_head, args.publish_chain,
+                                  args.authority)
     for block in end:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
@@ -3030,7 +4562,13 @@ def cmd_install_hook(args):
 
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
-    marked = record_coverage("claude-code", wired)
+    marked = record_coverage("claude-code", wired, args.profile,
+                             remote=(args.publish_chain
+                                     or args.publish_head),
+                             authority=args.authority,
+                             failures=[block.get("matcher", "*")
+                                       for block in failed if ours(block)])
+    tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
         if marked:
@@ -3089,7 +4627,8 @@ def cmd_uninstall_hook(args):
     path = (codex_hooks_path() if args.codex
             else os.path.join(os.path.expanduser("~"), ".claude",
                               "settings.json"))
-    events = ("PostToolUse", "SessionStart", "SessionEnd")
+    events = ("PostToolUse", "PostToolUseFailure", "SessionStart",
+              "SessionEnd")
     markers = RECORDER_MARKERS + (DIGEST_MARKER,)
     settings = load_settings(path)
     if settings is None:
@@ -3212,6 +4751,21 @@ def main(argv=None):
                                     "missing file is noted, never a verdict")
     verify_parser.add_argument("--anchors", action="store_true",
                                help="also judge anchor proofs, offline")
+    verify_parser.add_argument("--stamps", action="store_true",
+                               help="also judge authority timestamps, "
+                                    "offline, through openssl (ADR-0032); "
+                                    "without --authority-chain, or without "
+                                    "openssl, each is noted as not judged")
+    verify_parser.add_argument("--authority-chain", metavar="FILE",
+                               default=None,
+                               help="the authority's certificate chain "
+                                    "(PEM) you saved, for --stamps. Every "
+                                    "token is judged against this one "
+                                    "file, so when the sidecar holds "
+                                    "tokens from more than one authority, "
+                                    "give one chain file holding every "
+                                    "authority's certificates "
+                                    "(concatenated PEM)")
     verify_parser.set_defaults(func=cmd_verify)
     package_parser = sub.add_parser(
         "verify-package",
@@ -3223,6 +4777,20 @@ def main(argv=None):
     package_parser.add_argument("path", metavar="PATH",
                                 help="the package: a zip, or its unpacked "
                                      "folder")
+    package_parser.add_argument("--authority-chain", metavar="FILE",
+                                default=None,
+                                help="the certificate chain (PEM) you saved "
+                                     "from the authority, for the tokens "
+                                     "this package carries (ADR-0032); "
+                                     "without it a token is present and not "
+                                     "judged, and the seal earns no rung. "
+                                     "Every token in the package, the "
+                                     "manifest's and each chain's, is "
+                                     "judged against this one file, so when "
+                                     "the records name more than one "
+                                     "authority, give one chain file "
+                                     "holding every authority's "
+                                     "certificates (concatenated PEM)")
     package_parser.set_defaults(func=cmd_verify_package)
     anchor_parser = sub.add_parser(
         "anchor", parents=[common],
@@ -3249,7 +4817,33 @@ def main(argv=None):
     publish_parser.add_argument("url", metavar="URL", type=publish_url,
                                 help="a plain http or https URL, such as a "
                                      "chat incoming webhook")
+    publish_parser.add_argument("--chain", action="store_true",
+                                help="send the chain's entries instead of "
+                                     "its head: the lines after the last "
+                                     "one the remote acknowledged, from "
+                                     "genesis the first time, to a remote "
+                                     "that can only add, never delete, such "
+                                     "as the receiver (ADR-0031, "
+                                     "docs/RECEIVER.md)")
     publish_parser.set_defaults(func=cmd_publish)
+    stamp_parser = sub.add_parser(
+        "stamp", parents=[common],
+        help="ask an RFC 3161 timestamp authority for a token over the "
+             "chain head, kept verbatim beside the chain (ADR-0032); a "
+             "second commitment beside the anchor, never instead of it")
+    stamp_parser.add_argument("--authority", required=True, metavar="URL",
+                              type=publish_url,
+                              help="the authority's http or https URL; no "
+                                   "default, since whom to trust is the "
+                                   "choice")
+    stamp_parser.add_argument("--manifest", default=None, metavar="PATH",
+                              help="stamp a package manifest's sha256 "
+                                   "instead of a chain head, the token "
+                                   "beside it in PATH.stamps.jsonl "
+                                   "(ADR-0026 ruling 4, ADR-0032; "
+                                   "`supervisor package --stamp` drives "
+                                   "this)")
+    stamp_parser.set_defaults(func=cmd_stamp)
     hook_parser = sub.add_parser(
         "hook",
         help="append one entry from a Claude Code PostToolUse payload on stdin")
@@ -3273,6 +4867,18 @@ def main(argv=None):
                                   "this URL after the tail commitment and "
                                   "before the anchor, quietly (ADR-0025; "
                                   "install-hook --publish-head wires this)")
+    hook_parser.add_argument("--publish-chain", default=None, metavar="URL",
+                             help="at SessionEnd, POST the chain's entries "
+                                  "since the last acknowledged one to this "
+                                  "URL, after the head and before the "
+                                  "stamp and the anchor, quietly (ADR-0031; "
+                                  "install-hook --publish-chain wires this)")
+    hook_parser.add_argument("--stamp", default=None, metavar="URL",
+                             help="at SessionEnd, ask this timestamp "
+                                  "authority for a token over the chain "
+                                  "head, after the two publishes and "
+                                  "before the anchor, quietly (ADR-0032; "
+                                  "install-hook --authority wires this)")
     hook_parser.set_defaults(func=cmd_hook)
     explain_parser = sub.add_parser(
         "explain", parents=[common],
@@ -3290,6 +4896,24 @@ def main(argv=None):
         help="wire Codex CLI instead: PostToolUse, SessionEnd, and the "
              "SessionStart digest into $CODEX_HOME/hooks.json (ADR-0020)")
     install_parser.add_argument(
+        "--profile", choices=PROFILES, default=None,
+        help="what leaves the machine, in one word (ADR-0031): local "
+             "(nothing; the default), timestamped (a 32-byte digest of "
+             "the chain head at each session end, the anchor), full "
+             "(that anchor, plus the head and every entry to the one "
+             "--remote URL), or custom (compose the raw flags below "
+             "yourself). Written to the coverage marker; `supervisor "
+             "serve` follows its cadences")
+    install_parser.add_argument(
+        "--remote", default=None, metavar="URL", type=publish_url,
+        help="where --profile full sends: one URL for both routes, the "
+             "head and the chain's entries, told apart at the far end "
+             "by content type (ADR-0031). Pick a remote that can only "
+             "add, never delete — `receiver.py` on a second machine is "
+             "the one this repo ships (docs/RECEIVER.md). Written to "
+             "the coverage marker, which never travels, so `supervisor "
+             "serve` publishes there on its cadence with no flag typed")
+    install_parser.add_argument(
         "--anchor-at-session-end", action="store_true",
         help="opt in: every session end anchors the chain head to Bitcoin "
              "via OpenTimestamps, quietly and best-effort, and upgrades "
@@ -3303,6 +4927,26 @@ def main(argv=None):
              "a remote the credentials on this machine cannot delete "
              "from, such as a chat incoming webhook. No path, project "
              "name, or action line leaves")
+    install_parser.add_argument(
+        "--publish-chain", default=None, metavar="URL", type=publish_url,
+        help="opt in: every session end POSTs the chain's entries since "
+             "the last acknowledged one to this URL, after the head and "
+             "before the stamp and the anchor, quietly and best-effort "
+             "(ADR-0031). Pick a remote that can only add, never delete, "
+             "such as the receiver (docs/RECEIVER.md). Every entry "
+             "leaves: action lines are command lines, and the installer "
+             "says so")
+    install_parser.add_argument(
+        "--authority", default=None, metavar="URL", type=publish_url,
+        help="opt in: every session end asks this RFC 3161 timestamp "
+             "authority for a token over the chain head, after the two "
+             "publishes and before the anchor, quietly and best-effort "
+             "(ADR-0032). A second commitment beside the anchor, never "
+             "instead of it; the token is the authority's signed word, "
+             "judged by `verify --stamps` through openssl. No default: "
+             "whom to trust is the choice, which is why this flag also "
+             "composes with --profile timestamped, where every other raw "
+             "flag is refused")
     install_parser.set_defaults(func=cmd_install_hook)
     uninstall_parser = sub.add_parser(
         "uninstall-hook",
@@ -3327,6 +4971,25 @@ def main(argv=None):
         if not command_argv:
             parser.error("run requires `-- <command> [args...]` after its flags")
         args.command_argv = command_argv
+    if args.command == "verify" and args.authority_chain and not args.stamps:
+        # The operator who names a chain file named it in order to have
+        # the tokens judged against it. Ignoring the flag would print
+        # `VALID` with nothing judged, which is the one outcome ADR-0032
+        # ruling 5 exists to prevent: a verdict that sounds like the
+        # tokens passed. A command spoken wrong is told so, exit 64, as
+        # a raw flag beside a named profile is.
+        verify_parser.error("--authority-chain is the file --stamps judges "
+                            "tokens against; add --stamps, or drop it")
+    if args.command == "install-hook":
+        # The profile and the raw flags are one choice (ADR-0031 ruling
+        # 1); a contradiction between them is a usage error, exit 64.
+        try:
+            (args.profile, args.anchor_at_session_end, args.publish_head,
+             args.publish_chain, args.authority) = resolve_profile(
+                args.profile, args.anchor_at_session_end, args.publish_head,
+                args.publish_chain, args.authority, args.remote)
+        except ValueError as e:
+            install_parser.error(str(e))
     return args.func(args)
 
 

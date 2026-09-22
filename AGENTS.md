@@ -1,8 +1,9 @@
 # loxodonta, for agents
 
-You are in the repository of a tamper-evident receipt log for AI agents: two
-single-file Python programs, standard library only. `loxodonta.py` records
-and verifies; `supervisor.py` watches and recalls. What they write are
+You are in the repository of a tamper-evident receipt log for AI agents:
+three single-file Python programs, standard library only. `loxodonta.py`
+records and verifies; `supervisor.py` watches and recalls; `receiver.py`
+keeps a copy on a machine the agent cannot reach. What they write are
 receipts. The vocabulary is settled; use it exactly.
 
 Read, in this order:

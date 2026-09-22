@@ -24,6 +24,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# This folder on sys.path, so the sibling imports below also resolve
+# when the module runs alone (`python -m unittest tests.test_serve`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import home_outside, isolated_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -92,20 +98,26 @@ def log_entry(log, action, actor="claude-code", files=()):
 
 
 class ServerFixture(unittest.TestCase):
-    """A temp root and a real `serve` subprocess on an ephemeral port."""
+    """A temp root and a real `serve` subprocess on an ephemeral port, in
+    a home of the test's own: serve reads the coverage marker and follows
+    the profile it names, so the machine's home would hand a test its
+    remote (#242)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        self.env = isolated_env(home_outside(self))
 
-    def serve(self, extra_env=None):
-        """Start `serve` on an ephemeral port and read the announced URL."""
+    def serve(self, extra_env=None, extra_args=()):
+        """Start `serve` on an ephemeral port and read the announced URL.
+        `extra_args` ride on the command line after the fixed ones (a
+        `--witness`, for a suite that needs the completeness watch)."""
         self.proc = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--root",
-             str(self.root), "--port", "0"],
+             str(self.root), "--port", "0", *extra_args],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+            env={**self.env, "PYTHONIOENCODING": "utf-8",
                  **(extra_env or {})})
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
@@ -147,7 +159,7 @@ class StoreServeTest(ServerFixture):
             [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
              "--witness", str(witness)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+            env={**self.env, "PYTHONIOENCODING": "utf-8",
                  "LOXODONTA_HOME": str(self.home)})
         self.addCleanup(self._stop)
         line = self.proc.stdout.readline()
@@ -218,6 +230,17 @@ class DashboardTest(ServerFixture):
         self.assertIn("NOT THE RECORDED HISTORY", page)
         self.assertIn("RECEIPTS STOPPED ARRIVING", page)
         self.assertIn("all quiet", page)
+
+    def test_a_watch_row_says_the_counts_that_decided_its_chip(self):
+        # ADR-0034: paired tool by tool, the totals can match while a
+        # tool is short, and failed calls that may owe take their tool's
+        # receipts first, so "witnessed 3, received 3" can sit beside a
+        # deficit chip. The row says both counts beside the totals.
+        page = self.page()
+        self.assertIn('(s.deficit ? ", " + s.deficit + " short" : "")',
+                      page)
+        self.assertIn('(s.may_owe ? ", " + s.may_owe + " may owe" : "")',
+                      page)
 
     def test_the_rail_carries_status_and_the_attention_queue(self):
         # The redesign's shell (#48, ratified 2026-09-01): a sticky rail
@@ -702,6 +725,44 @@ class DashboardTest(ServerFixture):
                          r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
+class TranscriptRetentionPanelTest(ServerFixture):
+    """#260 on the page: the watch panel already carries the witness's
+    one-line facts, so it carries how long the harness keeps the
+    transcripts it reads, as the settings say. Every home the server
+    reads is inside the test's folder, and the witness too."""
+
+    def serve_isolated(self, settings):
+        home = self.root / "home"
+        witness = home / ".claude" / "projects"
+        witness.mkdir(parents=True)
+        (home / ".claude" / "settings.json").write_text(
+            json.dumps(settings), encoding="utf-8")
+        self.proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
+             "--witness", str(witness)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
+        self.addCleanup(self._stop)
+        line = self.proc.stdout.readline()
+        match = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if match is None:
+            self.proc.kill()
+            _, err = self.proc.communicate()
+            self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
+        self.url = match.group()
+
+    def test_the_watch_panel_carries_the_retention_line(self):
+        self.serve_isolated({"cleanupPeriodDays": 60})
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        retention = json.loads(body)["completeness"]["transcript_retention"]
+        self.assertEqual(retention["days"], 60)
+        self.assertIn("older than 60 days", retention["words"])
+        self.assertIn("report.completeness.transcript_retention.words", page)
+
+
 class FortnightTest(ServerFixture):
     """The third question a monitoring surface owes its operator: is
     this a trend or a one-off? Fourteen days sit under the strip, one
@@ -802,7 +863,7 @@ class ServeTest(ServerFixture):
             [sys.executable, str(SUPERVISOR), "scan", "--root",
              str(self.root), "--json"],
             capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
         served, printed = json.loads(body), json.loads(cli.stdout)
         # Two ticks, two clocks: the freshness stamp is the one field
         # allowed to differ between them.

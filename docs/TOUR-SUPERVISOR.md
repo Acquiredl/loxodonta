@@ -90,9 +90,12 @@ Two adversary details worth noticing. The throttle memory lives in the
 writer-reachable baseline, so a timestamp *from the future* reads as no
 memory at all — otherwise one edit stands the keeper down silently and
 forever, which is exactly what an adversary would want from it. And a
-turn can fail twice (a refused upgrade and a refused submission); every
-failure stays said in the note, because evidence is not a scratchpad
-where the last writer wins. Staleness is quiet evidence, never an exit
+turn can fail more than once (a refused upgrade, a refused submission,
+and, when the coverage marker names a timestamp authority, a token that
+authority would not grant: the same turn asks for both commitments of
+the head, since ADR-0032 gave the authority no cadence of its own);
+every failure stays said in the note, because evidence is not a
+scratchpad where the last writer wins. Staleness is quiet evidence, never an exit
 shout — a siren that never stops sounding trains the operator to ignore
 the band.
 
@@ -104,14 +107,20 @@ cadence and is not in its publish memo is posted once, through
 ripeness test. It exists for the bad day the session-end publish cannot
 cover: the hook was stripped, so no session end ever fired and nothing
 left the machine. The memo beside the chain (`<log>.published.jsonl`:
-head, entry count, time, event kind — never the URL, which is a
+head, entry count, time, event kind; a chain row adds its range and a
+fingerprint of the remote it went to, #263 — never the URL, which is a
 credential) is writer-reachable and therefore testimony: it stops a
 repeat and proves nothing; the remote's copy is the head record. What
 the report adds is `left`, per chain: when a head last left this machine
 and by which door, published or anchored, aged by the reader and painted
 in the anchor row with the unanchored head's own stale class. Never an
 alarm, never the exit code: a dead remote is a note in `left`, and the
-keeper tries again next turn. Off by default, like everything that
+keeper tries again next turn. Beside `left` sits `last_failed` (#240):
+the last session-end step that failed, as step, time and the recorder's
+own line, read from the attempt rows the hook leaves in the sidecars,
+cadence or no cadence; and the report's `published` block says in one
+sentence when publishing is wired on the SessionEnd command and no
+chain holds a sent head. Off by default, like everything that
 leaves. A head reported unpublished may still land late, since the wait is bounded; the memo records confirmed departures only, so such a head is posted again, and a repeat in the channel is the honest cost of never standing the keeper down on a POST that may not have arrived.
 
 **The completeness witness** is the flagship claim (issue #22): pair
@@ -173,18 +182,44 @@ a start claim says more calls owe receipts, an end claim says fewer,
 and "nothing was owed from here" is the silence the alarm exists to
 catch.
 
+A fifth finding reopened the second (#239, ADR-0034). The harness does
+fire an event for a call that started and failed, `PostToolUseFailure`,
+and `install-hook` now wires it beside `PostToolUse`, so such a call
+leaves a receipt like any other. What still fires nothing is a denial,
+an input the harness rejects before it runs, or a call a `PreToolUse`
+hook blocks, and the transcript flags all of them with the same
+`is_error`; only the words tell some apart. `failed_call_owes` reads
+them under the epoch in force, which the calibration and the marker
+now carry as `failures`: nothing where the event was not wired, where
+the result is a `<tool_use_error>` or the record a marked denial, or
+where a shell failure has no `Exit code N` line; owed where the result
+opens with that line, a command that ran; and `may_owe` for any other
+tool's failure. Then `reconcile` pairs receipts with calls tool by tool
+rather than as two totals, and within a tool gives its `may_owe` calls
+their receipts first, so a receipt a failed call may have left never
+pays for one an owed call lost, in another tool or its own. The first
+two cuts of this let the writer do exactly that on purpose. The unpaid
+call is then an earlier one, so its deficit is dated no earlier than
+the tool's newest `may_owe` call, and a receipt still on its way gets
+its grace. The price is a live deficit for a non-shell call a hook
+blocked, in a session that used that tool otherwise.
+
 `classify` is the ratified state machine — a pure reading of the
 evidence: OK / QUIET / LAGGING (a 30-second grace, because an honest
 lock wait must never alarm) / ALARM-SILENT (recording stopped) /
-ALARM-DEFICIT (the fork-shaped hole: receipts arrive, fewer than owed)
-/ SURPLUS (an investigate flag, never a verdict) / ENDED-CLEAN /
-ENDED-DEFICIT (missing forever; kept as evidence, not a siren) /
-ENDED-SURPLUS (a surplus does not become clean by the session ending) /
-UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY. Deficit is sticky
-— lost receipts never arrive later. ELSEWHERE belongs to legacy `--root`
-mode alone (#117): a witnessed session whose chain is not under the
-root but *is* in the store has recorded fine, and the wrong universe
-is being scanned (ADR-0011). Naming it rather than charging it keeps
+ALARM-DEFICIT (the fork-shaped hole: receipts arrive, and a tool has
+fewer than the calls it made) / SURPLUS (an investigate flag, never a
+verdict) / ENDED-CLEAN / ENDED-DEFICIT (missing forever, unless a
+failed call fired nothing; kept as evidence, not a siren) /
+ENDED-SURPLUS (a surplus does not become clean by the session ending)
+/ UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY.
+Deficit is sticky — lost receipts never arrive later — and since
+pairing went tool by tool it also wins: a session short in one tool and
+over in another reads as the deficit, never the surplus (ADR-0034).
+ELSEWHERE belongs to legacy `--root` mode alone (#117): a witnessed
+session whose chain is not under the root but *is* in the store has
+recorded fine, and the wrong universe is being scanned (ADR-0011).
+Naming it rather than charging it keeps
 the alarm about recording stopping; a session with no chain in either
 place is still the disabled hook, and still alarms.
 
@@ -315,17 +350,24 @@ does not fire is the loudest thing the drill can say.
 **`serve`** is serialization only, zero decisions (ADR-0005). One scan
 per tick under a lock — never one per request, because a scan diffs
 the baseline and then rewrites it, and two racing scans could swallow
-a tripwire event between them. The bind is 127.0.0.1 and the posture
-is *nothing is ever offered off-machine* — which includes off-machine
-by trickery: a Host header that is not localhost is refused (DNS
-rebinding makes a stranger's page read as same-origin, and CORS never
-enters it), and a POST carrying a foreign Origin is refused (no
-stranger's page pokes the drill, or saves a view). The write path
-carries a second lock: a body this face will read must declare a
-small length and `application/json`, which a cross-origin form post
-cannot set without a preflight nothing here answers. `/api/chain`
-and `/api/drill` only resolve chains under the root; sidecars and
-path escapes get 404.
+a tripwire event between them. What starts a tick is the point of
+issue #271: the keepers live inside the scan, so while only a request
+could start one, a `serve` run as a background service with nobody
+looking at the page anchored and published nothing. With a cadence in
+force, a daemon thread now asks for the same scan the routes ask for,
+a minute after the last walk finished, through the same door and the
+same lock — and asks not to be remembered in the day book, because a
+machine talking to itself is not somebody looking (ADR-0014).
+The bind is 127.0.0.1 and the posture is *nothing is ever offered
+off-machine* — which includes off-machine by trickery: a Host header
+that is not localhost is refused (DNS rebinding makes a stranger's
+page read as same-origin, and CORS never enters it), and a POST
+carrying a foreign Origin is refused (no stranger's page pokes the
+drill, or saves a view). The write path carries a second lock: a body
+this face will read must declare a small length and
+`application/json`, which a cross-origin form post cannot set without
+a preflight nothing here answers. `/api/chain` and `/api/drill` only
+resolve chains under the root; sidecars and path escapes get 404.
 
 **The page** is one inline HTML file, no framework, no build step,
 nothing fetched from anywhere but this machine. Writer-supplied text

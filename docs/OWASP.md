@@ -33,7 +33,7 @@ loxodonta is that control, plus one thing OWASP's line does not ask for: tamper 
 
 The pieces that make up the control:
 
-- **Coverage is every completed tool call.** The shipped `PostToolUse` matcher is `*` (ADR-0016): reads, searches, fetches, spawns, and MCP tools all owe a receipt, not just state changes. A sensor with an allowlist has blind spots an attacker can enumerate by reading this public repo.
+- **Coverage is every tool call that runs and is not cancelled, completed or failed.** The shipped matcher is `*` (ADR-0016), on `PostToolUse` and, since #239, on `PostToolUseFailure` beside it: reads, searches, fetches, spawns, and MCP tools all leave a receipt, not just state changes. A call cancelled while it runs fires neither event. What a failed call owes the completeness alarm is ADR-0034's to say. A sensor with an allowlist has blind spots an attacker can enumerate by reading this public repo.
 - **The watching layer closes the loop.** OWASP's "and respond accordingly" needs someone to actually look. The supervisor scans every chain in the store, shouts on unexplainable change (the baseline tripwire, exit 5), and alarms when a visibly active session stops producing receipts (the completeness alarm, exit 6). Detection latency is a function of how often something looks; the supervisor is the something.
 - **Circuit breakers stay out of scope.** OWASP's mitigation #9 (rate limiting, halting) is a control loxodonta deliberately does not implement. The hook is outcome-blind: this tool evidences someone else's circuit breaker, it never is one ([.out-of-scope/001](../.out-of-scope/001-outcome-capture-in-hook.md)).
 

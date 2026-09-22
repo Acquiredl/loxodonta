@@ -27,6 +27,14 @@ from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
+# The ladder's third rung, word for word as ratified in the #244 grill
+# (#249). Shared so the two ladder tests read the same string and a
+# looser rewrite of the claim fails both.
+FULL_LADDER_ROW = (
+    "  full         --profile full --remote URL   head and receipts go "
+    "to a remote you name; a wiped log survives there as of the last "
+    "send.")
+
 
 def run_receipts(*args, cwd, env=None):
     return subprocess.run(
@@ -174,7 +182,8 @@ class PublishBase(unittest.TestCase):
         """The session's one chain, wherever the store filed it."""
         found = [p for p in (self.store / "receipts").rglob(
                      f"receipts-{self.SESSION}*.jsonl")
-                 if not p.name.endswith((".anchors.jsonl", ".published.jsonl"))]
+                 if not p.name.endswith((".anchors.jsonl", ".published.jsonl",
+                                         ".stamps.jsonl"))]
         self.assertEqual(len(found), 1, found)
         return found[0]
 
@@ -186,6 +195,23 @@ class PublishBase(unittest.TestCase):
 
     def body(self, index=0):
         return json.loads(self.receiver.received[index]["raw"].decode("utf-8"))
+
+    def memo(self):
+        """The publish memo beside the chain, parsed; [] when none."""
+        memo = self.chain().with_name(self.chain().name + ".published.jsonl")
+        if not memo.exists():
+            return []
+        return [json.loads(line) for line in
+                memo.read_text(encoding="utf-8").splitlines()]
+
+    def memo_heads(self):
+        """The memo's head rows: one per head the remote took."""
+        return [row for row in self.memo() if "head" in row]
+
+    def memo_attempts(self):
+        """The memo's attempt rows (#240): how each session-end
+        publish went, sent or not."""
+        return [row for row in self.memo() if row.get("kind") == "attempt"]
 
 
 class PublishAtSessionEndTest(PublishBase):
@@ -214,20 +240,89 @@ class PublishAtSessionEndTest(PublishBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         memo = self.chain().with_name(self.chain().name + ".published.jsonl")
         self.assertTrue(memo.exists(), list(self.chain().parent.iterdir()))
-        (record,) = [json.loads(l) for l in memo.read_text("utf-8").splitlines()]
+        (record,) = self.memo_heads()
         self.assertEqual(record["head"], self.body()["head"])
         self.assertEqual(record["event"], "session-end")
         self.assertNotIn(self.receiver.url, memo.read_text("utf-8"))
 
-    def test_a_failed_publish_leaves_no_memo(self):
+    def test_a_sent_head_leaves_an_attempt_row_beside_the_head_row(self):
+        # #240, the sidecar form: after the step, one row of kind
+        # `attempt` saying how it went, beside the head row and never
+        # one: the step, the time, the budget, the outcome.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+
+        self.session_end("--publish", self.receiver.url)
+
+        self.assertEqual(len(self.memo_heads()), 1)
+        (row,) = self.memo_attempts()
+        self.assertEqual(set(row), {"kind", "step", "ts", "budget", "outcome"})
+        self.assertEqual(row["step"], "publish-head")
+        self.assertEqual(row["outcome"], "sent")
+        self.assertEqual(row["budget"], 3.0)
+        self.assertRegex(row["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_a_failed_publish_leaves_no_head_row_and_says_why(self):
+        # The memo holds no head row for a POST that never landed, so the
+        # keeper still owes this head; it does hold the recorder's one
+        # line on what happened, so the store can say the hook fired
+        # and was refused (#240). Never the URL: it is a credential.
         self.transcript.write_bytes(b"page one\n")
         self.tool_call()
 
         result = self.session_end("--publish", "http://127.0.0.1:9/hook")
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.memo_heads(), [])
+        (row,) = self.memo_attempts()
+        self.assertEqual(row["step"], "publish-head")
+        self.assertEqual(row["budget"], 3.0)
+        self.assertNotEqual(row["outcome"], "sent")
+        self.assertTrue(row["outcome"], "the outcome must say what happened")
         memo = self.chain().with_name(self.chain().name + ".published.jsonl")
-        self.assertFalse(memo.exists())
+        self.assertNotIn("127.0.0.1", memo.read_text("utf-8"))
+        self.assertNotIn("/hook", memo.read_text("utf-8"))
+
+    def test_a_url_the_client_refuses_leaves_its_name_and_never_its_path(self):
+        # http.client refuses a request path holding a control character
+        # and quotes the whole path in its message. The memo rides in
+        # every package and in the raw export, and a webhook's path is
+        # where its token lives, so the row holds the exception's bare
+        # name and neither the host nor the path.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        port = self.receiver.server_address[1]
+        refused = f"http://127.0.0.1:{port}/secret\x01token"
+
+        result = self.session_end("--publish", refused)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.receiver.received, [])
+        self.assertEqual(self.memo_heads(), [])
+        (row,) = self.memo_attempts()
+        self.assertEqual(row["outcome"], "InvalidURL")
+        memo = self.chain().with_name(
+            self.chain().name + ".published.jsonl").read_text("utf-8")
+        for leak in ("127.0.0.1", str(port), "secret", "token", "u0001"):
+            self.assertNotIn(leak, memo)
+
+    def test_a_chain_whose_memo_holds_only_attempt_rows_still_verifies(self):
+        # The memo is beside the chain, not in it: a session whose every
+        # publish failed leaves notes there and nothing on the chain, so
+        # the verdict is the chain's own.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        self.session_end("--publish", "http://127.0.0.1:9/hook")
+        self.assertEqual(self.memo_heads(), [])
+        self.assertEqual(len(self.memo_attempts()), 1)
+
+        verify = run_receipts("verify", "--anchors", "--log",
+                              str(self.chain()), cwd=self.project)
+
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertTrue(verify.stdout.strip().splitlines()[-1]
+                        .startswith("VALID"), verify.stdout)
 
     def test_the_body_is_the_fingerprint_and_never_the_work(self):
         # ADR-0025 ruling 2: head, n, session, ts, event, and one readable
@@ -326,6 +421,11 @@ class PublishAtSessionEndTest(PublishBase):
         self.assertLess(elapsed, self.receiver.delay)
         self.assertEqual(len(self.receiver.received), 1)
         self.assertEqual([d.hex() for d in calendar.submitted], [self.head()])
+        # The abandonment is the outcome the memo records (#240): the
+        # one line the bounded POST produces, and no head row.
+        self.assertEqual(self.memo_heads(), [])
+        (row,) = self.memo_attempts()
+        self.assertEqual(row["outcome"], "no answer within 3 seconds")
 
     def test_a_codex_hook_cuts_the_post_off_inside_codexs_three_seconds(self):
         # Codex caps the whole SessionEnd hook at three seconds, where
@@ -372,11 +472,13 @@ class PublishAtSessionEndTest(PublishBase):
         # cap, where the difference had only half a second to give.
         self.assertLess(codex_took, 3, "Codex would have killed the hook")
         self.assertGreater(codex_took, 1, "the POST was never waited on")
-        # What this cannot prove: that the bound is 1.5 exactly. Any wait
-        # between one second and the cap passes. The 1.5 is a decision
-        # (CODEX_SESSION_END_PUBLISH) and the worst case it buys is a
-        # measurement, both quoted in docs/HOOK.md; this test guards the
-        # property those numbers exist to serve.
+        # What the clock cannot prove, the memo says outright (#240):
+        # each attempt row carries the budget the hook waited under,
+        # the decision (CODEX_SESSION_END_PUBLISH) quoted in docs/HOOK.md.
+        # Any wait between one second and the cap passes the clock
+        # above; the rows pin the two bounds themselves.
+        self.assertEqual([row["budget"] for row in self.memo_attempts()],
+                         [3.0, 1.5])
         last = json.loads(self.chain().read_text(
             encoding="utf-8").splitlines()[-1])
         self.assertTrue(last["action"].startswith("transcript-commitment:"))
@@ -432,7 +534,10 @@ class InstallPublishHeadTest(unittest.TestCase):
     """`install-hook --publish-head URL` writes `--publish URL` onto the
     wired SessionEnd command, the way `--anchor-at-session-end` writes
     `--anchor` (ADR-0024 ruling 1, ADR-0025 ruling 3): readable in the
-    settings file, idempotent, removed by `uninstall-hook`."""
+    settings file, idempotent, removed by `uninstall-hook`. The profile
+    (ADR-0031 ruling 1) is the one word for a set of those flags, and
+    its install cases live here too: each tier's wired command, the
+    refusals, the ladder, and Codex's lines."""
 
     URL = "https://hooks.example.test/services/T000/B000/XXXX"
 
@@ -442,7 +547,14 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.root = Path(self._tmp.name).resolve()
         self.home = self.root / "home"
         (self.home / ".claude").mkdir(parents=True)
-        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home)}
+        # A private store, so the coverage marker the installer writes
+        # (ADR-0030) lands here and never in the developer's own.
+        self.store = self.root / "store"
+        # CODEX_HOME inside the temp home too: a machine that sets it
+        # would otherwise get this test's hooks in its real hooks.json.
+        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
+                    "LOXODONTA_HOME": str(self.store),
+                    "CODEX_HOME": str(self.home / ".codex")}
 
     def install(self, *args):
         return run_receipts("install-hook", *args, cwd=self.root,
@@ -455,6 +567,72 @@ class InstallPublishHeadTest(unittest.TestCase):
     def commands(self, event):
         return [h["command"] for b in self.settings()["hooks"][event]
                 for h in b["hooks"]]
+
+    def test_profile_timestamped_is_the_session_end_anchor_under_one_word(self):
+        # ADR-0031 ruling 1: the tier name is the beginner's word and the
+        # mechanism keeps its own. `--profile timestamped` wires exactly
+        # the SessionEnd command `--anchor-at-session-end` wires, and the
+        # installer states the choice in the mechanism's words.
+        result = self.install("--profile", "timestamped")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertTrue(end.endswith(" --anchor"), end)
+        self.assertNotIn("--anchor", json.dumps(self.commands("PostToolUse")))
+        self.assertIn("anchors at session end", result.stdout)
+
+        # The raw flag finds nothing to rewire: same command, same install.
+        by_flag = self.install("--anchor-at-session-end")
+        self.assertEqual(by_flag.returncode, 0, by_flag.stderr)
+        self.assertIn("already installed", by_flag.stdout)
+        self.assertEqual(self.commands("SessionEnd"), [end])
+
+    def test_a_raw_flag_beside_a_named_profile_is_refused_naming_custom(self):
+        # A profile already says what leaves the machine; a raw flag
+        # beside it is a command spoken wrong (exit 64, ADR-0026 ruling
+        # 7), and the refusal names the way out.
+        for spoken_wrong in (("--profile", "timestamped",
+                              "--anchor-at-session-end"),
+                             ("--profile", "local",
+                              "--publish-head", self.URL),
+                             ("--profile", "timestamped",
+                              "--publish-head", self.URL)):
+            result = self.install(*spoken_wrong)
+            self.assertEqual(result.returncode, 64, result.stderr)
+            self.assertIn("--profile custom", result.stderr)
+            self.assertFalse((self.home / ".claude" / "settings.json").exists(),
+                             "a refusal writes nothing")
+
+    def test_profile_custom_is_the_raw_flags_exactly_as_before(self):
+        result = self.install("--profile", "custom", "--anchor-at-session-end",
+                              "--publish-head", self.URL)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertTrue(end.endswith(f' --anchor --publish "{self.URL}"'), end)
+        self.assertIn("anchors at session end", result.stdout)
+        self.assertIn(self.URL, result.stdout)
+        # The same flags with the word left off are the same install.
+        again = self.install("--anchor-at-session-end",
+                             "--publish-head", self.URL)
+        self.assertIn("already installed", again.stdout)
+        # `custom` with no raw flag at all wires nothing that leaves.
+        bare = self.install("--profile", "custom")
+        self.assertEqual(bare.returncode, 0, bare.stderr)
+        [end] = self.commands("SessionEnd")
+        self.assertNotIn("--anchor", end)
+        self.assertNotIn("--publish", end)
+
+    def test_profile_full_without_a_remote_is_a_usage_error(self):
+        # The strongest tier is the two publishes to a URL the operator
+        # names (ADR-0031 ruling 1), so there is no such tier without
+        # one: refused, exit 64, nothing written. What the refusal says
+        # is pinned in test_publish_chain.InstallProfileFullTest.
+        result = self.install("--profile", "full")
+
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("--remote", result.stderr)
+        self.assertFalse((self.home / ".claude" / "settings.json").exists())
 
     def test_publish_head_rides_on_the_session_end_command(self):
         result = self.install("--publish-head", self.URL)
@@ -482,43 +660,85 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("no longer", result.stdout)
         self.assertIn("publish", result.stdout)
 
-    def test_a_flagless_install_says_no_head_record_is_wired(self):
-        # ADR-0002's tiers: an edit, a deletion, or a reorder is caught
-        # unconditionally; a regenerated chain only against a head kept
-        # off the machine. A plain install is the lower tier, and the
-        # installer says so, on first install and on every re-run (#221).
+    def ladder(self, stdout):
+        """The tier rows the installer printed, keyed by tier name."""
+        rows = [line for line in stdout.splitlines()
+                if line.startswith("  local ")
+                or line.startswith("  timestamped ")
+                or line.startswith("  full ")]
+        return {row.split()[0]: row for row in rows}
+
+    def test_a_flagless_install_prints_the_ladder(self):
+        # ADR-0031 ruling 1: the flagless install is `local`, and the
+        # installer prints the ladder in place of #221's note, one row
+        # per tier the operator can reach, each naming its flag and
+        # what leaves. The `local` row keeps #221's sentence: a
+        # regenerated chain is caught only against a head kept off the
+        # machine, and the `full` row the phrase that says what the
+        # strongest tier does and does not promise (#249). Printed on
+        # first install and on every re-run.
         first = self.install()
+
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertIn("no head record", first.stdout)
-        self.assertIn("--publish-head", first.stdout)
+        self.assertIn("wired: Claude Code, every tool call, profile local",
+                      first.stdout)
+        ladder = self.ladder(first.stdout)
+        self.assertEqual(sorted(ladder), ["full", "local", "timestamped"])
+        self.assertIn("a regenerated chain only against a head you keep "
+                      "(`head`, then `verify --expect-head`)",
+                      ladder["local"])
+        self.assertIn("--profile timestamped", ladder["timestamped"])
+        self.assertIn("a 32-byte digest leaves at each session end",
+                      ladder["timestamped"])
+        self.assertIn("once the anchor matures", ladder["timestamped"])
+        # The third rung, word for word as ratified in the #244 grill:
+        # the flag that reaches the tier, and the claim in the
+        # phrase the PRD fixed so it is never rewritten looser.
+        self.assertEqual(ladder["full"], FULL_LADDER_ROW)
+        self.assertIn("as of the last send", ladder["full"])
+        # The ladder is the only notice: #221's line is gone.
+        self.assertNotIn("no head record", first.stdout)
+        self.assertNotIn("note:", first.stdout)
 
         again = self.install()
         self.assertIn("already installed", again.stdout)
-        self.assertIn("no head record", again.stdout)
+        self.assertEqual(self.ladder(again.stdout), ladder)
 
-    def test_an_install_with_an_opt_in_says_nothing_about_the_tier(self):
-        # Either opt-in is a rememberer off the machine: the published
-        # head (ADR-0025) or the anchor (ADR-0024). The line is for the
-        # install that has neither.
+    def test_an_install_above_local_reads_its_profile_back_without_the_ladder(self):
+        # The ladder is for the install that reached no tier above
+        # `local`; any other install states its profile in one line.
         with_publish = self.install("--publish-head", self.URL)
         self.assertEqual(with_publish.returncode, 0, with_publish.stderr)
-        self.assertNotIn("no head record", with_publish.stdout)
+        self.assertIn("profile custom", with_publish.stdout)
+        self.assertEqual(self.ladder(with_publish.stdout), {})
 
-        with_anchor = self.install("--anchor-at-session-end")
-        self.assertEqual(with_anchor.returncode, 0, with_anchor.stderr)
-        self.assertNotIn("no head record", with_anchor.stdout)
+        timestamped = self.install("--profile", "timestamped")
+        self.assertEqual(timestamped.returncode, 0, timestamped.stderr)
+        self.assertIn("profile timestamped", timestamped.stdout)
+        self.assertEqual(self.ladder(timestamped.stdout), {})
 
-    def test_a_flagless_codex_install_names_only_the_opt_in_codex_has(self):
-        # Codex refuses the session-end anchor (ADR-0024), so its line
-        # names --publish-head alone.
+    def test_a_flagless_codex_install_prints_the_ladder_in_codexs_terms(self):
+        # Codex refuses the session-end anchor (ADR-0024), so its
+        # `timestamped` row says the digest leaves on the supervisor's
+        # cadence and never names the flag Codex cannot take.
         (self.home / ".codex").mkdir()
 
         result = self.install("--codex")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("no head record", result.stdout)
-        self.assertIn("--publish-head", result.stdout)
+        self.assertIn("wired: Codex, every tool call, profile local",
+                      result.stdout)
+        ladder = self.ladder(result.stdout)
+        self.assertEqual(sorted(ladder), ["full", "local", "timestamped"])
+        self.assertIn("--profile timestamped", ladder["timestamped"])
+        self.assertIn("supervisor", ladder["timestamped"])
+        self.assertIn("cadence", ladder["timestamped"])
+        # The `full` row is the same on both harnesses: what it
+        # promises is the two publishes, which Codex does wire, and it
+        # names no anchor, which Codex does not.
+        self.assertEqual(ladder["full"], FULL_LADDER_ROW)
         self.assertNotIn("--anchor-at-session-end", result.stdout)
+        self.assertNotIn("no head record", result.stdout)
 
     def test_both_opt_ins_ride_on_the_one_command(self):
         result = self.install("--anchor-at-session-end",
@@ -607,6 +827,36 @@ class InstallPublishHeadTest(unittest.TestCase):
         self.assertIn("publish", result.stdout)
         self.assertEqual(len([h for b in self.codex_hooks()["SessionEnd"]
                               for h in b["hooks"]]), 1)
+
+    def test_codex_profile_timestamped_records_the_profile_and_wires_no_anchor(self):
+        # ADR-0031 ruling 1 on Codex: the profile is written down, the
+        # session-end anchor stays refused (ADR-0024: three seconds is a
+        # POST, not a calendar round trip), so nothing extra is wired and
+        # the notice says the supervisor anchors on its cadence.
+        (self.home / ".codex").mkdir()
+
+        result = self.install("--codex", "--profile", "timestamped")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hooks = self.codex_hooks()
+        [end] = [h for b in hooks["SessionEnd"] for h in b["hooks"]]
+        self.assertNotIn("--anchor", end["command"])
+        self.assertEqual(end["timeout"], 3)
+        marker = json.loads((self.store / "coverage.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual((marker["epochs"][-1]["harness"],
+                          marker["epochs"][-1]["profile"]),
+                         ("codex", "timestamped"))
+        self.assertIn("profile timestamped", result.stdout)
+        self.assertIn("supervisor", result.stdout)
+        self.assertIn("cadence", result.stdout)
+        self.assertNotIn("--anchor-at-session-end", result.stdout)
+        # Not a tier reached by a flag Codex refuses: the raw flag is
+        # still refused, profile or no profile.
+        refused = self.install("--codex", "--profile", "custom",
+                               "--anchor-at-session-end")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("--anchor-every", refused.stderr)
 
     def test_codex_still_refuses_the_session_end_anchor(self):
         # #183 measured a POST, not a calendar round trip: the anchor's

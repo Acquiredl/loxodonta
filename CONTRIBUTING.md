@@ -47,8 +47,17 @@ The repo enforces its own vocabulary. `tools/house_check.py` fails on the
 GLOSSARY anti-terms anywhere (the refutation form, "not immutable", is
 allowed), on em dashes in the front-door files (README, SECURITY,
 CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT), and on overclaim words there
-("prove", "guarantee", "always"); elsewhere those words only warn. CI runs
-exactly this command, so passing it locally is passing CI:
+("prove", "guarantee", "always"); elsewhere those words only warn. It also
+fails on the tool's old name (ADR-0010) where it can only mean the tool:
+the old command written as code, the old script run with `python`, or the
+old name after "the" or "a" and before "tool", "CLI", "command" or
+"recorder". Prose is not judged, since there the
+word means the receipts themselves as often as the tool, and the history,
+the changelog, the tours and the ADRs from before the rename keep the old
+name. The words the GLOSSARY refuses for its own terms, such as a "chain
+backup" for the published chain or "a bundle" for the package, fail in the
+front-door files and in the code and warn elsewhere. CI runs exactly this
+command, so passing it locally is passing CI:
 
 ```
 python tools/house_check.py
@@ -126,20 +135,22 @@ not. When unsure, open an issue and ask; the answer is usually short.
 
 ## Releases
 
-Every promotion of `dev` to `main` gets a tag and a GitHub release carrying
-`loxodonta.py`, `supervisor.py`, and a `SHA256SUMS` file over both, so a
-person can check the file they downloaded against what was published
-(ADR-0022). The tool version is semantic and decoupled from the receipt
+Every promotion of `dev` to `main` that moves the tools gets a tag and a
+GitHub release carrying
+`loxodonta.py`, `supervisor.py`, `receiver.py`, and a `SHA256SUMS` file over
+the three, so a person can check the file they downloaded against what was
+published (ADR-0022). A promotion that changes none of the three files
+carries no tag and no release (ADR-0028). The tool version is semantic and decoupled from the receipt
 format, which stays at `0.1`. The ritual, in order:
 
 1. Branch a throwaway `promote/<date>` from `dev` and open a pull request
    from it into `main`.
 2. In that pull request, move the entries under `## [Unreleased]` in
    `CHANGELOG.md` to a new `## [x.y.z] - YYYY-MM-DD` heading, add the
-   version's compare link at the bottom, and bump `TOOL_VERSION` in both
-   `loxodonta.py` and `supervisor.py` to `x.y.z`. Minor per promotion;
-   patch for a hotfix cherry-picked to `main`. The two files carry one
-   version and the suite checks that they agree.
+   version's compare link at the bottom, and bump `TOOL_VERSION` in
+   `loxodonta.py`, `supervisor.py` and `receiver.py` to `x.y.z`. Minor per
+   promotion; patch for a hotfix cherry-picked to `main`. The three files
+   carry one version and the suite checks that they agree.
 3. Merge the pull request once the suite and the house checker are green.
 4. On `main`, tag the merge commit `vx.y.z` and push the tag:
 
@@ -148,11 +159,11 @@ format, which stays at `0.1`. The ritual, in order:
    ```
 
 5. CI takes it from there (`.github/workflows/release.yml`): it checks the
-   tag against `TOOL_VERSION` in both files, builds `SHA256SUMS`, takes the
-   matching CHANGELOG section as the notes, and publishes the release with
-   the three files attached. A mismatched tag or a missing section stops
+   tag against `TOOL_VERSION` in all three files, builds `SHA256SUMS`, takes
+   the matching CHANGELOG section as the notes, and publishes the release
+   with the four files attached. A mismatched tag or a missing section stops
    the release.
-6. Check the sums once by hand. Download the three files from the release
+6. Check the sums once by hand. Download the four files from the release
    page into an empty folder and run:
 
    ```
@@ -160,7 +171,7 @@ format, which stays at `0.1`. The ritual, in order:
    ```
 
    On Windows, `certutil -hashfile loxodonta.py SHA256` (and the same for
-   `supervisor.py`) prints each sum; compare it by eye with the line in
+   `supervisor.py` and `receiver.py`) prints each sum; compare it by eye with the line in
    `SHA256SUMS`. If a sum disagrees, the release is wrong, not the file:
    delete the release and the tag, find out why, and cut it again.
 7. Close the issues the release finished. Nothing here closes itself: a
