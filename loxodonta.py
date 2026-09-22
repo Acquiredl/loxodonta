@@ -209,7 +209,16 @@ def locked_out(log):
 
 
 def tail_entry(lines):
-    """The chain's final entry, or None if the tail is damaged."""
+    """The chain's final entry, or None if the tail is damaged. Two shapes
+    of damage, both innocent (ADR-0004): a torn tail, the line left
+    partial by a crash or an overlapping append; and a forked tail, a
+    well-formed entry whose `n` is not its line number, which is what a
+    lock taken from a paused holder leaves behind: two entries claiming
+    one `n`. Neither can be built on. A new entry laid over a fork would
+    bury an innocent race under later receipts until it read as
+    tampering in the middle of the file, so the fork ends the chain the
+    way a tear does, and damage stays at the tail, where the readers
+    that name it honestly expect it (SPEC §6, §8)."""
     if not lines:
         return None
     try:
@@ -217,6 +226,8 @@ def tail_entry(lines):
     except json.JSONDecodeError:
         return None
     if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+        return None
+    if last["n"] != len(lines) - 1:
         return None
     return last
 
@@ -360,7 +371,7 @@ def append_locked(log, actor, action, files):
     # A new entry chains to the tail; a damaged tail cannot anchor one.
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {log} has a damaged final line — run `loxodonta verify` "
+        print(f"error: {log} has a damaged tail — run `loxodonta verify` "
               "(appending would bury the damage)", file=sys.stderr)
         return 1
 
@@ -429,7 +440,7 @@ def cmd_head(args):
         return 1
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged final line — run "
+        print(f"error: {args.log} has a damaged tail — run "
               "`loxodonta verify` (a torn tail has no head to record)",
               file=sys.stderr)
         return 1
@@ -1490,7 +1501,7 @@ def cmd_publish(args):
         return 1
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged final line — run "
+        print(f"error: {args.log} has a damaged tail — run "
               "`loxodonta verify` before publishing", file=sys.stderr)
         return 1
     head, n = last["entry_hash"], last["n"]
@@ -1759,7 +1770,7 @@ def cmd_stamp(args):
         return 1
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged final line — run "
+        print(f"error: {args.log} has a damaged tail — run "
               "`loxodonta verify` before stamping", file=sys.stderr)
         return 1
     return stamp_digest(args.log, last["entry_hash"], last["n"],
@@ -1834,7 +1845,7 @@ def cmd_anchor(args):
         return 1
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged final line — run "
+        print(f"error: {args.log} has a damaged tail — run "
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
     return submit_digest(args.log, last["entry_hash"], last["n"],
@@ -3692,7 +3703,8 @@ def record_project(log_dir, project):
 
 
 def chain_is_damaged(log):
-    """True when the log exists but cannot be extended — a torn tail."""
+    """True when the log exists but cannot be extended: a torn tail, or
+    a forked one (`tail_entry`)."""
     try:
         lines = read_log(log)
     except OSError:
