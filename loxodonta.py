@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.7.0"
+TOOL_VERSION = "0.8.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
