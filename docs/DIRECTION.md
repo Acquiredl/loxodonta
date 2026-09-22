@@ -70,8 +70,8 @@ all required (ADR-0022, addendum of 2026-09-21):
 
 1. **The verifier.** `verifier.py`, copied out of the recorder and never
    imported by it (ADR-0035); conformance vectors that pass on both files;
-   a walk that refuses a duplicate key and a wrong-typed field by name;
-   and a SPEC that states every property the verifier relies on, the
+   a walk that refuses a duplicate key and a wrong-typed field by name
+   (done, #285); and a SPEC that states every property the verifier relies on, the
    sidecars and the package included, beside what the design cannot claim.
 2. **The second-record contract at `/1`**, which means the second vertical
    is complete.
@@ -85,8 +85,8 @@ The order:
 - **0.8.0** ships what `dev` already holds.
 - **0.9.x**, for as long as it takes. First the foundation:
   - the verifier arc of ADR-0035: the reorder, alone and
-    behaviour-preserving; `verify_log` as the real function; the stricter
-    walk; the vectors; then the copy;
+    behaviour-preserving; `verify_log` as the real function; the vectors;
+    then the copy (the stricter walk is already in, #285);
   - one typed way to read a sidecar row inside that region, with the rows
     written before rows carried a kind still read, in one place;
   - the SPEC's growth: the sidecars and the package as normative text, the
@@ -170,33 +170,36 @@ The crosswalk from each term to the nearest standard term is
 (the package's `witness.json`, the completeness state words) is cheap only
 before 1.0 freezes it.
 
-## 9. Ruled, and not yet built
+## 9. Ruled, and built
 
-- **A forked chain ends like a torn one.** A lock can be taken from a
-  holder that was paused and not dead (ADR-0004 names the trade). Tested
-  on 2026-09-20: where the operating system lets the lock file go, the
-  result is two entries claiming one `n`, and because the tail still
-  parses no sibling chain starts, so an innocent race is buried under
-  later receipts and reads as tampering in the middle of the file. Ruled
-  2026-09-21: a chain whose tail's `n` is not its line count less one
-  cannot be extended either. The hook starts a sibling, and `log` and
-  `run` refuse as they do for a torn tail. Damage ends a chain, never the
-  recording, and innocent damage stays at the tail where the glossary
-  says it lives. SPEC section 8 states the race and this bound; ADR-0004
-  takes an addendum when the code lands.
-- **An append reaches the disk before it is reported.** Today `logged
-  entry N` can sit in the operating system's cache, while the receiver
-  already syncs before it answers. Measured on the author's machine on
-  2026-09-20: 2.2 ms per append where the store lives, 0.6 ms on a second
-  drive, 6.1 ms on Linux, against about 135 ms for a hook call end to
-  end. The published work says nothing specific about it
-  ([GROUNDING.md](GROUNDING.md) section 2). Ruled 2026-09-21: every
-  append, the genesis included, is followed by an `fsync` inside the
-  lock. A crash that loses receipts reads at the witness exactly as a
-  killed hook does, and an innocent loss should not wear that face. SPEC
-  section 1 gains the sentence beside its single-write rule, and names
-  what is left: on POSIX, the directory entry of a chain created a moment
-  before the power went.
+Two engineering rulings from the same grill, both tested on 2026-09-20
+and both on `dev` since 2026-09-22. They stay here because the reasoning
+is the direction's, not only the code's.
+
+- **A forked chain ends like a torn one** (#286, ADR-0004 addendum). A
+  lock can be taken from a holder that was paused and not dead, and where
+  the operating system lets the lock file go, two entries claim one `n`.
+  Because that tail still parsed, no sibling started and an innocent race
+  was buried under later receipts until it read as tampering mid-file. A
+  chain whose final entry's `n` is not its line number is damage now: the
+  hook starts a sibling, the writing verbs refuse, and innocent damage
+  stays at the tail where the glossary says it lives. SPEC section 8
+  states the race and the bound.
+- **An append reaches the disk before it is reported** (#287). `logged
+  entry N` could be printed while the entry sat in the operating system's
+  cache, while the receiver already synced before answering. Every chain
+  write is pushed to the disk inside the lock before the report: about
+  2 ms where the store lives against about 135 ms for a hook call, and
+  within noise end to end. A crash that lost a written receipt read at the
+  witness exactly as a killed hook does, and an innocent loss should not
+  wear that face. The published work says nothing specific about it
+  ([GROUNDING.md](GROUNDING.md) section 2). SPEC section 1 states the rule
+  and what remains outside it.
+
+Landed beside them, from the same review: the batch-cap knob read when a
+send needs it and never at import (#284), and the walk that refuses a key
+given twice and a wrong-typed field by name (#285), which section 4
+listed under the verifier arc and which is done ahead of it.
 
 ## 10. Where the decisions live
 
