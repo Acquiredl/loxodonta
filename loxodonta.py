@@ -331,6 +331,23 @@ def append_entry(log, actor, action, file_paths):
         return locked_out(log)
 
 
+def referenced_paths(lines):
+    """Every path the chain's entries reference, read tolerantly: this
+    feeds a write-time warning, and a line that is not an entry is
+    `verify`'s to name, not a reason for `log` to crash."""
+    paths = set()
+    for line in lines:
+        try:
+            refs = json.loads(line).get("files")
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(refs, list):
+            paths.update(ref["path"] for ref in refs
+                         if isinstance(ref, dict)
+                         and isinstance(ref.get("path"), str))
+    return paths
+
+
 def append_locked(log, actor, action, files):
     """The critical section of `append_entry` — callers must hold the lock."""
     try:
@@ -355,8 +372,7 @@ def append_locked(log, actor, action, files):
     # none, and those append without paying for it (#222; 19 ms on a
     # 3,878-entry chain, against 55 ms of interpreter start).
     if files:
-        known_paths = {ref["path"] for line in lines
-                       for ref in json.loads(line)["files"]}
+        known_paths = referenced_paths(lines)
         for ref in files:
             for known in known_paths:
                 if ref["path"] != known and ref["path"].lower() == known.lower():
@@ -2236,11 +2252,60 @@ def check_stamps(log, entries, chain_file):
     return bad
 
 
+class KeyGivenTwice(ValueError):
+    """A JSON object that names one key twice. A last-wins reader (this
+    one) and a first-wins reader see two different lines, and a hash that
+    holds under one reading says nothing under the other; no reading of
+    such a line is an entry (SPEC §6 step 1)."""
+
+    def __init__(self, key):
+        super().__init__(key)
+        self.key = key
+
+
+def object_with_each_key_once(pairs):
+    """The dict of a JSON object's pairs, refusing a key given twice at
+    any depth (json's object_pairs_hook is called for every object)."""
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise KeyGivenTwice(key)
+        seen[key] = value
+    return seen
+
+
+def shape_problem(entry):
+    """The first way `entry`'s values fail SPEC §2's types, named; None
+    when each is of its type. Type only: whether a string is hex, or a
+    timestamp well-formed, is the hash comparison's and the reader's
+    business, and a mistyped value is what makes a reader crash."""
+    n = entry.get("n")
+    if isinstance(n, bool) or not isinstance(n, int):
+        return "n is not an integer"
+    for field in ("ts", "actor", "action"):
+        value = entry.get(field)
+        if not isinstance(value, str) or not value:
+            return f"{field} is not a non-empty string"
+    if not isinstance(entry.get("entry_hash"), str):
+        return "entry_hash is not a string"
+    prev = entry.get("prev")
+    if prev is not None and not isinstance(prev, str):
+        return "prev is not a string or null"
+    files = entry.get("files")
+    if not isinstance(files, list):
+        return "files is not an array"
+    for ref in files:
+        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}                 or not all(isinstance(value, str) for value in ref.values()):
+            return "files holds something that is not a reference"
+    return None
+
+
 def walk(lines):
     """The mechanical walk of SPEC §6, shared by verify (which judges) and
     report (which narrates). Returns (entries, breaks, warns): entries[n] is
-    the parsed entry or None where the line is unparseable; breaks and warns
-    are (n, message) lists in walk order."""
+    the parsed entry or None where the line is unparseable or is not the
+    shape of an entry; breaks and warns are (n, message) lists in walk
+    order."""
     entries = []
     breaks = []
     warns = []
@@ -2248,7 +2313,13 @@ def walk(lines):
     prev_ts = None
     for n, line in enumerate(lines):
         try:
-            entry = json.loads(line)
+            entry = json.loads(line, object_pairs_hook=object_with_each_key_once)
+        except KeyGivenTwice as twice:
+            breaks.append((n, f"BROKEN at entry {n}: key {twice.key!r} "
+                              "given twice"))
+            entries.append(None)
+            prev_hash = None
+            continue
         except json.JSONDecodeError:
             if n == len(lines) - 1:
                 # The one honest damage signature: a crash mid-append can
@@ -2265,12 +2336,26 @@ def walk(lines):
             entries.append(None)
             prev_hash = None
             continue
-        entries.append(entry)
         expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
         if set(entry) != expected_fields:
             odd = set(entry) ^ expected_fields
             breaks.append((n, f"BROKEN at entry {n}: schema mismatch: "
                               f"{', '.join(sorted(odd))}"))
+        # The right field names and the right hash do not make an entry
+        # when a value is the wrong type (SPEC §6 step 1): a `files` that
+        # is a string would crash every reader that resolves references.
+        # The line is refused by name and carried as None, so nothing
+        # downstream touches it; the chain rule carries on from its
+        # stored hash where that is a string, so the next line is judged
+        # on its own account.
+        wrong = shape_problem(entry)
+        if wrong is not None:
+            breaks.append((n, f"BROKEN at entry {n}: {wrong}"))
+            entries.append(None)
+            stored = entry.get("entry_hash")
+            prev_hash = stored if isinstance(stored, str) else None
+            continue
+        entries.append(entry)
         if entry.get("n") != n:
             breaks.append((n, f"BROKEN at entry {n}: sequence number is "
                               f"{entry.get('n')}, expected {n}"))
