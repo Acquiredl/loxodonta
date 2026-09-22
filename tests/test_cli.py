@@ -1360,3 +1360,29 @@ class UsageExitTest(ReceiptsCliTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnvironmentKnobTest(ReceiptsCliTest):
+    """The batch cap knob (LOXODONTA_CHAIN_BATCH_BYTES) is the test
+    suite's handle on the publish path. A value that is not a number must
+    not reach further than that path: every verb runs, and the knob falls
+    back to its default the way LOXODONTA_LOCK_TIMEOUT already does."""
+
+    def run_with_knob(self, value, *args):
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), *args],
+            cwd=self.workdir, capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                 "LOXODONTA_CHAIN_BATCH_BYTES": value})
+
+    def test_a_garbage_batch_cap_does_not_stop_the_other_verbs(self):
+        run_receipts("init", cwd=self.workdir)
+
+        for verb in (["--version"], ["verify"],
+                     ["log", "--actor", "agent", "--action", "still runs"]):
+            result = self.run_with_knob("eight-megs", *verb)
+            self.assertEqual(result.returncode, 0,
+                             " ".join(verb) + ": " + result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr, " ".join(verb))
+        self.assertEqual(len(self.log_path.read_text(encoding="utf-8")
+                             .splitlines()), 2, "the log verb appended")

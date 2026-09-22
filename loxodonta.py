@@ -1150,8 +1150,20 @@ CHAIN_KIND = "chain"
 # which refuses a longer body on its Content-Length before reading any
 # of it. The env knob is the test suite's handle -- a batching rule that
 # only runs above 8 MiB is a contract no test could reach.
-CHAIN_BATCH_CAP = int(os.environ.get("LOXODONTA_CHAIN_BATCH_BYTES",
-                                     8 * 1024 * 1024))
+CHAIN_BATCH_CAP = 8 * 1024 * 1024   # override: LOXODONTA_CHAIN_BATCH_BYTES
+
+
+def chain_batch_cap():
+    """The cap, read when a send needs it and not at import: a knob that
+    only the publish path reads must not be able to stop `verify` or
+    `--version`. A value that is not a positive number is the default,
+    the way `lock_timeout` treats its own knob."""
+    try:
+        cap = int(os.environ.get("LOXODONTA_CHAIN_BATCH_BYTES",
+                                 CHAIN_BATCH_CAP))
+    except ValueError:
+        return CHAIN_BATCH_CAP
+    return cap if cap > 0 else CHAIN_BATCH_CAP
 
 
 def is_chain_record(record):
@@ -1225,7 +1237,7 @@ def chain_cursor(log, url):
     return cursor
 
 
-def chain_batch(entries, cursor, cap=CHAIN_BATCH_CAP):
+def chain_batch(entries, cursor, cap):
     """The next batch after `cursor`: (body, first, last, head), or None
     when nothing is left to send. Lines are taken in order while the
     body stays under the cap. The first line goes in whatever its size,
@@ -1311,7 +1323,7 @@ def publish_chain(log, url, session, timeout, event):
         # attempt row carries it (the head route guards its read the
         # same way).
         return None, "the memo could not be read"
-    cap = CHAIN_BATCH_CAP
+    cap = chain_batch_cap()
     deadline = time.monotonic() + timeout
     sent = None
     while True:
