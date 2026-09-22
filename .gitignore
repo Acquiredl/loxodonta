@@ -9,6 +9,7 @@ DOGFOOD.md
 dogfood.py
 METACOG.md
 POSITIONING.md
+RESEARCH.md
 
 # drill sandbox, if a reader runs `supervisor drill` inside the repo
 .supervisor-drill/
