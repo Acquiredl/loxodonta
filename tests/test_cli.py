@@ -1386,3 +1386,115 @@ class EnvironmentKnobTest(ReceiptsCliTest):
             self.assertNotIn("Traceback", result.stderr, " ".join(verb))
         self.assertEqual(len(self.log_path.read_text(encoding="utf-8")
                              .splitlines()), 2, "the log verb appended")
+
+
+class ShapeTest(TamperTest):
+    """SPEC section 6 step 1, as sharpened on 2026-09-21: a line parses as
+    an object with exactly the schema fields, each once, each of its
+    section 2 type. A line can carry the right field names and the right
+    hash and still not be an entry: a key given twice (a reader keeping
+    the last one hashes clean and a reader keeping the first one sees
+    another action), or a field of the wrong type. Each is BROKEN by
+    name, never VALID and never a traceback, on every reader."""
+
+    def rehashed(self, index, mutate):
+        """Entry `index` with `mutate` applied and its hash recomputed,
+        so only the shape rule can catch it."""
+        lines = self.read_lines()
+        entry = json.loads(lines[index])
+        del entry["entry_hash"]
+        mutate(entry)
+        entry["entry_hash"] = spec_hash(entry)
+        lines[index] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        self.write_lines(lines)
+
+    def test_a_key_given_twice_is_broken_by_name(self):
+        # Python's json keeps the last value, so the hash still matches;
+        # a first-wins reader sees the other action. Neither reading is
+        # an entry.
+        lines = self.read_lines()
+        lines[2] = ('{"action":"rm -rf / (what a first-wins reader sees)",'
+                    + lines[2][1:])
+        self.write_lines(lines)
+
+        result = self.assert_broken(at_entry=2)
+        self.assertIn("action", result.stdout)
+        self.assertIn("twice", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_key_given_twice_inside_a_file_reference_is_broken(self):
+        lines = self.read_lines()
+        entry = json.loads(lines[1])
+        del entry["entry_hash"]
+        entry["files"] = [{"path": "a.txt", "sha256": "0" * 64}]
+        entry["entry_hash"] = spec_hash(entry)
+        line = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        lines[1] = line.replace('{"path":"a.txt"', '{"path":"b.txt","path":"a.txt"')
+        self.write_lines(lines)
+
+        result = self.assert_broken(at_entry=1)
+        self.assertIn("path", result.stdout)
+        self.assertIn("twice", result.stdout)
+
+    def test_each_wrong_typed_field_is_broken_by_name(self):
+        cases = [
+            ("n is not an integer", "n", True),
+            ("n is not an integer", "n", 1.0),
+            ("n is not an integer", "n", "1"),
+            ("ts is not a non-empty string", "ts", 5),
+            ("actor is not a non-empty string", "actor", None),
+            ("actor is not a non-empty string", "actor", ""),
+            ("action is not a non-empty string", "action", None),
+            ("action is not a non-empty string", "action", ""),
+            ("files is not an array", "files", "not-a-list"),
+            ("files holds something that is not a reference", "files", [7]),
+            ("files holds something that is not a reference", "files",
+             [{"path": "a", "sha256": 3}]),
+            ("files holds something that is not a reference", "files",
+             [{"path": "a"}]),
+            ("prev is not a string or null", "prev", 12),
+        ]
+        for rule, field, value in cases:
+            with self.subTest(field=field, value=value):
+                self.setUp()
+                self.rehashed(1, lambda e: e.__setitem__(field, value))
+
+                result = self.assert_broken(at_entry=1)
+                self.assertIn(rule, result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_wrong_typed_entry_hash_is_broken_not_a_crash(self):
+        lines = self.read_lines()
+        entry = json.loads(lines[1])
+        entry["entry_hash"] = 12345
+        lines[1] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        self.write_lines(lines)
+
+        result = self.assert_broken(at_entry=1)
+        self.assertIn("entry_hash", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_null_prev_after_genesis_is_broken_by_the_chain_rule_not_a_crash(self):
+        self.rehashed(1, lambda e: e.__setitem__("prev", None))
+
+        result = self.assert_broken(at_entry=1)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_no_reader_crashes_on_a_wrong_typed_chain(self):
+        # The readers that do more than walk: --files resolves references,
+        # report narrates, log --file scans every earlier reference for a
+        # case-only respelling. Each judged the chain by its type before
+        # this ruling and crashed on a string where a list was promised.
+        self.rehashed(1, lambda e: e.__setitem__("files", "not-a-list"))
+        self.rehashed(2, lambda e: e.__setitem__("ts", 5))
+        (self.workdir / "a.txt").write_text("x", encoding="utf-8")
+
+        for verb in (["verify", "--files"], ["report"],
+                     ["log", "--actor", "agent", "--action", "after",
+                      "--file", "a.txt"]):
+            result = run_receipts(*verb, cwd=self.workdir)
+            self.assertNotIn("Traceback", result.stderr, " ".join(verb))
+        verify = run_receipts("verify", "--files", cwd=self.workdir)
+        self.assertEqual(verify.returncode, 1, verify.stdout + verify.stderr)
+        self.assertIn("BROKEN at entry 1", verify.stdout)
+        self.assertIn("BROKEN at entry 2", verify.stdout)

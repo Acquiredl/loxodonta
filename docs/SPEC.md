@@ -108,7 +108,7 @@ The **chain head** is the `entry_hash` of the last entry. It commits to the enti
 
 `verify` walks the file top to bottom. Before anything else it reads the genesis entry's `v` (§2.1) and refuses cleanly if it doesn't speak that version. Then it checks, per entry:
 
-1. The line parses as JSON with exactly the schema fields (genesis: plus `v`).
+1. The line parses as a JSON object with exactly the schema fields (genesis: plus `v`), each given once, each of its §2 type: `n` an integer (never a boolean or a float), `ts`, `actor` and `action` non-empty strings, `files` an array of `{path, sha256}` objects with string values and no other keys, `prev` a string or `null`, `entry_hash` a string. A line that fails this is refused by name (`BROKEN at entry N: key 'action' given twice`, `BROKEN at entry N: files is not an array`) and is not an entry: nothing downstream reads it. The rule exists because a line can carry the right field names and a hash that recomputes and still say two things: a JSON parser that keeps the last of two `action` keys hashes it clean while a parser that keeps the first sees another action, and a `files` that is a string crashes a reader that expected a list. Type only: whether a string is hex, or a timestamp well-formed, is the hash comparison's and the reader's business. *(Sharpened 2026-09-21; verifier behavior, not a format change: every entry the recorder has ever written passes, and v0.1 hashes are unaffected.)*
 2. `n` equals the line number (0-based) — catches deletion and reordering.
 3. Recomputed canonical hash equals the stored `entry_hash` — catches edits.
 4. `prev` equals the previous entry's `entry_hash` (genesis: `prev` is `null`) — catches splice attacks.
