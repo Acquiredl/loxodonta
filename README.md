@@ -5,7 +5,7 @@
 
 [![tests](https://github.com/Acquiredl/loxodonta/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Acquiredl/loxodonta/actions/workflows/tests.yml) [![python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/downloads/) [![no dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#install) [![license MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-loxodonta writes one receipt per completed tool call an AI coding agent makes, into a plain JSON-lines file, and tells you afterwards whether that file was touched. Each receipt carries the SHA256 of the receipt before it, so an edit, a deletion, or a reorder anywhere breaks the chain and `verify` names the entry. Three Python files, standard library only: `loxodonta.py` records and judges, `supervisor.py` reads the record back, and `receiver.py`, optional, keeps a copy on a machine the agent cannot reach. Claude Code and Codex CLI are wired with one command, the OpenAI Agents SDK through a small adapter, and any program that can run a command through `run`.
+loxodonta writes one receipt per completed tool call an AI coding agent makes, into a plain JSON-lines file, and tells you afterwards whether that file was touched. Each receipt carries the SHA256 of the receipt before it, so an edit, a deletion, or a reorder anywhere before the end breaks the chain and `verify` names the entry; a chain cut short at its end is caught against a head kept where the agent cannot reach it. Three Python files, standard library only: `loxodonta.py` records and judges, `supervisor.py` reads the record back, and `receiver.py`, optional, keeps a copy on a machine the agent cannot reach. Claude Code and Codex CLI are wired with one command, the OpenAI Agents SDK through a small adapter, and any program that can run a command through `run`.
 
 The adversary it is designed around is the agent itself ([ADR-0002](adrs/0002-writer-as-adversary.md)): it has the same access to its log as to everything else on the machine, and a session that reads a prompt injection can act on it and then rewrite the log to hide that it did. Receipts are written by a hook the harness fires after each tool call, outside the agent's control, and a rewrite afterwards shows.
 
@@ -52,7 +52,7 @@ Check the sums of what you downloaded, and ask the file which version it is:
 
 ```
 sha256sum -c --ignore-missing SHA256SUMS   # Windows: certutil -hashfile loxodonta.py SHA256, then compare by eye
-python loxodonta.py --version   # loxodonta 0.7.0 (format 0.1, commit unknown)
+python loxodonta.py --version   # loxodonta 0.8.0 (format 0.1, commit unknown)
 ```
 
 `commit unknown` is the expected answer for a download; inside a clone the same line names the commit. Releases are cut from `main`, where the suite runs on Linux, macOS, and Windows; day-to-day work lands on `dev`.

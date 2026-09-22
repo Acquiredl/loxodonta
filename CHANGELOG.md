@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-22
+
+The release that carries two arcs and a change of direction. The profiles arc gave the installer one word for what leaves the machine, and gave the entries themselves somewhere to go: `receiver.py`, the third single file, the far end of a URL that can only add. A bugfix round then wired the failed-call event, made a headless `serve` keep its keepers turning, and drew the topology on one page. The direction grill that closed the cycle ruled who the design answers to first, the person handed a package who must decide alone whether to believe it, and wrote down where the project is going, the published work it stands on, and what it can and cannot claim. Four fixes came out of testing an outside review's claims rather than taking them: a verifier that no longer says `VALID` of a line that is not an entry, a forked chain that ends the way a torn one does, an append that reaches the disk before it is reported, and a setting that no longer stops every verb. The receipt format is untouched.
+
 ### Added
 
 - `supervisor serve` answers `GET /metrics` in the Prometheus text exposition format, so the Prometheus, Grafana, Elastic or pager an operator already runs becomes the siren for a tripwire that until now only shouted on a page somebody had to be looking at (#252, ADR-0033). Gauges only, fifteen families: chains by verdict, sessions by completeness state and by dormancy tier, sessions running hot, heads no anchor covers yet, heads with no row in the publish memo beside them, publishing wired with nothing sent, the last session-end step that failed per step, the scan's exit code and its age in seconds, and the tally. Every name starts with `loxodonta_` and says the mechanism it counts rather than the conclusion a reader might draw, and every help line ends with `(verdict)`, `(witness verdict)` or `(testimony)`, so a scrape says which numbers came from `verify`, which the supervisor decided from its own watching, and which count writer-stamped lines. The body is one pure function over the scan report the server already holds, so a scrape starts no second walk of the store and no number can disagree with `scan --json`. Pull only: nothing is pushed to any vendor, no credential for a monitoring service sits on the machine, and the route takes the loopback bind and the `Host` refusal the dashboard has, which makes reaching it from another box the operator's tunnel or reverse proxy. The names are frozen from the release that carries them; a state the scan grows later is a new label value and a line in `docs/METRICS.md`, never a renamed metric.
@@ -164,7 +168,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.7.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.8.0...dev
+[0.8.0]: https://github.com/Acquiredl/loxodonta/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Acquiredl/loxodonta/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Acquiredl/loxodonta/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Acquiredl/loxodonta/compare/v0.4.0...v0.5.0
