@@ -1387,6 +1387,7 @@ class EnvironmentKnobTest(ReceiptsCliTest):
         self.assertEqual(len(self.log_path.read_text(encoding="utf-8")
                              .splitlines()), 2, "the log verb appended")
 
+
 class ShapeTest(TamperTest):
     """SPEC section 6 step 1, as sharpened on 2026-09-21: a line parses as
     an object with exactly the schema fields, each once, each of its
