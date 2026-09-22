@@ -78,6 +78,25 @@ def entry_line(entry):
     return json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
 
 
+def write_line_to_disk(path, mode, line):
+    """One line, written and pushed through the operating system's cache
+    to the disk before this returns, so that "logged entry N" means the
+    entry is there (SPEC §1). A crash that loses a written receipt reads
+    at the witness exactly as a killed hook does, and an innocent loss
+    should not wear that face. The sync costs about 2 ms where the store
+    lives, against ~135 ms for a hook call. If the sync itself fails the
+    line is still written and the failure is said, never hidden, since
+    the entry is on its way to the disk either way."""
+    with open(path, mode, encoding="utf-8", newline="\n") as f:
+        f.write(line)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError as e:
+            print(f"warning: {path}: written, but not synced to disk: {e}",
+                  file=sys.stderr)
+
+
 def read_log(path):
     """All lines of the receipt log; FileNotFoundError if it doesn't exist."""
     with open(path, encoding="utf-8") as f:
@@ -221,8 +240,7 @@ def genesis_entry():
 
 def cmd_init(args):
     try:
-        with open(args.log, "x", encoding="utf-8", newline="\n") as f:
-            f.write(entry_line(genesis_entry()))
+        write_line_to_disk(args.log, "x", entry_line(genesis_entry()))
     except FileExistsError:
         print(f"error: {args.log} already exists; refusing to overwrite", file=sys.stderr)
         return 1
@@ -355,9 +373,9 @@ def append_locked(log, actor, action, files):
     }
     entry["entry_hash"] = entry_hash(entry)
     # Single write of one complete line (SPEC §1): a crash can at worst
-    # truncate this line, never damage earlier entries.
-    with open(log, "a", encoding="utf-8", newline="\n") as f:
-        f.write(entry_line(entry))
+    # truncate this line, never damage earlier entries. Synced before it
+    # is reported, so the report is true when it is printed.
+    write_line_to_disk(log, "a", entry_line(entry))
     print(f"logged entry {entry['n']}")
     return 0
 
@@ -3611,8 +3629,7 @@ def ensure_chain(log):
     """
     with ChainLock(log):
         if not os.path.exists(log) or os.path.getsize(log) == 0:
-            with open(log, "w", encoding="utf-8", newline="\n") as f:
-                f.write(entry_line(genesis_entry()))
+            write_line_to_disk(log, "w", entry_line(genesis_entry()))
 
 
 def cmd_hook(args):
