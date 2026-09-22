@@ -11,6 +11,7 @@ a torn line (a partial entry on disk) and a forked chain (two entries
 claiming the same `n`).
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -39,6 +40,14 @@ def run_receipts(*args, cwd, extra_env=None):
         [sys.executable, str(LOXODONTA), *args],
         cwd=cwd, capture_output=True, encoding="utf-8", env=env,
     )
+
+
+def spec_hash(entry_without_hash):
+    """SPEC §4 canonical form, reimplemented so a test proves the tool
+    matches the spec and not itself (the same helper test_cli carries)."""
+    canonical = json.dumps(entry_without_hash, sort_keys=True,
+                           separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def hook_payload(session="sess-1234abcd", tool="Bash", command="ls"):
@@ -245,3 +254,90 @@ class SiblingChainTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForkedTailTest(unittest.TestCase):
+    """The second shape of tail damage (ADR-0004 addendum, 2026-09-21): a
+    lock taken from a holder that was paused and not dead leaves two
+    entries claiming one `n`. The tail parses, so before this ruling no
+    sibling started and every later receipt was laid over the fork,
+    until an innocent race read as tampering in the middle of the file.
+    A chain whose tail's `n` is not its line number cannot be extended
+    either: the hook starts a sibling, the operator's verbs refuse, and
+    innocent damage stays at the tail, where the glossary says it lives."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+        self.log_dir = self.workdir / "receipts"
+
+    def fire_hook(self, command="ls"):
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook",
+             "--log-dir", str(self.log_dir)],
+            cwd=self.workdir, input=hook_payload(command=command),
+            capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+
+    def chain(self, suffix=""):
+        return self.log_dir / f"receipts-sess-1234abcd{suffix}.jsonl"
+
+    def fork(self, path):
+        """Lay a second entry at the tail's own `n`, exactly as the second
+        writer of a stolen lock leaves it: chained to the same
+        predecessor, hashed clean on its own."""
+        lines = path.read_text(encoding="utf-8").splitlines()
+        rival = json.loads(lines[-1])
+        del rival["entry_hash"]
+        rival["action"] = "the other writer's entry at the same n"
+        rival["entry_hash"] = spec_hash(rival)
+        lines.append(json.dumps(rival, sort_keys=True, separators=(",", ":")))
+        path.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
+
+    def test_the_hook_starts_a_sibling_after_a_fork(self):
+        self.fire_hook(command="before the fork")
+        self.fork(self.chain())
+        forked = self.chain().read_bytes()
+
+        result = self.fire_hook(command="after the fork")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sibling = self.chain("-002")
+        self.assertTrue(sibling.exists(), "recording continues in a sibling")
+        entries = [json.loads(l) for l
+                   in sibling.read_text(encoding="utf-8").splitlines()]
+        self.assertIn("after the fork", entries[1]["action"])
+        self.assertEqual(self.chain().read_bytes(), forked,
+                         "the forked chain is evidence: untouched")
+
+    def test_the_log_command_refuses_to_extend_a_fork(self):
+        log = self.workdir / "receipts.jsonl"
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "one",
+                     cwd=self.workdir)
+        self.fork(log)
+        before = log.read_bytes()
+
+        result = run_receipts("log", "--actor", "agent", "--action", "two",
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("damaged tail", result.stderr)
+        self.assertIn("verify", result.stderr)
+        self.assertEqual(log.read_bytes(), before)
+
+    def test_verify_still_names_the_fork_as_broken(self):
+        # The refusal changes nothing about the verdict: two entries at
+        # one n is BROKEN, as it was, at the second of them.
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "one",
+                     cwd=self.workdir)
+        self.fork(self.workdir / "receipts.jsonl")
+
+        result = run_receipts("verify", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("BROKEN at entry 2", result.stdout)
+        self.assertIn("sequence number is 1, expected 2", result.stdout)

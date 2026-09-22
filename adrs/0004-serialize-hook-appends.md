@@ -1,6 +1,6 @@
 # ADR-0004: Serialize the hook's appends, and never stop recording
 
-**Status:** `accepted` (2026-08-14)
+**Status:** `accepted` (2026-08-14; addendum 2026-09-21, a forked tail is the second shape of damage, below)
 **Date:** 2026-08-14
 **Deciders:** Acquiredl
 
@@ -68,6 +68,37 @@ No format change. No new fields. v0.1 stays frozen.
 - **A resident writer daemon serializing appends** — rejected: a background process contradicts the stdlib-only, nothing-to-install premise.
 - **Optimistic retry without a lock** (re-read the tail, re-append on conflict) — rejected: it can resolve a fork but not a tear. By the time the conflict is visible, the torn bytes are already on disk.
 - **Let `verify` tolerate torn tails and heal them** — rejected outright. ADR-0002 refuses a repair command because a sanctioned way to trim a tail is exactly the capability an adversary with a "crash" cover story wants. That reasoning is unchanged; this ADR routes *around* damage instead of erasing it.
+
+## Addendum, 2026-09-21: a forked tail ends a chain the way a torn one does
+
+This ADR named the trade in its lock: staleness is judged by age, so a
+writer that stalls past the window can have its lock taken. What that
+costs was measured on 2026-09-20, on a scratch chain, by pausing the
+holder past the window while a second writer arrived. Where the
+operating system lets the lock file go (POSIX; on Windows the holder's
+open handle blocks the unlink while it lives), the second writer reads
+the same tail, and the paused one wakes and appends from its stale
+copy: two well-formed entries claiming one `n`, both chained to the same
+predecessor. `verify` says `BROKEN`, as it should. But the tail parses,
+so part 2 above never fired: the hook saw no damage, started no sibling,
+and every later receipt was laid over the fork, until the innocent race
+sat in the middle of the file, where SPEC section 6 says a malformed
+line "has no innocent explanation".
+
+> **A chain whose final entry's `n` is not its line number cannot be
+> extended, exactly as a chain whose final line does not parse cannot.**
+> The hook starts a sibling; `log`, `run`, `head`, `anchor`, `stamp` and
+> `publish` refuse with the damaged-tail sentence they already had. The
+> forked chain is left as it lies.
+
+One rule, in `tail_entry`, and every path that reads the tail follows.
+The property this restores is the one the glossary states: innocent
+damage stays at the tail. Its blast radius is now one damaged tail and
+one sibling, which is what part 2 promised for a tear. The lock itself
+is unchanged: re-checking ownership before the write would narrow the
+window further, and it was left alone until the race is seen in the
+field, since it adds per-platform subtlety to the one code path this
+ADR fought to keep.
 
 ## References
 
