@@ -238,6 +238,20 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertNotIn("127.0.0.1", memo_text)
         self.assertNotIn(receiver.url.rsplit("/", 1)[-1], memo_text)
 
+    def test_a_cap_of_zero_or_less_is_the_default_and_the_chain_still_goes(self):
+        # A cap of 0 would call every entry oversized and refuse the send,
+        # and a negative cap is no cap at all. Both read as the default,
+        # the way a value that is not a number does.
+        receiver = start_receiver(self, self.data)
+        lines = make_chain(self.log, ["step 1"], epoch=1700000000)
+
+        for cap in (0, -5):
+            result = run_capped(cap, "publish", "--chain", "--log", self.log,
+                                receiver.url)
+            self.assertEqual(result.returncode, 0, f"{cap}: {result.stderr}")
+            self.assertNotIn("larger than the receiver's cap", result.stderr)
+        self.assertEqual((self.data / self.log.name).read_bytes(), lines)
+
     def test_the_batch_carries_the_ndjson_type_and_the_four_headers(self):
         # docs/RECEIVER.md section 4: the chain's file name, the session
         # id, the n range and the head ride in headers named for the
