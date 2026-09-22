@@ -1,6 +1,6 @@
 # ADR-0022: The tool gets a version, a tag, and a release; 1.0 waits for field data
 
-**Status:** accepted 2026-09-03 (presentation-arc grill, issue #119; ratified by worked example: promotion, hotfix, outside export that holds, outside export that fails)
+**Status:** accepted 2026-09-03 (presentation-arc grill, issue #119; ratified by worked example: promotion, hotfix, outside export that holds, outside export that fails); ruling 6 amended 2026-09-21 (direction grill, restate-to-ratify passed; see the addendum)
 
 **Deciders:** Acquiredl
 
@@ -51,7 +51,8 @@ The `main` branch already has a milestone ritual: `dev` promotes to
    `docs/FIELD-DATA.md`.** "Stable on `main`" means walked and tested
    here; 1.0 means the recorder held somewhere that is not the
    author's machine. The community order already waits for the same
-   event.
+   event. *(Amended 2026-09-21: this gate stands, as the third of
+   four. See the addendum below.)*
 
 The recorder notice's rule stands: the tool reports which version is
 running and never updates itself (ADR-0015). A version number is a
@@ -98,9 +99,97 @@ label on the file, not a channel to fetch a newer one.
   format change): would make every tool release look like a patch and
   a format change look like a tool rewrite. Rejected.
 
+## Addendum, 2026-09-21: 1.0 is four gates, and someone who is not the author passes two of them
+
+Ruling 6 was written for an operator's tool, so its one gate is the
+operator's: the recorder held on a machine that is not the author's. The
+direction grill of 2026-09-20 and 2026-09-21 ruled that when the
+project's goals pull apart the recipient wins, and everything it ruled
+after that (a vertical that is complete or does not count, a contract
+for the second record, a verifier copied out of the recorder by
+ADR-0035) sits outside that gate. Semantic Versioning, which the
+changelog follows, says what the number is for: "Version 1.0.0 defines
+the public API." So 1.0 is a promise about contracts and not about
+features, and the open question was which contracts, and promised to
+whom.
+
+> **1.0 is the point where every contract a recipient depends on is
+> frozen, and each has been exercised by someone who is not the author.
+> Four gates, all of them required:**
+>
+> 1. **The verifier.** `verifier.py` exists as ADR-0035 rules it, the
+>    conformance vectors exist and pass on both files, the walk refuses
+>    a duplicate key and a wrong-typed field by name, and the SPEC
+>    states every property the verifier relies on, the sidecars and the
+>    package included, beside the list of what this design cannot claim.
+> 2. **The second-record contract at `/1`.** The format starts as
+>    `loxodonta-second-record/0`, provisional, and freezes only with two
+>    producers behind it: Claude Code's transcript and one more vertical
+>    that is complete (capture, a second record the witness reads, a
+>    commitment to the rich record, a package). The grill named that
+>    vertical: LangGraph, carrying a real recurring workload.
+> 3. **The recorder held elsewhere.** Ruling 6 as it stood: one export
+>    from another machine read into `docs/FIELD-DATA.md`.
+> 4. **One recipient, unaided.** Someone who is not the author and has
+>    had nothing explained is handed a package, `verifier.py` and the
+>    docs, and reaches the verdict the author reached.
+
+Ratified restatement: *the four gates block 1.0. 1.0 promises the
+recipient, and anyone who builds on loxodonta, that the contracts they
+depend on will not break: the verifier's verdicts, the package format,
+and the second-record format. Each one was exercised by someone other
+than the author before it froze. Until all four gates hold the version
+stays 0.9.x, however long that takes, and features and more
+compatibility come after.*
+
+What the promise covers: the verdict words and exit codes of `verify`
+and `verify-package` (SPEC section 6; GLOSSARY, *States and
+transitions*), the package format (`loxodonta-package/1`), and the
+second-record format once it reads `/1`. The chain format has been
+frozen at `0.1` since the first chain and is promised already. The hook
+payload has been a public contract with more than one producer since
+ADR-0020, and is no gate here.
+
+Where each gate comes from. Gate 2 is the practice of never freezing an
+interface on a single implementation, which the IETF writes down as two
+independent, interoperable implementations before a specification
+advances (RFC 2026 section 4.1.2, cited from general knowledge). Gate 4
+is the ACPO Good Practice Guide's third principle used as an acceptance
+test: an independent third party should be able to "examine those
+processes and achieve the same result" (v5, section 2.1, verified in the
+grill's research pass). It is the recipient's twin of the reader test
+issue #135 already carries for the front door.
+
+The order that follows: `0.8.0` ships what `dev` already holds. `0.9.x`
+is the foundation (the verifier arc of ADR-0035, the SPEC's growth, the
+witness split from its reader, the `/0` format) and then the second
+vertical, for as long as that takes. Pre-1.0 semantics stand for all of
+it: a minor bump may change behaviour and the changelog says so. After
+1.0, or in another repository: more verticals, the dashboard, recall's
+growth, the incident-review service, a second record for Claude Code
+that is out of the writer's reach, a receipt written before the call
+runs.
+
+A lighter reading was weighed and declined: ship 1.0 with `/0` still
+provisional and freeze `/1` in 1.1. The completeness reading is the one
+thing in this project the published work names as missing and nobody
+supplies, and a 1.0 whose flagship contract is still provisional would
+undersell exactly that. If the second vertical stalls, that lighter
+reading is the amendment to reach for, and it was named here first.
+
+When `verifier.py` exists it joins the files ruling 4 attaches to a
+release and the version test ruling 3 implies, and gate 4 gets its own
+issue; issue #135 already carries gate 3.
+
 ## References
 
 - ADR-0015 (the recorder notice; never self-update)
 - SPEC §2.1 (format versioning and the new-chain rule)
 - ADR-0021 (field-data export, the 1.0 gate's event)
 - Issue #119 (presentation arc)
+- ADR-0035 (the verifier the first gate names); ADR-0020 (the hook
+  payload as a public contract); GLOSSARY, *Witness* and *Second
+  record* (the second gate's terms)
+- Semantic Versioning 2.0.0, item 5; RFC 2026 section 4.1.2; ACPO Good
+  Practice Guide for Digital Evidence v5, section 2.1
+- Discussion: the direction grill, 2026-09-20 and 2026-09-21
