@@ -3989,7 +3989,10 @@ def replace_file(path, data, mode_of=None):
     and a same-folder file is always on the original's. A crash or a
     full disk mid-write leaves the old file, never half a new one. The
     new file keeps the permission bits of `mode_of` (default `path`)
-    when that exists."""
+    when that exists. A `path` that is a symbolic link (a dotfile
+    manager's) is written through: the temporary file and the replace
+    land beside the file it names, and the link stays a link."""
+    path = os.path.realpath(path)
     folder = os.path.dirname(path)
     os.makedirs(folder, exist_ok=True)
     fd, temp = tempfile.mkstemp(dir=folder, suffix=".tmp",
@@ -4002,7 +4005,10 @@ def replace_file(path, data, mode_of=None):
         try:
             os.chmod(temp, os.stat(mode_of or path).st_mode & 0o7777)
         except OSError:
-            pass  # a new file: mkstemp's owner-only bits stand
+            # A new file keeps mkstemp's owner-only bits, deliberately:
+            # the SessionEnd command can carry a publish URL, and the
+            # URL is where a remote's credential rides (ADR-0025).
+            pass
         os.replace(temp, path)
     except BaseException:
         try:
@@ -4037,8 +4043,9 @@ def backup_settings(path):
 # with. Its interpreter has been a bare `python3` (the first, shell-
 # expanded install) and, since, the quoted `sys.executable`; the script
 # carries either era's recorder name (ADR-0010) or the supervisor's. An
-# entry is ours when its command reads as exactly that, and every other
-# entry is the user's (#293). The test once was a substring, which took
+# entry is ours when its command reads as exactly that (a supervisor.py
+# on disk also needs a recorder beside it), and every other entry is the
+# user's (#293). The test once was a substring, which took
 # a user's `python ~/ops/supervisor.py notify` and
 # `python ~/bin/upload_receipts.py --to s3` for ours: replaced on
 # install, deleted on uninstall.
@@ -4094,9 +4101,27 @@ def owned_script(command, names):
         return None
     interpreter, script, verb = words[:3]
     name = file_name(script)
-    if not is_interpreter(interpreter) or name not in names:
+    if not is_interpreter(interpreter) or name not in names \
+            or WIRED_VERB[name] != verb:
         return None
-    return script if WIRED_VERB[name] == verb else None
+    if name in DIGEST_NAMES and not beside_a_recorder(script):
+        return None
+    return script
+
+
+def beside_a_recorder(script):
+    """Whether a supervisor.py is this project's, as far as the disk
+    can say. The name is common enough that a user's own script can
+    carry it, verb and all, so one that exists counts only with a
+    recorder in the same folder, as every checkout has. One that is
+    gone has no folder to ask, and stays ours so it can be healed:
+    the checkout moved."""
+    where = os.path.expanduser(script)
+    if not os.path.isfile(where):
+        return True
+    folder = os.path.dirname(where)
+    return any(os.path.isfile(os.path.join(folder, name))
+               for name in RECORDER_NAMES)
 
 
 # The shipped default before ADR-0016 widened coverage. A wired block

@@ -1001,6 +1001,10 @@ class InstallerOwnershipTest(RecallBase):
         home.mkdir(exist_ok=True)
         return home
 
+    def session_start(self, command):
+        return {"hooks": {"SessionStart": [{"matcher": "startup", "hooks": [
+            {"type": "command", "command": command}]}]}}
+
     def commands(self, settings, event):
         return [h["command"] for b in settings["hooks"].get(event, [])
                 for h in b["hooks"]]
@@ -1184,6 +1188,94 @@ class InstallerOwnershipTest(RecallBase):
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertIn("nothing of ours", removed.stdout)
         self.assertEqual(self.settings(home), seeded)
+
+    def test_a_supervisor_of_the_users_own_on_disk_is_theirs(self):
+        # "supervisor.py" is a common enough name that a user's own
+        # script can carry it, and even the verb. One that exists is
+        # the installer's only when a recorder sits beside it, as it
+        # does in every checkout; this one has none.
+        home = self.home()
+        ops = home / "ops"
+        ops.mkdir()
+        (ops / "supervisor.py").write_text("print('mine')\n",
+                                           encoding="utf-8")
+        theirs = "python ~/ops/supervisor.py digest --mine"
+        seeded = self.session_start(theirs)
+        self.seed(home, seeded)
+
+        removed, _ = self.run_installer("uninstall-hook")
+
+        self.assertIn("nothing of ours", removed.stdout)
+        self.assertEqual(self.settings(home), seeded)
+
+        installed, _ = self.run_installer("install-hook")
+
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        start = self.commands(self.settings(home), "SessionStart")
+        self.assertIn(theirs, start)
+        self.assertEqual(len(start), 2, start)
+        self.assertIn("SessionStart", installed.stdout)
+
+    def test_a_supervisor_beside_a_recorder_is_the_installers(self):
+        # A checkout of this repo elsewhere, wired by hand: the
+        # supervisor has its recorder beside it, so it is ours, not
+        # doubled on install and removed on uninstall.
+        home = self.home()
+        checkout = home / "loxodonta"
+        checkout.mkdir()
+        for name in ("supervisor.py", "loxodonta.py"):
+            (checkout / name).write_text("", encoding="utf-8")
+        wired = "python3 ~/loxodonta/supervisor.py digest"
+        self.seed(home, self.session_start(wired))
+
+        installed, _ = self.run_installer("install-hook")
+
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertEqual(self.commands(self.settings(home), "SessionStart"),
+                         [wired])
+
+        removed, _ = self.run_installer("uninstall-hook")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertNotIn("SessionStart", self.settings(home)["hooks"])
+
+    def test_a_dangling_supervisor_is_healed(self):
+        # Gone from disk, nothing beside it to ask: the checkout moved,
+        # so the digest is pointed at this one, as the recorder is.
+        home = self.home()
+        self.seed(home, self.session_start(
+            "python3 ~/moved/supervisor.py digest"))
+
+        result, _ = self.run_installer("install-hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("healed 1 hook command(s)", result.stdout)
+        (start,) = self.commands(self.settings(home), "SessionStart")
+        self.assertIn(SUPERVISOR.as_posix(), start)
+
+    def test_a_settings_file_that_is_a_link_stays_a_link(self):
+        # Dotfile managers keep settings.json as a link into a repo of
+        # their own. The write lands in the file the link names, and
+        # the link stays.
+        home = self.home()
+        dotfiles = home / "dotfiles"
+        dotfiles.mkdir()
+        target = dotfiles / "settings.json"
+        target.write_text(json.dumps(USERS_OWN_HOOKS), encoding="utf-8")
+        link = home / ".claude" / "settings.json"
+        link.parent.mkdir()
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("this machine cannot make a symbolic link")
+
+        result, _ = self.run_installer("install-hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(link.is_symlink())
+        self.assertIn("loxodonta.py", target.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(p.name for p in dotfiles.iterdir()),
+                         ["settings.json"])
 
 
 if __name__ == "__main__":
