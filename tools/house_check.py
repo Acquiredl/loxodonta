@@ -408,8 +408,8 @@ def excerpt(line, match):
 # the indexes, what sits at the root, the changelog, the ADR file names
 # (issue #298; an outside review of v0.8.0 scored the presentation below
 # the engineering, and a fix held by memory drifts back). They report and
-# do not gate: `--front-door` exits 1 on any finding, and CI runs only the
-# default pass until the presentation pass makes these pass.
+# gate: `--front-door` exits 1 on any finding, and CI runs it as its own
+# step after the default pass.
 #
 # Every number and list the rules use is in this one table, so an argument
 # with a threshold is an edit to one line. Paths are relative to the root
