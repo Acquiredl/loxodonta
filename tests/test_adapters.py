@@ -226,16 +226,10 @@ class CodexHookTest(unittest.TestCase):
         start = {"session_id": "019374ab-codex-session",
                  "hook_event_name": "SessionStart", "source": "startup",
                  "transcript_path": None, "cwd": str(project)}
-        # The digest prints the project's path, and printing a lone
-        # surrogate is the renderer's own matter (not this slug's), so
-        # stdout here escapes what it cannot encode.
-        out = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "digest", "--payload"],
-            input=json.dumps(start).encode("utf-8"), capture_output=True,
-            cwd=str(self.root),
-            env={**self.env, "PYTHONIOENCODING": "utf-8:backslashreplace"})
+        out = run_supervisor("digest", "--payload", stdin=start,
+                             env=self.env, cwd=str(self.root))
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn(b"Bash: make", out.stdout)
+        self.assertIn("Bash: make", out.stdout)
 
     def test_session_end_seals_the_rollout_transcript(self):
         rollout = self.root / "rollout-2026-09-02.jsonl"
