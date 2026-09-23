@@ -85,14 +85,18 @@ entry_hash = SHA256( canonical_json( entry minus the entry_hash field ) )
 
 1. Object keys sorted lexicographically (byte order) at every nesting level.
 2. Compact separators: `,` and `:` with no whitespace anywhere.
-3. Strings serialized as UTF-8; non-ASCII characters emitted as-is (no `\uXXXX` escaping beyond JSON's mandatory escapes: `"`, `\`, control characters).
+3. Strings serialized as UTF-8, each string escaped exactly as RFC 8785 section 3.2.2.2 escapes it (it MUST be): `"` as `\"` and `\` as `\\`; U+0008, U+0009, U+000A, U+000C and U+000D as `\b`, `\t`, `\n`, `\f` and `\r`; every other character from U+0000 to U+001F as `\u` and four lowercase hex digits (`\u001b`); and every other character as it stands, unescaped, non-ASCII included. So a newline is `\n` and never `\u000a`, hex is never uppercase, and the solidus `/`, DEL (U+007F), the C1 controls such as NEL (U+0085), and the separators U+2028 and U+2029 are emitted as they stand. A string holding a lone surrogate has no UTF-8 form, so the entry has no canonical form and is refused, not hashed (RFC 8785 likewise requires an error). The recorder never writes one: a lone surrogate it is handed is written as the six characters of its escape text (`\ud800`), which are ordinary text here. *(Pinned 2026-09-23, #299: the escaping every v0.1 chain was already hashed under, now stated; not a format change, and v0.1 hashes are unaffected.)*
 4. Integers only — no floats anywhere in the schema (timestamps are strings for exactly this reason; float serialization is not portable).
 5. `null` is the literal `null`; booleans do not occur in v0.1.
 6. The hashed bytes are the canonical JSON string encoded as UTF-8, with no trailing newline.
 
 In Python this is `json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")` — but the *rules* above are normative, not the Python idiom.
 
-The line as written to the file MAY be non-canonical (any key order); the hash is always computed over the canonical form. Verifiers MUST re-canonicalize before hashing.
+Only the string escaping is taken from RFC 8785. Key order is rule 1's byte order, which for the keys v0.1 allows (all ASCII) is the same order as RFC 8785's UTF-16 order, and numbers are rule 4's integers.
+
+The line as written to the file MAY be non-canonical (any key order, and any escape spelling JSON allows: the recorder writes non-ASCII as `\u` escapes); the hash is always computed over the canonical form. Verifiers MUST re-canonicalize before hashing.
+
+The conformance set is [`tests/vectors/`](../tests/vectors/README.md): small chains, each with the exit and verdict a verifier must reach on it, among them an entry needing every escape above, with its canonical form written out in full.
 
 ## 5. The chain rule
 
