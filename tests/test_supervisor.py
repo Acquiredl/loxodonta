@@ -3080,6 +3080,56 @@ class DrillTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
 
+    def drill_from(self, cwd, root, log):
+        """`drill` started in `cwd` with `--root` and `--log` spelled as
+        a reader types them, relative to that folder (#297)."""
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), "drill", "--root", root,
+             "--log", log, "--json"],
+            capture_output=True, encoding="utf-8", cwd=str(cwd),
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+
+    def test_a_log_relative_to_the_current_folder_is_drilled(self):
+        # The README's line, `drill --root docs/demo --log
+        # docs/demo/bad-day-session.jsonl`, run from a clone: both paths
+        # are read from the folder the command runs in.
+        make_chain(self.root / "docs" / "demo", "sess-aaaa", entries=3)
+
+        result = self.drill_from(self.root, "docs/demo",
+                                 "docs/demo/receipts-sess-aaaa.jsonl")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["all_fired"])
+        self.assertEqual(report["log"], "receipts-sess-aaaa.jsonl")
+        self.assertTrue((self.root / "docs" / "demo" / ".supervisor-drill")
+                        .is_dir(), "the sandbox sits under the root")
+
+    def test_a_log_relative_to_the_root_is_still_drilled(self):
+        make_chain(self.root / "docs" / "demo", "sess-aaaa", entries=3)
+
+        result = self.drill_from(self.root, "docs/demo",
+                                 "receipts-sess-aaaa.jsonl")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(json.loads(result.stdout)["all_fired"])
+
+    def test_a_current_folder_log_outside_the_root_is_refused(self):
+        # Read from the current folder, the path must still land on a
+        # chain under the root: a real chain beside it is refused, and
+        # nothing is written.
+        make_chain(self.root / "docs" / "demo", "sess-aaaa", entries=3)
+        make_chain(self.root / "elsewhere", "sess-bbbb", entries=3)
+
+        result = self.drill_from(self.root, "docs/demo",
+                                 "elsewhere/receipts-sess-bbbb.jsonl")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is not a chain under", result.stderr)
+        self.assertFalse(
+            (self.root / "docs" / "demo" / ".supervisor-drill").exists(),
+            "a refused drill writes nothing")
+
 
 if __name__ == "__main__":
     unittest.main()

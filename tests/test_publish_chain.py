@@ -803,7 +803,9 @@ class SessionEndWindowTest(PublishBase):
         # The head's row says what the window had left when it began, to
         # a tenth, and a busy machine spends a tenth before it.
         budget, outcome = rows["publish-head"]
-        self.assertAlmostEqual(budget, 1.5, delta=0.1)
+        # The budget is rounded to a tenth, and a tenth short of the target
+        # differs by a hair over 0.1 in floating point: allow 0.15.
+        self.assertAlmostEqual(budget, 1.5, delta=0.15)
         self.assertRegex(outcome, r"^no answer within 1\.[456] seconds$")
         self.assertEqual(rows["publish-chain"], (0.0, WINDOW_CLOSED))
         self.assertEqual(rows["stamp"], (0.0, WINDOW_CLOSED))
@@ -821,7 +823,13 @@ class SessionEndWindowTest(PublishBase):
 
         self.assertLess(took, 3, "Codex would have killed the hook")
         rows = self.rows_by_step()
-        self.assertEqual(rows["publish-head"], (1.5, "sent"))
+        # To a tenth, as above: a busy machine spends one before the
+        # head's step begins; the outcome word stays exact.
+        budget, outcome = rows["publish-head"]
+        # The budget is rounded to a tenth, and a tenth short of the target
+        # differs by a hair over 0.1 in floating point: allow 0.15.
+        self.assertAlmostEqual(budget, 1.5, delta=0.15)
+        self.assertEqual(outcome, "sent")
         waited, outcome = rows["publish-chain"]
         self.assertTrue(0 < waited <= 1.5, waited)
         self.assertEqual(outcome, f"no answer within {waited:g} seconds")
