@@ -16,7 +16,6 @@ handshake and the 2026-07-28 per-request `_meta` form).
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -27,7 +26,8 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_mcp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_recall import forge_chain, run_py
+from test_recall import forge_chain, recall_home, run_py
+from test_supervisor import isolated_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
@@ -45,9 +45,10 @@ class McpClient:
     one response per request. Notifications get no reply."""
 
     def __init__(self, *args, env_extra=None, cwd=None):
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8",
+        # Every home the run's recall home, never the machine's (#274),
+        # and no ambient project; what the test sets lands on top.
+        env = {**isolated_env(recall_home()), "PYTHONIOENCODING": "utf-8",
                **(env_extra or {})}
-        env.pop("CLAUDE_PROJECT_DIR", None)
         self.proc = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "mcp", *args],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,

@@ -243,12 +243,15 @@ class StoreScanTest(unittest.TestCase):
 
 
 def run_adopt(store_home, root, *extra):
+    # adopt writes into the store alone, but no home is the machine's
+    # (#274).
     return subprocess.run(
         [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root),
          *extra],
         capture_output=True, encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8",
-             "LOXODONTA_HOME": str(store_home)})
+        env=isolated_env(Path(store_home).parent / "home",
+                         LOXODONTA_HOME=str(store_home),
+                         PYTHONIOENCODING="utf-8"))
 
 
 class AdoptTest(unittest.TestCase):
@@ -2705,9 +2708,10 @@ def isolated_env(home, **knobs):
     with a `--witness` under a temporary folder. The knobs land last, so
     a test that keeps its store or its project somewhere of its own
     names it here (`LOXODONTA_HOME=...`, `CLAUDE_PROJECT_DIR=...`). Every
-    start of scan, serve, calibrate, drill, export or package goes
-    through this (#242); the home guard (tests/home_guard.py) refuses
-    one that does not."""
+    start of scan, serve, calibrate, drill, export or package (#242), and
+    of adopt, hook, install-hook or uninstall-hook (#274), goes through
+    this or sets all four homes itself; the home guard
+    (tests/home_guard.py) refuses one that does neither."""
     env = keeper_env(LOXODONTA_HOME=str(Path(home) / ".loxodonta"),
                      HOME=str(home), USERPROFILE=str(home),
                      CODEX_HOME=str(Path(home) / ".codex"))

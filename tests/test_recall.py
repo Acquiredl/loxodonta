@@ -12,7 +12,6 @@ label itself testimony and never print a verdict word of its own.
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -30,14 +29,30 @@ SUPERVISOR = REPO_ROOT / "supervisor.py"
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
+# The home a recall verb reads when its test names none (#274): one for
+# the whole run, since the recall verbs (digest, show, search, timeline,
+# mcp) read a home and write nothing to it. The guard lets a writing verb
+# through here too, since this home is a temporary one, so a test that
+# writes names a home of its own (scan_env) rather than lean on this.
+_recall_home = None
+
+
+def recall_home():
+    global _recall_home
+    if _recall_home is None:
+        _recall_home = tempfile.TemporaryDirectory()
+    return Path(_recall_home.name).resolve()
+
+
 def run_py(script, *args, env_extra=None, cwd=None, env=None):
     """`env`, when given, is the whole environment the child starts
     from (isolated_env's, for a verb that reads the machine's home);
+    else every home is the run's recall home, never the machine's.
     `env_extra` lands on top of either."""
     return subprocess.run(
         [sys.executable, str(script), *args],
         capture_output=True, encoding="utf-8", cwd=cwd,
-        env={**(os.environ if env is None else env),
+        env={**(isolated_env(recall_home()) if env is None else env),
              "PYTHONIOENCODING": "utf-8", **(env_extra or {})})
 
 
@@ -328,8 +343,8 @@ class StoreRecallTest(RecallBase):
         return subprocess.run(
             [sys.executable, str(LOXODONTA), "hook"],
             input=payload.encode("utf-8"), capture_output=True,
-            env={**os.environ, "PYTHONIOENCODING": "utf-8",
-                 **self.store_env(project)})
+            env=self.scan_env(PYTHONIOENCODING="utf-8",
+                              **self.store_env(project)))
 
     def test_digest_reads_the_drawer_the_hook_wrote(self):
         project = self.repo("alpha")
@@ -734,16 +749,16 @@ class ScanSummaryTest(RecallBase):
 
 class InstallerTest(RecallBase):
     def run_installer(self, *args):
-        """The installer against a home inside the test, with no ambient
-        store or Codex home: an exported LOXODONTA_HOME or CODEX_HOME
+        """The installer against a home inside the test, with no store
+        or Codex home named: an exported LOXODONTA_HOME or CODEX_HOME
         would otherwise take the coverage marker, or the Codex hooks,
-        out of the test and into that home."""
+        out of the test and into that home. Unset, both fall back inside
+        the test's home, which is the fallback these tests read (#274)."""
         home = self.root / "home"
         home.mkdir(exist_ok=True)
-        env = {name: value for name, value in os.environ.items()
+        env = {name: value for name, value
+               in isolated_env(home, PYTHONIOENCODING="utf-8").items()
                if name not in ("LOXODONTA_HOME", "CODEX_HOME")}
-        env.update(PYTHONIOENCODING="utf-8", HOME=str(home),
-                   USERPROFILE=str(home))
         return subprocess.run(
             [sys.executable, str(LOXODONTA), *args], capture_output=True,
             encoding="utf-8", env=env), home

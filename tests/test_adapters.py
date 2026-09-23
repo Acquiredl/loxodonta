@@ -25,17 +25,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 sys.path.insert(0, str(REPO_ROOT))
+# This folder too, so the sibling import below also resolves when the
+# module runs alone (`python -m unittest tests.test_adapters`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from adapters.openai_agents import ReceiptRecorder  # noqa: E402
+from test_supervisor import isolated_env  # noqa: E402
 
 
 def run_loxodonta(*args, stdin=None, env=None, cwd=None):
+    """`env`, when given, is the whole environment the child starts from
+    (clean_env's), never a patch on this process's: a patch would bring
+    back the CLAUDE_PROJECT_DIR clean_env took out."""
     result = subprocess.run(
         [sys.executable, str(LOXODONTA), *args], cwd=cwd,
         input=(json.dumps(stdin).encode("utf-8")
                if isinstance(stdin, dict) else stdin),
         capture_output=True,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8", **(env or {})})
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8"})
     result.stdout = result.stdout.decode("utf-8", errors="replace")
     result.stderr = result.stderr.decode("utf-8", errors="replace")
     return result
@@ -47,19 +55,17 @@ def run_supervisor(*args, stdin=None, env=None, cwd=None):
         input=(json.dumps(stdin).encode("utf-8")
                if isinstance(stdin, dict) else stdin),
         capture_output=True,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8", **(env or {})})
+        env={**(os.environ if env is None else env),
+             "PYTHONIOENCODING": "utf-8"})
     result.stdout = result.stdout.decode("utf-8", errors="replace")
     result.stderr = result.stderr.decode("utf-8", errors="replace")
     return result
 
 
-def clean_env(**extra):
-    """No ambient harness or store: what the test sets is all there is."""
-    env = dict(os.environ)
-    for name in ("CLAUDE_PROJECT_DIR", "LOXODONTA_HOME", "CODEX_HOME"):
-        env.pop(name, None)
-    env.update(extra)
-    return env
+def clean_env(home, **extra):
+    """No ambient harness or store: every home inside the test's own
+    `home` (#274), and what the test sets is all there is."""
+    return isolated_env(home, **extra)
 
 
 def drawer_of(store, project_name):
@@ -98,7 +104,8 @@ class CodexHookTest(unittest.TestCase):
         self.store = self.root / "storehome"
         self.project = self.root / "someproject"
         self.project.mkdir()
-        self.env = clean_env(LOXODONTA_HOME=str(self.store))
+        self.env = clean_env(self.root / "home",
+                             LOXODONTA_HOME=str(self.store))
 
     def hook(self, payload, **env):
         # cwd of the hook process differs from the project on purpose:
@@ -204,7 +211,10 @@ class CodexInstallTest(unittest.TestCase):
         self.root = Path(self._tmp.name).resolve()
         self.home = self.root / "home"
         (self.home / ".codex").mkdir(parents=True)
-        self.env = clean_env(HOME=str(self.home), USERPROFILE=str(self.home))
+        # CODEX_HOME unset: the installer's own fallback, ~/.codex, is
+        # what these tests read back, inside the test's home (#274).
+        self.env = clean_env(self.home)
+        del self.env["CODEX_HOME"]
         self.hooks_path = self.home / ".codex" / "hooks.json"
 
     def install(self, *args, env=None):
@@ -328,10 +338,13 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         self.project = self.root / "agentprog"
         self.project.mkdir()
         # The adapter runs in-process and spawns the recorder, which
-        # reads the store's home from the environment.
+        # reads its homes from this process's environment: all of them
+        # the test's own for the test's length (#274).
+        homes = ("LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME")
         previous = {k: os.environ.get(k)
-                    for k in ("LOXODONTA_HOME", "CLAUDE_PROJECT_DIR")}
-        os.environ["LOXODONTA_HOME"] = str(self.store)
+                    for k in homes + ("CLAUDE_PROJECT_DIR",)}
+        own = clean_env(self.root / "home", LOXODONTA_HOME=str(self.store))
+        os.environ.update({k: own[k] for k in homes})
         os.environ.pop("CLAUDE_PROJECT_DIR", None)
 
         def restore():
@@ -404,8 +417,7 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         self.assertEqual(actions, ["read_file: a.py", "edit_file: a.py",
                                    "run_shell: pytest",
                                    "handoff: coder -> reviewer"])
-        judged = run_loxodonta("verify", "--log", str(log),
-                               env={"LOXODONTA_HOME": str(self.store)})
+        judged = run_loxodonta("verify", "--log", str(log))
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertIn("VALID", judged.stdout)
         # A second trace is a sibling chain, never a shared file.
