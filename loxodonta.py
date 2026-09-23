@@ -44,7 +44,10 @@ GENESIS_FIELDS = ENTRY_FIELDS | {"v"}
 # The entry_hash is SHA256 over the canonical JSON of the entry minus its
 # entry_hash field: keys sorted, compact separators, UTF-8, no trailing
 # newline. These bytes are the format's ground truth — an independent
-# implementation must reproduce them exactly.
+# implementation must reproduce them exactly. json.dumps escapes a string
+# exactly as RFC 8785 section 3.2.2.2 does, which is what SPEC §4 pins:
+# `\n` and the other short forms, lowercase `\u001b` for the rest of the
+# controls, everything else as it stands. tests/vectors/ holds it there.
 
 def canonical_bytes(entry_without_hash):
     return json.dumps(
@@ -78,21 +81,36 @@ def receipt_text(text):
 # The log's lines, the tail, and the files an entry names, read and
 # never written.
 
+def split_lines(data):
+    """The lines of a chain's or a sidecar's bytes, by the one rule every
+    reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
+    and nothing else ends one. U+2028, U+2029 and NEL are characters a
+    JSON string holds raw, and a `\\r` alone is whitespace between two
+    JSON tokens; a reader that ended a line at any of them would read
+    one entry of another conforming writer as two broken ones. A `\\r`
+    just before the `\\n` belongs to the ending, so a file whose endings
+    a Windows tool rewrote to `\\r\\n` reads as the same lines. The bytes
+    after the last `\\n`, when there are any, are a line too: the torn
+    tail a crash leaves, which the walk names. Written the same way in
+    loxodonta.py, supervisor.py and receiver.py, which never import one
+    another; tests/test_suite_shape.py holds the copies equal."""
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    return [line[:-1] if line.endswith(b"\r") else line for line in lines]
+
+
 def read_log(path):
-    """All lines of the receipt log; FileNotFoundError if it doesn't exist."""
-    with open(path, encoding="utf-8") as f:
-        return f.read().splitlines()
-
-
-def read_log_to_judge(path):
-    """`read_log` for the readers that walk the chain (verify, report,
-    explain, the package's walk). A byte that is not UTF-8 arrives as a
-    lone surrogate (surrogateescape) instead of ending the whole read in
-    a traceback, so the walk can refuse the one line it sits on by name
-    (SPEC §6). The recorder only ever writes ASCII lines, so no line it
-    wrote is read any differently."""
-    with open(path, encoding="utf-8", errors="surrogateescape") as f:
-        return f.read().splitlines()
+    """All lines of the receipt log, split by `split_lines`, for every
+    reader and writer here; FileNotFoundError if it doesn't exist. A
+    byte that is not UTF-8 arrives as a lone surrogate (surrogateescape)
+    instead of ending the whole read in a traceback: the walk refuses
+    the one line it sits on by name (SPEC §6), and `tail_entry` calls a
+    tail holding one damaged. The recorder only ever writes ASCII lines,
+    so no line it wrote is read any differently."""
+    with open(path, "rb") as f:
+        return [line.decode("utf-8", "surrogateescape")
+                for line in split_lines(f.read())]
 
 
 def missing_log(path):
@@ -110,12 +128,19 @@ def tail_entry(lines):
     bury an innocent race under later receipts until it read as
     tampering in the middle of the file, so the fork ends the chain the
     way a tear does, and damage stays at the tail, where the readers
-    that name it honestly expect it (SPEC §6, §8)."""
+    that name it honestly expect it (SPEC §6, §8). A tail holding a byte
+    that is not UTF-8 is torn in the same sense, since a crash in the
+    middle of a character leaves one (#299)."""
     if not lines:
         return None
     try:
+        # A byte that is not UTF-8 arrives from `read_log` as a lone
+        # surrogate, which has no UTF-8 form. Every refusal of the reader
+        # is a ValueError, the too-long integer's among them; nesting too
+        # deep is a RecursionError.
+        lines[-1].encode("utf-8")
         last = json.loads(lines[-1])
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
         return None
@@ -181,11 +206,37 @@ def object_with_each_key_once(pairs):
     return seen
 
 
+def path_leaving_base(path):
+    """How a reference path's spelling could lead outside the reference
+    base, named; None when it cannot (SPEC §3). A leading slash of
+    either kind is absolute (`\\\\server\\share` too), a letter and a
+    colon is a drive (`C:\\x`, and `C:x`, which Windows reads from that
+    drive's current folder), and a `..` segment steps up, with either
+    slash as the separator since Windows reads both.
+    The rule is spelling, the same on every platform, so a chain's
+    verdict never depends on the machine that judges it. The recorder
+    applies it to what a receipt stores and the walk to what a chain
+    holds, so a chain the recorder wrote never fails it (#299). It is
+    not containment: a symbolic link under the base is followed where
+    it leads, by `log` and by `verify --files` alike (SPEC §3)."""
+    if path[:1] in ("/", "\\"):
+        return "absolute"
+    if path[1:2] == ":":
+        return "a drive"
+    if ".." in path.replace("\\", "/").split("/"):
+        return "a '..' segment"
+    return None
+
+
 def shape_problem(entry):
     """The first way `entry`'s values fail SPEC §2's types, named; None
-    when each is of its type. Type only: whether a string is hex, or a
-    timestamp well-formed, is the hash comparison's and the reader's
-    business, and a mistyped value is what makes a reader crash."""
+    when each is of its type. Type only, with one exception: whether a
+    string is hex, or a timestamp well-formed, is the hash comparison's
+    and the reader's business, and a mistyped value is what makes a
+    reader crash. The exception is a reference path that could leave the
+    project: `verify --files` would open it on the recipient's machine,
+    and no chain the recorder wrote holds one, so it was written past
+    the recorder's refusal or forged (SPEC §3, §6 step 1; #299)."""
     n = entry.get("n")
     if isinstance(n, bool) or not isinstance(n, int):
         return "n is not an integer"
@@ -204,6 +255,13 @@ def shape_problem(entry):
     for ref in files:
         if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}                 or not all(isinstance(value, str) for value in ref.values()):
             return "files holds something that is not a reference"
+    for ref in files:
+        how = path_leaving_base(ref["path"])
+        if how is not None:
+            # Escaped for display (`visible`, below): the path is the
+            # writer's text.
+            return (f"files names a path that leaves the project ({how}): "
+                    f"{visible(ref['path'])}")
     return None
 
 
@@ -269,8 +327,8 @@ def walk(lines):
         # other line that is not an entry, never a traceback that leaves
         # the reader with no verdict at all (SPEC §6, #292).
         try:
-            # A byte that is not UTF-8 arrives from `read_log_to_judge`
-            # as a lone surrogate, the one thing UTF-8 cannot encode.
+            # A byte that is not UTF-8 arrives from `read_log` as a
+            # lone surrogate, the one thing UTF-8 cannot encode.
             line.encode("utf-8")
             entry = json.loads(line, object_pairs_hook=object_with_each_key_once)
         except UnicodeEncodeError:
@@ -709,7 +767,10 @@ def anchors_path(log):
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
-    as None, so a judge can name it rather than skip it."""
+    as None, so a judge can name it rather than skip it, and so does a
+    line the reader cannot take apart: a byte that is not UTF-8 (a lone
+    surrogate from `read_log`), an integer too long to read, nesting too
+    deep (#299)."""
     try:
         lines = read_log(path)
     except FileNotFoundError:
@@ -717,10 +778,11 @@ def read_sidecar_records(path):
     records = []
     for line in lines:
         try:
+            line.encode("utf-8")
             record = json.loads(line)
             if not isinstance(record, dict):
                 record = None
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             record = None
         records.append(record)
     return records
@@ -1094,7 +1156,7 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
     the mechanism in its own verdict line and "anchor" is never the word
     for an authority timestamp (ADR-0032 ruling 1)."""
     try:
-        lines = read_log_to_judge(log)
+        lines = read_log(log)
     except FileNotFoundError:
         return missing_log(log)
     if not lines:
@@ -1134,6 +1196,12 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
 
     diverged = 0
     if files:
+        # Every path below comes from the chain being judged, and every
+        # one stays under the base by its spelling: an entry naming a
+        # path that could leave it is refused by the walk above, BROKEN,
+        # so this is never reached for it and nothing here opens it
+        # (`path_leaving_base`, #299). A symbolic link is followed, as the
+        # recorder followed it when it logged the file (SPEC §3).
         # Latest reference per path is authoritative (GLOSSARY: file reference).
         latest = {}
         for entry in entries:
@@ -1370,9 +1438,18 @@ def read_manifest(folder):
     format tag, and a shape this verifier cannot judge are refusals, the
     way UNSUPPORTED-VERSION is."""
     try:
+        # Read with the walk's guard (SPEC §6 step 1): a manifest giving
+        # one key twice says two things, one to a reader keeping the
+        # first and another to one keeping the last, and whatever this
+        # verifier judged, the recipient's own tools may read the other
+        # (#299).
         with open(os.path.join(folder, "manifest.json"), encoding="utf-8") as f:
-            manifest = json.load(f)
-    except (OSError, ValueError):
+            manifest = json.load(f, object_pairs_hook=object_with_each_key_once)
+    except KeyGivenTwice as twice:
+        return None, (f"UNSUPPORTED-FORMAT: manifest.json has key "
+                      f"{visible(repr(twice.key))} given twice; no reading "
+                      "of it is the manifest")
+    except (OSError, ValueError, RecursionError):
         return None, ("UNSUPPORTED-FORMAT: no readable manifest.json at the "
                       "top of this package; not a loxodonta package")
     refusal = manifest_refusal(manifest)
@@ -1402,7 +1479,7 @@ def walked_listing(log):
     count, how many file references its entries carry, and how many
     transcript commitments it holds. The same walk verify uses; a chain
     is judged by walking, never by file hash (ADR-0026 ruling 3)."""
-    lines = read_log_to_judge(log)
+    lines = read_log(log)
     entries, _, _ = walk(lines)
     head = None
     references = 0
@@ -1982,12 +2059,51 @@ def judge_package(shown, folder, chain_file=None, block_headers=None):
     return 0
 
 
+# The characters a Windows unzip turns into `_` in a member's name.
+WINDOWS_UNZIP_UNDERSCORES = str.maketrans(':<>|"?*', "_" * 7)
+
+
+def landing_name(name):
+    """The file a zip member's name unpacks to, folded so that two names
+    landing on one file on any system compare equal: a drive or a
+    `\\\\server\\share` prefix dropped and either slash a separator
+    (Windows), empty, `.` and `..` segments dropped (every unzip), a
+    segment's trailing dots and spaces dropped and `:<>|"?*` read as `_`
+    (Windows), one Unicode normal form (macOS), and case folded (Windows
+    and macOS). The fold is the union of those systems' rules, applied on
+    every system, so a package's verdict never depends on where the
+    recipient unpacks it; it folds a little more than any one system
+    does, and a package the supervisor wrote, flat and plainly named,
+    never comes near it (#299)."""
+    import ntpath  # Windows's own path rules, the same on every system
+    _, rest = ntpath.splitdrive(name.replace("/", "\\"))
+    segments = (segment.rstrip(". ") for segment in rest.split("\\"))
+    landed = "/".join(segment for segment in segments if segment)
+    landed = landed.translate(WINDOWS_UNZIP_UNDERSCORES)
+    return unicodedata.normalize("NFC", landed).casefold()
+
+
+def one_file_twice(names):
+    """The first two of a zip's member names that unpack to one file, or
+    None. Unpacking writes both and keeps the last, while `unzip -p` and
+    a zip reader that stops at the first show the first: a tampered
+    chain ahead of the original verified SELF-CONSISTENT (#299)."""
+    seen = {}
+    for name in names:
+        landed = landing_name(name)
+        if landed in seen:
+            return seen[landed], name
+        seen[landed] = name
+    return None
+
+
 def cmd_verify_package(args):
     """`verify-package PATH`: a zip or an unpacked folder, the manifest at
     its top. A zip is unpacked into a temporary folder and judged there,
     so a Windows unzip and this command see the same bytes the same way;
-    one that declares more than PACKAGE_MAX_BYTES unpacked, or that is
-    damaged past what its end record shows, is refused unopened."""
+    one that declares more than PACKAGE_MAX_BYTES unpacked, that holds
+    two members unpacking to one file, or that is damaged past what its
+    end record shows, is refused unopened."""
     import zipfile  # only this command reads zips; the hook never pays for it
     path = args.path
     headers = headers_by_root(args.block_header)
@@ -2009,8 +2125,21 @@ def cmd_verify_package(args):
                           "bytes unpacked, more than this verifier will "
                           f"unpack ({PACKAGE_MAX_BYTES})")
                     return 4
+                twice = one_file_twice(package.namelist())
+                if twice is not None:
+                    first, second = (visible(repr(name)) for name in twice)
+                    which = (f"{first} twice" if twice[0] == twice[1]
+                             else f"{first} and {second}")
+                    print(f"UNSUPPORTED-FORMAT: {path} holds two members "
+                          f"that unpack to one file, {which}; which one is "
+                          "read depends on the tool that unpacks it, so "
+                          "this verifier refuses it unopened")
+                    return 4
                 package.extractall(unpacked)
-        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as e:
+        # ValueError: a member whose name leaves nothing to unpack to,
+        # such as `..`, which extractall refuses by raising.
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError,
+                ValueError) as e:
             print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked ({e}); "
                   "not a loxodonta package")
             return 4
@@ -2446,19 +2575,25 @@ def file_reference(base, raw_path):
     stored and hashed relative to the reference base — the project
     root, which for a local log is the log's own directory."""
     path = raw_path.replace("\\", "/")
+    # The file is read by its own name; the receipt holds the name as
+    # text it can carry, and the caller sorts what it holds.
+    stored = receipt_text(path)
     # SPEC §3: absolute and `..` paths are rejected, never silently rewritten —
     # a file outside the log's directory usually means the log is misplaced.
-    if os.path.isabs(path) or (len(path) > 1 and path[1] == ":"):
-        raise ValueError(f"absolute path not allowed: {raw_path}")
-    if ".." in path.split("/"):
-        raise ValueError(f"path may not contain '..': {raw_path}")
+    # The rule is the walk's own, applied to the spelling the receipt
+    # stores, so the recorder never writes a chain the walk refuses
+    # (#299). That catches `\Users\x`, which Python 3.13 on Windows no
+    # longer calls absolute, and a name starting with a byte that is not
+    # UTF-8, or with `..` and then one, whose escape text (`\udcff...`,
+    # `..\udcff`) Windows reads as rooted or as a step up.
+    how = path_leaving_base(stored)
+    if how is not None:
+        raise ValueError(f"path not allowed ({how}): {raw_path}")
     try:
         sha256 = sha256_file(os.path.join(base, path))
     except FileNotFoundError:
         raise ValueError(f"file not found: {raw_path}")
-    # The file is read by its own name; the receipt holds the name as
-    # text it can carry, and the caller sorts what it holds.
-    return {"path": receipt_text(path), "sha256": sha256}
+    return {"path": stored, "sha256": sha256}
 
 
 def build_references(log, file_paths):
@@ -3248,24 +3383,26 @@ def is_chain_record(record):
 
 def entries_on_disk(log):
     """The chain's complete lines as (n, entry_hash, bytes), read raw so
-    what is sent is what sits on disk. Reading stops at the first line
-    that is not an entry, a torn tail or damage, because the receiver
-    refuses a batch whole when any line is not one: the torn line stays
-    here as the damage `verify` reports."""
+    what is sent is what sits on disk: each line's bytes as `split_lines`
+    reads them, ended with `\\n` (a `\\r` before it is part of the ending,
+    which the receiver would drop anyway). Reading stops at the first
+    line that is not an entry, a torn tail or damage, because the
+    receiver refuses a batch whole when any line is not one: the torn
+    line stays here as the damage `verify` reports."""
     with open(log, "rb") as f:
         raw = f.read()
     entries = []
-    for line in raw.splitlines(keepends=True):
+    for line in split_lines(raw):
         try:
             entry = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             break
         n, digest = (entry.get("n"), entry.get("entry_hash")) \
             if isinstance(entry, dict) else (None, None)
         if isinstance(n, bool) or not isinstance(n, int) \
                 or not isinstance(digest, str):
             break
-        entries.append((n, digest, line))
+        entries.append((n, digest, line + b"\n"))
     return entries
 
 
@@ -3299,6 +3436,11 @@ def chain_cursor(log, url):
     mine = remote_id(url)
     cursor = -1
     for line in lines:
+        # A byte that is not UTF-8 arrives from `read_log` as a lone
+        # surrogate. The memo holding it cannot be read, and is raised
+        # as such (UnicodeEncodeError is a ValueError), as it was before
+        # `read_log` read such bytes at all (#299).
+        line.encode("utf-8")
         try:
             record = json.loads(line)
         except ValueError:
@@ -3464,12 +3606,15 @@ def damaged_tail_after(log, entries):
     file ends cleanly: anything on disk past the last complete entry is
     the tear. Said out loud by the command, because an operator sending
     a chain by hand should not learn from a byte count that part of it
-    is gone."""
-    intact = sum(len(line) for _, _, line in entries)
+    is gone. Counted in lines by `split_lines`, the rule
+    `entries_on_disk` reads by, so a chain with Windows line endings
+    ends cleanly too."""
     try:
-        return entries[-1][0] if os.path.getsize(log) > intact else None
+        with open(log, "rb") as f:
+            lines = split_lines(f.read())
     except OSError:
         return None
+    return entries[-1][0] if len(lines) > len(entries) else None
 
 
 def publish_chain_command(args):
@@ -4009,7 +4154,7 @@ def timeline_lines(entries, breaks, warns):
 
 def cmd_report(args):
     try:
-        lines = read_log_to_judge(args.log)
+        lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
 
@@ -4076,7 +4221,7 @@ def split_command(text):
 
 def cmd_explain(args):
     try:
-        lines = read_log_to_judge(args.log)
+        lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
     if not lines:

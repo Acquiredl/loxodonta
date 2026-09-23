@@ -68,7 +68,7 @@ The sender side of this contract is the recorder. Any other sender, and any othe
 **Two content types, two destinations.**
 
 - `Content-Type: application/json` is a published head: one JSON object, the body ADR-0025 ruling 2 describes (`head`, `n`, `session`, `ts`, `event`, `text`, `content`). It is appended to `heads.jsonl` as one line, compact and key-sorted, whatever whitespace the sender used.
-- `Content-Type: application/x-ndjson` is a batch of a published chain: the chain's lines exactly as they sit in the chain file, newline-delimited, from genesis on the first send and from the entry after the last acknowledged one on later sends. It is appended to the file the chain header names.
+- `Content-Type: application/x-ndjson` is a batch of a published chain: the chain's lines as they sit in the chain file, each ended with `\n`, from genesis on the first send and from the entry after the last acknowledged one on later sends. It is appended to the file the chain header names.
 
 **The headers on a chain batch.**
 
@@ -83,7 +83,7 @@ The receiver reads the chain header and nothing else; the other three ride along
 
 **The chain header must be a receipt file name.** `receipts-`, then a session id of letters, digits, hyphens and underscores (the sibling suffix is made of the same), then `.jsonl`, at most 200 characters between the two. Anything else is refused with `400` and nothing is written: a separator (`/` or `\`), a parent reference (`..`), a dot inside the id, another extension, `.JSONL`, an empty header, a missing one. Nothing in a header ever becomes a path.
 
-**The body.** `Content-Length` is required; a body declared past the cap of 8 MiB (8,388,608 bytes) is refused with `413` before a byte of it is read. A chain batch must hold at least one line, and every line must be a JSON object carrying an integer `n` and a string `entry_hash`; a batch with a line that is not is refused whole with `400`, nothing written, because a file that is a receipt log holds entries and nothing else. The receiver judges nothing further about a line: judging is `verify`'s job.
+**The body.** `Content-Length` is required; a body declared past the cap of 8 MiB (8,388,608 bytes) is refused with `413` before a byte of it is read. A line ends at `\n` and nowhere else, a `\r` just before it being part of the ending, by the rule every reader of a chain keeps (docs/SPEC.md section 1). A chain batch must hold at least one line, and every line must be a JSON object carrying an integer `n` and a string `entry_hash`; a batch with a line that is not is refused whole with `400`, nothing written, because a file that is a receipt log holds entries and nothing else. The receiver judges nothing further about a line: judging is `verify`'s job.
 
 **The append rule** that keeps each chain file a receipt log (ADR-0031 ruling 4):
 

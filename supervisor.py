@@ -134,22 +134,49 @@ def chain_identity(root, log):
     return repo, session, seq
 
 
+def split_lines(data):
+    """The lines of a chain's or a sidecar's bytes, by the one rule every
+    reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
+    and nothing else ends one. U+2028, U+2029 and NEL are characters a
+    JSON string holds raw, and a `\\r` alone is whitespace between two
+    JSON tokens; a reader that ended a line at any of them would read
+    one entry of another conforming writer as two broken ones. A `\\r`
+    just before the `\\n` belongs to the ending, so a file whose endings
+    a Windows tool rewrote to `\\r\\n` reads as the same lines. The bytes
+    after the last `\\n`, when there are any, are a line too: the torn
+    tail a crash leaves, which the walk names. Written the same way in
+    loxodonta.py, supervisor.py and receiver.py, which never import one
+    another; tests/test_suite_shape.py holds the copies equal."""
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    return [line[:-1] if line.endswith(b"\r") else line for line in lines]
+
+
+def read_lines(path, errors="replace"):
+    """A chain's or a sidecar's lines as text, split by `split_lines`.
+    A byte that is not UTF-8 reads as U+FFFD by default: the readers
+    here display and count, and the verify walk is where such a line
+    gets its name."""
+    with open(path, "rb") as f:
+        return [line.decode("utf-8", errors) for line in split_lines(f.read())]
+
+
 def read_entries(log):
     """Every line of a chain that still reads as an entry — the census's
     parsing half, display and diffing only (ADR-0005). Damage is not
     judged here: a torn or garbled line is simply not remembered; the
     verify walk is where damage gets its name."""
     entries = []
-    with open(log, encoding="utf-8", errors="replace") as lines:
-        for line in lines:
-            try:
-                entry = json.loads(line)
-            except (ValueError, RecursionError):
-                # Not JSON, an integer past the digit limit, or nesting
-                # past the recursion limit: garbled all the same (#292).
-                continue
-            if isinstance(entry, dict):
-                entries.append(entry)
+    for line in read_lines(log):
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            # Not JSON, an integer past the digit limit, or nesting
+            # past the recursion limit: garbled all the same (#292).
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
     return entries
 
 
@@ -918,16 +945,16 @@ def sidecar_records(sidecar):
     judging the proofs stays with verify. A missing file, a torn line,
     or a line that is not an object yields nothing."""
     try:
-        with open(sidecar, encoding="utf-8", errors="replace") as lines:
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(record, dict):
-                    yield record
+        lines = read_lines(sidecar)
     except FileNotFoundError:
         return
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            yield record
 
 
 def is_attempt(record):
@@ -3645,20 +3672,18 @@ def walk_chain(root, asked):
         return None
     relpath = path.relative_to(root.resolve()).as_posix()
     lines = []
-    with open(path, encoding="utf-8", errors="replace") as chain:
-        for raw in chain:
-            raw = raw.rstrip("\n")
-            try:
-                entry = json.loads(raw)
-            except (ValueError, RecursionError):
-                # An integer past the digit limit or nesting past the
-                # recursion limit is damage too, never a crash (#292).
-                lines.append({"damage": raw})
-                continue
-            if isinstance(entry, dict):
-                lines.append({"entry": entry})
-            else:
-                lines.append({"damage": raw})
+    for raw in read_lines(path):
+        try:
+            entry = json.loads(raw)
+        except (ValueError, RecursionError):
+            # An integer past the digit limit or nesting past the
+            # recursion limit is damage too, never a crash (#292).
+            lines.append({"damage": raw})
+            continue
+        if isinstance(entry, dict):
+            lines.append({"entry": entry})
+        else:
+            lines.append({"damage": raw})
     return {"log": relpath, "testimony": TESTIMONY, "lines": lines}
 
 
@@ -5145,9 +5170,10 @@ def chain_listing(log):
     entry count, never by file hash. The head is the commitment, and
     the verifier recomputes it by walking, so a Windows unzip that
     changes line endings changes nothing the manifest says."""
-    # errors="replace" and RecursionError: a line no reader can take
-    # apart is packaged as it stands, and the verifier names it (#292).
-    lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    # U+FFFD for a byte that is not UTF-8, and RecursionError: a line no
+    # reader can take apart is packaged as it stands, and the verifier
+    # names it (#292). Counted by the verifier's own line rule (#299).
+    lines = read_lines(log)
     head = None
     for line in lines:
         try:
@@ -5900,7 +5926,7 @@ def run_drill(root, asked):
     log = resolve_chain(root, asked)
     if log is None:
         return None, 1
-    lines = log.read_text(encoding="utf-8").splitlines()
+    lines = read_lines(log, errors="strict")
     if len(lines) < 3:
         return {"log": asked, "refused": "too short to drill — the "
                 "battery plays with middle entries; give it at least "
