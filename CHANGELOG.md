@@ -12,11 +12,13 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
+- The receiver gives each request its own thread and drops one not whole within 60 seconds, so a slow sender no longer holds the door (#300).
 - The supervisor writes its baseline, day book and views whole or not at all, so a crash mid-write no longer leaves a baseline the next scan cannot read, and the tripwire keeps its memory of heads (#300).
 
 ### Added
 
 - `verifier.py`: the recorder's `head`, `verify` and `verify-package` on their own, with nothing that writes or sends. It is copied from `loxodonta.py`, never edited by hand; CI fails a stale copy, and releases carry it (ADR-0035, #299).
+- The receiver caps what it keeps, 1024 MiB a file and 10240 MiB in all (`--file-cap`, `--total-cap`), answering `507` past a cap and trimming nothing (#300).
 
 ## [0.8.1] - 2026-09-23
 

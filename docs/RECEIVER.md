@@ -23,14 +23,16 @@ python receiver.py serve
 It prints where it keeps its files, where it listens and in what, and the URL:
 
 ```
-receiver 0.8.1 keeping /home/op/.loxodonta/receiver
+receiver 0.8.1 keeping /home/op/.loxodonta/receiver, at most 1024 MiB a file and 10240 MiB in all
 listening on 0.0.0.0:8790 (all interfaces), speaking plain HTTP (give --cert and --key for TLS)
 publish to http://shelf:8790/7qpsWUkU86ML-NOuaGjSaetfYCGgGffLyTRvOJFMYPo
   (shelf is this machine's name; use the address the sending machine reaches this one by)
 the URL is the credential: it can add and cannot read, list or delete; --new-token retires it
 ```
 
-It binds all interfaces by default, because its whole point is another machine; `--bind 127.0.0.1` narrows it to one address, for a receiver behind a reverse proxy or a tunnel. Every later start prints the same URL, so a restart never forces a rewire. Run it under whatever keeps a process up on that box (systemd, launchd, a scheduled task); it is one process and one thread, taking one request at a time, and each request ends in an fsync.
+It binds all interfaces by default, because its whole point is another machine; `--bind 127.0.0.1` narrows it to one address, for a receiver behind a reverse proxy or a tunnel. Every later start prints the same URL, so a restart never forces a rewire. Run it under whatever keeps a process up on that box (systemd, launchd, a scheduled task). It is one process that gives each request a thread of its own, so a slow sender holds only its own connection. The writes still take turns: one append at a time, each ending in an fsync, so two batches for one chain never interleave.
+
+Each request is due whole, headers and body, within sixty seconds of its connection opening, and a sender that goes quiet for thirty seconds is dropped sooner. That deadline carries a full 8 MiB batch at a little over one megabit a second. A sender that trickles its bytes to keep a connection open gets no longer than one that sends them all at once.
 
 | Flag | What it does |
 |---|---|
@@ -39,6 +41,8 @@ It binds all interfaces by default, because its whole point is another machine; 
 | `--port N` | the port (default 8790; `0` takes a free one and prints it) |
 | `--cert FILE --key FILE` | speak TLS from this PEM pair (section 5) |
 | `--new-token` | mint a new token; the old URL answers 404 from now on (section 3) |
+| `--file-cap MIB` | the most any one file in the data directory may hold (default 1024 MiB); past it a request is refused with `507` (section 4, *The caps*) |
+| `--total-cap MIB` | the most the data directory may hold in all (default 10240 MiB); past it a request is refused with `507` |
 | `--version` | tool version, format version, and the checkout's commit, in step with the recorder and the supervisor |
 
 What it keeps, in the data directory:
@@ -87,6 +91,8 @@ The receiver reads the chain header and nothing else; the other three ride along
 2. A line whose `n` the file holds with a different `entry_hash` is a regenerated chain arriving after the original, and is appended: that collision is what the copy exists to show.
 3. Every other line is appended in the order received.
 
+**The caps.** Whoever holds the URL could otherwise post shape-valid batches until the disk is full and every honest send fails with it. So the receiver caps what it keeps: each file in its data directory at 1024 MiB, and the directory as a whole at 10240 MiB, unless `--file-cap` and `--total-cap` say otherwise. The sizes are the files as they are on disk, read at each request. Once the append rule has dropped the duplicates, a request whose remaining lines would take a file past its cap, or the directory past its own, is refused whole with `507` and one line naming the cap. Nothing is written, and nothing already kept is trimmed or rewritten to make room: the receiver only adds. A resend of lines the file already holds adds nothing, so it is never refused, and the sender's retry still gets its `2xx`. The status is `507 Insufficient Storage` rather than `413`, because the request is well formed and inside the body cap; it is this receiver's storage that has no room for it. `413` stays the one answer for a body too large to take at all, so the sender's failure line tells the two apart. The sender's memo does not advance on a `507`, so once the operator raises a cap or moves files off the box, the next send carries the same lines again.
+
 **The answer.** `200` with a small JSON body, `{"appended": 3, "dropped": 0}` for a chain batch and `{"appended": 1}` for a head, sent only after the bytes are on disk, flushed and fsynced. Any `2xx` means on disk; the recorder advances its memo on a `2xx` and on nothing else.
 
 | Status | When |
@@ -100,6 +106,7 @@ The receiver reads the chain header and nothing else; the other three ride along
 | `415` | a content type that is neither of the two |
 | `500` | the disk refused the write; nothing of the batch is acknowledged, and the sender's memo does not advance |
 | `501` | a verb the stdlib server does not know at all |
+| `507` | the lines would take a file past `--file-cap` or the data directory past `--total-cap`; nothing is written |
 
 A refusal carries one line of plain text saying why. The receiver's own log, on its stdout, is one line per request with the time, the client address, the verb and the status; the request path is on no line, because the path is the credential.
 
@@ -155,7 +162,8 @@ The walk judges the receiver's file the way it judges any chain, so what it says
 - A chain header that is not a receipt file name: `400`, nothing written, nothing from the header touching the disk.
 - A body with no declared length, or declared past the cap: `411`, `413`, before a byte is read.
 - A batch with a line that is not shaped like an entry: `400`, nothing written.
-- A sender that stalls for thirty seconds, mid-body or before a TLS handshake it never starts: dropped silently, with no line on the receiver's log, so a stalling stranger cannot fill it.
+- A request that has not arrived whole, headers and body, sixty seconds after its connection opened, or a sender that goes quiet for thirty seconds, mid-body or before a TLS handshake it never starts: dropped silently, with no line on the receiver's log, so a stalling stranger cannot fill it. A slow sender holds only its own connection while it lasts; every other sender is served beside it.
+- Lines that would take a file past its cap, or the data directory past the total cap: `507`, nothing written, nothing already kept touched.
 - Every request for what it holds: there is no such request. The files are read on the box, by the operator, with the recorder.
 
 ## 8. The head-record test, restated
@@ -168,3 +176,4 @@ What none of this survives (ADR-0031):
 - **The receiver's box, reached another way.** A receiver reachable from the writer's machine by a credential other than the URL (an SSH key on the box, a shared filesystem, a login in a browser) is reachable by the writer. The tool cannot enforce this; the operator's choice of box does.
 - **The tail since the last send.** Everything after the last acknowledged entry can still be rewritten consistently on the writer's machine. Session end closes the window for sessions that reach one; before that, the keeper sends nothing until the head has sat unchanged past its cadence, which covers a session killed before its end and leaves a busy session's tail unsent until it ends.
 - **Garbage in.** The copy is of what the writer said.
+- **A flood from the URL's holder.** The caps keep a flood from filling the disk, and they cannot tell it from honest sends: once a flood has used a cap up, honest lines are refused with `507` beside it. What already landed stays, so the flood sits on disk, shape-valid and visible, until the operator moves it off the box.
