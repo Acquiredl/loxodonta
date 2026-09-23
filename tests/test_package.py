@@ -851,7 +851,8 @@ class HookStorePackageTest(PackageCase):
         self.assertEqual(out.count("\nchain: "), 2, out)
         # The recorder's own anchor line, under its chain, as detail
         # (ruling 6): the chain is anchored, the package is not.
-        self.assertIn("ANCHORED: entries 0..3 existed by Bitcoin block 850000",
+        self.assertIn("ANCHORED: entries 0..3: the attestation claims "
+                      "Bitcoin block 850000, and the block was not checked",
                       out)
         self.assertIn(f"{self.sidecar.name}: matches the manifest", out)
         lines = out.strip().splitlines()
@@ -929,7 +930,8 @@ class HookStorePackageTest(PackageCase):
         # The first chain still walks clean, and the anchor under it
         # still prints: the finding is the sibling's alone.
         self.assertIn("VALID", judged.stdout)
-        self.assertIn("ANCHORED: entries 0..3 existed by Bitcoin block 850000",
+        self.assertIn("ANCHORED: entries 0..3: the attestation claims "
+                      "Bitcoin block 850000, and the block was not checked",
                       judged.stdout)
         witness = json.loads((folder / "witness.json").read_text("utf-8"))
         verdicts = {c["log"]: c["verdict"] for c in witness["scan"]["chains"]}

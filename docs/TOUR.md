@@ -294,7 +294,12 @@ digest doubles as the claim-ticket number `upgrade` polls); else refuse.
 - The ANCHORED sentence ends at the honesty boundary: the verifier
   proves the fingerprint folds up to *that merkle root*; whether the
   root sits in the named block is a fact about the outside world,
-  confirmed against a block source the operator trusts. Reading the
+  confirmed against a block source the operator trusts. So without a
+  header the sentence says the attestation *claims* the block and the
+  block was not checked; `--block-header` hands the verifier that
+  block's 80 bytes, and only when their merkle root is the proof's does
+  it say the entries existed by the block, named by the header's hash
+  (ruling 3 on #299, ANCHORING.md §3). Reading the
   block height for freshness is likewise the operator's half of the
   regeneration defense (ANCHORING.md §5).
 - Verdict tiers: ANCHOR-MISMATCH and ANCHOR-INVALID share exit 3 with

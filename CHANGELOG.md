@@ -24,6 +24,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `verifier.py`: the recorder's `head`, `verify` and `verify-package` on their own, with nothing that writes or sends. It is copied from `loxodonta.py`, never edited by hand; CI fails a stale copy, and releases carry it (ADR-0035, #299).
 - Conformance vectors in `tests/vectors/`: small chains with the verdict each must get, run against `loxodonta.py` and `verifier.py`, for a second implementation to check itself against. SPEC section 4 now pins string escaping to RFC 8785's (ADR-0035, #299).
 - The receiver caps what it keeps, 1024 MiB a file and 10240 MiB in all (`--file-cap`, `--total-cap`), answering `507` past a cap and trimming nothing (#300).
+- `--block-header HEX` on `verify --anchors` and `verify-package`: a Bitcoin block header from a source you trust, matched to anchors by merkle root, offline. A match names the block by its hash (#299).
+
+### Changed
+
+- An anchor line says its attestation claims block H and the block was not checked, since a regenerated chain can carry a made-up attestation; only a matching `--block-header` makes it say the entries existed by that block (#299).
 
 ## [0.8.1] - 2026-09-23
 
