@@ -7,7 +7,7 @@
 ## Read first
 
 0. `docs/DIRECTION.md` — where the project is going and what it declines: the recipient first, a vertical complete or not counted, the four gates to 1.0, the supervisor's ceiling. Check a plan against it before building. `docs/GROUNDING.md` holds the published work it stands on, and what the design can and cannot claim.
-1. `GLOSSARY.md` — the vocabulary is settled; use it exactly (note the anti-terms: no "blockchain", no "immutable", no "audit log").
+1. `docs/GLOSSARY.md` — the vocabulary is settled; use it exactly (note the anti-terms: no "blockchain", no "immutable", no "audit log").
 2. `docs/SPEC.md` — format spec v0.1-draft. The canonical-JSON rules in §4 are the load-bearing part.
 3. `adrs/0001-hash-chain-not-signatures.md` — why no keys, and why anchoring (not signatures) closes the owner-rewrite gap.
 4. `adrs/0002-writer-as-adversary.md` — the threat model: the agent writing the log is the adversary; drove head records, the `run` wrapper, and the completeness principle.
@@ -21,7 +21,7 @@
 - `adapters/` — per-harness recorder adapters (ADR-0020).
 - `tools/` — repo tooling; `house_check.py` enforces the vocabulary.
 - `tests/` — the suite, through the public CLI: `python -m unittest discover -s tests`.
-- `docs/` — DIRECTION, GROUNDING, START, TOPOLOGY, SPEC, HOOK, ANCHORING, PACKAGE, RECEIVER, METRICS, MCP, OWASP, FIRE-DRILL, EXPERIMENTS, FIELD-DATA, the tours, HISTORY.
+- `docs/` — GLOSSARY, DIRECTION, GROUNDING, START, TOPOLOGY, SPEC, HOOK, ANCHORING, PACKAGE, RECEIVER, METRICS, MCP, OWASP, FIRE-DRILL, EXPERIMENTS, FIELD-DATA, the tours, HISTORY.
 - `adrs/` — decisions that are hard to reverse; `.out-of-scope/` — what was deliberately not built.
 - The store: `~/.loxodonta/receipts/<project-slug>/`, one drawer per project (ADR-0011, `docs/HOOK.md`).
 

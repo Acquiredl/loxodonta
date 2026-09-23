@@ -10,7 +10,7 @@ checked at its primary location that day, and the passage relied on was
 read, unless the entry says otherwise. Section 7 lists what could not be
 verified, and nothing in this page rests on it. Sources are paraphrased
 with a pointer to the section relied on. A few titles contain a word this
-repo's vocabulary refuses ([GLOSSARY](../GLOSSARY.md), *Anti-terms*); those
+repo's vocabulary refuses ([GLOSSARY](GLOSSARY.md), *Anti-terms*); those
 works are cited by author, venue, year and identifier.
 
 ## 1. Lineage
@@ -59,7 +59,7 @@ it can claim none of what that secret buys.
   2.2). Schneier and Kelsey observe that a crash and a truncation look
   alike without a closing record (section 4.1). Here the closing record is
   the session-end commitment, its absence is the *uncommitted tail*
-  annotation, and the [published head](../GLOSSARY.md#published-head) is
+  annotation, and the [published head](GLOSSARY.md#published-head) is
   what tells a verifier how long the chain was.
 - **Protection at the moment of the call.** Paccagnella and others (CCS
   2020) removed events from buffers before they were committed, and their
@@ -110,8 +110,8 @@ recorded items says nothing about the missing ones (ISA 500, paragraph
 A27). Reconciliation between records is a named control for it (ISA 315,
 appendix 3, paragraph 20).
 
-That is the [witness](../GLOSSARY.md#witness): `verify` tests what is in
-the chain, and the witness starts from a [second record](../GLOSSARY.md#second-record)
+That is the [witness](GLOSSARY.md#witness): `verify` tests what is in
+the chain, and the witness starts from a [second record](GLOSSARY.md#second-record)
 of the session and follows each tool event to its receipt.
 
 **The comparison source is graded, not excluded.** The standards do not
@@ -192,7 +192,7 @@ for that, and nowhere else in this repository.
   non-discrimination and nothing more (article 41(1)). An anchor most
   plausibly falls under the second, which is an inference and no court's
   holding, and no ruling or statute found names OpenTimestamps. That
-  matches ADR-0032: the [authority timestamp](../GLOSSARY.md#authority-timestamp)
+  matches ADR-0032: the [authority timestamp](GLOSSARY.md#authority-timestamp)
   sits beside the anchor as a different kind of evidence, and neither is
   the other.
 - **The writer the frameworks had in mind.** NIST SP 800-53 AU-9(4) warns
@@ -237,15 +237,15 @@ standard's sense.
 
 | Term here | Nearest standard term | How they differ | What the glossary does |
 |---|---|---|---|
-| [Recipient](../GLOSSARY.md#recipient) | Relying party (PKI; RFC 9943 section 3) | Same role: the party that checks the proofs before relying on what they cover. | Cross-references it. |
-| [Issuer](../GLOSSARY.md#issuer) | Issuer (RFC 9943 section 3) | Same role: the party that secures a statement under its own name. | Cross-references it. |
-| [Published head](../GLOSSARY.md#published-head) | Checkpoint (C2SP `tlog-checkpoint`); signed tree head (RFC 6962) | A checkpoint is signed by the log. A published head is signed by nobody, and rests on a remote that cannot unsay it. | Cross-references it, and says so. |
-| [Seal](../GLOSSARY.md#seal) | Electronic seal (Regulation (EU) 910/2014, article 3(24) and 3(25)) | An electronic seal is a legal person's data ensuring origin and integrity. A seal here is any outer commitment to the manifest hash; only the issuer signature could be an electronic seal. | Scopes it. |
-| [Witness](../GLOSSARY.md#witness) | Witness (C2SP `tlog-witness`); witness (PeerReview) | A transparency-log witness checks that a new checkpoint is consistent with the last and cosigns it. PeerReview's witness audits another node's log. Here it counts receipts against a second record: completeness, not consistency. The nearest thing here to the first is the [receiver](../GLOSSARY.md#receiver). | Scopes it. |
+| [Recipient](GLOSSARY.md#recipient) | Relying party (PKI; RFC 9943 section 3) | Same role: the party that checks the proofs before relying on what they cover. | Cross-references it. |
+| [Issuer](GLOSSARY.md#issuer) | Issuer (RFC 9943 section 3) | Same role: the party that secures a statement under its own name. | Cross-references it. |
+| [Published head](GLOSSARY.md#published-head) | Checkpoint (C2SP `tlog-checkpoint`); signed tree head (RFC 6962) | A checkpoint is signed by the log. A published head is signed by nobody, and rests on a remote that cannot unsay it. | Cross-references it, and says so. |
+| [Seal](GLOSSARY.md#seal) | Electronic seal (Regulation (EU) 910/2014, article 3(24) and 3(25)) | An electronic seal is a legal person's data ensuring origin and integrity. A seal here is any outer commitment to the manifest hash; only the issuer signature could be an electronic seal. | Scopes it. |
+| [Witness](GLOSSARY.md#witness) | Witness (C2SP `tlog-witness`); witness (PeerReview) | A transparency-log witness checks that a new checkpoint is consistent with the last and cosigns it. PeerReview's witness audits another node's log. Here it counts receipts against a second record: completeness, not consistency. The nearest thing here to the first is the [receiver](GLOSSARY.md#receiver). | Scopes it. |
 | What the witness does | Reconciliation, a control for completeness (ISA 315, appendix 3, paragraph 20) | None. | Section 3 says it in those words. |
-| [Second record](../GLOSSARY.md#second-record) | Underlying documents, in direction of testing (ISA 500, paragraph A27) | Auditing theory grades that source by its independence; here the grade is called reach. | States reach wherever a count is shown. |
+| [Second record](GLOSSARY.md#second-record) | Underlying documents, in direction of testing (ISA 500, paragraph A27) | Auditing theory grades that source by its independence; here the grade is called reach. | States reach wherever a count is shown. |
 | The completeness alarm | Response to a failure of the logging process (NIST SP 800-53, AU-5) | AU-5 asks for the alert and leaves the detection to the organization. | Goes on the control-mapping page. |
-| [Receipt](../GLOSSARY.md#entry) | Receipt (RFC 9943 section 3; RFC 9942) | There, a signed proof from a transparency service that a statement was registered. Here, a line the recorder wrote, signed by nobody. The word has other settled senses as well, so no one standard owns it. | Scopes it. |
+| [Receipt](GLOSSARY.md#entry) | Receipt (RFC 9943 section 3; RFC 9942) | There, a signed proof from a transparency service that a statement was registered. Here, a line the recorder wrote, signed by nobody. The word has other settled senses as well, so no one standard owns it. | Scopes it. |
 
 ## 7. Not verified
 

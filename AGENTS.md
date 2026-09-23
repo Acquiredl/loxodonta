@@ -8,7 +8,7 @@ receipts. The vocabulary is settled; use it exactly.
 
 Read, in this order:
 
-1. `GLOSSARY.md`: the words, and the anti-terms. This is not a blockchain,
+1. `docs/GLOSSARY.md`: the words, and the anti-terms. This is not a blockchain,
    nothing here is immutable, and it is not an audit log.
 2. `docs/SPEC.md`: the receipt format, frozen at v0.1.
 3. `adrs/`: the decisions that are hard to reverse. Argue with the ADR, not

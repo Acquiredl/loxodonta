@@ -11,7 +11,7 @@ safe: a change is judged by what it does when run, not by who typed it.
 
 Reading three files first saves everyone a round trip:
 
-- `GLOSSARY.md`: the vocabulary, used exactly. Note the anti-terms: this is
+- `docs/GLOSSARY.md`: the vocabulary, used exactly. Note the anti-terms: this is
   not a blockchain, nothing here is immutable, and it is not an audit log.
 - `docs/SPEC.md`: the receipt format, frozen at v0.1. The canonical-JSON
   rules in §4 are the load-bearing part.
@@ -80,7 +80,7 @@ shell version of this check silently passes everything.
 
 The rest of the Markdown checks run in CI only: the remaining markdownlint
 rules (in `.markdownlint.yml`) and lychee, the link checker (exclusions and
-their reasons in `lychee.toml`; it also runs weekly, so a link that dies
+their reasons in `.github/lychee.toml`; it also runs weekly, so a link that dies
 quietly still gets noticed). Neither needs anything installed here.
 
 ## The voice rule

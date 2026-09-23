@@ -1,7 +1,7 @@
 # Link rot check: lychee walks every link in the Markdown, web addresses and
 # relative file paths alike, on push and pull request, and once a week on a
 # schedule so a link that died while no one touched the repo still gets
-# noticed. Exclusions and their reasons live in lychee.toml. One broken link
+# noticed. Exclusions and their reasons live in .github/lychee.toml. One broken link
 # fails the run.
 name: links
 
@@ -20,5 +20,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: lycheeverse/lychee-action@v2
         with:
-          args: --config lychee.toml './**/*.md'
+          args: --config .github/lychee.toml './**/*.md'
           fail: true
