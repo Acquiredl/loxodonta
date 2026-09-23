@@ -356,18 +356,48 @@ def build(workdir):
         "shrinks.", 5, "TRANSCRIPT-DIVERGED: chain intact, but a committed "
         "transcript prefix no longer holds")
 
+    # The hashing is frozen across format versions (ADR-0036): a chain
+    # whose genesis claims a version this verifier does not speak has its
+    # hash chain walked all the same, and only its field rules go unjudged.
+    refusal = ('UNSUPPORTED-VERSION: log is format "0.2"; this verifier '
+               'speaks "0.1"')
     later = rechained([{**e[0], "v": "0.2"}] + e[1:])
     chain("unsupported-version", [stored(entry) for entry in later])
     row("unsupported-version", "verify", "Genesis claims format 0.2, every "
-        "hash holding.", 4,
-        'UNSUPPORTED-VERSION: log is format "0.2"; this verifier speaks "0.1"')
+        "hash holding: the field rules are a later version's, so this "
+        "verifier refuses to judge them.", 4, refusal)
+    later_head = later[3]["entry_hash"]
+    row("unsupported-version-expect-head", "verify", "The same chain "
+        "against a head record from elsewhere: the head is the last "
+        "entry's hash under any version, so it is still compared.", 3,
+        f"HEAD-MISMATCH: chain head is {later_head}, expected {head} — "
+        "this is not the recorded history", more=["--expect-head", head],
+        log="unsupported-version")
+    fields = rechained([{**e[0], "v": "0.2"},
+                        {**e[1], "model": "a field 0.1 does not have"},
+                        {**e[2], "files": "a shape 0.1 does not allow"},
+                        e[3]])
+    chain("unsupported-version-new-fields", [stored(entry) for entry in fields])
+    row("unsupported-version-new-fields", "verify", "Genesis claims format "
+        "0.2; entry 1 carries a field 0.1 lacks and entry 2 a files that is "
+        "a string, every hash holding. BROKEN under 0.1's field rules, which "
+        "do not apply: a refusal.", 4, refusal)
     later[2] = {**later[2], "action": "reviewed the notes and approved them"}
     chain("unsupported-version-edited", [stored(entry) for entry in later])
     row("unsupported-version-edited", "verify", "Genesis claims format "
-        "0.2 and entry 2 is edited. Today's behaviour: the version refusal "
-        "comes before the walk. The #299 ruling to freeze the hashing makes "
-        "this BROKEN, exit 1.", 4,
-        'UNSUPPORTED-VERSION: log is format "0.2"; this verifier speaks "0.1"')
+        "0.2 and entry 2 is edited: the hashes are walked whatever the "
+        "version says, and a hash that fails is BROKEN.", 1,
+        "BROKEN at entry 2: entry_hash does not match canonical form")
+
+    # No input (ADR-0037): nothing to judge is not a verdict. Exit 66,
+    # nothing on stdout, the reason on stderr.
+    row("log-missing", "verify", "The file --log names is not there, and "
+        "is deliberately absent from this folder.", 66, "", log_absent=True)
+    chain("log-empty", [])
+    row("log-empty", "verify", "An empty file: no genesis, so not a "
+        "receipt log.", 66, "")
+    row("log-empty-head", "head", "An empty file has no head.", 66, "",
+        log="log-empty")
 
     manifest = {
         "format": "0.1",

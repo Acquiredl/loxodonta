@@ -333,7 +333,7 @@
     },
     {
       "name": "unsupported-version",
-      "about": "Genesis claims format 0.2, every hash holding.",
+      "about": "Genesis claims format 0.2, every hash holding: the field rules are a later version's, so this verifier refuses to judge them.",
       "args": [
         "verify",
         "--log",
@@ -343,15 +343,73 @@
       "last_line": "UNSUPPORTED-VERSION: log is format \"0.2\"; this verifier speaks \"0.1\""
     },
     {
+      "name": "unsupported-version-expect-head",
+      "about": "The same chain against a head record from elsewhere: the head is the last entry's hash under any version, so it is still compared.",
+      "args": [
+        "verify",
+        "--expect-head",
+        "fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35",
+        "--log",
+        "unsupported-version.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "HEAD-MISMATCH: chain head is 19299290b71641786ac5d0dd9a8c47011a5e92945b75c995eb973e0de56d636c, expected fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35 \u2014 this is not the recorded history"
+    },
+    {
+      "name": "unsupported-version-new-fields",
+      "about": "Genesis claims format 0.2; entry 1 carries a field 0.1 lacks and entry 2 a files that is a string, every hash holding. BROKEN under 0.1's field rules, which do not apply: a refusal.",
+      "args": [
+        "verify",
+        "--log",
+        "unsupported-version-new-fields.jsonl"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-VERSION: log is format \"0.2\"; this verifier speaks \"0.1\""
+    },
+    {
       "name": "unsupported-version-edited",
-      "about": "Genesis claims format 0.2 and entry 2 is edited. Today's behaviour: the version refusal comes before the walk. The #299 ruling to freeze the hashing makes this BROKEN, exit 1.",
+      "about": "Genesis claims format 0.2 and entry 2 is edited: the hashes are walked whatever the version says, and a hash that fails is BROKEN.",
       "args": [
         "verify",
         "--log",
         "unsupported-version-edited.jsonl"
       ],
-      "exit": 4,
-      "last_line": "UNSUPPORTED-VERSION: log is format \"0.2\"; this verifier speaks \"0.1\""
+      "exit": 1,
+      "last_line": "BROKEN at entry 2: entry_hash does not match canonical form"
+    },
+    {
+      "name": "log-missing",
+      "about": "The file --log names is not there, and is deliberately absent from this folder.",
+      "args": [
+        "verify",
+        "--log",
+        "log-missing.jsonl"
+      ],
+      "exit": 66,
+      "last_line": "",
+      "log_absent": true
+    },
+    {
+      "name": "log-empty",
+      "about": "An empty file: no genesis, so not a receipt log.",
+      "args": [
+        "verify",
+        "--log",
+        "log-empty.jsonl"
+      ],
+      "exit": 66,
+      "last_line": ""
+    },
+    {
+      "name": "log-empty-head",
+      "about": "An empty file has no head.",
+      "args": [
+        "head",
+        "--log",
+        "log-empty.jsonl"
+      ],
+      "exit": 66,
+      "last_line": ""
     }
   ]
 }

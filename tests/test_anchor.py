@@ -438,7 +438,7 @@ class AnchorTest(unittest.TestCase):
             "anchor", "--calendar", "http://127.0.0.1:1", cwd=self.workdir
         )
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)  # EX_UNAVAILABLE (ADR-0037)
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.sidecar.exists())
 
@@ -450,7 +450,7 @@ class AnchorTest(unittest.TestCase):
             "anchor", "--calendar", self.server.url, cwd=empty
         )
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 66)  # EX_NOINPUT (ADR-0037)
         self.assertIn("init", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 

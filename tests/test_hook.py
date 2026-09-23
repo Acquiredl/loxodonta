@@ -421,14 +421,16 @@ class HookTest(unittest.TestCase):
                     b"\xff\xfe not utf-8 \x80"):
             result = run_hook(bad, cwd=self.workdir)
 
-            self.assertEqual(result.returncode, 1, repr(bad))
+            # EX_DATAERR (ADR-0037); never 2, which Claude Code reads as
+            # "block the session" (docs/HOOK.md).
+            self.assertEqual(result.returncode, 65, repr(bad))
             self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(list(self.workdir.iterdir()), [])
 
     def test_payload_without_session_or_tool_errors_cleanly(self):
         result = run_hook({"hook_event_name": "PostToolUse"}, cwd=self.workdir)
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 65)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_claude_project_dir_env_routes_chains_to_the_store(self):

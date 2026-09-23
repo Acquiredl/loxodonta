@@ -39,3 +39,5 @@ Each ADR records a decision that is hard to reverse and why it was made; filenam
 | 0033 | [Pull-only metrics for the operator's own siren](0033-the-supervisor-exposes-its-counts-for-the-operators-own-siren-pull-only.md) | accepted |
 | 0034 | [A failed call that ran owes a receipt](0034-a-failed-call-owes-a-receipt-when-its-words-say-it-ran-and-receipts-pay-tool-by-tool.md) | accepted |
 | 0035 | [The verifier is copied out, never imported](0035-the-recipients-verifier-is-copied-out-of-the-recorder-never-imported-by-it.md) | accepted |
+| 0036 | [The hashing is frozen across format versions](0036-the-hashing-is-frozen-across-format-versions.md) | accepted |
+| 0037 | [Exit 1 means BROKEN and nothing else](0037-exit-1-means-broken-and-nothing-else.md) | accepted |

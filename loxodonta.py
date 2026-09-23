@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import traceback
 import unicodedata
 from datetime import datetime, timezone
 
@@ -37,6 +38,23 @@ GENESIS_FIELDS = ENTRY_FIELDS | {"v"}
 # definition past that line; tools/build_verifier.py copies it, with the
 # imports and constants above it, into verifier.py, the file a recipient
 # runs (ADR-0035).
+
+
+# --- What an exit code says (ADR-0037) ----------------------------------------
+#
+# Exit 1 is BROKEN and nothing else: the chain does not walk clean, or a
+# writer found its tail damaged and will not build on it. The verdicts
+# hold 0 to 5 (SPEC §6), and every failure that is not a verdict takes
+# its number from sysexits(3), so a script that reads the code is never
+# told a chain is broken when the log was only missing or the tool fell
+# over. The numbers only the writers give sit beside them, below the
+# verifier.
+EX_USAGE = 64     # the command was spoken wrong
+EX_NOINPUT = 66   # no log to judge: missing, empty, or not readable as a file
+EX_SOFTWARE = 70  # the tool itself failed; the traceback is on stderr
+# Not a sysexits number: a shell reports a writer that its pipe's reader
+# left as 128 + SIGPIPE, and this is that number, given on purpose.
+EXIT_READER_GONE = 141
 
 
 # --- Canonical form (SPEC §4) -------------------------------------------------
@@ -115,7 +133,16 @@ def read_log(path):
 
 def missing_log(path):
     print(f"error: {path} not found — run `loxodonta init` first", file=sys.stderr)
-    return 1
+    return EX_NOINPUT
+
+
+def unreadable_log(path, error):
+    """A log that is there and cannot be read as a file: a folder, or a
+    file this user may not open. No input, like a missing one (ADR-0037);
+    a line that cannot be read is another matter, and the walk names it."""
+    print(f"error: {path} cannot be read as a receipt log: "
+          f"{error.strerror or error}", file=sys.stderr)
+    return EX_NOINPUT
 
 
 def tail_entry(lines):
@@ -311,12 +338,22 @@ def visible(text):
     return "".join(shown)
 
 
-def walk(lines):
+def walk(lines, field_rules=True):
     """The mechanical walk of SPEC §6, shared by verify (which judges) and
     report (which narrates). Returns (entries, breaks, warns): entries[n] is
     the parsed entry or None where the line is unparseable or is not the
     shape of an entry; breaks and warns are (n, message) lists in walk
-    order."""
+    order.
+
+    Two kinds of rule are walked here, and ADR-0036 keeps them apart. The
+    hash chain is the same in every format version: each line one JSON
+    object, each key once, its `entry_hash` the hash of its canonical
+    form (SPEC §4), its `prev` the entry before it's (§5). The field rules
+    are v0.1's own: which fields, of which types, and `n` counting up.
+    With `field_rules` False only the hash chain is walked, which is how
+    a chain whose genesis claims a version this verifier does not speak
+    is judged: its hashes are checked, and its fields are not ours to
+    judge."""
     entries = []
     breaks = []
     warns = []
@@ -373,7 +410,7 @@ def walk(lines):
             prev_hash = None
             continue
         expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
-        if set(entry) != expected_fields:
+        if field_rules and set(entry) != expected_fields:
             odd = set(entry) ^ expected_fields
             # The odd names are the writer's, and this message reaches
             # agents through recall's verify tool: escaped like any other
@@ -388,7 +425,7 @@ def walk(lines):
         # downstream touches it; the chain rule carries on from its
         # stored hash where that is a string, so the next line is judged
         # on its own account.
-        wrong = shape_problem(entry)
+        wrong = shape_problem(entry) if field_rules else None
         if wrong is not None:
             breaks.append((n, f"BROKEN at entry {n}: {wrong}"))
             entries.append(None)
@@ -413,7 +450,7 @@ def walk(lines):
             prev_hash = stored_hash
             continue
         entries.append(entry)
-        if entry.get("n") != n:
+        if field_rules and entry.get("n") != n:
             breaks.append((n, f"BROKEN at entry {n}: sequence number is "
                               f"{entry.get('n')}, expected {n}"))
         if entry.get("prev") != prev_hash:
@@ -424,7 +461,7 @@ def walk(lines):
                               "match canonical form"))
         # ts is writer-supplied testimony, not a mechanical fact: a backward
         # jump warns but never changes the verdict (SPEC §6, ADR-0002).
-        ts = entry.get("ts")
+        ts = entry.get("ts") if field_rules else None
         if prev_ts is not None and ts is not None and ts < prev_ts:
             warns.append((n, f"WARN: ts decreases at entry {n} — clock skew "
                              "at write time?"))
@@ -1159,15 +1196,17 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
         lines = read_log(log)
     except FileNotFoundError:
         return missing_log(log)
+    except OSError as e:
+        return unreadable_log(log, e)
     if not lines:
         print(f"error: {log} is empty — not a receipt log", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
 
-    # SPEC §2.1: read the genesis version before applying any other rule.
-    # The refusal is only for a *claimed* version we don't speak. A genesis
-    # with no version claim at all (damaged, non-object, or v stripped) is
-    # the walk's business — that's tampering to judge, not a dialect to
-    # politely decline.
+    # SPEC §2.1: read the genesis version first, to know which field rules
+    # apply. A version we don't speak is judged by its hashes alone
+    # (ADR-0036). A genesis with no version claim at all (damaged,
+    # non-object, or v stripped) is the walk's business — that's
+    # tampering to judge, not a dialect to politely decline.
     try:
         # A line that is not UTF-8, or that the reader cannot take apart
         # at all, claims no version: the walk names it (#292).
@@ -1178,13 +1217,7 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
     log_version = genesis.get("v", FORMAT_VERSION) if isinstance(genesis, dict) \
         else FORMAT_VERSION
     if log_version != FORMAT_VERSION:
-        # Escape text, so a claim holding a lone surrogate prints (#292).
-        claimed = receipt_text(str(log_version))
-        print(
-            f'UNSUPPORTED-VERSION: log is format "{claimed}"; '
-            f'this verifier speaks "{FORMAT_VERSION}"'
-        )
-        return 4
+        return verify_unknown_version(lines, log_version, expect_head)
 
     entries, breaks, warns = walk(lines)
     for _, message in warns:
@@ -1262,11 +1295,7 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
               "transcript prefix no longer holds")
 
     chain_head = entries[-1]["entry_hash"] if entries else None
-    if expect_head is not None and chain_head != expect_head:
-        # Internally consistent, but not the chain the operator recorded —
-        # the signature of whole-chain regeneration.
-        print(f"HEAD-MISMATCH: chain head is {chain_head}, expected "
-              f"{expect_head} — this is not the recorded history")
+    if head_mismatch(chain_head, expect_head):
         return 3
     if anchors_bad or stamps_bad:
         return 3
@@ -1280,6 +1309,42 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
 
     print("VALID")
     return 0
+
+
+def head_mismatch(chain_head, expect_head):
+    """True, with the verdict line printed, when a head record was given
+    and the chain's head is not it: internally consistent, but not the
+    chain the operator recorded, the signature of whole-chain
+    regeneration."""
+    if expect_head is None or chain_head == expect_head:
+        return False
+    print(f"HEAD-MISMATCH: chain head is {chain_head}, expected "
+          f"{expect_head} — this is not the recorded history")
+    return True
+
+
+def verify_unknown_version(lines, log_version, expect_head):
+    """A chain whose genesis claims a format this verifier does not speak
+    (ADR-0036). The hashing is frozen across versions, so its hash chain
+    is walked all the same, and a break is BROKEN, exit 1, exactly as for
+    a chain of our own. Only when every hash and link holds is it the
+    refusal, exit 4: the field rules are a later version's, and not ours
+    to judge. The head is the last entry's hash under any version, so a
+    head record is still compared, and a mismatch is still exit 3. The
+    other checks read fields (files, the transcript, the sidecars'
+    entry numbers) and do not run."""
+    entries, breaks, _ = walk(lines, field_rules=False)
+    if breaks:
+        for _, message in breaks:
+            print(message)
+        return 1
+    # Escape text, so a claim holding a lone surrogate prints (#292).
+    claimed = receipt_text(str(log_version))
+    print(f'UNSUPPORTED-VERSION: log is format "{claimed}"; '
+          f'this verifier speaks "{FORMAT_VERSION}"')
+    if head_mismatch(entries[-1]["entry_hash"], expect_head):
+        return 3
+    return 4
 
 
 def cmd_verify(args):
@@ -1297,9 +1362,11 @@ def cmd_head(args):
         lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
     if not lines:
         print(f"error: {args.log} is empty — no chain head to print", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
         print(f"error: {args.log} has a damaged tail — run "
@@ -1357,9 +1424,14 @@ PACKAGE_WORDS = {
 # The exit-3 tier holds two mechanisms now, the anchor's and the
 # authority timestamp's, and a chain's verify exit alone cannot say which
 # fired; `verify_log` hands the word back through `mechanisms`, and this
-# table is the fallback for an exit with no word beside it.
+# table is the fallback for an exit with no word beside it. A packaged
+# chain that is empty gives verify's no-input exit, 66 (ADR-0037); inside
+# a package that is a finding, not a missing input, since the manifest
+# lists a chain there and there is nothing to walk, so it is CHAIN-BROKEN,
+# as it was before 66 existed.
 CHAIN_WORDS = {1: "CHAIN-BROKEN", 3: "ANCHOR-MISMATCH",
-               4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED"}
+               4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED",
+               EX_NOINPUT: "CHAIN-BROKEN"}
 # The issuer signature (ADR-0008, ADR-0026 ruling 4) is made and judged
 # by ssh-keygen, never by this file: the stdlib has no Ed25519, and the
 # tool is on every machine since OpenSSH 8.0. The namespace is the
@@ -2111,7 +2183,7 @@ def cmd_verify_package(args):
         return judge_package(path, path, args.authority_chain, headers)
     if not os.path.isfile(path):
         print(f"error: {path} not found", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     if not zipfile.is_zipfile(path):
         print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
               "not a loxodonta package")
@@ -2205,9 +2277,6 @@ class VersionAction(argparse.Action):
         home = os.path.dirname(os.path.abspath(__file__))
         print(version_line(parser.prog, home))
         parser.exit()
-
-
-EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 
 
 def speak_utf8():
@@ -2353,26 +2422,40 @@ def verifier_main(argv=None):
     return args.func(args)
 
 
+def reader_gone(error):
+    """True when `error` is the reader hanging up on stdout (`loxodonta
+    report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
+    reports a plain EINVAL from the closed handle instead, so match on
+    both or the quiet death is a traceback on half the platforms. EINVAL
+    means nothing about pipes off Windows."""
+    return isinstance(error, BrokenPipeError) or (
+        os.name == "nt" and isinstance(error, OSError)
+        and error.errno == errno.EINVAL)
+
+
 def run_main(main):
-    """Run a command line to its exit code, as both files' entry point."""
+    """Run a command line to its exit code, as both files' entry point.
+    Two endings are not the command's own (ADR-0037). The reader hung
+    up: no verdict was asked of the lines that went unread, so it dies
+    quietly with 141, what a shell reports for a writer its pipe's
+    reader left. Never 0, which a script reads as VALID, though a BROKEN
+    line may be among the unread ones, and never 1, which is BROKEN and
+    nothing else. Or the tool itself failed: the traceback goes to
+    stderr, as Python would print it, and the exit is 70, sysexits'
+    internal error, so a crash is never read as a verdict. SystemExit
+    (argparse's 64, `--version`'s 0) and Ctrl-C are not failures of the
+    tool, and pass through as Python ends them."""
     try:
         speak_utf8()  # before anything prints
-        sys.exit(main())
-    except OSError as e:
-        # The reader hung up (`loxodonta report | head`) — no verdict was
-        # asked of the lines that went unread; die quietly, not loudly.
-        # (This exit 1 reuses a verdict number, the only one left now that
-        # usage errors exit 64 on their own, so scripts should trust the
-        # stdout verdict line, never the exit code alone.)
-        # POSIX raises BrokenPipeError (EPIPE); Windows reports a plain
-        # EINVAL from the closed handle instead, so match on both or the
-        # quiet death is a traceback on half the platforms.
-        if not isinstance(e, BrokenPipeError) and not (
-                os.name == "nt" and e.errno == errno.EINVAL):
-            raise  # EINVAL means nothing about pipes off Windows: let it fly
+        code = main()
+    except Exception as e:  # noqa: BLE001 - every failure gets its exit
+        if not reader_gone(e):
+            traceback.print_exc()
+            sys.exit(EX_SOFTWARE)
         # Give the interpreter a sink to flush into, or shutdown re-raises.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        sys.exit(1)
+        sys.exit(EXIT_READER_GONE)
+    sys.exit(code)
 
 
 # === End of the verifier (ADR-0035) ===========================================
@@ -2392,6 +2475,17 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+# The exits only the writers give (ADR-0037), sysexits(3)'s numbers
+# beside the three the verifier defines above. Exit 1 on a writer says
+# the chain's tail is damaged and will not be built on; each of these
+# says something else went wrong, and no entry was written.
+EX_DATAERR = 65      # the hook's stdin, or a settings file, is not what it must be
+EX_UNAVAILABLE = 69  # a calendar, a publish URL, an authority, or the
+                     # narrating command did not do what was asked
+EX_CANTCREAT = 73    # a file this verb must create cannot be: a log that
+                     # already exists, a lock file, a granted token
+EX_TEMPFAIL = 75     # another writer holds the lock; try again
 
 
 # --- Writing a line -----------------------------------------------------------
@@ -2536,11 +2630,11 @@ def locked_out(log):
     if not os.path.exists(lock):
         print(f"error: cannot create {lock} — no entry was written. "
               "Check write permissions on the directory.", file=sys.stderr)
-        return 1
+        return EX_CANTCREAT
     print(f"error: {log} is locked by another writer — no entry was written. "
           "Retry; if nothing is running, delete the .lock file beside it.",
           file=sys.stderr)
-    return 1
+    return EX_TEMPFAIL
 
 
 # --- Commands -----------------------------------------------------------------
@@ -2565,7 +2659,11 @@ def cmd_init(args):
         write_line_to_disk(args.log, "x", entry_line(genesis_entry()))
     except FileExistsError:
         print(f"error: {args.log} already exists; refusing to overwrite", file=sys.stderr)
-        return 1
+        return EX_CANTCREAT
+    except OSError as e:
+        print(f"error: cannot create {args.log}: {e.strerror or e}",
+              file=sys.stderr)
+        return EX_CANTCREAT
     print(f"initialized {args.log}")
     return 0
 
@@ -2592,23 +2690,28 @@ def file_reference(base, raw_path):
     try:
         sha256 = sha256_file(os.path.join(base, path))
     except FileNotFoundError:
-        raise ValueError(f"file not found: {raw_path}")
+        raise FileNotFoundError(f"file not found: {raw_path}") from None
     return {"path": stored, "sha256": sha256}
 
 
 def build_references(log, file_paths):
-    """The sorted {path, sha256} list for an append, or (None, 1) with
-    the complaint printed — shared by `log`/`run`/`hook` so all three
-    refuse the same ways."""
+    """The sorted {path, sha256} list for an append, or (None, exit code)
+    with the complaint printed — shared by `log`/`run`/`hook` so all
+    three refuse the same ways. A path spelled against SPEC §3 (absolute,
+    or with `..`) is the command spoken wrong, 64; a file, or a project
+    record, that cannot be read is no input, 66 (ADR-0037)."""
     base, problem = files_base(log)
     if problem and file_paths:
         print(f"error: {problem}", file=sys.stderr)
-        return None, 1
+        return None, EX_NOINPUT
     try:
         files = [file_reference(base, p) for p in file_paths]
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
-        return None, 1
+        return None, EX_USAGE
+    except OSError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return None, EX_NOINPUT
     files.sort(key=lambda ref: ref["path"])  # by path bytes (SPEC §3)
     return files, 0
 
@@ -2652,9 +2755,11 @@ def append_locked(log, actor, action, files):
         lines = read_log(log)
     except FileNotFoundError:
         return missing_log(log)
+    except OSError as e:
+        return unreadable_log(log, e)
     if not lines:
         print(f"error: {log} is empty — run `loxodonta init` first", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     # A new entry chains to the tail; a damaged tail cannot anchor one.
     last = tail_entry(lines)
     if last is None:
@@ -2700,7 +2805,7 @@ def append_locked(log, actor, action, files):
 def cmd_log(args):
     if not args.actor or not args.action:
         print("error: --actor and --action must be non-empty", file=sys.stderr)
-        return 1
+        return EX_USAGE
     return append_entry(args.log, args.actor, args.action, args.file)
 
 
@@ -2794,10 +2899,12 @@ def cmd_run(args):
                 outcome = (f"terminated by signal {int(received[0])}, "
                            f"{outcome}")
         action = f"run: {command_line} ({outcome})"
-        if append_entry(args.log, args.actor, action, args.file) != 0:
-            # A lost receipt must never hide behind the command's exit code.
+        written = append_entry(args.log, args.actor, action, args.file)
+        if written != 0:
+            # A lost receipt must never hide behind the command's exit
+            # code: the exit is why the receipt was lost (ADR-0037).
             print(f"error: receipt not written for: {action}", file=sys.stderr)
-            return 1
+            return written
         return code
     finally:
         for signum, handler in previous.items():
@@ -3625,15 +3732,17 @@ def publish_chain_command(args):
     a refusal here, as it is for the head (the head after a tear is not
     the chain's): the intact prefix is exactly what a remote that can
     only add should be holding, and the line says where the tear is.
-    Exit 1 only when a batch did not land."""
+    Exit 69 when a batch did not land (ADR-0037)."""
     try:
         entries = entries_on_disk(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
     if not entries:
         print(f"error: {args.log} holds no entry — run `loxodonta init` "
               "first", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     torn = damaged_tail_after(args.log, entries)
     damage = f"; the tail after {torn} is damaged" if torn is not None else ""
     sent, failure = publish_chain(args.log, args.url, chain_session(args.log),
@@ -3656,7 +3765,7 @@ def publish_chain_command(args):
                               PUBLISH_TIMEOUT, failure)
         print(f"error: the chain was not published: {failure}",
               file=sys.stderr)
-        return 1
+        return EX_UNAVAILABLE
     return 0
 
 
@@ -3667,10 +3776,12 @@ def cmd_publish(args):
         lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
     if not lines:
         print(f"error: {args.log} is empty — run `loxodonta init` first",
               file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
         print(f"error: {args.log} has a damaged tail — run "
@@ -3692,7 +3803,7 @@ def cmd_publish(args):
                               PUBLISH_TIMEOUT, failure)
         print(f"error: the head was not published: {failure}",
               file=sys.stderr)
-        return 1
+        return EX_UNAVAILABLE
     # The memo is written only for a head the remote took: a memo line
     # for a POST that never landed would stand the keeper down for good.
     append_published_record(args.log, head, n, body["ts"], body["event"])
@@ -3921,16 +4032,18 @@ def cmd_stamp(args):
             head = sha256_file(args.manifest)
         except OSError as e:
             print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
-            return 1
+            return EX_NOINPUT
         return stamp_digest(args.manifest, head, None, args.authority)
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
     if not lines:
         print(f"error: {args.log} is empty — run `loxodonta init` first",
               file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
         print(f"error: {args.log} has a damaged tail — run "
@@ -3964,7 +4077,7 @@ def stamp_digest(target, head, n, url):
         append_attempt_record(stamps_path(target), STEP_STAMP,
                               STAMP_TIMEOUT, failure)
         print(f"error: the head was not stamped: {failure}", file=sys.stderr)
-        return 1
+        return EX_UNAVAILABLE
     try:
         append_stamp_record(target, head, n, url, reply)
     except OSError as e:
@@ -3975,7 +4088,7 @@ def stamp_digest(target, head, n, url):
                               STAMP_TIMEOUT, "the token could not be written")
         print(f"error: the authority granted a token and it could not be "
               f"written: {e.strerror or e}", file=sys.stderr)
-        return 1
+        return EX_CANTCREAT
     print(f"stamped {record_label(head, n)} via {url}")
     return 0
 
@@ -3995,17 +4108,19 @@ def cmd_anchor(args):
             head = sha256_file(args.manifest)
         except OSError as e:
             print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
-            return 1
+            return EX_NOINPUT
         return submit_digest(args.manifest, head, None, args.calendar,
                              f"--upgrade --manifest={args.manifest}")
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
     if not lines:
         print(f"error: {args.log} is empty — run `loxodonta init` first",
               file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
         print(f"error: {args.log} has a damaged tail — run "
@@ -4037,7 +4152,7 @@ def submit_digest(target, head, n, calendars, upgrade_flags):
     if not written:
         print("error: no calendar accepted the digest — not anchored",
               file=sys.stderr)
-        return 1
+        return EX_UNAVAILABLE
     print(f"proof is pending — run `loxodonta anchor {upgrade_flags}` "
           "after a few hours to complete it")
     return 0
@@ -4051,7 +4166,7 @@ def upgrade_anchors(args):
     if not records:
         print(f"error: no anchors found at {anchors_path(target)} — "
               "run `loxodonta anchor` first", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     # A head+calendar pair that already has a completed record needs
     # nothing, and neither does any pair whose head another calendar has
     # already settled (#199): the anchor's claim is about the head.
@@ -4112,7 +4227,7 @@ def upgrade_anchors(args):
         completed.add(key)
         settled_heads.add(record["head"])
         print(f"upgraded: {label} now has a Bitcoin attestation")
-    return 1 if failures else 0
+    return EX_UNAVAILABLE if failures else 0
 
 
 def splice_continuation(proof_bytes, head_hex, continuation_bytes):
@@ -4157,12 +4272,14 @@ def cmd_report(args):
         lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
 
     if not lines:
         # One opinion between the two readers: verify calls this "not a
         # receipt log", so report must not narrate it as a quiet night.
         print(f"error: {args.log} is empty — not a receipt log", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
 
     entries, breaks, warns = walk(lines)
     print(f"receipt log: {args.log} ({len(lines)} entries)")
@@ -4224,10 +4341,12 @@ def cmd_explain(args):
         lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
     if not lines:
         print(f"error: {args.log} is empty — run `loxodonta init` first",
               file=sys.stderr)
-        return 1
+        return EX_NOINPUT
 
     entries, breaks, warns = walk(lines)
     if breaks:
@@ -4245,7 +4364,7 @@ def cmd_explain(args):
     if not command:
         print("error: --llm is empty — pass a command to narrate with, "
               "or install the `claude` CLI", file=sys.stderr)
-        return 1
+        return EX_USAGE
     try:
         # The prompt crosses the pipe as UTF-8 whatever the console
         # speaks — actions carry arbitrary characters, and the locale
@@ -4258,11 +4377,11 @@ def cmd_explain(args):
     except OSError:
         print(f"error: LLM command not found: {command[0]} — pass --llm "
               "or install the `claude` CLI", file=sys.stderr)
-        return 1
+        return EX_UNAVAILABLE
     if completed.returncode != 0:
         detail = completed.stderr.strip() or f"exit {completed.returncode}"
         print(f"error: LLM command failed: {detail}", file=sys.stderr)
-        return 1
+        return EX_UNAVAILABLE
 
     print("narration (model testimony — the verdict comes from "
           "`loxodonta verify`):")
@@ -4538,14 +4657,14 @@ def cmd_hook(args):
         payload = None
     if not isinstance(payload, dict):
         print("error: stdin is not a JSON hook payload", file=sys.stderr)
-        return 1
+        return EX_DATAERR
     session = payload.get("session_id")
     tool = payload.get("tool_name")
     ending = payload.get("hook_event_name") == "SessionEnd"
     if not session or not (tool or ending):
         print("error: hook payload has no session_id or tool_name",
               file=sys.stderr)
-        return 1
+        return EX_DATAERR
 
     # Where chains live, most specific wins: an explicit --log-dir; else
     # the store's drawer for the project named by CLAUDE_PROJECT_DIR
@@ -5189,7 +5308,7 @@ def install_codex_hooks(publish=None, profile="local",
     path = codex_hooks_path()
     settings = load_settings(path)
     if settings is None:
-        return 1
+        return EX_DATAERR
     if publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
@@ -5383,7 +5502,7 @@ def cmd_install_hook(args):
                   "its SessionEnd hook is capped at three seconds, too "
                   "short to reach a calendar with margin. Use the "
                   "supervisor's --anchor-every instead.", file=sys.stderr)
-            return 1
+            return EX_USAGE
         # All three quick steps are wired: #183 measured one POST
         # inside the same three seconds for the head, and #251 measured
         # the stamp's (docs/HOOK.md, under Codex CLI). The hook gives
@@ -5400,7 +5519,7 @@ def cmd_install_hook(args):
 
     settings = load_settings(path)
     if settings is None:
-        return 1
+        return EX_DATAERR
     if args.publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
@@ -5574,7 +5693,7 @@ def cmd_uninstall_hook(args):
                               "settings.json"))
     settings = load_settings(path)
     if settings is None:
-        return 1
+        return EX_DATAERR
     if not settings:
         print(f"nothing installed: no hooks file at {path}")
         return 0

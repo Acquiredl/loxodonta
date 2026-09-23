@@ -23,8 +23,9 @@ here is a head record (GLOSSARY: Supervisor, Baseline).
 store (ADR-0011; --root walks a legacy folder of repos instead), a
 verdict for each, a baseline diff against the last look,
 machine-readable JSON on stdout, and an exit code cron can shout about —
-0 when nothing demands attention, 1–4 for the worst verify exit found,
-5 when the baseline saw a change appends cannot explain (a reason to
+0 when nothing demands attention, 1–4 for the worst verify exit found
+(a chain verify could not judge at all, empty or unreadable, counts as
+4, the refusal), 5 when the baseline saw a change appends cannot explain (a reason to
 investigate, never a verdict), 6 when a session is demonstrably active
 but its chain is behind the witness (the completeness alarm), 7 when a
 chain's transcript commitments contradict each other (verify's exit 5,
@@ -219,6 +220,19 @@ def verify(log):
         verdict = "NO-VERDICT"
         lines = result.stderr.strip().splitlines()
     return verdict, result.returncode, lines
+
+
+def scan_exit(code):
+    """verify's exit as the scan counts it. 0 to 5 are verify's verdicts
+    and its refusal (SPEC §6). Anything else is no verdict at all: 66, a
+    chain verify could not read, empty or not a file; 70, the recorder
+    failing on it; or a number this supervisor has never heard of. Each
+    counts as 4, the refused rung beside UNSUPPORTED-VERSION, which is
+    where the page already draws a chain with no verdict. A chain nobody
+    could judge is not in good standing, so it still raises the exit,
+    and it is not BROKEN, which exit 1 now says and nothing else
+    (ADR-0037)."""
+    return code if 0 <= code <= 5 else 4
 
 
 def sibling_of(log):
@@ -2910,7 +2924,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         if posted:
             keeper["publish:" + relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        verdict, exit_code, detail = verify(log)
+        verdict, code, detail = verify(log)
+        exit_code = scan_exit(code)
         stood_down = exit_code != 0 and superseded(log, detail)
         chain = {
             "log": log.as_posix(),
@@ -4280,7 +4295,12 @@ def cmd_verify(args):
     this is one chain, by the handle the digest hands out."""
     match, code = resolve_address(args)
     if match is None:
-        return code
+        # The recall commands say 1 for an address they cannot resolve;
+        # here 1 is the recorder's BROKEN and nothing else (ADR-0037).
+        # An address spelled wrong is the command spoken wrong, 64; one
+        # that names no single chain leaves no chain to judge, 66.
+        well_formed = ADDRESS_RE.match(args.address.lower())
+        return EX_NOINPUT if well_formed else EX_USAGE
     log = match[0]
     judged = subprocess.run(
         [sys.executable, str(LOXODONTA), "verify", f"--log={log}"],
@@ -6112,7 +6132,8 @@ def metrics_text(report, age_seconds):
     # The scan itself: what cron would shout about, and how old it is.
     gauge("loxodonta_scan_exit_code",
           "The last scan's exit code: 0 nothing demanding attention, 1 to "
-          "4 the worst verify exit among the chains, 5 the baseline saw a "
+          "4 the worst verify exit among the chains (a chain verify could "
+          "not judge at all counts as 4), 5 the baseline saw a "
           "change appends cannot explain, 6 a live session is behind its "
           "witness, 7 a chain's transcript commitments contradict each "
           "other", "witness verdict", [((), report.get("exit") or 0)])
@@ -9094,6 +9115,7 @@ class VersionAction(argparse.Action):
 
 
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
+EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: `verify` found no chain to judge
 
 
 def speak_utf8():
@@ -9293,7 +9315,8 @@ def main(argv):
         "verify", parents=[recall_common],
         help="the recorder's verdict on the chain holding one entry "
              "address (loxodonta verify --log, verbatim; exit code is "
-             "the recorder's)")
+             "the recorder's, or 64 or 66 for an address that names no "
+             "chain)")
     verify.add_argument("address", help="entry-hash prefix, 4+ hex chars")
     verify.set_defaults(func=cmd_verify)
     search = sub.add_parser(

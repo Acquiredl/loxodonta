@@ -338,7 +338,7 @@ class PublishChainCommandTest(unittest.TestCase):
 
         refused = self.publish_chain(fake.url)
 
-        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertEqual(refused.returncode, 69, refused.stderr)
         self.assertEqual(refused.stdout, "")
         self.assertIn("the chain was not published", refused.stderr)
         self.assertIn("the remote answered 400", refused.stderr)
@@ -398,7 +398,7 @@ class PublishChainCommandTest(unittest.TestCase):
         result = run_capped(cap, "publish", "--chain", "--log", self.log,
                             fake.url)
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)
         self.assertIn("entry 2 is larger than the receiver's cap",
                       result.stderr)
         # Everything before it left, and the cursor stops where it did.
@@ -409,7 +409,7 @@ class PublishChainCommandTest(unittest.TestCase):
         # And it stays refused rather than stalling on a socket word.
         again = run_capped(cap, "publish", "--chain", "--log", self.log,
                            fake.url)
-        self.assertEqual(again.returncode, 1)
+        self.assertEqual(again.returncode, 69)
         self.assertIn("entry 2 is larger than the receiver's cap",
                       again.stderr)
         self.assertEqual(len(fake.received), 2)

@@ -38,7 +38,7 @@ The help line in the table is exactly the one the route prints, with its grade i
 
 | Metric | Labels | Grade | Help line |
 |---|---|---|---|
-| `loxodonta_scan_exit_code` | none | witness verdict | The last scan's exit code: 0 nothing demanding attention, 1 to 4 the worst verify exit among the chains, 5 the baseline saw a change appends cannot explain, 6 a live session is behind its witness, 7 a chain's transcript commitments contradict each other |
+| `loxodonta_scan_exit_code` | none | witness verdict | The last scan's exit code: 0 nothing demanding attention, 1 to 4 the worst verify exit among the chains (a chain verify could not judge at all counts as 4), 5 the baseline saw a change appends cannot explain, 6 a live session is behind its witness, 7 a chain's transcript commitments contradict each other |
 | `loxodonta_scan_age_seconds` | none | witness verdict | Seconds since the scan these numbers come from; a gauge is as fresh as the last tick |
 | `loxodonta_chains` | `verdict` | verdict | Chains by the verdict verify handed them on the last scan, torn tails a sibling continued excluded |
 | `loxodonta_chains_superseded` | none | verdict | Chains verify called BROKEN for a torn tail alone, stood down because a sibling chain continued the recording |

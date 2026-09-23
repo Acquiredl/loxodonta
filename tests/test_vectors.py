@@ -81,6 +81,7 @@ class VectorsTest(unittest.TestCase):
                     (verifier.returncode, verifier.stdout, verifier.stderr))
 
     def test_every_row_names_one_expectation_and_a_file_that_exists(self):
+        # Save the one row that tests a missing log, which says so.
         names = [row["name"] for row in rows()]
         self.assertEqual(len(names), len(set(names)), "a name given twice")
         for row in rows():
@@ -88,7 +89,8 @@ class VectorsTest(unittest.TestCase):
                 self.assertEqual(
                     ("last_line" in row) + ("last_line_prefix" in row), 1)
                 log = row["args"][row["args"].index("--log") + 1]
-                self.assertTrue((VECTORS / log).is_file(), log)
+                self.assertEqual((VECTORS / log).exists(),
+                                 not row.get("log_absent"), log)
 
     def test_every_chain_file_is_run_by_some_row(self):
         run = {row["args"][row["args"].index("--log") + 1] for row in rows()}

@@ -164,7 +164,8 @@ class ConcurrentAppendTest(unittest.TestCase):
                               cwd=self.workdir,
                               extra_env={"LOXODONTA_LOCK_TIMEOUT": "0.5"})
 
-        self.assertNotEqual(result.returncode, 0)
+        # EX_TEMPFAIL (ADR-0037): try again, and never 1, which is BROKEN.
+        self.assertEqual(result.returncode, 75, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("lock", result.stderr.lower())
         self.assertEqual(len(self.entries()), 1, "nothing was written")
