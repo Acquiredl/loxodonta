@@ -49,6 +49,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1300,6 +1301,92 @@ def read_settings(settings_file):
     return settings if isinstance(settings, dict) else None
 
 
+# --- Which hook entries are the recorder's ------------------------------------
+# The settings file is shared with the user's own hooks, so a reader must
+# know which entries the installer wrote before it reads anything off
+# them: which tools owe a receipt, whether SessionEnd is wired, which file
+# runs. The rule is the installer's (#293), copied here word for word
+# because the two files never import each other (ADR-0035); a test in
+# tests/test_suite_shape.py holds the copies equal. The readers once took
+# any command holding `receipts` or `loxodonta`, so a user's own
+# `python ~/bin/upload_receipts.py --to s3` left after uninstall-hook read
+# as the recorder's SessionEnd (#303). Only the recorder's `hook` entries
+# are read here: the supervisor's own digest entry wires no receipt.
+
+RECORDER_NAMES = ("loxodonta.py", "receipts.py")
+DIGEST_NAMES = ("supervisor.py",)
+WIRED_VERB = {"loxodonta.py": "hook", "receipts.py": "hook",
+              "supervisor.py": "digest"}
+
+
+def command_words(command):
+    """A hook command split into words as a shell would, or None when
+    it cannot be. A backslash is an ordinary character here, not an
+    escape: a Windows path (C:\\Tools\\loxodonta.py), quoted or bare,
+    must stay one word with every backslash in it, and no command the
+    installer writes escapes anything."""
+    if not isinstance(command, str):
+        return None
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    try:
+        return list(lexer)
+    except ValueError:  # an unclosed quote
+        return None
+
+
+def file_name(path):
+    """The last part of a path written with either separator, on any
+    platform: a settings file can hold a Windows path read elsewhere."""
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def is_interpreter(word):
+    """A Python interpreter: this one exactly as the installer writes
+    it, or any whose file name says python (python3, python.exe,
+    python3.12, pythonw, platform-python, pypy3). Another interpreter
+    than this one is the ordinary case: a re-install after an upgrade,
+    or a settings file written by a different Python."""
+    if word == sys.executable.replace(os.sep, "/"):
+        return True
+    name = file_name(word).lower()
+    return "python" in name or name.startswith("pypy")
+
+
+def owned_script(command, names):
+    """The script path in `command` when the installer wrote it for one
+    of `names`, else None: an interpreter, then a script with one of
+    those file names, then the verb that script is wired with."""
+    words = command_words(command)
+    if not words or len(words) < 3:
+        return None
+    interpreter, script, verb = words[:3]
+    name = file_name(script)
+    if not is_interpreter(interpreter) or name not in names \
+            or WIRED_VERB[name] != verb:
+        return None
+    if name in DIGEST_NAMES and not beside_a_recorder(script):
+        return None
+    return script
+
+
+def beside_a_recorder(script):
+    """Whether a supervisor.py is this project's, as far as the disk
+    can say. The name is common enough that a user's own script can
+    carry it, verb and all, so one that exists counts only with a
+    recorder in the same folder, as every checkout has. One that is
+    gone has no folder to ask, and stays ours so it can be healed:
+    the checkout moved."""
+    where = os.path.expanduser(script)
+    if not os.path.isfile(where):
+        return True
+    folder = os.path.dirname(where)
+    return any(os.path.isfile(os.path.join(folder, name))
+               for name in RECORDER_NAMES)
+
+
 def hook_matchers(witness, event="PostToolUse"):
     """Which tools owe a receipt: the matchers wired to receipts under
     one hook event, read from the harness settings beside the witness
@@ -1321,8 +1408,7 @@ def hook_matchers(witness, event="PostToolUse"):
             isinstance(hook, dict)
             # Either era's name (ADR-0010): an install that predates the
             # rename still owes receipts, and is still watched.
-            and any(marker in str(hook.get("command", ""))
-                    for marker in ("receipts", "loxodonta"))
+            and owned_script(hook.get("command"), RECORDER_NAMES)
             for hook in commands)
         if wired:
             matchers.append(str(rule.get("matcher", "*")))
@@ -1350,7 +1436,7 @@ def sessionend_commands_in(settings_file):
         for hook in hooks if isinstance(hooks, list) else []:
             command = str(hook.get("command", "")) if isinstance(hook, dict) \
                 else ""
-            if any(marker in command for marker in ("receipts", "loxodonta")):
+            if owned_script(command, RECORDER_NAMES):
                 commands.append(command)
     return commands
 
@@ -1701,13 +1787,11 @@ def matchers_at(calibration, ts):
 # writer a second road to the one file that has to stay honest
 # (ADR-0002). Drift is the operator's to resolve, deliberately.
 
-RECORDER_NAMES = ("loxodonta.py", "receipts.py")
-
-
 def recorder_path(witness):
     """The file the harness actually runs for PostToolUse, read out of
     the wired command line — the only place that truth lives. Either
-    era's name (ADR-0010)."""
+    era's name (ADR-0010), and only a command the installer would claim
+    (#303); `~` is expanded, as the shell running the hook expands it."""
     settings = read_settings(witness.parent / "settings.json")
     try:
         rules = settings["hooks"]["PostToolUse"]
@@ -1719,12 +1803,9 @@ def recorder_path(witness):
         for hook in rule.get("hooks") or []:
             if not isinstance(hook, dict):
                 continue
-            # Quoted first: a path with spaces is one token, not several.
-            for quoted, bare in re.findall(r'"([^"]+?\.py)"|(\S+\.py)',
-                                           str(hook.get("command", ""))):
-                candidate = Path(quoted or bare)
-                if candidate.name in RECORDER_NAMES:
-                    return candidate
+            script = owned_script(hook.get("command"), RECORDER_NAMES)
+            if script:
+                return Path(os.path.expanduser(script))
     return None
 
 

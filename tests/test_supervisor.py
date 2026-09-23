@@ -1966,6 +1966,82 @@ class CalibrationTest(unittest.TestCase):
                          again.stdout + again.stderr)
 
 
+class UsersOwnHookTest(unittest.TestCase):
+    """The settings file is shared with the user's own hooks (#303): the
+    supervisor reads an entry as the recorder's only by the rule the
+    installer claims it by (#293), an interpreter, a script with one of
+    the recorder's names, and the verb `hook`. A user's
+    `upload_receipts.py` left after uninstall-hook is not a recorder,
+    wired at session end or anywhere else."""
+
+    USERS = "python ~/bin/upload_receipts.py --to s3"
+    # The recorder's old name with another verb: the user's, not ours.
+    SYNC = "python ~/bin/receipts.py sync"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.root.mkdir()
+        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness.mkdir()
+        self.baseline = self.root / ".supervisor-baseline.json"
+        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+
+    def wire(self, hooks):
+        (self.witness.parent / "settings.json").write_text(
+            json.dumps({"hooks": hooks}), encoding="utf-8")
+
+    def users_blocks(self):
+        return {
+            "PostToolUse": [{"matcher": "Read", "hooks": [
+                {"type": "command", "command": self.USERS},
+                {"type": "command", "command": self.SYNC}]}],
+            "PostToolUseFailure": [{"matcher": "Read", "hooks": [
+                {"type": "command", "command": self.USERS}]}],
+            "SessionEnd": [{"hooks": [
+                {"type": "command", "command": self.USERS}]}],
+        }
+
+    def scan(self):
+        result = run_scan(self.root, "--witness", str(self.witness),
+                          "--json", env=self.env)
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        baseline = json.loads(self.baseline.read_text(encoding="utf-8"))
+        return json.loads(result.stdout), baseline
+
+    def test_a_users_own_hooks_wire_no_recorder(self):
+        # After uninstall-hook: only the user's hooks are left.
+        self.wire(self.users_blocks())
+
+        report, baseline = self.scan()
+
+        self.assertFalse(baseline["sessionend"]["wired"],
+                         "a user's upload_receipts.py is not the "
+                         "recorder's SessionEnd")
+        self.assertEqual(baseline["calibration"][-1]["matchers"], [])
+        self.assertNotIn("failures", baseline["calibration"][-1])
+        self.assertEqual(report["recorder"]["state"], "unwired")
+
+    def test_the_recorder_beside_a_users_hooks_reads_as_before(self):
+        hooks = self.users_blocks()
+        recorder = "python loxodonta.py hook"
+        hooks["PostToolUse"].append({
+            "matcher": "Edit|Write|NotebookEdit|Bash",
+            "hooks": [{"type": "command", "command": recorder}]})
+        hooks["SessionEnd"].append({"hooks": [
+            {"type": "command", "command": recorder}]})
+        self.wire(hooks)
+
+        report, baseline = self.scan()
+
+        self.assertTrue(baseline["sessionend"]["wired"])
+        self.assertEqual(baseline["calibration"][-1]["matchers"],
+                         ["Edit|Write|NotebookEdit|Bash"])
+        self.assertEqual(report["recorder"]["path"], "loxodonta.py")
+
+
 class FailedCallWitnessTest(unittest.TestCase):
     """#239, ruled in ADR-0034: the harness fires `PostToolUseFailure`,
     not `PostToolUse`, for a tool call that started and failed, and
@@ -3273,6 +3349,22 @@ class RecorderDriftTest(unittest.TestCase):
 
         self.assertEqual(recorder["state"], "unknown")
         self.assertIsNone(recorder["branch"])
+
+    def test_a_recorder_wired_under_the_home_is_found_there(self):
+        # The shell running the hook expands `~`, so the notice does
+        # too (#303): a recorder wired as ~/x/loxodonta.py is the file
+        # under the home, not a path that is "not on disk".
+        home = Path(self.env["HOME"])
+        script = home / "x" / "loxodonta.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("# recorder under the home\n", encoding="utf-8")
+        install_witness_hook(self.witness,
+                             command="python ~/x/loxodonta.py hook")
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["path"], script.as_posix())
+        self.assertNotIn("not on disk", recorder["note"])
 
     def test_an_install_from_before_the_failure_event_says_so(self):
         # #239: an install from before it wired completed calls alone,
