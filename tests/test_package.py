@@ -326,6 +326,25 @@ class DemoStorePackageTest(PackageCase):
         # The recorder's own words, verbatim, name the entry.
         self.assertIn("BROKEN at entry 3", result.stdout)
 
+    def test_a_chain_line_the_reader_cannot_take_apart_is_chain_broken(self):
+        # #292: a byte that is not UTF-8 ended the package judge in a
+        # traceback, in the recorder's verify and again in the walk
+        # that counts the chain against the manifest.
+        folder = self.folder_package()
+        chain = folder / f"receipts-{BAD_DAY_SESSION}.jsonl"
+        raw = chain.read_bytes()
+        self.assertIn(b"Read: .env", raw)
+        chain.write_bytes(raw.replace(b"Read: .env", b"Read: .env\xff"))
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("CHAIN-BROKEN"), lines[-1])
+        self.assertIn("BROKEN at entry 3: line is not valid UTF-8",
+                      result.stdout)
+
     def test_an_unknown_format_tag_is_unsupported_format_exit_4(self):
         folder = self.folder_package()
         manifest = folder / "manifest.json"

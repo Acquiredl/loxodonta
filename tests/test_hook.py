@@ -389,6 +389,33 @@ class HookTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Bash: {command}", self.entries()[1]["action"])
 
+    def test_a_lone_surrogate_in_the_tool_input_is_recorded_as_escape_text(self):
+        # #292: JSON lets a model type half a UTF-16 pair into any tool
+        # argument. It has no UTF-8 form, so the receipt was lost to a
+        # traceback and the chain went on verifying VALID with a gap.
+        # The ruling: the receipt holds its six characters of escape
+        # text. The payload is built as the harness sends it, the escape
+        # spelled with chr(92) so nothing on the way can read it early.
+        escape = chr(92) + "ud800"
+        raw = ('{"session_id":"sess-1234abcd","hook_event_name":"PostToolUse",'
+               '"tool_name":"Bash","tool_input":{"command":"echo ' + escape
+               + ' hi"},"tool_response":{}}')
+
+        result = run_hook(raw, cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.entries()[1]["action"],
+                         "Bash: echo " + escape + " hi")
+        # The chain keeps receipting after the escaped call, and walks.
+        run_hook(payload(tool="Bash", tool_input={"command": "ls"}),
+                 cwd=self.workdir)
+        self.assertEqual([e["n"] for e in self.entries()], [0, 1, 2])
+        verify = run_receipts("verify", "--log", self.session_log().name,
+                              cwd=self.workdir)
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertEqual(verify.stdout.strip(), "VALID")
+
     def test_malformed_stdin_errors_cleanly(self):
         for bad in ("not json at all", '["a", "list"]', "",
                     b"\xff\xfe not utf-8 \x80"):
@@ -928,6 +955,25 @@ class TranscriptCommitmentTest(unittest.TestCase):
         self.assertFalse(self.transcript.exists())
         entries = self.entries()
         self.assertEqual(len(entries), self.CADENCE + 1)
+        self.assertEqual(self.commitments(), [])
+
+    def test_a_transcript_path_no_filesystem_can_name_is_skipped(self):
+        # #292: a NUL anywhere, or on POSIX a lone surrogate, makes the
+        # open raise ValueError rather than OSError. It is skipped like
+        # a missing transcript, on the cadence and at SessionEnd, never
+        # a traceback after the receipt was already written.
+        self.drive(2)
+        for spelling in ("u0000", "ud800"):
+            with self.subTest(spelling=spelling):
+                raw = ('{"session_id":"sess-1234abcd",'
+                       '"hook_event_name":"SessionEnd",'
+                       '"transcript_path":"diary' + chr(92) + spelling
+                       + '.jsonl"}')
+
+                result = run_hook(raw, cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.commitments(), [])
 
 
