@@ -120,7 +120,7 @@ supervisor's memory aren't judged.*
    surface that judged a session by a seeded epoch says so.
 
 7. **Calibration becomes a glossary term.** ADR-0016 has owned the word
-   since it was written while `GLOSSARY.md` only pointed at it, and a
+   since it was written while `docs/GLOSSARY.md` only pointed at it, and a
    state named for the edge of the calibration memory cannot be the
    thing that finally defines it.
 

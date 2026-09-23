@@ -28,7 +28,7 @@ The PRD is issue #40. `supervisor digest` (budget-capped, local-only session-sta
 
 ## Going public (2026-08)
 
-Public since 2026-08, under the Acquiredl identity only. Positioning discipline governs, from the operator-side prior-art survey (not in this repo): show our claims, avoid naming others unless necessary, never overclaim. The go-public opsec review happened 2026-08-26 (author scrub + dev-doc purge).
+Public since 2026-08, under the Acquiredl identity. Positioning discipline governs: show our claims, avoid naming others unless necessary, never overclaim.
 
 ## The rename and the store (2026-08-29)
 

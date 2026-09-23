@@ -11,7 +11,7 @@ safe: a change is judged by what it does when run, not by who typed it.
 
 Reading three files first saves everyone a round trip:
 
-- `GLOSSARY.md`: the vocabulary, used exactly. Note the anti-terms: this is
+- `docs/GLOSSARY.md`: the vocabulary, used exactly. Note the anti-terms: this is
   not a blockchain, nothing here is immutable, and it is not an audit log.
 - `docs/SPEC.md`: the receipt format, frozen at v0.1. The canonical-JSON
   rules in §4 are the load-bearing part.
@@ -56,11 +56,14 @@ word means the receipts themselves as often as the tool, and the history,
 the changelog, the tours and the ADRs from before the rename keep the old
 name. The words the GLOSSARY refuses for its own terms, such as a "chain
 backup" for the published chain or "a bundle" for the package, fail in the
-front-door files and in the code and warn elsewhere. CI runs exactly this
-command, so passing it locally is passing CI:
+front-door files and in the code and warn elsewhere. CI runs exactly these
+two commands, the second judging the shape a stranger meets (the README's
+first screen, the pictures, the indexes, what sits at the root), so passing
+them locally is passing CI:
 
 ```
 python tools/house_check.py
+python tools/house_check.py --front-door
 ```
 
 One markdownlint rule is worth catching before CI does, because it is the
@@ -80,7 +83,7 @@ shell version of this check silently passes everything.
 
 The rest of the Markdown checks run in CI only: the remaining markdownlint
 rules (in `.markdownlint.yml`) and lychee, the link checker (exclusions and
-their reasons in `lychee.toml`; it also runs weekly, so a link that dies
+their reasons in `.github/lychee.toml`; it also runs weekly, so a link that dies
 quietly still gets noticed). Neither needs anything installed here.
 
 ## The voice rule

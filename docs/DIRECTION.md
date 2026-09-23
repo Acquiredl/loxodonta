@@ -17,9 +17,9 @@ reader.
 ADR-0002 weighed four purposes and made one of them the product: purpose
 B, the agent as untrusted writer. That stays the threat model, unamended.
 This page adds who the design answers to: purpose C, third-party proof,
-which ADR-0002 said would begin at Stage B. The [recipient](../GLOSSARY.md#recipient)
+which ADR-0002 said would begin at Stage B. The [recipient](GLOSSARY.md#recipient)
 is the person across the trust boundary who is handed a
-[package](../GLOSSARY.md#package) and has to believe it or not, with
+[package](GLOSSARY.md#package) and has to believe it or not, with
 nothing running and nobody to ask.
 
 ## 2. Who wins when goals pull apart
@@ -47,12 +47,12 @@ repo never calls one supported because capture alone works:
 One of three is complete today. The other two give a recipient a hash
 chain and nothing more, and the docs say so where they describe them.
 
-**Toward:** the [witness](../GLOSSARY.md#witness) is split from the reader
+**Toward:** the [witness](GLOSSARY.md#witness) is split from the reader
 of Claude Code's transcript, and what passes between them becomes a
 contract: a file of normalized tool events (a time, a tool name, a call
 id, an outcome class, and never an input or an output), versioned
 `loxodonta-second-record/0` while it is provisional. It freezes at `/1`
-only with two producers behind it. Each [second record](../GLOSSARY.md#second-record)
+only with two producers behind it. Each [second record](GLOSSARY.md#second-record)
 states its reach wherever its count is shown, and a writer-reachable one
 is said to catch faults, not a writer shaping both records.
 
@@ -205,5 +205,5 @@ listed under the verifier arc and which is done ahead of it.
 
 - `adrs/0035-the-recipients-verifier-is-copied-out-of-the-recorder-never-imported-by-it.md`
 - `adrs/0022-the-tool-gets-a-version-tag-and-release.md`, the addendum
-- [GLOSSARY.md](../GLOSSARY.md): *Witness*, *Second record*, *Recipient*
+- [GLOSSARY.md](GLOSSARY.md): *Witness*, *Second record*, *Recipient*
 - [GROUNDING.md](GROUNDING.md): the published work all of this stands on

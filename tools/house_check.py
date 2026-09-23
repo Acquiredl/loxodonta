@@ -408,8 +408,8 @@ def excerpt(line, match):
 # the indexes, what sits at the root, the changelog, the ADR file names
 # (issue #298; an outside review of v0.8.0 scored the presentation below
 # the engineering, and a fix held by memory drifts back). They report and
-# do not gate: `--front-door` exits 1 on any finding, and CI runs only the
-# default pass until the presentation pass makes these pass.
+# gate: `--front-door` exits 1 on any finding, and CI runs it as its own
+# step after the default pass.
 #
 # Every number and list the rules use is in this one table, so an argument
 # with a threshold is an edit to one line. Paths are relative to the root
@@ -753,8 +753,8 @@ def adr_slug_findings(tracked):
 def tracked_files():
     """Every Markdown file git tracks under the working directory, and the
     tool files the code pass reads. Tracked, not present: a scratch file
-    in the tree is nobody's front door yet, and the operator-side journals
-    the .gitignore lists are not the repo's."""
+    in the tree is nobody's front door yet, and an untracked local file
+    is not the repo's."""
     listing = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.md", *CODE_FILES],
         capture_output=True, encoding="utf-8", check=True).stdout

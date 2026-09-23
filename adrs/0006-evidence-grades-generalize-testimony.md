@@ -59,6 +59,6 @@ Rules that hold everywhere:
 ## References
 
 - Related ADRs: `adrs/0002-writer-as-adversary.md` (the binary this generalizes; stands unamended).
-- Glossary terms **added or sharpened**: `GLOSSARY.md#testimony` (added), `GLOSSARY.md#evidence-grade` (added), `GLOSSARY.md#genesis` (sharpened: provenance corollary).
+- Glossary terms **added or sharpened**: `docs/GLOSSARY.md#testimony` (added), `docs/GLOSSARY.md#evidence-grade` (added), `docs/GLOSSARY.md#genesis` (sharpened: provenance corollary).
 - Glossary terms **retired**, and topologies overruled: none.
 - Discussion: external code review of the first derived trail design, 2026-08-25; routed here because trail canon lives in this repo.

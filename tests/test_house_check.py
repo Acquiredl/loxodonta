@@ -98,7 +98,7 @@ class EmDashTest(Fixture):
         self.assertIn("START.md:3: em-dash:", result.stdout)
 
     def test_the_glossary_and_docs_keep_their_em_dashes(self):
-        glossary = self.write("GLOSSARY.md", "- **Receipt** — one entry.\n")
+        glossary = self.write("docs/GLOSSARY.md", "- **Receipt** — one entry.\n")
         doc = self.write("docs/SPEC.md", "Canonical JSON — sorted keys.\n")
 
         result = run_checker(glossary, doc)

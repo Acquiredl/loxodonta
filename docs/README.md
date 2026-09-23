@@ -19,7 +19,7 @@ Every page in this folder, sorted by what you came for: running loxodonta, check
 - [ANCHORING.md](ANCHORING.md): how a chain's latest hash is committed to Bitcoin through OpenTimestamps, and what that does and does not prove.
 - [TOPOLOGY.md](TOPOLOGY.md): where each piece runs, what each place holds, and what a verdict checked there is worth.
 - [OWASP.md](OWASP.md): a first draft walking the OWASP Top 10 for LLM Applications, entry by entry: where loxodonta helps, where not.
-- [GLOSSARY.md](../GLOSSARY.md): the project's vocabulary, and the words it deliberately refuses to use.
+- [GLOSSARY.md](GLOSSARY.md): the project's vocabulary, and the words it deliberately refuses to use.
 
 ## Project
 

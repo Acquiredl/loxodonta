@@ -6,7 +6,7 @@
 
 ## Context
 
-The original design docs framed the tool's one structural gap — whole-chain regeneration — as "the log owner rewriting history," an edge case deferred to Stage B anchoring. The design grill of 2026-08-09 surfaced the problem with that framing: in the target use case, the **writer is an AI agent with the same filesystem access as the operator**. An agent can be prompt-injected by content it reads; an injected agent's cleanest cover-up is editing its own log. The predecessor system (Acu) could dismiss log tampering as "self-sabotage" because writer and operator were the same person. The moment they aren't, the deferred gap becomes the primary adversary's easiest move.
+The original design docs framed the tool's one structural gap — whole-chain regeneration — as "the log owner rewriting history," an edge case deferred to Stage B anchoring. The design grill of 2026-08-09 surfaced the problem with that framing: in the target use case, the **writer is an AI agent with the same filesystem access as the operator**. An agent can be prompt-injected by content it reads; an injected agent's cleanest cover-up is editing its own log. A predecessor pipeline could dismiss log tampering as "self-sabotage" because writer and operator were the same person. The moment they aren't, the deferred gap becomes the primary adversary's easiest move.
 
 Four candidate purposes were weighed: (A) operator forensics, (B) the agent as untrusted writer, (C) third-party proof, (D) compliance artifact. A plain log already serves A; C and D require anchoring (Stage B) to be honest.
 
