@@ -961,5 +961,230 @@ class InstallerTest(RecallBase):
         self.assertIn("somebody-else", text)
 
 
+# The user's own hooks from #293's repro: one names a script that merely
+# contains a recorder name, one runs a supervisor.py of the user's own
+# with a verb the installer never writes. Neither is ours.
+USERS_OWN_HOOKS = {
+    "model": "opus",
+    "hooks": {
+        "SessionEnd": [{"hooks": [{
+            "type": "command",
+            "command": "python ~/bin/upload_receipts.py --to s3"}]}],
+        "SessionStart": [{"matcher": "startup", "hooks": [{
+            "type": "command",
+            "command": "python ~/ops/supervisor.py notify"}]}],
+    },
+}
+
+
+class InstallerOwnershipTest(RecallBase):
+    """#293: an entry is the installer's only when its command is an
+    interpreter, a script named as the recorder or the supervisor, and
+    the verb the installer wires that script with. Everything else is
+    the user's, never replaced, healed or removed. The backup keeps the
+    user's original, the write replaces the file whole, and a settings
+    file of a shape the installer cannot read is refused untouched."""
+
+    # The installer's own start and read-back, borrowed rather than
+    # inherited so InstallerTest's tests do not run twice.
+    run_installer = InstallerTest.run_installer
+    settings = InstallerTest.settings
+
+    def seed(self, home, settings):
+        path = home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        return path
+
+    def home(self):
+        home = self.root / "home"
+        home.mkdir(exist_ok=True)
+        return home
+
+    def commands(self, settings, event):
+        return [h["command"] for b in settings["hooks"].get(event, [])
+                for h in b["hooks"]]
+
+    def test_the_users_own_hooks_survive_install_and_uninstall(self):
+        self.seed(self.home(), USERS_OWN_HOOKS)
+
+        installed, home = self.run_installer("install-hook")
+
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        settings = self.settings(home)
+        end = self.commands(settings, "SessionEnd")
+        start = self.commands(settings, "SessionStart")
+        self.assertIn("python ~/bin/upload_receipts.py --to s3", end)
+        self.assertIn("python ~/ops/supervisor.py notify", start)
+        # The installer's own were added beside them, not in their place.
+        self.assertTrue(any(c.endswith("loxodonta.py\" hook") for c in end),
+                        end)
+        self.assertTrue(any(c.endswith("supervisor.py\" digest")
+                            for c in start), start)
+        self.assertNotIn("healed", installed.stdout)
+
+        removed, _ = self.run_installer("uninstall-hook")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(self.settings(home), USERS_OWN_HOOKS)
+
+    def test_a_second_install_keeps_the_first_backup(self):
+        path = self.seed(self.home(), USERS_OWN_HOOKS)
+        original = path.read_bytes()
+
+        first, home = self.run_installer("install-hook")
+        # A re-run with a new choice rewrites the file a second time.
+        second, _ = self.run_installer("install-hook",
+                                       "--anchor-at-session-end")
+        removed, _ = self.run_installer("uninstall-hook")
+
+        backup = path.with_name("settings.json.bak")
+        self.assertIn("saved as settings.json.bak", first.stdout)
+        for later in (second, removed):
+            self.assertEqual(later.returncode, 0, later.stderr)
+            self.assertIn("settings.json.bak was kept", later.stdout)
+        self.assertEqual(backup.read_bytes(), original)
+        # The write went through a temporary file beside it, replaced
+        # whole: nothing is left behind in the folder.
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()),
+                         ["settings.json", "settings.json.bak"])
+
+    def test_a_first_install_leaves_no_backup_of_nothing(self):
+        result, home = self.run_installer("install-hook")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(".bak", result.stdout)
+        self.assertEqual(sorted(p.name for p in (home / ".claude").iterdir()),
+                         ["settings.json"])
+        self.assertNotIn(b"\r\n", (home / ".claude"
+                                   / "settings.json").read_bytes())
+
+    def test_settings_of_an_unexpected_shape_are_refused_untouched(self):
+        shapes = {
+            "a top-level array": [],
+            "hooks as a string": {"hooks": "PostToolUse"},
+            "an event as an object": {"hooks": {"SessionEnd": {}}},
+            "a block as a string": {"hooks": {"PostToolUse": ["x"]}},
+            "a block's hooks as a string": {"hooks": {"SessionStart": [
+                {"matcher": "startup", "hooks": "x"}]}},
+            "a hook as a string": {"hooks": {"SessionEnd": [
+                {"hooks": ["python notify.py"]}]}},
+        }
+        home = self.home()
+        for shape, settings in shapes.items():
+            for verb in ("install-hook", "uninstall-hook"):
+                with self.subTest(shape=shape, verb=verb):
+                    path = self.seed(home, settings)
+                    before = path.read_bytes()
+
+                    result, _ = self.run_installer(verb)
+
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertIn("refusing to touch", result.stderr)
+                    self.assertIn("expected", result.stderr)
+                    self.assertEqual(path.read_bytes(), before)
+                    self.assertFalse(
+                        path.with_name("settings.json.bak").exists())
+
+    def test_every_command_shape_the_installer_ever_wrote_is_its_own(self):
+        # The shapes of every era: the first shell-expanded command
+        # (bare python3, a --log-dir), the quoted interpreter and script
+        # of every install since, with the flags the session end has
+        # carried, the hand-wired shape docs/HOOK.md shows, the digest
+        # with and without --payload, and a Windows path written with
+        # backslashes, quoted or bare.
+        home = self.home()
+        recorder = [
+            'python3 "$CLAUDE_PROJECT_DIR/receipts.py" hook '
+            '--log-dir "$CLAUDE_PROJECT_DIR/receipts"',
+            '"/usr/bin/python3" "/elsewhere/receipts.py" hook',
+            '"/usr/bin/python3" "/elsewhere/loxodonta.py" hook --actor codex '
+            '--anchor --publish "https://example.test/head" '
+            '--publish-chain "https://example.test/chain" '
+            '--stamp "https://tsa.example.test"',
+            '"C:\\Python312\\python.exe" "C:\\Tools\\loxodonta.py" hook',
+            'C:\\Python312\\python.exe C:\\Tools\\loxodonta.py hook --anchor',
+            "python3 /absolute/path/to/loxodonta.py hook",
+        ]
+        digest = [
+            '"/usr/bin/python3" "/elsewhere/supervisor.py" digest',
+            '"C:/Python312/python.exe" "C:/Tools/supervisor.py" digest '
+            "--payload",
+        ]
+        self.seed(home, {"hooks": {
+            "PostToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": c} for c in recorder]}],
+            "SessionStart": [{"matcher": "startup", "hooks": [
+                {"type": "command", "command": c} for c in digest]}],
+        }})
+
+        removed, _ = self.run_installer("uninstall-hook")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(self.settings(home), {"hooks": {}})
+
+    def test_a_windows_recorder_path_that_is_gone_is_healed(self):
+        # A backslash path parses whole (no shell escapes), so a
+        # checkout that moved is found dangling and pointed at this one.
+        home = self.home()
+        self.seed(home, {"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command",
+             "command": '"C:\\Python312\\python.exe" '
+                        '"C:\\Gone\\Checkout\\loxodonta.py" hook'}]}]}})
+
+        result, _ = self.run_installer("install-hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("healed 1 hook command(s)", result.stdout)
+        (post,) = self.commands(self.settings(home), "PostToolUse")
+        self.assertNotIn("Gone", post)
+        self.assertIn(LOXODONTA.as_posix(), post)
+
+    def test_a_recorder_under_the_users_home_is_live_not_dangling(self):
+        # `~` is expanded before a path is judged dangling: a recorder
+        # the user wired by hand under their home is a working install,
+        # neither healed away nor doubled.
+        home = self.home()
+        tools = home / "tools"
+        tools.mkdir()
+        (tools / "loxodonta.py").write_text(
+            LOXODONTA.read_text(encoding="utf-8"), encoding="utf-8")
+        wired = "python3 ~/tools/loxodonta.py hook"
+        self.seed(home, {"hooks": {"PostToolUse": [
+            {"matcher": "*", "hooks": [{"type": "command",
+                                        "command": wired}]}]}})
+
+        result, _ = self.run_installer("install-hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("healed", result.stdout)
+        self.assertEqual(self.commands(self.settings(home), "PostToolUse"),
+                         [wired])
+
+    def test_a_near_miss_is_the_users_and_never_removed(self):
+        # Each is one step from the installer's shape: another verb,
+        # another script name, a recorder name that is only a suffix,
+        # a script that is not the first argument.
+        home = self.home()
+        theirs = [
+            "python ~/ops/supervisor.py notify",
+            "python ~/bin/upload_receipts.py --to s3",
+            "python ~/bin/my_loxodonta.py hook",
+            "python -u ~/tools/loxodonta.py hook",
+            "python ~/tools/loxodonta.py verify",
+            "echo loxodonta.py hook",
+        ]
+        seeded = {"hooks": {"PostToolUse": [
+            {"matcher": "*", "hooks": [{"type": "command", "command": c}
+                                       for c in theirs]}]}}
+        self.seed(home, seeded)
+
+        removed, _ = self.run_installer("uninstall-hook")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertIn("nothing of ours", removed.stdout)
+        self.assertEqual(self.settings(home), seeded)
+
+
 if __name__ == "__main__":
     unittest.main()
