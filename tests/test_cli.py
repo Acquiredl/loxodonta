@@ -9,9 +9,11 @@ there.
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1064,6 +1066,108 @@ class RunTest(ReceiptsCliTest):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("doomed.txt", result.stderr)
         self.assertIn("receipt", result.stderr)
+
+    def assert_chain_valid(self):
+        result = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VALID", result.stdout)
+
+    def test_run_of_command_that_cannot_start_leaves_a_receipt(self):
+        # #296: a command that is not there used to end in a traceback and
+        # no receipt. The attempt is itself the thing to record.
+        missing = str(self.workdir / "no-such-command")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--", missing, "--flag",
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("could not start", result.stderr)
+        entry = self.last_entry()
+        self.assertEqual(entry["n"], 1)
+        self.assertEqual(
+            entry["action"],
+            f"run: {missing} --flag (could not start: FileNotFoundError)",
+        )
+        self.assert_chain_valid()
+
+    @unittest.skipIf(os.name == "nt", "a file without an execute bit is POSIX")
+    def test_run_of_command_without_execute_permission_exits_126(self):
+        script = self.workdir / "not-executable.sh"
+        script.write_text("#!/bin/sh\necho ran\n", encoding="utf-8")
+        script.chmod(0o644)
+        if os.access(script, os.X_OK):
+            self.skipTest("running as a user every file is executable for")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--", str(script),
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 126, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {script} (could not start: PermissionError)",
+        )
+
+    @unittest.skipIf(os.name == "nt", "a child cannot send SIGTERM to its "
+                     "parent on Windows: os.kill there is TerminateProcess")
+    def test_run_killed_by_its_child_with_sigterm_still_leaves_a_receipt(self):
+        # #296: the child ends its own wrapper. The wrapper passes the
+        # signal on, waits for the child, writes the receipt, and exits
+        # the way a shell reports a death by signal: 128 + N.
+        kill_parent = ("import os, signal, time; "
+                       "os.kill(os.getppid(), signal.SIGTERM); time.sleep(30)")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--", sys.executable, "-c", kill_parent,
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 128 + signal.SIGTERM, result.stderr)
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {sys.executable} -c {kill_parent} "
+            f"(terminated by signal {int(signal.SIGTERM)})",
+        )
+        self.assert_chain_valid()
+
+    @unittest.skipIf(os.name == "nt", "SIGINT cannot be sent to one process "
+                     "on Windows, only a Ctrl-C to a whole console")
+    def test_run_interrupted_waits_for_the_child_and_leaves_a_receipt(self):
+        # #296: Ctrl-C used to raise KeyboardInterrupt out of the wait and
+        # leave no receipt. The interrupt is sent to the wrapper alone
+        # (a console would send it to the child as well), so the child
+        # finishes on its own and the wrapper must still be waiting.
+        started = self.workdir / "started"
+        finished = self.workdir / "finished"
+        child = ("import time; open('started', 'w').close(); time.sleep(2); "
+                 "open('finished', 'w').close()")
+
+        wrapper = subprocess.Popen(
+            [sys.executable, str(LOXODONTA), "run", "--actor", "agent", "--",
+             sys.executable, "-c", child],
+            cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        deadline = time.monotonic() + 30
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(started.exists(), "the child never started")
+        wrapper.send_signal(signal.SIGINT)
+        out, err = wrapper.communicate(timeout=60)
+
+        self.assertEqual(wrapper.returncode, 130, err)
+        self.assertNotIn("Traceback", err)
+        self.assertTrue(finished.exists(), "the wrapper did not wait")
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {sys.executable} -c {child} (interrupted)",
+        )
+        self.assert_chain_valid()
 
     def test_chain_verifies_valid_after_several_runs(self):
         run_receipts(
