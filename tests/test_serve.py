@@ -109,14 +109,16 @@ class ServerFixture(unittest.TestCase):
         self.root = Path(self._tmp.name).resolve()
         self.env = isolated_env(home_outside(self))
 
-    def serve(self, extra_env=None, extra_args=()):
+    def serve(self, extra_env=None, extra_args=(), cwd=None):
         """Start `serve` on an ephemeral port and read the announced URL.
         `extra_args` ride on the command line after the fixed ones (a
-        `--witness`, for a suite that needs the completeness watch)."""
+        `--witness`, for a suite that needs the completeness watch);
+        `cwd` is the folder the server runs in, when that matters."""
         self.proc = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--root",
              str(self.root), "--port", "0", *extra_args],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            cwd=None if cwd is None else str(cwd),
             env={**self.env, "PYTHONIOENCODING": "utf-8",
                  **(extra_env or {})})
         self.addCleanup(self._stop)
@@ -1036,6 +1038,28 @@ class DrillSurfaceTest(ServerFixture):
         self.assertTrue(report["all_fired"])
         self.assertEqual(len(report["drills"]), 4)
         self.assertIn("sandbox", report["rehearsal"])
+
+    def test_the_drill_route_never_reads_a_log_from_the_servers_folder(self):
+        # The CLI's `drill --log` also reads a path from the folder it
+        # runs in (#297); the page's route does not. A chain beside the
+        # root, named relative to the folder the server runs in, is not
+        # drilled, and no sandbox is written.
+        outside = self.root
+        make_chain(outside / "elsewhere", "sess-bbbb", entries=3)
+        self.root = outside / "served"
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                   entries=3)
+        self.serve(cwd=outside)
+
+        request = urllib.request.Request(
+            self.url + "/api/drill?log="
+            + urllib.parse.quote("elsewhere/receipts-sess-bbbb.jsonl"),
+            method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            OPENER.open(request, timeout=60)
+
+        self.assertEqual(caught.exception.code, 404)
+        self.assertFalse((self.root / ".supervisor-drill").exists())
 
     def test_the_checklist_is_served_where_the_surface_links_to_it(self):
         self.serve()

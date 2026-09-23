@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
+from test_supervisor import home_outside, isolated_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -123,6 +124,7 @@ class PublishBase(unittest.TestCase):
         self.project = self.root / self.PROJECT_NAME
         self.project.mkdir()
         self.store = self.root / "store"
+        self.home = home_outside(self)  # every other home (#274)
         self.transcript = self.root / "transcript.jsonl"
         self.receiver = self.serve(FakeReceiver, FakeReceiverHandler)
         self.receiver.received = []
@@ -153,9 +155,9 @@ class PublishBase(unittest.TestCase):
         return calendar
 
     def hook(self, payload, *extra):
-        env = clean_env()
-        env["CLAUDE_PROJECT_DIR"] = str(self.project)
-        env["LOXODONTA_HOME"] = str(self.store)
+        env = isolated_env(self.home, CLAUDE_PROJECT_DIR=str(self.project),
+                           LOXODONTA_HOME=str(self.store),
+                           PYTHONIOENCODING="utf-8")
         result = subprocess.run(
             [sys.executable, str(LOXODONTA), "hook", *extra],
             cwd=self.project, input=json.dumps(payload).encode("utf-8"),

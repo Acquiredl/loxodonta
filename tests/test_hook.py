@@ -16,22 +16,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_hook`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import isolated_env  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 
 def run_hook(payload, cwd, *args, extra_env=None, timeout=None):
-    # CLAUDE_PROJECT_DIR steers the default log dir; scrub the ambient one
-    # so tests are deterministic wherever they run, and inject it only when
-    # a test is exercising that resolution.
-    env = dict(os.environ)
-    env.pop("CLAUDE_PROJECT_DIR", None)
-    env.pop("LOXODONTA_HOME", None)
-    # The decode below assumes UTF-8, so tell the child to emit UTF-8 —
-    # otherwise a cp1252 console codepage on Windows breaks the agreement.
-    env["PYTHONIOENCODING"] = "utf-8"
-    if extra_env:
-        env.update(extra_env)
     # The harness pipes the payload as raw UTF-8 bytes; feeding the hook the
     # same way keeps the console codepage out of the test's path (bytes in,
     # decoded output out — never `text=True`, whose locale codec would mask
@@ -42,14 +37,26 @@ def run_hook(payload, cwd, *args, extra_env=None, timeout=None):
         stdin = payload
     else:
         stdin = json.dumps(payload).encode("utf-8")
-    result = subprocess.run(
-        [sys.executable, str(LOXODONTA), "hook", *args],
-        cwd=cwd,
-        input=stdin,
-        capture_output=True,
-        env=env,
-        timeout=timeout,
-    )
+    # Every home is one of this call's own (#274), so a store the test did
+    # not name is a throwaway, never the machine's.
+    with tempfile.TemporaryDirectory() as home:
+        # CLAUDE_PROJECT_DIR steers the default log dir; isolated_env
+        # scrubs the ambient one so tests are deterministic wherever they
+        # run, and a test exercising that resolution injects it. The
+        # decode below assumes UTF-8, so tell the child to emit UTF-8 —
+        # otherwise a cp1252 console codepage on Windows breaks the
+        # agreement.
+        env = isolated_env(Path(home).resolve(), PYTHONIOENCODING="utf-8")
+        if extra_env:
+            env.update(extra_env)
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook", *args],
+            cwd=cwd,
+            input=stdin,
+            capture_output=True,
+            env=env,
+            timeout=timeout,
+        )
     result.stdout = result.stdout.decode("utf-8", errors="replace")
     result.stderr = result.stderr.decode("utf-8", errors="replace")
     return result
@@ -266,7 +273,7 @@ class HookTest(unittest.TestCase):
         # reaches it differently: os.path.relpath RAISES across drives
         # on Windows instead of returning a '..' path, so the "outside
         # the project" branch was never reached and the hook died
-        # before writing anything. A scratchpad on C: and a repo on S:
+        # before writing anything. A scratchpad on C: and a repo on D:
         # is an ordinary layout, and every receipt for it went missing.
         here = str(self.workdir)[:1].upper()
         other = next((d for d in "CDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -381,6 +388,33 @@ class HookTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Bash: {command}", self.entries()[1]["action"])
+
+    def test_a_lone_surrogate_in_the_tool_input_is_recorded_as_escape_text(self):
+        # #292: JSON lets a model type half a UTF-16 pair into any tool
+        # argument. It has no UTF-8 form, so the receipt was lost to a
+        # traceback and the chain went on verifying VALID with a gap.
+        # The ruling: the receipt holds its six characters of escape
+        # text. The payload is built as the harness sends it, the escape
+        # spelled with chr(92) so nothing on the way can read it early.
+        escape = chr(92) + "ud800"
+        raw = ('{"session_id":"sess-1234abcd","hook_event_name":"PostToolUse",'
+               '"tool_name":"Bash","tool_input":{"command":"echo ' + escape
+               + ' hi"},"tool_response":{}}')
+
+        result = run_hook(raw, cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.entries()[1]["action"],
+                         "Bash: echo " + escape + " hi")
+        # The chain keeps receipting after the escaped call, and walks.
+        run_hook(payload(tool="Bash", tool_input={"command": "ls"}),
+                 cwd=self.workdir)
+        self.assertEqual([e["n"] for e in self.entries()], [0, 1, 2])
+        verify = run_receipts("verify", "--log", self.session_log().name,
+                              cwd=self.workdir)
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertEqual(verify.stdout.strip(), "VALID")
 
     def test_malformed_stdin_errors_cleanly(self):
         for bad in ("not json at all", '["a", "list"]', "",
@@ -894,11 +928,10 @@ class TranscriptCommitmentTest(unittest.TestCase):
         # default SessionEnd budget is too small for a big transcript).
         home = self.workdir / "home"
         (home / ".claude").mkdir(parents=True)
-        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        env = isolated_env(home, PYTHONIOENCODING="utf-8")
         result = subprocess.run(
             [sys.executable, str(LOXODONTA), "install-hook"],
-            capture_output=True, encoding="utf-8",
-            env={**os.environ, **env, "PYTHONIOENCODING": "utf-8"})
+            capture_output=True, encoding="utf-8", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         settings = json.loads(
             (home / ".claude" / "settings.json").read_text(
@@ -911,8 +944,7 @@ class TranscriptCommitmentTest(unittest.TestCase):
                             for b in end for h in b.get("hooks", [])))
         again = subprocess.run(
             [sys.executable, str(LOXODONTA), "install-hook"],
-            capture_output=True, encoding="utf-8",
-            env={**os.environ, **env, "PYTHONIOENCODING": "utf-8"})
+            capture_output=True, encoding="utf-8", env=env)
         self.assertIn("already installed", again.stdout)
 
     def test_unreadable_transcript_skips_the_commitment_never_fails(self):
@@ -923,6 +955,25 @@ class TranscriptCommitmentTest(unittest.TestCase):
         self.assertFalse(self.transcript.exists())
         entries = self.entries()
         self.assertEqual(len(entries), self.CADENCE + 1)
+        self.assertEqual(self.commitments(), [])
+
+    def test_a_transcript_path_no_filesystem_can_name_is_skipped(self):
+        # #292: a NUL anywhere, or on POSIX a lone surrogate, makes the
+        # open raise ValueError rather than OSError. It is skipped like
+        # a missing transcript, on the cadence and at SessionEnd, never
+        # a traceback after the receipt was already written.
+        self.drive(2)
+        for spelling in ("u0000", "ud800"):
+            with self.subTest(spelling=spelling):
+                raw = ('{"session_id":"sess-1234abcd",'
+                       '"hook_event_name":"SessionEnd",'
+                       '"transcript_path":"diary' + chr(92) + spelling
+                       + '.jsonl"}')
+
+                result = run_hook(raw, cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.commitments(), [])
 
 
@@ -946,15 +997,14 @@ class CoverageMarkerTest(unittest.TestCase):
         (self.home / ".claude").mkdir(parents=True)
         self.store = self.work / "store"
         self.codex = self.work / "codex"
-        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
-                    "LOXODONTA_HOME": str(self.store),
-                    "CODEX_HOME": str(self.codex)}
+        self.env = isolated_env(self.home, LOXODONTA_HOME=str(self.store),
+                                CODEX_HOME=str(self.codex),
+                                PYTHONIOENCODING="utf-8")
 
     def run_tool(self, *args):
         return subprocess.run(
             [sys.executable, str(LOXODONTA), *args],
-            capture_output=True, encoding="utf-8",
-            env={**os.environ, **self.env, "PYTHONIOENCODING": "utf-8"})
+            capture_output=True, encoding="utf-8", env=self.env)
 
     def marker(self):
         path = self.store / "coverage.json"

@@ -8,7 +8,8 @@ printed. The rule lists live in the script next to the vocabulary they
 enforce; the tests pin the behavior of each rule, each allowlisted form,
 and the file set each rule applies to. Issue #241 added the old name, the
 synonym table and the code pass, each with a failing and a passing
-fixture.
+fixture. Issue #298 added `--front-door`, the presentation rules, each
+firing on a fixture checkout and quiet on a compliant one.
 """
 
 import os
@@ -97,7 +98,7 @@ class EmDashTest(Fixture):
         self.assertIn("START.md:3: em-dash:", result.stdout)
 
     def test_the_glossary_and_docs_keep_their_em_dashes(self):
-        glossary = self.write("GLOSSARY.md", "- **Receipt** — one entry.\n")
+        glossary = self.write("docs/GLOSSARY.md", "- **Receipt** — one entry.\n")
         doc = self.write("docs/SPEC.md", "Canonical JSON — sorted keys.\n")
 
         result = run_checker(glossary, doc)
@@ -572,6 +573,381 @@ class CommandTest(Fixture):
         result = run_checker(cwd=REPO_ROOT)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+# A README that passes every front-door rule: a comment, the wordmark, the
+# tagline, a line of badges, a short paragraph, a picture by line 15, and
+# a Why-not heading.
+COMPLIANT_README = "\n".join([
+    "<!-- markdownlint-disable-next-line MD041 -->",
+    "![loxodonta](docs/images/wordmark.svg)",
+    "",
+    "*A flight recorder for AI agents.*",
+    "",
+    "[![tests](https://example.com/badge.svg)](https://example.com/ci) "
+    "[![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)",
+    "",
+    "One receipt per tool call, and a verdict on whether the file was touched.",
+    "",
+    "![the tamper demo](docs/images/demo.gif)",
+    "",
+    "## Six commands",
+    "",
+    "## Why not a plain log",
+    "",
+    "A plain log proves nothing.",
+]) + "\n"
+
+
+class FrontDoorTest(Fixture):
+    # `--front-door` (issue #298): the shape a stranger meets, measured.
+    # Each test builds a checkout that passes every rule, breaks one
+    # thing, and runs the command. The rules read tracked files, so the
+    # fixture is a git checkout with every file added; a file written
+    # after `track` is untracked, as a scratch file would be.
+
+    def setUp(self):
+        super().setUp()
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        self.write("README.md", COMPLIANT_README)
+        for name in ("LICENSE", ".gitignore", "loxodonta.py",
+                     "docs/images/wordmark.svg", "docs/images/demo.gif",
+                     "docs/images/demo.tape", "docs/START.md", "docs/SPEC.md",
+                     "adrs/0001-hash-chain.md", "adrs/0036-a-short-slug.md"):
+            self.write(name, "x\n")
+        self.write("docs/README.md", "- [Start](START.md)\n- [Spec](./SPEC.md#top)\n")
+        self.write("adrs/README.md", "- [0001](0001-hash-chain.md)\n"
+                                     "- [0036](/adrs/0036-a-short-slug.md)\n")
+        self.write("CHANGELOG.md", "\n".join([
+            "# Changelog", "", "## [Unreleased]", "", "- A short bullet.", "",
+            "## [0.9.0] - 2026-10-01", "", "### Added", "", "- Another short one.",
+        ]) + "\n")
+
+    def track(self):
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+
+    def front_door(self):
+        self.track()
+        return run_checker("--front-door", cwd=self.root)
+
+    def findings(self, result):
+        return result.stdout.splitlines()
+
+    def test_a_compliant_checkout_passes(self):
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_it_runs_from_a_subfolder_of_the_checkout(self):
+        self.write("GLOSSARY.md", "x\n")
+        self.track()
+
+        result = run_checker("--front-door", cwd=self.root / "docs")
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.findings(result), [
+            "GLOSSARY.md: root-file: not on the root allowlist; "
+            "it could live in docs/"])
+
+    def test_the_default_pass_is_unchanged_by_front_door_findings(self):
+        # CI runs the default pass; a front-door finding must not fail it.
+        self.write("README.md", "No picture, no Why-not heading, " + "word " * 80 + "\n")
+        self.write("notes.txt", "x\n")
+        self.track()
+
+        front = run_checker("--front-door", cwd=self.root)
+        default = run_checker(cwd=self.root)
+
+        self.assertEqual(front.returncode, 1, front.stdout + front.stderr)
+        self.assertEqual(default.returncode, 0, default.stdout + default.stderr)
+        self.assertEqual(default.stdout.strip(), "")
+
+    def test_front_door_takes_no_paths(self):
+        result = run_checker("--front-door", "README.md", cwd=self.root)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("usage:", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    # 1. The README's first screen.
+
+    def test_the_first_paragraph_over_sixty_words_fails_at_its_line(self):
+        long = " ".join(["word"] * 61)
+        self.write("README.md", COMPLIANT_README.replace(
+            "One receipt per tool call, and a verdict on whether the file was touched.",
+            long))
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(len(self.findings(result)), 1, result.stdout)
+        self.assertIn("README.md:8: first-paragraph: 61 words, at most 60:", result.stdout)
+
+    def test_sixty_words_pass_and_a_wrapped_paragraph_is_counted_whole(self):
+        wrapped = "\n".join([" ".join(["word"] * 30)] * 2)
+        self.write("README.md", COMPLIANT_README.replace(
+            "One receipt per tool call, and a verdict on whether the file was touched.",
+            wrapped))
+        at_sixty = self.front_door()
+        self.write("README.md", COMPLIANT_README.replace(
+            "One receipt per tool call, and a verdict on whether the file was touched.",
+            wrapped + " word"))
+        over = self.front_door()
+
+        self.assertEqual(at_sixty.returncode, 0, at_sixty.stdout + at_sixty.stderr)
+        self.assertIn("README.md:8: first-paragraph: 61 words", over.stdout)
+
+    def test_the_first_paragraph_is_the_first_prose_past_the_masthead(self):
+        # A long comment, the wordmark, the tagline, the badges and a
+        # heading come first and are passed over; a link counts as its
+        # text; the long paragraph after the first one is not measured.
+        readme = "\n".join([
+            "<!--",
+            " ".join(["comment"] * 70),
+            "-->",
+            "![loxodonta](docs/images/wordmark.svg)",
+            "*" + " ".join(["tagline"] * 70) + "*",
+            " ".join(["[![b](https://example.com/b.svg)](https://example.com)"] * 70),
+            "# loxodonta",
+            "A short paragraph with [a link of several words](docs/START.md) in it.",
+            "",
+            "![the tamper demo](docs/images/demo.gif)",
+            "",
+            " ".join(["later"] * 90),
+            "",
+            "## Why not a plain log",
+        ]) + "\n"
+        self.write("README.md", readme)
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_a_bold_or_underscored_tagline_is_passed_over(self):
+        # Were the tagline measured, its 70 words would fail.
+        tagline = " ".join(["tagline"] * 70)
+        for form in (f"**{tagline}**", f"_{tagline}_", f"__{tagline}__"):
+            with self.subTest(form=form[:3]):
+                self.write("README.md", COMPLIANT_README.replace(
+                    "*A flight recorder for AI agents.*", form))
+
+                result = self.front_door()
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), "")
+
+    def test_a_line_of_reference_style_badges_is_passed_over(self):
+        # `[![t](image)][ci]`, with its definition at the foot of the page.
+        badges = " ".join(["[![t](https://example.com/b.svg)][ci]"] * 70)
+        self.write("README.md", COMPLIANT_README.replace(
+            "[![tests](https://example.com/badge.svg)](https://example.com/ci) "
+            "[![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)",
+            badges) + "\n[ci]: https://example.com/ci\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_no_picture_but_the_wordmark_and_badges_fails(self):
+        self.write("README.md", COMPLIANT_README.replace(
+            "![the tamper demo](docs/images/demo.gif)", ""))
+        self.write("docs/START.md", "![the tamper demo](images/demo.gif)\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(len(self.findings(result)), 1, result.stdout)
+        self.assertIn("README.md: first-image: ", result.stdout)
+
+    def test_a_picture_below_line_fifteen_fails_and_an_img_tag_counts(self):
+        below = COMPLIANT_README.replace(
+            "![the tamper demo](docs/images/demo.gif)", "\n" * 10
+            + "![the tamper demo](docs/images/demo.gif)")
+        self.write("README.md", below)
+        late = self.front_door()
+        self.write("README.md", COMPLIANT_README.replace(
+            "![the tamper demo](docs/images/demo.gif)",
+            '<img src="docs/images/demo.gif" alt="the tamper demo" width="600">'))
+        tag = self.front_door()
+
+        self.assertEqual(late.returncode, 1, late.stdout + late.stderr)
+        self.assertIn("README.md: first-image: ", late.stdout)
+        self.assertEqual(tag.returncode, 0, tag.stdout + tag.stderr)
+
+    def test_a_readme_with_no_why_not_heading_fails(self):
+        # The words in prose or in a code block are not a heading.
+        self.write("README.md", COMPLIANT_README.replace(
+            "## Why not a plain log", "Why not a plain log?\n\n```\n# Why not\n```"))
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.findings(result),
+                         ['README.md: why-not: no heading starts "Why not"'])
+
+    # 2. Pictures.
+
+    def test_a_picture_no_tracked_page_shows_fails(self):
+        # An untracked page linking it does not count, and a .tape
+        # source is never judged.
+        self.write("docs/images/dashboard.png", "x\n")
+        self.write("docs/images/other.tape", "x\n")
+        self.track()
+        self.write("docs/scratch.md", "![](images/dashboard.png)\n")
+
+        result = run_checker("--front-door", cwd=self.root)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.findings(result), [
+            "docs/images/dashboard.png: orphan-image: no tracked Markdown file links it"])
+
+    def test_the_social_preview_is_shown_elsewhere_and_passes_unlinked(self):
+        # Uploaded by hand in the repository settings; no page links it.
+        self.write("docs/images/social-preview.png", "x\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_a_picture_shown_by_any_page_in_any_spelling_passes(self):
+        self.write("docs/images/a.png", "x\n")
+        self.write("docs/images/b.png", "x\n")
+        self.write("docs/images/c.png", "x\n")
+        self.write("docs/images/d.png", "x\n")
+        self.write("docs/SPEC.md", "\n".join([
+            "![a](images/a.png)",
+            '<img src="../docs/images/b.png">',
+            "![c](https://raw.githubusercontent.com/o/r/main/docs/images/c.png)",
+            "![d][d]",
+            "",
+            "[d]: ./images/d.png",
+        ]) + "\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    # 3. Indexes.
+
+    def test_an_index_that_misses_a_page_names_it(self):
+        self.write("docs/NEW.md", "x\n")
+        self.write("adrs/0002-writer.md", "x\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.findings(result), [
+            "docs/README.md: index: does not link docs/NEW.md",
+            "adrs/README.md: index: does not link adrs/0002-writer.md"])
+
+    def test_a_missing_index_is_one_finding_not_one_per_page(self):
+        (self.root / "docs" / "README.md").unlink()
+        (self.root / "adrs" / "README.md").unlink()
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.findings(result), [
+            "docs/README.md: index: missing; it would link every page in docs/, 2 pages",
+            "adrs/README.md: index: missing; it would link every ADR, 2 pages"])
+
+    # 4. The root.
+
+    def test_a_file_off_the_root_allowlist_fails_and_names_a_home(self):
+        # The allowed names and any dotfile pass.
+        for name in ("SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md",
+                     "AGENTS.md", "CLAUDE.md", "supervisor.py", "receiver.py",
+                     ".markdownlint.yml", ".gitattributes"):
+            self.write(name, "x\n")
+        for name in ("GLOSSARY.md", "lychee.toml", "helper.py", "notes.txt"):
+            self.write(name, "x\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        found = self.findings(result)
+        self.assertEqual(len(found), 4, result.stdout)
+        self.assertIn("GLOSSARY.md: root-file: not on the root allowlist; "
+                      "it could live in docs/", found)
+        self.assertIn("helper.py: root-file: not on the root allowlist; "
+                      "it could live in tools/", found)
+        self.assertTrue(any(line.startswith("lychee.toml: root-file: ")
+                            and ".github/" in line for line in found), found)
+        self.assertTrue(any(line.startswith("notes.txt: root-file: ")
+                            for line in found), found)
+
+    # 5. The changelog.
+
+    def test_a_long_bullet_under_a_new_version_or_unreleased_fails(self):
+        long = " ".join(["word"] * 41)
+        self.write("CHANGELOG.md", "\n".join([
+            "# Changelog", "",
+            "## [Unreleased]", "", "- " + long, "",
+            "## [0.9.0] - 2026-10-01", "", "### Added", "",
+            "- " + " ".join(["word"] * 40), "- " + " ".join(["word"] * 20),
+            "  " + " ".join(["wrapped"] * 21), "",
+            "## [0.8.0] - 2026-09-22", "", "### Added", "",
+            "- " + " ".join(["released"] * 90), "",
+        ]) + "\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        found = self.findings(result)
+        self.assertEqual(len(found), 2, result.stdout)
+        self.assertTrue(found[0].startswith(
+            "CHANGELOG.md:5: changelog-bullet: 41 words, at most 40:"), found)
+        self.assertTrue(found[1].startswith(
+            "CHANGELOG.md:12: changelog-bullet: 41 words, at most 40:"), found)
+
+    def test_headings_without_brackets_and_numbered_items_are_judged(self):
+        long = " ".join(["word"] * 41)
+        self.write("CHANGELOG.md", "\n".join([
+            "# Changelog", "",
+            "## Unreleased", "", "1. " + long, "",
+            "## 0.10.0 - 2026-11-01", "", "### Fixed", "",
+            "2) " + long, "",
+            "## 0.8.0 - 2026-09-22", "", "1. " + long, "",
+        ]) + "\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        found = self.findings(result)
+        self.assertEqual(len(found), 2, result.stdout)
+        self.assertTrue(found[0].startswith(
+            "CHANGELOG.md:5: changelog-bullet: 41 words, at most 40:"), found)
+        self.assertTrue(found[1].startswith(
+            "CHANGELOG.md:11: changelog-bullet: 41 words, at most 40:"), found)
+
+    # 6. ADR slugs.
+
+    def test_a_long_slug_fails_from_adr_0036_on(self):
+        self.write("adrs/0035-" + "a" * 61 + ".md", "x\n")
+        self.write("adrs/0037-" + "b" * 60 + ".md", "x\n")
+        self.write("adrs/0038-" + "c" * 61 + ".md", "x\n")
+        self.write("adrs/README.md", "\n".join(
+            f"- [{name}]({name})" for name in sorted(
+                p.name for p in (self.root / "adrs").glob("0*.md"))) + "\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.findings(result), [
+            "adrs/0038-" + "c" * 61 + ".md: adr-slug: slug of 61 characters, at most 60"])
+
+    # And the checker on this checkout: it completes and reports, whether
+    # or not the presentation pass has landed yet.
+
+    def test_it_runs_on_this_checkout(self):
+        result = run_checker("--front-door", cwd=REPO_ROOT)
+
+        self.assertIn(result.returncode, (0, 1), result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
 
 
 if __name__ == "__main__":

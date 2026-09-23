@@ -21,4 +21,4 @@ Files changing after a session ends is the normal course of a working machine, n
 
 ## Could this ever change?
 
-> On a pipeline-shaped use case: a root where chains fingerprint *deliverables* that must not drift after logging (the Acu-style "the report that passed review" case). That earns an **opt-in** `--files` flag on `scan` — never a default — and the PR that adds it must also fix the verdict parse in `supervisor.verify()` (the last-line read breaks when FILES-DIVERGED prints before the anchor lines; a tripwire comment sits at the parse site) and restore the frontend tier removed with this decision.
+> On a pipeline-shaped use case: a root where chains fingerprint *deliverables* that must not drift after logging (the predecessor pipeline's "the report that passed review" case). That earns an **opt-in** `--files` flag on `scan` — never a default — and the PR that adds it must also fix the verdict parse in `supervisor.verify()` (the last-line read breaks when FILES-DIVERGED prints before the anchor lines; a tripwire comment sits at the parse site) and restore the frontend tier removed with this decision.

@@ -22,6 +22,12 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_concurrency`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import home_outside, isolated_env  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
@@ -100,14 +106,16 @@ class ConcurrentAppendTest(unittest.TestCase):
         # one session chain.
         calls = 8
         log_dir = self.workdir / "receipts"
+        # Every home the test's own (#274), though --log-dir keeps the
+        # chain in the working folder.
+        env = isolated_env(home_outside(self), PYTHONIOENCODING="utf-8")
 
         def fire(i):
             return subprocess.run(
                 [sys.executable, str(LOXODONTA), "hook",
                  "--log-dir", str(log_dir)],
                 cwd=self.workdir, input=hook_payload(command=f"cmd {i}"),
-                capture_output=True, encoding="utf-8",
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                capture_output=True, encoding="utf-8", env=env,
             )
 
         with ThreadPoolExecutor(max_workers=calls) as pool:
@@ -170,6 +178,7 @@ class SiblingChainTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.workdir = Path(self._tmp.name)
         self.log_dir = self.workdir / "receipts"
+        self.home = home_outside(self)  # every home the test's own (#274)
 
     def fire_hook(self, command="ls"):
         return subprocess.run(
@@ -177,7 +186,7 @@ class SiblingChainTest(unittest.TestCase):
              "--log-dir", str(self.log_dir)],
             cwd=self.workdir, input=hook_payload(command=command),
             capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            env=isolated_env(self.home, PYTHONIOENCODING="utf-8"),
         )
 
     def chain(self, suffix=""):
@@ -271,6 +280,7 @@ class ForkedTailTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.workdir = Path(self._tmp.name)
         self.log_dir = self.workdir / "receipts"
+        self.home = home_outside(self)  # every home the test's own (#274)
 
     def fire_hook(self, command="ls"):
         return subprocess.run(
@@ -278,7 +288,7 @@ class ForkedTailTest(unittest.TestCase):
              "--log-dir", str(self.log_dir)],
             cwd=self.workdir, input=hook_payload(command=command),
             capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            env=isolated_env(self.home, PYTHONIOENCODING="utf-8"),
         )
 
     def chain(self, suffix=""):

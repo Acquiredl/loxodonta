@@ -98,7 +98,7 @@ of commitment status is deferred to the dashboard's territory
 (ADR-0013, issue #48).
 
 **6. The name is *transcript commitment*.** "Seal" is refused here: a
-[seal](../GLOSSARY.md#seal) (ADR-0007) is an *outer* commitment applied
+[seal](../docs/GLOSSARY.md#seal) (ADR-0007) is an *outer* commitment applied
 from beyond the package; this is writer-authored, inner, and protected
 only by the chain. Calling it a seal would launder recorder bookkeeping
 into the vocabulary of outer trust — the same overclaim family as

@@ -37,8 +37,11 @@ jobs:
   # front door's no-em-dash and no-overclaim rules, the tool's old name
   # where it can only mean the tool, and the synonym table, over the
   # Markdown and, for the anti-terms and synonyms, the tool files too)
-  # enforced by the same stdlib script a contributor runs locally. One
-  # platform is enough; the rules are about words, not operating systems.
+  # enforced by the same stdlib script a contributor runs locally. Then
+  # the front door (issue #298): the shape a stranger meets, the README's
+  # first screen, the pictures, the indexes, the root, the changelog and
+  # the ADR names. One platform is enough; the rules are about words and
+  # files, not operating systems.
   house:
     name: house checker
     runs-on: ubuntu-latest
@@ -49,3 +52,5 @@ jobs:
           python-version: "3.13"
       - name: the repo's vocabulary, enforced
         run: python tools/house_check.py
+      - name: the front door
+        run: python tools/house_check.py --front-door

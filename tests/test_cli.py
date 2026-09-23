@@ -9,9 +9,11 @@ there.
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1065,6 +1067,142 @@ class RunTest(ReceiptsCliTest):
         self.assertIn("doomed.txt", result.stderr)
         self.assertIn("receipt", result.stderr)
 
+    def assert_chain_valid(self):
+        result = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VALID", result.stdout)
+
+    def test_run_of_command_that_cannot_start_leaves_a_receipt(self):
+        # #296: a command that is not there used to end in a traceback and
+        # no receipt. The attempt is itself the thing to record.
+        missing = str(self.workdir / "no-such-command")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--", missing, "--flag",
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("could not start", result.stderr)
+        entry = self.last_entry()
+        self.assertEqual(entry["n"], 1)
+        self.assertEqual(
+            entry["action"],
+            f"run: {missing} --flag (could not start: FileNotFoundError)",
+        )
+        self.assert_chain_valid()
+
+    @unittest.skipIf(os.name == "nt", "a file without an execute bit is POSIX")
+    def test_run_of_command_without_execute_permission_exits_126(self):
+        script = self.workdir / "not-executable.sh"
+        script.write_text("#!/bin/sh\necho ran\n", encoding="utf-8")
+        script.chmod(0o644)
+        if os.access(script, os.X_OK):
+            self.skipTest("running as a user every file is executable for")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--", str(script),
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 126, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {script} (could not start: PermissionError)",
+        )
+
+    @unittest.skipIf(os.name == "nt", "a child cannot send SIGTERM to its "
+                     "parent on Windows: os.kill there is TerminateProcess")
+    def test_run_killed_by_its_child_with_sigterm_still_leaves_a_receipt(self):
+        # #296: the child ends its own wrapper. The wrapper passes the
+        # signal on, waits for the child, writes the receipt, and exits
+        # the way a shell reports a death by signal: 128 + N.
+        kill_parent = ("import os, signal, time; "
+                       "os.kill(os.getppid(), signal.SIGTERM); time.sleep(30)")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--", sys.executable, "-c", kill_parent,
+            cwd=self.workdir,
+        )
+
+        # The command's own exit status is kept beside the signal: the
+        # child died of the SIGTERM passed on to it.
+        self.assertEqual(result.returncode, 128 + signal.SIGTERM, result.stderr)
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {sys.executable} -c {kill_parent} "
+            f"(terminated by signal {int(signal.SIGTERM)}, "
+            f"exit {-int(signal.SIGTERM)})",
+        )
+        self.assert_chain_valid()
+
+    # A command that marks when it started, runs two seconds, and marks
+    # when it finished: long enough to be signalled while it runs.
+    SLOW_CHILD = ("import time; open('started', 'w').close(); time.sleep(2); "
+                  "open('finished', 'w').close()")
+
+    def start_wrapper_in_background(self, launcher=(), **popen_args):
+        """Start `run` around SLOW_CHILD and return once the child runs."""
+        wrapper = subprocess.Popen(
+            [*launcher, sys.executable, str(LOXODONTA), "run",
+             "--actor", "agent", "--", sys.executable, "-c", self.SLOW_CHILD],
+            cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            **popen_args,
+        )
+        self.addCleanup(lambda: wrapper.poll() is None and wrapper.kill())
+        started = self.workdir / "started"
+        deadline = time.monotonic() + 30
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(started.exists(), "the child never started")
+        return wrapper
+
+    @unittest.skipIf(os.name == "nt", "SIGINT cannot be sent to one process "
+                     "on Windows, only a Ctrl-C to a whole console")
+    def test_run_interrupted_waits_for_the_child_and_leaves_a_receipt(self):
+        # #296: Ctrl-C used to raise KeyboardInterrupt out of the wait and
+        # leave no receipt. The interrupt is sent to the wrapper alone
+        # (a console would send it to the child as well), so the child
+        # finishes on its own and the wrapper must still be waiting.
+        wrapper = self.start_wrapper_in_background()
+        wrapper.send_signal(signal.SIGINT)
+        out, err = wrapper.communicate(timeout=60)
+
+        self.assertEqual(wrapper.returncode, 130, err)
+        self.assertNotIn("Traceback", err)
+        self.assertTrue((self.workdir / "finished").exists(),
+                        "the wrapper did not wait")
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {sys.executable} -c {self.SLOW_CHILD} (interrupted, exit 0)",
+        )
+        self.assert_chain_valid()
+
+    @unittest.skipIf(os.name == "nt", "Windows has no SIGHUP")
+    def test_run_under_nohup_leaves_an_ignored_hangup_ignored(self):
+        # `nohup loxodonta run ...` sets SIGHUP to "ignore" and relies on
+        # the command inheriting it. Catching SIGHUP in the wrapper would
+        # reset the command's copy to the default, and a closed terminal
+        # would then kill the very command nohup was protecting.
+        nohup = [sys.executable, "-c",
+                 "import os, signal, sys; "
+                 "signal.signal(signal.SIGHUP, signal.SIG_IGN); "
+                 "os.execv(sys.argv[1], sys.argv[1:])"]
+        wrapper = self.start_wrapper_in_background(
+            launcher=nohup, start_new_session=True)
+        os.killpg(wrapper.pid, signal.SIGHUP)  # the whole group, as a hangup
+        out, err = wrapper.communicate(timeout=60)
+
+        self.assertEqual(wrapper.returncode, 0, err)
+        self.assertTrue((self.workdir / "finished").exists())
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {sys.executable} -c {self.SLOW_CHILD} (exit 0)",
+        )
+
     def test_chain_verifies_valid_after_several_runs(self):
         run_receipts(
             "run", "--actor", "agent", "--",
@@ -1498,3 +1636,211 @@ class ShapeTest(TamperTest):
         self.assertEqual(verify.returncode, 1, verify.stdout + verify.stderr)
         self.assertIn("BROKEN at entry 1", verify.stdout)
         self.assertIn("BROKEN at entry 2", verify.stdout)
+
+
+# A backslash, spelled so no layer between here and the child (Python
+# literal, shell, JSON) can read it as the start of an escape.
+BACKSLASH = chr(92)
+# A lone low surrogate: what POSIX hands Python for an undecodable byte
+# in argv or a file name (surrogateescape), and a code point Windows
+# argv can carry as it stands, so the same character reaches the
+# recorder on every platform the suite runs on.
+LONE = chr(0xDCFF)
+
+
+class LoneSurrogateTest(ReceiptsCliTest):
+    """#292: a lone surrogate has no UTF-8 form, so the canonical form
+    cannot hold it and the receipt used to be lost to a traceback while
+    the chain went on verifying VALID. The ruling (2026-09-22): the
+    receipt records it as its six ASCII characters of escape text, and
+    the format does not change."""
+
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+
+    def entries(self):
+        return [json.loads(line) for line in
+                self.log_path.read_text(encoding="utf-8").splitlines()]
+
+    def assert_valid(self):
+        verify = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertEqual(verify.stdout.strip(), "VALID")
+
+    def test_log_records_a_lone_surrogate_as_its_escape_text(self):
+        result = run_receipts("log", "--actor", "agent" + LONE,
+                              "--action", "echo " + LONE + " hi",
+                              cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+        entry = self.entries()[1]
+        self.assertEqual(entry["actor"], "agent" + BACKSLASH + "udcff")
+        self.assertEqual(entry["action"],
+                         "echo " + BACKSLASH + "udcff hi")
+        # The chain keeps receipting after the escaped call, and walks.
+        run_receipts("log", "--actor", "agent", "--action", "after",
+                     cwd=self.workdir)
+        self.assertEqual([e["n"] for e in self.entries()], [0, 1, 2])
+        self.assert_valid()
+
+    def test_run_records_a_lone_surrogate_in_its_command_as_escape_text(self):
+        result = run_receipts("run", "--actor", "agent", "--",
+                              sys.executable, "-c", "pass", LONE,
+                              cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+        action = self.entries()[1]["action"]
+        self.assertTrue(action.endswith(" " + BACKSLASH + "udcff (exit 0)"),
+                        action)
+        self.assert_valid()
+
+    def test_a_file_path_with_a_lone_surrogate_is_recorded_as_escape_text(self):
+        if sys.platform == "darwin":
+            self.skipTest("APFS refuses a file name that is not UTF-8")
+        name = "note" + LONE + ".txt"
+        try:
+            (self.workdir / name).write_text("x", encoding="utf-8")
+        except (OSError, UnicodeError):
+            self.skipTest("this filesystem cannot hold the name")
+
+        result = run_receipts("log", "--actor", "agent", "--action", "wrote",
+                              "--file", name, cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        ref = self.entries()[1]["files"][0]
+        self.assertEqual(ref["path"], "note" + BACKSLASH + "udcff.txt")
+        self.assertEqual(ref["sha256"], hashlib.sha256(b"x").hexdigest())
+        self.assert_valid()
+
+
+class UnopenableReferenceTest(ReceiptsCliTest):
+    """#292 review: a well-hashed entry can carry a path this machine
+    cannot open as a file: a NUL (ValueError everywhere), a directory
+    (PermissionError on Windows, IsADirectoryError elsewhere), a name
+    Windows refuses (`a<b`, EINVAL, which the broken-pipe handler used
+    to swallow, so verify exited 1 printing nothing). `verify --files`
+    says MISSING for each, as for a file not on disk, and the verdict
+    and exit code are the chain's."""
+
+    def test_verify_files_names_each_unopenable_path_missing(self):
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "wrote",
+                     cwd=self.workdir)
+        (self.workdir / "sub").mkdir()
+        paths = sorted(["a" + chr(0) + "b", "sub", "a<b"])
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        entry = json.loads(lines[-1])
+        del entry["entry_hash"]
+        entry["files"] = [{"path": p, "sha256": "0" * 64} for p in paths]
+        entry["entry_hash"] = spec_hash(entry)
+        lines[-1] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        self.log_path.write_text("".join(l + "\n" for l in lines),
+                                 encoding="utf-8")
+
+        result = run_receipts("verify", "--files", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        out = result.stdout.splitlines()
+        self.assertEqual(out[-1], "VALID")
+        # A directory is on disk but is no file to fingerprint; `a<b` is
+        # an unopenable name on Windows and simply absent elsewhere.
+        self.assertIn("MISSING (not a readable file here): sub", out)
+        self.assertTrue(any(l.startswith("MISSING (") and l.endswith(": a<b")
+                            for l in out), out)
+        self.assertEqual(sum(l.startswith("MISSING (") for l in out), 3, out)
+
+
+class UnreadableLineTest(TamperTest):
+    """SPEC section 6: a line that is not an entry is refused by name.
+    Four lines the reader cannot even take apart (a byte that is not
+    UTF-8, a string holding a lone surrogate, which has no canonical
+    form, an integer past Python's digit limit, nesting past its
+    recursion limit) used to end verify in a traceback. Each is BROKEN
+    at its entry, exit 1, on every reader of the walk (#292)."""
+
+    def write_raw(self, index, raw):
+        lines = self.log_path.read_bytes().split(b"\n")
+        lines[index] = raw
+        self.log_path.write_bytes(b"\n".join(lines))
+
+    def assert_refused(self, at_entry, reason):
+        result = self.assert_broken(at_entry)
+        self.assertIn(reason, result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        for verb in (["report"], ["verify", "--files"]):
+            again = run_receipts(*verb, cwd=self.workdir)
+            self.assertNotIn("Traceback", again.stderr, " ".join(verb))
+        self.assertEqual(run_receipts("report", cwd=self.workdir).returncode, 0)
+
+    def entry_line(self, index, **fields):
+        entry = json.loads(self.read_lines()[index])
+        entry.update(fields)
+        return json.dumps(entry, sort_keys=True,
+                          separators=(",", ":")).encode("ascii")
+
+    def test_a_byte_that_is_not_utf8_is_broken_by_name(self):
+        line = self.read_lines()[2].encode("ascii")
+        self.write_raw(2, line.replace(b"step 2", b"step 2 \xff"))
+
+        self.assert_refused(2, "BROKEN at entry 2: line is not valid UTF-8")
+
+    def test_a_lone_surrogate_in_a_stored_string_is_broken_by_name(self):
+        # The JSON escape decodes to a lone surrogate, which has no UTF-8
+        # form, so there is no canonical form to hash (SPEC section 4).
+        line = self.entry_line(2, action="step 2")
+        self.write_raw(2, line.replace(
+            b"step 2", b"step 2 " + BACKSLASH.encode() + b"ud800"))
+
+        self.assert_refused(2, "BROKEN at entry 2: a string holds a lone "
+                               "surrogate")
+
+    def test_an_integer_past_the_digit_limit_is_broken_not_a_crash(self):
+        # Python 3.11 and later refuse to read it; 3.9 reads it and the
+        # sequence rule refuses it. Either way, a verdict.
+        line = self.entry_line(2).replace(b'"n":2', b'"n":' + b"9" * 5000)
+        self.write_raw(2, line)
+
+        self.assert_refused(2, "BROKEN at entry 2")
+
+    def test_nesting_past_the_recursion_limit_is_broken_by_name(self):
+        self.write_raw(2, b"[" * 100000 + b"]" * 100000)
+
+        self.assert_refused(2, "BROKEN at entry 2: nesting too deep to read")
+
+    def test_an_unreadable_genesis_is_broken_not_a_crash(self):
+        # The genesis is read once before the walk, for its version claim.
+        # The long integer is not the claim itself: on 3.9, which reads
+        # it, a number claimed as the version is a refusal, not a break.
+        for raw in (b"[" * 100000 + b"]" * 100000,
+                    b'{"n":' + b"9" * 5000 + b'}',
+                    self.read_lines()[0].encode("ascii").replace(
+                        b"genesis", b"genesis\xff")):
+            with self.subTest(raw=raw[:20]):
+                self.setUp()
+                self.write_raw(0, raw)
+                self.assert_refused(0, "BROKEN at entry 0")
+
+    def test_a_version_claim_holding_a_lone_surrogate_is_named_not_a_crash(self):
+        line = self.entry_line(0).replace(
+            b'"v":"0.1"', b'"v":"0.1' + BACKSLASH.encode() + b'ud800"')
+        self.write_raw(0, line)
+
+        result = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("UNSUPPORTED-VERSION", result.stdout)
+        self.assertIn("0.1" + BACKSLASH + "ud800", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_schema_key_holding_a_lone_surrogate_is_named_not_a_crash(self):
+        line = self.entry_line(2).replace(
+            b'"ts":', b'"x' + BACKSLASH.encode() + b'ud800":1,"ts":')
+        self.write_raw(2, line)
+
+        result = self.assert_broken(at_entry=2)
+        self.assertIn("schema mismatch: x" + BACKSLASH + "ud800",
+                      result.stdout)
+        self.assertNotIn("Traceback", result.stderr)

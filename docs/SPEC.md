@@ -130,7 +130,12 @@ The companion command `loxodonta head` prints the current chain head, so the ope
 loxodonta run --actor <name> [--file PATH]... -- <command> [args...]
 ```
 
-Runs the command, waits for it to exit, then appends exactly one entry: `action` is the literal command line plus its exit code (e.g. `run: pytest -q (exit 0)`), and each `--file` is hashed **after** the command completes. The entry is appended whether the command succeeded or failed — the point of the wrapper is that the invoked process cannot prevent or shape its own receipt. `run` introduces no new schema fields; it is sugar over `log` with the invocation moved outside the writer's volition.
+Runs the command, waits for it to exit, then appends exactly one entry: `action` is the literal command line plus its exit code (e.g. `run: pytest -q (exit 0)`), and each `--file` is hashed **after** the command completes. The command is receipted however it ends: when it succeeds or fails, when the wrapper is interrupted or signalled, and when it cannot start.
+
+- **Interrupted or signalled.** The wrapper catches Ctrl-C, and where the platform has them SIGTERM, SIGHUP and Ctrl-Break, including a signal the command sends its own wrapper. SIGTERM and SIGHUP are passed on to the command; Ctrl-C and Ctrl-Break are not, because the console already sent them to it. The wrapper then waits as long as the command runs (a command that ignores SIGTERM keeps it waiting) and records the command's exit status beside what the wrapper was sent: `(interrupted, exit N)` for Ctrl-C, exiting 130, or `(terminated by signal S, exit N)` otherwise, exiting 128+S. `N` is the exit status as Python's `subprocess` reports it, negative on POSIX when the command died of a signal. A signal already set to be ignored when `run` starts (as under `nohup`) is left ignored, for the command too.
+- **Could not start.** A command that is not found or not executable is recorded as `(could not start: <reason>)`, exiting 127, or 126 when it is not executable.
+
+What is not receipted is the wrapper's own death by a signal it cannot catch: SIGKILL, or on Windows a TerminateProcess (which is what a SIGTERM sent there becomes). A command running with the operator's privileges can kill its wrapper that way, and then no receipt is written. `run` introduces no new schema fields; it is sugar over `log` with the invocation moved outside the writer's volition.
 
 ## 8. Explicit non-goals (v0.1)
 

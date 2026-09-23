@@ -428,7 +428,9 @@ class StampCommandTest(unittest.TestCase):
         self.assertEqual(token_rows(self.sidecar), [])
         (note,) = attempt_rows(self.sidecar)
         self.assertEqual(note["step"], "stamp")
-        self.assertAlmostEqual(note["budget"], 15, delta=0.1)
+        # The budget is rounded to a tenth, and a tenth short of the target
+        # differs by a hair over 0.1 in floating point: allow 0.15.
+        self.assertAlmostEqual(note["budget"], 15, delta=0.15)
         self.assertNotIn("127.0.0.1",
                          self.sidecar.read_text(encoding="utf-8"))
 
@@ -754,7 +756,9 @@ class SessionEndStampTest(PublishBase):
         self.assertEqual(set(note), {"kind", "step", "ts", "budget", "outcome"})
         self.assertEqual(note["step"], "stamp")
         self.assertEqual(note["outcome"], "granted")
-        self.assertAlmostEqual(note["budget"], 3, delta=0.1)
+        # The budget is rounded to a tenth, and a tenth short of the target
+        # differs by a hair over 0.1 in floating point: allow 0.15.
+        self.assertAlmostEqual(note["budget"], 3, delta=0.15)
 
     def test_a_refused_query_leaves_an_attempt_row_and_no_token_row(self):
         self.authority.answer = reply(2)
@@ -815,7 +819,9 @@ class SessionEndStampTest(PublishBase):
         # before it: the wording holds the same tolerance the budget does.
         self.assertRegex(note["outcome"],
                          r"^no answer within 1\.[456] seconds$")
-        self.assertAlmostEqual(note["budget"], 1.5, delta=0.1)
+        # The budget is rounded to a tenth, and a tenth short of the target
+        # differs by a hair over 0.1 in floating point: allow 0.15.
+        self.assertAlmostEqual(note["budget"], 1.5, delta=0.15)
 
     def test_an_unreachable_authority_is_quiet_and_the_row_names_no_url(self):
         self.transcript.write_bytes(b"page one\n")

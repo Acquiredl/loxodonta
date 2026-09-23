@@ -28,7 +28,7 @@ The response is `text/plain; version=0.0.4; charset=utf-8`, and every family on 
 
 ## 3. What is on the scrape
 
-Every name begins with `loxodonta_` and says the mechanism it counts, never the conclusion you might draw: `loxodonta_chains{verdict="BROKEN"}`, and no metric anywhere called "tampering detected". Every `# HELP` line ends with the grade of evidence behind the number, the same honesty labels [recall](../GLOSSARY.md#recall) carries:
+Every name begins with `loxodonta_` and says the mechanism it counts, never the conclusion you might draw: `loxodonta_chains{verdict="BROKEN"}`, and no metric anywhere called "tampering detected". Every `# HELP` line ends with the grade of evidence behind the number, the same honesty labels [recall](GLOSSARY.md#recall) carries:
 
 - **(verdict)** — the number came from `loxodonta verify` and its inputs: recomputed hashes, the chain rule, an anchor replayed against a Bitcoin block.
 - **(witness verdict)** — the supervisor decided it from its own watching: the harness transcript paired with the chain it witnessed, its own diary of when it last saw a head move (ADR-0018), its own clock, or its own fold of all of those together with `verify`'s exits into one number.

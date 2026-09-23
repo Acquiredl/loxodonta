@@ -18,9 +18,11 @@ The blocks pinned:
 - `bad-day-check` — verify and drill over the committed demo chain.
 
 Commands run cross-platform: `python loxodonta.py ...` runs through the
-copy in the working directory, `sed -i 's/A/B/' FILE` is applied as the
-substitution it expresses (Windows runners have no `sed`), and `drill`
-runs on a throwaway copy so the repo is never touched.
+copy in the working directory, and `sed -i 's/A/B/' FILE` is applied as
+the substitution it expresses (Windows runners have no `sed`). Nothing is
+rewritten: the bad-day block runs as written, from the root of a copy of
+the repository's files it names, so the drill's sandbox lands in the copy
+and the repo is never touched (#297).
 """
 
 import json
@@ -96,9 +98,10 @@ class Runner:
     AssertionError naming the block when a command it does not recognize
     appears, so an unrunnable line can never pass in silence."""
 
-    def __init__(self, name, cwd):
+    def __init__(self, name, cwd, env=None):
         self.name = name
         self.cwd = Path(cwd)
+        self.env = env
 
     def fail(self, why):
         raise AssertionError(f"[pin:{self.name}] {why}")
@@ -108,9 +111,6 @@ class Runner:
         argv = command.split()
         if argv[:1] == ["sed"]:
             return self._sed(command)
-        if argv[:1] == ["python"] and argv[1:2] == ["supervisor.py"] \
-                and "drill" in argv:
-            return self._drill(argv)
         if argv[:1] == ["python"]:
             # `python loxodonta.py ...` / `python supervisor.py ...` run
             # through the copies placed in cwd, or the repo's own files.
@@ -118,7 +118,7 @@ class Runner:
             parts = shlex.split(command, posix=True)
             return subprocess.run(
                 [sys.executable, *parts[1:]], cwd=str(self.cwd),
-                capture_output=True, text=True)
+                capture_output=True, text=True, env=self.env)
         self.fail(f"don't know how to run {command!r}")
 
     def _sed(self, command):
@@ -134,25 +134,6 @@ class Runner:
             self.fail(f"sed pattern {old!r} not found in {name}")
         target.write_text(text.replace(old, new), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
-
-    def _drill(self, argv):
-        # Run drill on a throwaway copy of the --log, so the repo's
-        # docs/demo never grows a sandbox. The command's shape is what
-        # is pinned; the root is redirected to the temp copy.
-        log = Path(argv[argv.index("--log") + 1])
-        source = (REPO_ROOT / log)
-        if not source.is_file():
-            self.fail(f"drill --log {log} is not in the repo")
-        # The drill reads the coverage marker to name the tier, so it
-        # runs in a home of its own beside the copy, never the
-        # machine's (#242).
-        with tempfile.TemporaryDirectory() as tmp:
-            copy = Path(tmp) / source.name
-            copy.write_bytes(source.read_bytes())
-            return subprocess.run(
-                [sys.executable, str(SUPERVISOR), "drill", "--root", tmp,
-                 "--log", str(copy)], capture_output=True, text=True,
-                env=isolated_env(Path(tmp) / "home"))
 
 
 class TranscriptPinTest(unittest.TestCase):
@@ -196,8 +177,8 @@ class CommandListPinTest(unittest.TestCase):
     """A block with no `$`: each line is a command that must exit 0
     (a comment may explain it, but the chain here stays intact)."""
 
-    def check_commands(self, name, lines, cwd, tool_copies=()):
-        runner = Runner(name, cwd)
+    def check_commands(self, name, lines, cwd, tool_copies=(), env=None):
+        runner = Runner(name, cwd, env)
         for tool in tool_copies:
             shutil.copy(tool, Path(cwd) / tool.name)
         ran = 0
@@ -225,9 +206,23 @@ class CommandListPinTest(unittest.TestCase):
         blocks = pinned_blocks(README.read_text(encoding="utf-8"))
         self.assertIn("bad-day-check", blocks,
                       "the bad-day check block lost its marker")
-        # These reference docs/demo in the working tree; run from the repo.
-        self.check_commands("bad-day-check", blocks["bad-day-check"],
-                            REPO_ROOT)
+        # The lines a reader copies, run as written from the root of a
+        # clone (#297): a copy of the two tools and docs/demo, so the
+        # drill's sandbox (<root>/.supervisor-drill) lands in the copy
+        # and never in this working tree. The drill reads the coverage
+        # marker to name the tier, so every line runs in a home of its
+        # own, never the machine's (#242).
+        with tempfile.TemporaryDirectory() as tmp:
+            clone = Path(tmp) / "clone"
+            shutil.copytree(REPO_ROOT / "docs" / "demo",
+                            clone / "docs" / "demo",
+                            ignore=shutil.ignore_patterns(".supervisor-drill"))
+            self.check_commands("bad-day-check", blocks["bad-day-check"],
+                                clone, tool_copies=(LOXODONTA, SUPERVISOR),
+                                env=isolated_env(Path(tmp) / "home"))
+            self.assertTrue(
+                (clone / "docs" / "demo" / ".supervisor-drill").is_dir(),
+                "[pin:bad-day-check] the drill line ran no drill")
 
 
 class PinGuardTest(unittest.TestCase):
