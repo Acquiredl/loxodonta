@@ -363,6 +363,77 @@ class CodexInstallTest(unittest.TestCase):
         self.assertIn("refusing", result.stderr)
         self.assertEqual(self.hooks_path.read_text("utf-8"), "{not json")
 
+    # #293, the same rules as the Claude Code half: the user's own hooks
+    # that merely mention a recorder name are never theirs to take, the
+    # first backup is kept, and a shape the installer cannot read is
+    # refused with the file untouched.
+    USERS_OWN = {"hooks": {
+        "SessionEnd": [{"hooks": [{
+            "type": "command",
+            "command": "python ~/bin/upload_receipts.py --to s3"}]}],
+        "SessionStart": [{"matcher": "startup", "hooks": [{
+            "type": "command",
+            "command": "python ~/ops/supervisor.py notify"}]}],
+    }}
+
+    def test_the_users_own_hooks_survive_install_and_uninstall(self):
+        self.hooks_path.write_text(json.dumps(self.USERS_OWN),
+                                   encoding="utf-8")
+
+        installed = self.install()
+
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        hooks = self.hooks()["hooks"]
+        end = [h["command"] for b in hooks["SessionEnd"] for h in b["hooks"]]
+        start = [h["command"] for b in hooks["SessionStart"]
+                 for h in b["hooks"]]
+        self.assertIn("python ~/bin/upload_receipts.py --to s3", end)
+        self.assertEqual(sum("loxodonta.py" in c for c in end), 1)
+        self.assertIn("python ~/ops/supervisor.py notify", start)
+        self.assertEqual(sum(c.endswith(" digest --payload")
+                             for c in start), 1)
+
+        removed = run_loxodonta("uninstall-hook", "--codex", env=self.env)
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(self.hooks(), self.USERS_OWN)
+
+    def test_a_second_install_keeps_the_first_backup(self):
+        self.hooks_path.write_text(json.dumps(self.USERS_OWN),
+                                   encoding="utf-8")
+        original = self.hooks_path.read_bytes()
+
+        first = self.install()
+        second = self.install("--profile", "full",
+                              "--remote", "http://127.0.0.1:9/r")
+
+        self.assertIn("saved as hooks.json.bak", first.stdout)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("hooks.json.bak was kept", second.stdout)
+        self.assertEqual(self.hooks_path.with_name("hooks.json.bak")
+                         .read_bytes(), original)
+        self.assertEqual(sorted(p.name for p in self.hooks_path.parent
+                                .iterdir()),
+                         ["hooks.json", "hooks.json.bak"])
+
+    def test_refuses_json_of_an_unexpected_shape(self):
+        for shape in ([], {"hooks": "PostToolUse"},
+                      {"hooks": {"PostToolUse": [{"hooks": [42]}]}}):
+            for verb in ("install-hook", "uninstall-hook"):
+                with self.subTest(shape=shape, verb=verb):
+                    self.hooks_path.write_text(json.dumps(shape),
+                                               encoding="utf-8")
+                    before = self.hooks_path.read_bytes()
+
+                    result = run_loxodonta(verb, "--codex", env=self.env)
+
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertIn("expected", result.stderr)
+                    self.assertEqual(self.hooks_path.read_bytes(), before)
+                    self.assertFalse(self.hooks_path.with_name(
+                        "hooks.json.bak").exists())
+
 
 def span(kind, name=None, input_=None, trace="trace_" + "ab" * 16,
          **extra):

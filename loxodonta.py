@@ -4024,34 +4024,202 @@ def cmd_hook(args):
 # beside this file — a SessionStart hook so every session starts with a
 # recall digest of its repo's recent history.
 
+# The events the installer wires, and so the only ones whose shape it
+# needs to read. Any other event in the file is the user's business.
+HOOK_EVENTS = ("PostToolUse", "PostToolUseFailure", "SessionStart",
+               "SessionEnd")
+SETTINGS_SHAPE = ('a JSON object whose "hooks" is an object mapping each '
+                  "event to a list of blocks, each block an object whose "
+                  '"hooks" is a list of objects')
+
+
+def settings_shape_problem(settings):
+    """What stops the installer reading `settings`, or None. Valid JSON
+    of another shape (a top-level array, `hooks` as a string) would
+    otherwise end in a traceback halfway through the merge (#293)."""
+    if not isinstance(settings, dict):
+        return "the top level is not an object"
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return '"hooks" is not an object'
+    for event in HOOK_EVENTS:
+        blocks = hooks.get(event, [])
+        if not isinstance(blocks, list):
+            return f'"hooks.{event}" is not a list'
+        for block in blocks:
+            if not isinstance(block, dict) \
+                    or not isinstance(block.get("hooks", []), list):
+                return (f'a block in "hooks.{event}" is not an object '
+                        'with a "hooks" list')
+            if not all(isinstance(h, dict) for h in block.get("hooks", [])):
+                return f'an entry in "hooks.{event}" is not an object'
+    return None
+
+
 def load_settings(path):
     """The user-level settings, or None with the complaint printed —
-    shared by install and uninstall so both refuse broken JSON the
-    same way instead of clobbering it."""
+    shared by install and uninstall so both refuse broken JSON, or JSON
+    of a shape they cannot read, the same way instead of clobbering it.
+    The file is left exactly as it was."""
     if not os.path.exists(path):
         return {}
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
+            settings = json.load(f)
+    except ValueError as e:  # not JSON, or not UTF-8
         print(f"refusing to touch {path}: it is not valid JSON ({e}) — "
               "fix it by hand first", file=sys.stderr)
         return None
+    problem = settings_shape_problem(settings)
+    if problem:
+        print(f"refusing to touch {path}: expected {SETTINGS_SHAPE}, but "
+              f"{problem} — fix it by hand first", file=sys.stderr)
+        return None
+    return settings
+
+
+def replace_file(path, data, mode_of=None):
+    """Write `data` to `path` whole or not at all (#293): into a
+    temporary file in the same folder, flushed to disk, then moved over
+    the original with os.replace, which is atomic within one filesystem
+    and a same-folder file is always on the original's. A crash or a
+    full disk mid-write leaves the old file, never half a new one. The
+    new file keeps the permission bits of `mode_of` (default `path`)
+    when that exists. A `path` that is a symbolic link (a dotfile
+    manager's) is written through: the temporary file and the replace
+    land beside the file it names, and the link stays a link."""
+    path = os.path.realpath(path)
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=folder, suffix=".tmp",
+                                prefix=os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(temp, os.stat(mode_of or path).st_mode & 0o7777)
+        except OSError:
+            # A new file keeps mkstemp's owner-only bits, deliberately:
+            # the SessionEnd command can carry a publish URL, and the
+            # URL is where a remote's credential rides (ADR-0025).
+            pass
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
 
 
 def backup_settings(path):
-    if os.path.exists(path):
-        with open(path, "rb") as src, open(path + ".bak", "wb") as dst:
-            dst.write(src.read())
+    """Keep the user's original beside the file, once: `<name>.bak` is
+    written only when none exists yet (#293). Overwriting it on every
+    run, as it once was, lost the original on the second run, since
+    by then the file held the installer's own edit. Returns the
+    parenthesis the installer prints after the path it wrote."""
+    backup = path + ".bak"
+    name = os.path.basename(backup)
+    if not os.path.exists(path):
+        return ""
+    if os.path.exists(backup):
+        return f" (the existing {name} was kept, not overwritten)"
+    with open(path, "rb") as f:
+        replace_file(backup, f.read(), mode_of=path)
+    return f" (previous version saved as {name})"
+
+
+# --- Which hook entries are the installer's ----------------------------------
+# The settings file is shared with the user's own hooks, so the installer
+# must know exactly which entries it wrote: those it may replace, heal and
+# remove. Every command it has ever written is three words and then
+# flags: an interpreter, a script, and the one verb that script is wired
+# with. Its interpreter has been a bare `python3` (the first, shell-
+# expanded install) and, since, the quoted `sys.executable`; the script
+# carries either era's recorder name (ADR-0010) or the supervisor's. An
+# entry is ours when its command reads as exactly that (a supervisor.py
+# on disk also needs a recorder beside it), and every other entry is the
+# user's (#293). The test once was a substring, which took
+# a user's `python ~/ops/supervisor.py notify` and
+# `python ~/bin/upload_receipts.py --to s3` for ours: replaced on
+# install, deleted on uninstall.
+
+RECORDER_NAMES = ("loxodonta.py", "receipts.py")
+DIGEST_NAMES = ("supervisor.py",)
+WIRED_VERB = {"loxodonta.py": "hook", "receipts.py": "hook",
+              "supervisor.py": "digest"}
+
+
+def command_words(command):
+    """A hook command split into words as a shell would, or None when
+    it cannot be. A backslash is an ordinary character here, not an
+    escape: a Windows path (C:\\Tools\\loxodonta.py), quoted or bare,
+    must stay one word with every backslash in it, and no command the
+    installer writes escapes anything."""
+    if not isinstance(command, str):
+        return None
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    try:
+        return list(lexer)
+    except ValueError:  # an unclosed quote
+        return None
+
+
+def file_name(path):
+    """The last part of a path written with either separator, on any
+    platform: a settings file can hold a Windows path read elsewhere."""
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def is_interpreter(word):
+    """A Python interpreter: this one exactly as the installer writes
+    it, or any whose file name says python (python3, python.exe,
+    python3.12, pythonw, platform-python, pypy3). Another interpreter
+    than this one is the ordinary case: a re-install after an upgrade,
+    or a settings file written by a different Python."""
+    if word == sys.executable.replace(os.sep, "/"):
         return True
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    return False
+    name = file_name(word).lower()
+    return "python" in name or name.startswith("pypy")
 
 
-# Both the current name and the one this tool carried before the rename
-# (ADR-0010): an install from either era is recognised, never doubled.
-RECORDER_MARKERS = ("loxodonta.py", "receipts.py")
-DIGEST_MARKER = "supervisor.py"
+def owned_script(command, names):
+    """The script path in `command` when the installer wrote it for one
+    of `names`, else None: an interpreter, then a script with one of
+    those file names, then the verb that script is wired with."""
+    words = command_words(command)
+    if not words or len(words) < 3:
+        return None
+    interpreter, script, verb = words[:3]
+    name = file_name(script)
+    if not is_interpreter(interpreter) or name not in names \
+            or WIRED_VERB[name] != verb:
+        return None
+    if name in DIGEST_NAMES and not beside_a_recorder(script):
+        return None
+    return script
+
+
+def beside_a_recorder(script):
+    """Whether a supervisor.py is this project's, as far as the disk
+    can say. The name is common enough that a user's own script can
+    carry it, verb and all, so one that exists counts only with a
+    recorder in the same folder, as every checkout has. One that is
+    gone has no folder to ask, and stays ours so it can be healed:
+    the checkout moved."""
+    where = os.path.expanduser(script)
+    if not os.path.isfile(where):
+        return True
+    folder = os.path.dirname(where)
+    return any(os.path.isfile(os.path.join(folder, name))
+               for name in RECORDER_NAMES)
+
+
 # The shipped default before ADR-0016 widened coverage. A wired block
 # still wearing this exact string is provably an unmodified install —
 # the fingerprint the widening below keys on.
@@ -4267,38 +4435,35 @@ def digest_command(payload=False):
     return command + (" --payload" if payload else "")
 
 
-def heal_hooks(blocks, markers, command):
+def heal_hooks(blocks, names, command):
     """Replace our hook commands whose script no longer exists — the
     migration path after a rename or a move: honoring a dangling
     command as 'already installed' would leave recording silently
     dead. A command whose script is still on disk is someone's working
-    install and is left alone."""
+    install and is left alone; `~` is expanded first, since the shell
+    that runs the hook expands it too (#293)."""
     count = 0
     for block in blocks:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
-            if old == command or not any(m in old for m in markers):
+            script = owned_script(old, names)
+            if old == command or script is None:
                 continue
-            try:
-                script = next((p for p in shlex.split(old)
-                               if any(m in p for m in markers)), None)
-            except ValueError:
-                continue
-            if script and not os.path.isfile(script):
+            if not os.path.isfile(os.path.expanduser(script)):
                 hook["command"] = command
                 count += 1
     return count
 
 
-def block_is_ours(block, markers=RECORDER_MARKERS):
-    return any(marker in h.get("command", "")
-               for h in block.get("hooks", [])
-               for marker in markers)
+def block_is_ours(block, names=RECORDER_NAMES):
+    return any(owned_script(h.get("command"), names)
+               for h in block.get("hooks", []))
 
 
 def write_hooks_file(path, settings):
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps(settings, indent=2) + "\n")
+    """The settings as the installer has always written them (two-space
+    JSON, LF endings, a final newline), replaced whole (#293)."""
+    replace_file(path, (json.dumps(settings, indent=2) + "\n").encode("utf-8"))
 
 
 def codex_hooks_path():
@@ -4339,7 +4504,6 @@ def install_codex_hooks(publish=None, profile="local",
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
         print(chain_notice(publish_chain, profile))
-    had_backup = backup_settings(path)
     record = recorder_command(CODEX_ACTOR)
     record_end = recorder_command(CODEX_ACTOR, publish=publish,
                                   publish_chain=publish_chain,
@@ -4348,14 +4512,14 @@ def install_codex_hooks(publish=None, profile="local",
     installed = []
 
     post = hooks.setdefault("PostToolUse", [])
-    healed = heal_hooks(post, RECORDER_MARKERS, record)
+    healed = heal_hooks(post, RECORDER_NAMES, record)
     if not any(block_is_ours(b) for b in post):
         post.append({"matcher": ".*",
                      "hooks": [{"type": "command", "command": record,
                                 "timeout": 30}]})
         installed.append(f"PostToolUse: {record}")
     end = hooks.setdefault("SessionEnd", [])
-    healed += heal_hooks(end, RECORDER_MARKERS, record_end)
+    healed += heal_hooks(end, RECORDER_NAMES, record_end)
     # The two publishes ride on this command, and the install command
     # states the choice each time: a re-run without a flag turns that
     # step off and says so (ADR-0025 ruling 3), as on Claude Code.
@@ -4364,7 +4528,7 @@ def install_codex_hooks(publish=None, profile="local",
     for block in end:
         for wired in block.get("hooks", []):
             old = wired.get("command", "")
-            if any(m in old for m in RECORDER_MARKERS) and old != record_end:
+            if owned_script(old, RECORDER_NAMES) and old != record_end:
                 wired["command"] = record_end
                 installed.append(
                     f"SessionEnd: {record_end}"
@@ -4377,8 +4541,8 @@ def install_codex_hooks(publish=None, profile="local",
     digest = digest_command(payload=True)
     if os.path.isfile(supervisor_path()):
         start = hooks.setdefault("SessionStart", [])
-        healed += heal_hooks(start, (DIGEST_MARKER,), digest)
-        if not any(block_is_ours(b, (DIGEST_MARKER,)) for b in start):
+        healed += heal_hooks(start, DIGEST_NAMES, digest)
+        if not any(block_is_ours(b, DIGEST_NAMES) for b in start):
             start.append({"matcher": "startup|clear|compact",
                           "hooks": [{"type": "command", "command": digest,
                                      "timeout": 5}]})
@@ -4400,10 +4564,9 @@ def install_codex_hooks(publish=None, profile="local",
         if tier:
             print(tier)
         return 0
+    backup = backup_settings(path)
     write_hooks_file(path, settings)
-    print(f"installed in {path}"
-          + (" (previous version saved as hooks.json.bak)"
-             if had_backup else ""))
+    print(f"installed in {path}{backup}")
     for line in installed:
         print(f"  {line}")
     if healed:
@@ -4552,14 +4715,13 @@ def cmd_install_hook(args):
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
         print(chain_notice(args.publish_chain, args.profile))
-    had_backup = backup_settings(path)
 
     hooks = settings.setdefault("hooks", {})
     installed = []
     heal, ours = heal_hooks, block_is_ours  # shared with the Codex half
 
     post = hooks.setdefault("PostToolUse", [])
-    healed = heal(post, RECORDER_MARKERS, record)
+    healed = heal(post, RECORDER_NAMES, record)
 
     # Coverage goes wide (ADR-0016): a recorder block still wearing the
     # old shipped default is provably ours and provably stale — widened
@@ -4599,7 +4761,7 @@ def cmd_install_hook(args):
     # it worked (.out-of-scope/001). An install from before this gains
     # the event on re-run, as it gains any hook it is missing.
     failed = hooks.setdefault("PostToolUseFailure", [])
-    healed += heal(failed, RECORDER_MARKERS, record)
+    healed += heal(failed, RECORDER_NAMES, record)
     if not any(ours(b) for b in failed):
         matcher = next((b.get("matcher", "*") for b in post if ours(b)), "*")
         failed.append({"matcher": matcher,
@@ -4616,7 +4778,7 @@ def cmd_install_hook(args):
                                   publish=args.publish_head,
                                   publish_chain=args.publish_chain,
                                   stamp=args.authority)
-    healed += heal(end, RECORDER_MARKERS, record_end)
+    healed += heal(end, RECORDER_NAMES, record_end)
     # The session-end opt-ins ride on this command: the anchor
     # (ADR-0024), the published head (ADR-0025), the published chain
     # (ADR-0031) and the authority timestamp (ADR-0032). The install
@@ -4628,7 +4790,7 @@ def cmd_install_hook(args):
     for block in end:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
-            if any(m in old for m in RECORDER_MARKERS) and old != record_end:
+            if owned_script(old, RECORDER_NAMES) and old != record_end:
                 hook["command"] = record_end
                 installed.append(f"SessionEnd: {record_end}"
                                  + session_end_notice(old, record_end, choices))
@@ -4642,9 +4804,8 @@ def cmd_install_hook(args):
 
     if os.path.isfile(supervisor):
         start = hooks.setdefault("SessionStart", [])
-        healed += heal(start, (DIGEST_MARKER,), digest)
-        if not any(DIGEST_MARKER in h.get("command", "")
-                   for b in start for h in b.get("hooks", [])):
+        healed += heal(start, DIGEST_NAMES, digest)
+        if not any(ours(b, DIGEST_NAMES) for b in start):
             start.append({
                 "matcher": "startup|clear|compact",
                 "hooks": [{"type": "command", "command": digest,
@@ -4673,10 +4834,9 @@ def cmd_install_hook(args):
             print(tier)
         return 0
 
+    backup = backup_settings(path)
     write_hooks_file(path, settings)
-    print(f"installed in {path}"
-          + (" (previous version saved as settings.json.bak)"
-             if had_backup else ""))
+    print(f"installed in {path}{backup}")
     for line in installed:
         print(f"  {line}")
     if healed:
@@ -4692,7 +4852,7 @@ def cmd_install_hook(args):
     return 0
 
 
-def remove_our_hooks(hooks, events, markers):
+def remove_our_hooks(hooks, events, names):
     """Drop our hook entries from each event's blocks, keeping every
     foreign entry and dropping an event only when nothing is left in
     it. Returns the events something was removed from."""
@@ -4701,8 +4861,7 @@ def remove_our_hooks(hooks, events, markers):
         kept_blocks = []
         for block in hooks.get(event, []):
             entries = [h for h in block.get("hooks", [])
-                       if not any(marker in h.get("command", "")
-                                  for marker in markers)]
+                       if not owned_script(h.get("command"), names)]
             if len(entries) != len(block.get("hooks", [])):
                 removed.append(event)
             if entries or "hooks" not in block:
@@ -4723,9 +4882,6 @@ def cmd_uninstall_hook(args):
     path = (codex_hooks_path() if args.codex
             else os.path.join(os.path.expanduser("~"), ".claude",
                               "settings.json"))
-    events = ("PostToolUse", "PostToolUseFailure", "SessionStart",
-              "SessionEnd")
-    markers = RECORDER_MARKERS + (DIGEST_MARKER,)
     settings = load_settings(path)
     if settings is None:
         return 1
@@ -4733,15 +4889,15 @@ def cmd_uninstall_hook(args):
         print(f"nothing installed: no hooks file at {path}")
         return 0
 
-    removed = remove_our_hooks(settings.get("hooks", {}), events, markers)
+    removed = remove_our_hooks(settings.get("hooks", {}), HOOK_EVENTS,
+                               RECORDER_NAMES + DIGEST_NAMES)
     if not removed:
         print(f"nothing of ours found in {path}")
         return 0
 
-    backup_settings(path)
+    backup = backup_settings(path)
     write_hooks_file(path, settings)
-    print(f"removed from {path}: {', '.join(sorted(set(removed)))}"
-          f" (previous version saved as {os.path.basename(path)}.bak)")
+    print(f"removed from {path}: {', '.join(sorted(set(removed)))}{backup}")
     return 0
 
 
