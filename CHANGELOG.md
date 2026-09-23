@@ -10,6 +10,14 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- The receiver gives each request its own thread and drops one not whole within 60 seconds, so a slow sender no longer holds the door (#300).
+
+### Added
+
+- The receiver caps what it keeps, 1024 MiB a file and 10240 MiB in all (`--file-cap`, `--total-cap`), answering `507` past a cap and trimming nothing (#300).
+
 ## [0.8.1] - 2026-09-23
 
 Receipts that survive hostile input. Every fix here came from an outside review that tested the README's claims against the code. The receipt format is untouched.

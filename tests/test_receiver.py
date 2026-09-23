@@ -20,6 +20,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -74,13 +75,13 @@ def free_port():
         return probe.getsockname()[1]
 
 
-def post(url, body, content_type, headers=None):
+def post(url, body, content_type, headers=None, timeout=30):
     """One POST; (status, body) whatever the status was."""
     request = urllib.request.Request(
         url, data=body, method="POST",
         headers={"Content-Type": content_type, **(headers or {})})
     try:
-        with OPENER.open(request, timeout=30) as response:
+        with OPENER.open(request, timeout=timeout) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as refused:
         return refused.code, refused.read()
@@ -159,6 +160,18 @@ class ReceiverFixture(unittest.TestCase):
     def stored(self):
         """Every file the receiver keeps, by name."""
         return sorted(p.name for p in self.data.iterdir())
+
+    @staticmethod
+    def logged(proc, status):
+        """The receiver's next log line for a POST answered `status`,
+        read before the process is stopped. The line is printed just
+        after the answer is sent, so it is always on its way."""
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                raise AssertionError(f"the receiver logged no {status}")
+            if f" POST {status} " in line:
+                return line
 
 
 class UrlTest(ReceiverFixture):
@@ -471,6 +484,170 @@ class AddressTest(ReceiverFixture):
                 self.assertEqual(done.returncode, 64, done.stderr)
                 self.assertIn("--cert", done.stderr)
                 self.assertIn("--key", done.stderr)
+
+
+def drip(url, opening, byte, bound, stop=None):
+    """Send `opening`, then `byte` every quarter second: the slow sender
+    of #300. Returns (seconds until the receiver closed the connection,
+    what it sent back), or (None, what it sent back) when it was still
+    open after `bound` seconds or when `stop` was set."""
+    parts = urllib.parse.urlsplit(url)
+    answered = b""
+    with socket.create_connection((parts.hostname, parts.port),
+                                  timeout=10) as sock:
+        sock.sendall(opening)
+        started = time.monotonic()
+        sock.settimeout(0.25)  # the wait for an answer is the pause
+        while time.monotonic() - started < bound:
+            if stop is not None and stop.is_set():
+                break
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    return time.monotonic() - started, answered
+                answered += chunk
+            except socket.timeout:
+                pass
+            except ConnectionError:
+                return time.monotonic() - started, answered
+            try:
+                sock.sendall(byte)
+            except ConnectionError:
+                return time.monotonic() - started, answered
+    return None, answered
+
+
+class DeadlineTest(ReceiverFixture):
+    """A request is due whole, headers and body, within a deadline of its
+    own, and a slow one holds only its own connection: one byte every
+    1.5 seconds used to hold the door against every honest sender (#300)."""
+
+    @staticmethod
+    def openings(url):
+        token = url.rsplit("/", 1)[1]
+        return (
+            # Stalled in the headers: a header line that never ends.
+            ("headers", ("POST /%s HTTP/1.0\r\nX-Slow: " % token).encode(),
+             b"a"),
+            # Stalled in the body: every header sent, the body trickling.
+            ("body", ("POST /%s HTTP/1.0\r\nHost: receiver\r\n"
+                      "Content-Type: application/x-ndjson\r\n"
+                      "X-Loxodonta-Chain: %s\r\n"
+                      "Content-Length: 100000\r\n\r\n" % (token, CHAIN)
+                      ).encode(),
+             b"x"),
+        )
+
+    def test_a_request_that_misses_its_deadline_is_dropped(self):
+        # Each byte arrives well inside the per-receive timeout, so only
+        # a deadline on the whole request can end it. Two seconds, and
+        # ten times that before the test calls the door held.
+        proc = self.start(env={"RECEIVER_DEADLINE_SECONDS": "2"})
+        for phase, opening, byte in self.openings(proc.url):
+            with self.subTest(phase=phase):
+                closed_after, answered = drip(proc.url, opening, byte, 20)
+                self.assertIsNotNone(closed_after, "the connection was held")
+                self.assertEqual(answered, b"")  # dropped, not answered
+        self.assertEqual(self.stored(), ["token"])
+
+    def test_a_slow_sender_does_not_hold_the_door_for_another(self):
+        # The default deadline, far longer than this test: the slow
+        # sender is still trickling when the honest head goes, and the
+        # head must land anyway, well inside its ten seconds.
+        proc = self.start()
+        _, opening, byte = self.openings(proc.url)[1]
+        stop = threading.Event()
+        slow = threading.Thread(
+            target=drip, args=(proc.url, opening, byte, 30, stop), daemon=True)
+        slow.start()
+        self.addCleanup(slow.join, 30)
+        self.addCleanup(stop.set)
+        time.sleep(0.5)  # the slow sender is in first
+
+        head = json.dumps({"head": "e" * 64, "n": 5}).encode("utf-8")
+        started = time.monotonic()
+        try:
+            status, _ = post(proc.url, head, "application/json", timeout=10)
+        except (urllib.error.URLError, socket.timeout) as held:
+            self.fail(f"the honest head waited behind the slow sender: {held}")
+        self.assertEqual(status, 200)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertTrue(slow.is_alive(), "the slow sender stopped trickling")
+        self.assertEqual(self.stored(), ["heads.jsonl", "token"])
+
+
+def filler(first, count):
+    """`count` lines shaped like entries from n=`first`, about 1.1 KB
+    each: enough of them to reach a cap. Shape is all the receiver
+    judges, so they need not be a chain."""
+    return b"".join(
+        json.dumps({"n": n, "entry_hash": "%064x" % n, "pad": "x" * 1000}
+                   ).encode("utf-8") + b"\n"
+        for n in range(first, first + count))
+
+
+class CapTest(ReceiverFixture):
+    """A cap on each file the receiver keeps and on all of them together,
+    so a writer holding the URL cannot fill the disk under honest sends
+    (#300). Past a cap is 507, and what is stored is never touched."""
+
+    def send(self, proc, body, name=CHAIN):
+        return post(proc.url, body, NDJSON, {"X-Loxodonta-Chain": name})
+
+    def test_a_batch_past_the_file_cap_is_507_and_the_file_is_untouched(self):
+        proc = self.start("--file-cap", "1")
+        first = filler(0, 600)                        # about 0.63 MiB
+        status, _ = self.send(proc, first)
+        self.assertEqual(status, 200)
+        self.logged(proc, 200)
+        kept = (self.data / CHAIN).read_bytes()
+
+        status, answer = self.send(proc, filler(600, 600))
+        self.assertEqual(status, 507, answer)
+        self.assertIn(b"file cap", answer)
+        self.assertIn(b"1 MiB", answer)
+        self.assertEqual(answer.count(b"\n"), 1)     # one line
+        self.assertIn("file cap", self.logged(proc, 507))
+        self.assertEqual((self.data / CHAIN).read_bytes(), kept)
+
+        # A resend of what the file holds adds nothing, so it is never
+        # refused: the sender's retry still gets its 2xx.
+        status, answer = self.send(proc, first)
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(json.loads(answer), {"appended": 0, "dropped": 600})
+
+        # Another chain has a cap of its own.
+        status, _ = self.send(proc, filler(600, 600), "receipts-other.jsonl")
+        self.assertEqual(status, 200)
+        self.assertEqual((self.data / CHAIN).read_bytes(), kept)
+
+    def test_a_batch_past_the_total_cap_is_507_and_nothing_is_touched(self):
+        proc = self.start("--file-cap", "1", "--total-cap", "2")
+        for name in ("receipts-a.jsonl", "receipts-b.jsonl", "receipts-c.jsonl"):
+            status, _ = self.send(proc, filler(0, 600), name)  # 1.9 MiB in all
+            self.assertEqual(status, 200)
+        before = {name: (self.data / name).read_bytes() for name in self.stored()}
+
+        status, answer = self.send(proc, filler(0, 600), "receipts-d.jsonl")
+        self.assertEqual(status, 507, answer)
+        self.assertIn(b"total cap", answer)
+        self.assertIn(b"2 MiB", answer)
+        self.assertIn("total cap", self.logged(proc, 507))
+        self.assertEqual(
+            {name: (self.data / name).read_bytes() for name in self.stored()},
+            before)
+
+    def test_a_cap_that_is_not_a_whole_number_of_mebibytes_is_a_usage_error(self):
+        for flag in ("--file-cap", "--total-cap"):
+            for value in ("0", "-1", "1.5", "lots"):
+                with self.subTest(flag=flag, value=value):
+                    done = subprocess.run(
+                        [sys.executable, str(RECEIVER), "serve", "--data",
+                         str(self.data), "--port", "0", flag, value],
+                        capture_output=True, encoding="utf-8", env=clean_env())
+                    self.assertEqual(done.returncode, 64, done.stderr)
+                    self.assertIn(flag, done.stderr)
+                    self.assertIn("MiB", done.stderr)
 
 
 @unittest.skipUnless(shutil.which("openssl"),
