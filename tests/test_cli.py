@@ -82,7 +82,7 @@ class InitTest(ReceiptsCliTest):
 
         result = run_receipts("init", cwd=self.workdir)
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 73, result.stderr)  # EX_CANTCREAT
         self.assertIn("exists", result.stderr)
         self.assertEqual(self.log_path.read_text(encoding="utf-8"), original)
 
@@ -124,7 +124,7 @@ class LogTest(ReceiptsCliTest):
         for flags in (("--actor", "", "--action", "did a thing"),
                       ("--actor", "agent", "--action", "")):
             result = run_receipts("log", *flags, cwd=self.workdir)
-            self.assertNotEqual(result.returncode, 0, flags)
+            self.assertEqual(result.returncode, 64, flags)
             self.assertIn("non-empty", result.stderr)
 
         self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
@@ -144,7 +144,7 @@ class LogTest(ReceiptsCliTest):
                 "log", "--actor", "agent", "--action", "step 2", cwd=self.workdir
             )
 
-            self.assertNotEqual(result.returncode, 0, repr(damaged_tail))
+            self.assertEqual(result.returncode, 1, repr(damaged_tail))
             self.assertIn("verify", result.stderr.lower())
             self.assertNotIn("Traceback", result.stderr)
             self.assertEqual(
@@ -159,7 +159,7 @@ class LogTest(ReceiptsCliTest):
             "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir
         )
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 66, result.stderr)
         self.assertIn("empty", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.log_path.read_text(encoding="utf-8"), "")
@@ -169,7 +169,7 @@ class LogTest(ReceiptsCliTest):
             "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir
         )
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 66, result.stderr)
         self.assertIn("init", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.log_path.exists())
@@ -361,7 +361,8 @@ class VerifyTest(ReceiptsCliTest):
 
         result = run_receipts("verify", cwd=self.workdir)
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
         self.assertIn("empty", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
@@ -408,7 +409,10 @@ class VerifyTest(ReceiptsCliTest):
         self.assertIn("schema", result.stdout)
         self.assertNotIn("UNSUPPORTED-VERSION", result.stdout)
 
-    def test_verify_refuses_unknown_format_version_before_any_other_rule(self):
+    def test_an_unknown_version_does_not_excuse_a_hash_that_fails(self):
+        # ADR-0036 reversed the old order: the hashing is frozen across
+        # versions, so the hashes are walked whatever `v` claims, and a
+        # hash that fails is BROKEN, never a polite refusal to judge.
         genesis = {
             "v": "9.9",
             "n": 0,
@@ -417,18 +421,16 @@ class VerifyTest(ReceiptsCliTest):
             "action": "genesis",
             "files": [],
             "prev": None,
-            "entry_hash": "f" * 64,  # garbage — version refusal must win over hash check
+            "entry_hash": "f" * 64,  # garbage
         }
         self.log_path.write_text(json.dumps(genesis) + "\n", encoding="utf-8")
 
         result = run_receipts("verify", cwd=self.workdir)
 
-        self.assertEqual(result.returncode, 4)
-        output = result.stdout + result.stderr
-        self.assertIn("UNSUPPORTED-VERSION", output)
-        self.assertIn('"9.9"', output)
-        self.assertIn('"0.1"', output)
-        self.assertNotIn("BROKEN", output)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "BROKEN at entry 0: "
+                         "entry_hash does not match canonical form")
+        self.assertNotIn("UNSUPPORTED-VERSION", result.stdout)
 
 
 class FileReferenceTest(ReceiptsCliTest):
@@ -522,7 +524,7 @@ class FileReferenceTest(ReceiptsCliTest):
             "--file", "not-there.md", cwd=self.workdir,
         )
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 66, result.stderr)  # EX_NOINPUT
         self.assertIn("not-there.md", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
@@ -554,7 +556,8 @@ class FileReferenceTest(ReceiptsCliTest):
                 "log", "--actor", "agent", "--action", "bad path",
                 "--file", bad_path, cwd=self.workdir,
             )
-            self.assertNotEqual(result.returncode, 0, bad_path)
+            # The path is spelled wrong for the format: a usage error.
+            self.assertEqual(result.returncode, 64, bad_path)
             self.assertIn("error", result.stderr.lower())
 
         self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
@@ -801,13 +804,13 @@ class HeadTest(ReceiptsCliTest):
 
     def test_head_on_missing_or_empty_log_errors_cleanly(self):
         missing = run_receipts("head", cwd=self.workdir)
-        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(missing.returncode, 66, missing.stderr)
         self.assertIn("init", missing.stderr)
         self.assertNotIn("Traceback", missing.stderr)
 
         self.log_path.write_text("", encoding="utf-8")
         empty = run_receipts("head", cwd=self.workdir)
-        self.assertNotEqual(empty.returncode, 0)
+        self.assertEqual(empty.returncode, 66, empty.stderr)
         self.assertIn("empty", empty.stderr)
         self.assertNotIn("Traceback", empty.stderr)
 
@@ -856,7 +859,7 @@ class ReportEmptyLogTest(ReceiptsCliTest):
 
         result = run_receipts("report", cwd=self.workdir)
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 66, result.stderr)
         self.assertIn("empty", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
@@ -1047,7 +1050,7 @@ class RunTest(ReceiptsCliTest):
             cwd=self.workdir,
         )
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 66, result.stderr)
         self.assertIn("init", result.stderr)
         self.assertFalse((self.workdir / "side-effect.txt").exists())
 
@@ -1063,7 +1066,8 @@ class RunTest(ReceiptsCliTest):
             cwd=self.workdir,
         )
 
-        self.assertNotEqual(result.returncode, 0)
+        # The receipt's own failure is the exit: its file is no input.
+        self.assertEqual(result.returncode, 66, result.stderr)
         self.assertIn("doomed.txt", result.stderr)
         self.assertIn("receipt", result.stderr)
 
@@ -1416,6 +1420,10 @@ class BrokenPipeTest(ReceiptsCliTest):
         process.wait()
 
         self.assertNotIn("Traceback", stderr)
+        # 128 + SIGPIPE, as a shell reports a pipe's writer that the
+        # reader left: never 0, which reads as VALID, and never 1, which
+        # is BROKEN and nothing else (ADR-0037).
+        self.assertEqual(process.returncode, 141, stderr)
 
 
 class GoldenFixtureTest(ReceiptsCliTest):
@@ -1824,15 +1832,17 @@ class UnreadableLineTest(TamperTest):
                 self.write_raw(0, raw)
                 self.assert_refused(0, "BROKEN at entry 0")
 
-    def test_a_version_claim_holding_a_lone_surrogate_is_named_not_a_crash(self):
+    def test_a_version_claim_holding_a_lone_surrogate_is_broken_not_a_crash(self):
+        # The claim is not one this verifier speaks, so the hashes are
+        # walked without the field rules (ADR-0036), and a genesis holding
+        # a lone surrogate has no canonical form to hash.
         line = self.entry_line(0).replace(
             b'"v":"0.1"', b'"v":"0.1' + BACKSLASH.encode() + b'ud800"')
         self.write_raw(0, line)
 
-        result = run_receipts("verify", cwd=self.workdir)
-        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
-        self.assertIn("UNSUPPORTED-VERSION", result.stdout)
-        self.assertIn("0.1" + BACKSLASH + "ud800", result.stdout)
+        result = self.assert_broken(at_entry=0)
+        self.assertIn("a string holds a lone surrogate", result.stdout)
+        self.assertNotIn("UNSUPPORTED-VERSION", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_a_schema_key_holding_a_lone_surrogate_is_named_not_a_crash(self):
@@ -1844,3 +1854,230 @@ class UnreadableLineTest(TamperTest):
         self.assertIn("schema mismatch: x" + BACKSLASH + "ud800",
                       result.stdout)
         self.assertNotIn("Traceback", result.stderr)
+
+
+def rechained(entries):
+    """`entries` with each `prev` set to the entry before it and every
+    hash recomputed by the independent SPEC section 4 above: a chain
+    consistent inside, whatever its fields say."""
+    out, prev = [], None
+    for entry in entries:
+        entry = {k: v for k, v in entry.items() if k != "entry_hash"}
+        entry["prev"] = prev
+        entry["entry_hash"] = prev = spec_hash(entry)
+        out.append(entry)
+    return out
+
+
+class UnknownVersionTest(ReceiptsCliTest):
+    """ADR-0036: the hashing is frozen. The canonical form, `entry_hash`
+    and `prev` never change between format versions, and a later version
+    may only add field rules. So the hashes are walked whatever the
+    genesis `v` claims: any break is BROKEN, exit 1, and exit 4 says only
+    that every hash and link holds and the field rules are ones this
+    verifier does not know."""
+
+    REFUSAL = ('UNSUPPORTED-VERSION: log is format "0.2"; this verifier '
+               'speaks "0.1"')
+
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+        for step in ("step 1", "step 2", "step 3"):
+            run_receipts("log", "--actor", "agent", "--action", step,
+                         cwd=self.workdir)
+
+    def entries(self):
+        return [json.loads(line) for line in
+                self.log_path.read_text(encoding="utf-8").splitlines()]
+
+    def write(self, entries, tail=""):
+        self.log_path.write_text(
+            "".join(json.dumps(e, sort_keys=True, separators=(",", ":"))
+                    + "\n" for e in entries) + tail, encoding="utf-8")
+
+    def later(self):
+        """The chain rehashed under a genesis claiming format 0.2."""
+        entries = self.entries()
+        entries[0]["v"] = "0.2"
+        return rechained(entries)
+
+    def verify(self, *flags):
+        return run_receipts("verify", *flags, cwd=self.workdir)
+
+    def test_hashes_that_hold_under_an_unknown_version_are_a_refusal(self):
+        self.write(self.later())
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), self.REFUSAL)
+
+    def test_an_edit_under_an_unknown_version_is_broken(self):
+        entries = self.later()
+        entries[2]["action"] = "step 2, and approved"
+        self.write(entries)
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "BROKEN at entry 2: "
+                         "entry_hash does not match canonical form")
+        self.assertNotIn("UNSUPPORTED-VERSION", result.stdout)
+
+    def test_a_deleted_entry_under_an_unknown_version_is_broken(self):
+        entries = self.later()
+        del entries[2]
+        self.write(entries)
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("BROKEN at entry 2: prev does not match predecessor's "
+                      "entry_hash", result.stdout)
+
+    def test_a_torn_tail_under_an_unknown_version_is_broken(self):
+        entries = self.later()
+        self.write(entries[:3], tail=json.dumps(entries[3])[:30])
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("BROKEN: torn tail at line 3", result.stdout)
+
+    def test_the_field_rules_are_not_applied_under_an_unknown_version(self):
+        # A field v0.1 does not have, and a v0.1 field of another type:
+        # BROKEN under 0.1's rules, and not for this verifier to say of
+        # a format whose rules it does not know. The hashes hold.
+        entries = self.entries()
+        entries[0]["v"] = "0.2"
+        entries[1]["model"] = "a field a later format might add"
+        entries[2]["files"] = "a later format's own shape"
+        self.write(rechained(entries))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), self.REFUSAL)
+
+    def test_the_head_record_is_still_compared_under_an_unknown_version(self):
+        entries = self.later()
+        self.write(entries)
+        head = entries[-1]["entry_hash"]
+
+        matched = self.verify("--expect-head", head)
+        self.assertEqual(matched.returncode, 4, matched.stdout)
+        self.assertEqual(matched.stdout.strip(), self.REFUSAL)
+
+        mismatched = self.verify("--expect-head", entries[2]["entry_hash"])
+        self.assertEqual(mismatched.returncode, 3, mismatched.stdout)
+        out = mismatched.stdout.strip().splitlines()
+        self.assertEqual(out[0], self.REFUSAL)
+        self.assertTrue(out[-1].startswith("HEAD-MISMATCH: chain head is "
+                                           + head), out)
+
+    def test_head_prints_the_head_whatever_the_version(self):
+        entries = self.later()
+        self.write(entries)
+
+        result = run_receipts("head", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), entries[-1]["entry_hash"])
+
+
+class NoInputTest(ReceiptsCliTest):
+    """ADR-0037: exit 1 is BROKEN and nothing else. A log that is not
+    there, is empty, or cannot be read as a file is no input to judge:
+    exit 66 (sysexits EX_NOINPUT), the reason on stderr, nothing on
+    stdout, and never a verdict word."""
+
+    def assert_no_input(self, result, words):
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn(words, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_verify_and_head_on_a_missing_log(self):
+        for verb in ("verify", "head"):
+            with self.subTest(verb=verb):
+                self.assert_no_input(run_receipts(verb, cwd=self.workdir),
+                                     "not found")
+
+    def test_verify_and_head_on_an_empty_log(self):
+        self.log_path.write_text("", encoding="utf-8")
+        for verb in ("verify", "head"):
+            with self.subTest(verb=verb):
+                self.assert_no_input(run_receipts(verb, cwd=self.workdir),
+                                     "empty")
+
+    def test_verify_and_head_on_a_log_that_is_a_folder(self):
+        self.log_path.mkdir()
+        for verb in ("verify", "head"):
+            with self.subTest(verb=verb):
+                self.assert_no_input(run_receipts(verb, cwd=self.workdir),
+                                     "cannot be read")
+
+    def test_verify_package_on_a_path_that_is_not_there(self):
+        result = run_receipts("verify-package", "no-such-package.zip",
+                              cwd=self.workdir)
+        self.assert_no_input(result, "not found")
+
+
+class WriterExitTest(ReceiptsCliTest):
+    """ADR-0037 on the writing verbs: exit 1 there says the chain's tail
+    is damaged and will not be built on, which is BROKEN found at the
+    tail. Every other failure takes its sysexits(3) number."""
+
+    def test_report_and_explain_on_a_missing_or_empty_log(self):
+        for verb in (["report"], ["explain", "--llm", "never-run"]):
+            with self.subTest(verb=verb[0], log="missing"):
+                result = run_receipts(*verb, cwd=self.workdir)
+                self.assertEqual(result.returncode, 66, result.stderr)
+        self.log_path.write_text("", encoding="utf-8")
+        for verb in (["report"], ["explain", "--llm", "never-run"]):
+            with self.subTest(verb=verb[0], log="empty"):
+                result = run_receipts(*verb, cwd=self.workdir)
+                self.assertEqual(result.returncode, 66, result.stderr)
+                self.assertIn("empty", result.stderr)
+
+    def test_init_where_no_file_can_be_created(self):
+        result = run_receipts("init", "--log", "no-such-folder/r.jsonl",
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 73, result.stderr)  # EX_CANTCREAT
+        self.assertIn("cannot create", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_log_on_a_log_that_is_a_folder_is_no_input(self):
+        self.log_path.mkdir()
+
+        result = run_receipts("log", "--actor", "agent", "--action", "x",
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 66, result.stderr)
+        self.assertIn("cannot be read", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_file_reference_that_is_a_folder_is_no_input(self):
+        run_receipts("init", cwd=self.workdir)
+        (self.workdir / "sub").mkdir()
+
+        result = run_receipts("log", "--actor", "agent", "--action", "x",
+                              "--file", "sub", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 66, result.stderr)
+        self.assertIn("sub", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_anchor_publish_and_stamp_on_an_empty_log_are_no_input(self):
+        self.log_path.write_text("", encoding="utf-8")
+        for verb in (["anchor", "--calendar", "http://127.0.0.1:9"],
+                     ["publish", "http://127.0.0.1:9"],
+                     ["publish", "--chain", "http://127.0.0.1:9"],
+                     ["stamp", "--authority", "http://127.0.0.1:9"]):
+            with self.subTest(verb=" ".join(verb[:2])):
+                result = run_receipts(*verb, cwd=self.workdir)
+                self.assertEqual(result.returncode, 66, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+

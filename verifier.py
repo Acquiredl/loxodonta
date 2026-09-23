@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import traceback
 import unicodedata
 from datetime import datetime, timezone
 
@@ -44,6 +45,23 @@ GENESIS_FIELDS = ENTRY_FIELDS | {"v"}
 # definition past that line; tools/build_verifier.py copies it, with the
 # imports and constants above it, into verifier.py, the file a recipient
 # runs (ADR-0035).
+
+
+# --- What an exit code says (ADR-0037) ----------------------------------------
+#
+# Exit 1 is BROKEN and nothing else: the chain does not walk clean, or a
+# writer found its tail damaged and will not build on it. The verdicts
+# hold 0 to 5 (SPEC §6), and every failure that is not a verdict takes
+# its number from sysexits(3), so a script that reads the code is never
+# told a chain is broken when the log was only missing or the tool fell
+# over. The numbers only the writers give sit beside them, below the
+# verifier.
+EX_USAGE = 64     # the command was spoken wrong
+EX_NOINPUT = 66   # no log to judge: missing, empty, or not readable as a file
+EX_SOFTWARE = 70  # the tool itself failed; the traceback is on stderr
+# Not a sysexits number: a shell reports a writer that its pipe's reader
+# left as 128 + SIGPIPE, and this is that number, given on purpose.
+EXIT_READER_GONE = 141
 
 
 # --- Canonical form (SPEC §4) -------------------------------------------------
@@ -107,7 +125,16 @@ def read_log_to_judge(path):
 
 def missing_log(path):
     print(f"error: {path} not found — run `loxodonta init` first", file=sys.stderr)
-    return 1
+    return EX_NOINPUT
+
+
+def unreadable_log(path, error):
+    """A log that is there and cannot be read as a file: a folder, or a
+    file this user may not open. No input, like a missing one (ADR-0037);
+    a line that cannot be read is another matter, and the walk names it."""
+    print(f"error: {path} cannot be read as a receipt log: "
+          f"{error.strerror or error}", file=sys.stderr)
+    return EX_NOINPUT
 
 
 def tail_entry(lines):
@@ -263,12 +290,22 @@ def visible(text):
     return "".join(shown)
 
 
-def walk(lines):
+def walk(lines, field_rules=True):
     """The mechanical walk of SPEC §6, shared by verify (which judges) and
     report (which narrates). Returns (entries, breaks, warns): entries[n] is
     the parsed entry or None where the line is unparseable or is not the
     shape of an entry; breaks and warns are (n, message) lists in walk
-    order."""
+    order.
+
+    Two kinds of rule are walked here, and ADR-0036 keeps them apart. The
+    hash chain is the same in every format version: each line one JSON
+    object, each key once, its `entry_hash` the hash of its canonical
+    form (SPEC §4), its `prev` the entry before it's (§5). The field rules
+    are v0.1's own: which fields, of which types, and `n` counting up.
+    With `field_rules` False only the hash chain is walked, which is how
+    a chain whose genesis claims a version this verifier does not speak
+    is judged: its hashes are checked, and its fields are not ours to
+    judge."""
     entries = []
     breaks = []
     warns = []
@@ -325,7 +362,7 @@ def walk(lines):
             prev_hash = None
             continue
         expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
-        if set(entry) != expected_fields:
+        if field_rules and set(entry) != expected_fields:
             odd = set(entry) ^ expected_fields
             # The odd names are the writer's, and this message reaches
             # agents through recall's verify tool: escaped like any other
@@ -340,7 +377,7 @@ def walk(lines):
         # downstream touches it; the chain rule carries on from its
         # stored hash where that is a string, so the next line is judged
         # on its own account.
-        wrong = shape_problem(entry)
+        wrong = shape_problem(entry) if field_rules else None
         if wrong is not None:
             breaks.append((n, f"BROKEN at entry {n}: {wrong}"))
             entries.append(None)
@@ -365,7 +402,7 @@ def walk(lines):
             prev_hash = stored_hash
             continue
         entries.append(entry)
-        if entry.get("n") != n:
+        if field_rules and entry.get("n") != n:
             breaks.append((n, f"BROKEN at entry {n}: sequence number is "
                               f"{entry.get('n')}, expected {n}"))
         if entry.get("prev") != prev_hash:
@@ -376,7 +413,7 @@ def walk(lines):
                               "match canonical form"))
         # ts is writer-supplied testimony, not a mechanical fact: a backward
         # jump warns but never changes the verdict (SPEC §6, ADR-0002).
-        ts = entry.get("ts")
+        ts = entry.get("ts") if field_rules else None
         if prev_ts is not None and ts is not None and ts < prev_ts:
             warns.append((n, f"WARN: ts decreases at entry {n} — clock skew "
                              "at write time?"))
@@ -1032,15 +1069,17 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
         lines = read_log_to_judge(log)
     except FileNotFoundError:
         return missing_log(log)
+    except OSError as e:
+        return unreadable_log(log, e)
     if not lines:
         print(f"error: {log} is empty — not a receipt log", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
 
-    # SPEC §2.1: read the genesis version before applying any other rule.
-    # The refusal is only for a *claimed* version we don't speak. A genesis
-    # with no version claim at all (damaged, non-object, or v stripped) is
-    # the walk's business — that's tampering to judge, not a dialect to
-    # politely decline.
+    # SPEC §2.1: read the genesis version first, to know which field rules
+    # apply. A version we don't speak is judged by its hashes alone
+    # (ADR-0036). A genesis with no version claim at all (damaged,
+    # non-object, or v stripped) is the walk's business — that's
+    # tampering to judge, not a dialect to politely decline.
     try:
         # A line that is not UTF-8, or that the reader cannot take apart
         # at all, claims no version: the walk names it (#292).
@@ -1051,13 +1090,7 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
     log_version = genesis.get("v", FORMAT_VERSION) if isinstance(genesis, dict) \
         else FORMAT_VERSION
     if log_version != FORMAT_VERSION:
-        # Escape text, so a claim holding a lone surrogate prints (#292).
-        claimed = receipt_text(str(log_version))
-        print(
-            f'UNSUPPORTED-VERSION: log is format "{claimed}"; '
-            f'this verifier speaks "{FORMAT_VERSION}"'
-        )
-        return 4
+        return verify_unknown_version(lines, log_version, expect_head)
 
     entries, breaks, warns = walk(lines)
     for _, message in warns:
@@ -1125,11 +1158,7 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
               "transcript prefix no longer holds")
 
     chain_head = entries[-1]["entry_hash"] if entries else None
-    if expect_head is not None and chain_head != expect_head:
-        # Internally consistent, but not the chain the operator recorded —
-        # the signature of whole-chain regeneration.
-        print(f"HEAD-MISMATCH: chain head is {chain_head}, expected "
-              f"{expect_head} — this is not the recorded history")
+    if head_mismatch(chain_head, expect_head):
         return 3
     if anchors_bad or stamps_bad:
         return 3
@@ -1143,6 +1172,42 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
 
     print("VALID")
     return 0
+
+
+def head_mismatch(chain_head, expect_head):
+    """True, with the verdict line printed, when a head record was given
+    and the chain's head is not it: internally consistent, but not the
+    chain the operator recorded, the signature of whole-chain
+    regeneration."""
+    if expect_head is None or chain_head == expect_head:
+        return False
+    print(f"HEAD-MISMATCH: chain head is {chain_head}, expected "
+          f"{expect_head} — this is not the recorded history")
+    return True
+
+
+def verify_unknown_version(lines, log_version, expect_head):
+    """A chain whose genesis claims a format this verifier does not speak
+    (ADR-0036). The hashing is frozen across versions, so its hash chain
+    is walked all the same, and a break is BROKEN, exit 1, exactly as for
+    a chain of our own. Only when every hash and link holds is it the
+    refusal, exit 4: the field rules are a later version's, and not ours
+    to judge. The head is the last entry's hash under any version, so a
+    head record is still compared, and a mismatch is still exit 3. The
+    other checks read fields (files, the transcript, the sidecars'
+    entry numbers) and do not run."""
+    entries, breaks, _ = walk(lines, field_rules=False)
+    if breaks:
+        for _, message in breaks:
+            print(message)
+        return 1
+    # Escape text, so a claim holding a lone surrogate prints (#292).
+    claimed = receipt_text(str(log_version))
+    print(f'UNSUPPORTED-VERSION: log is format "{claimed}"; '
+          f'this verifier speaks "{FORMAT_VERSION}"')
+    if head_mismatch(entries[-1]["entry_hash"], expect_head):
+        return 3
+    return 4
 
 
 def cmd_verify(args):
@@ -1159,9 +1224,11 @@ def cmd_head(args):
         lines = read_log(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
     if not lines:
         print(f"error: {args.log} is empty — no chain head to print", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
         print(f"error: {args.log} has a damaged tail — run "
@@ -1219,9 +1286,14 @@ PACKAGE_WORDS = {
 # The exit-3 tier holds two mechanisms now, the anchor's and the
 # authority timestamp's, and a chain's verify exit alone cannot say which
 # fired; `verify_log` hands the word back through `mechanisms`, and this
-# table is the fallback for an exit with no word beside it.
+# table is the fallback for an exit with no word beside it. A packaged
+# chain that is empty gives verify's no-input exit, 66 (ADR-0037); inside
+# a package that is a finding, not a missing input, since the manifest
+# lists a chain there and there is nothing to walk, so it is CHAIN-BROKEN,
+# as it was before 66 existed.
 CHAIN_WORDS = {1: "CHAIN-BROKEN", 3: "ANCHOR-MISMATCH",
-               4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED"}
+               4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED",
+               EX_NOINPUT: "CHAIN-BROKEN"}
 # The issuer signature (ADR-0008, ADR-0026 ruling 4) is made and judged
 # by ssh-keygen, never by this file: the stdlib has no Ed25519, and the
 # tool is on every machine since OpenSSH 8.0. The namespace is the
@@ -1888,7 +1960,7 @@ def cmd_verify_package(args):
         return judge_package(path, path, args.authority_chain)
     if not os.path.isfile(path):
         print(f"error: {path} not found", file=sys.stderr)
-        return 1
+        return EX_NOINPUT
     if not zipfile.is_zipfile(path):
         print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
               "not a loxodonta package")
@@ -1956,9 +2028,6 @@ class VersionAction(argparse.Action):
         home = os.path.dirname(os.path.abspath(__file__))
         print(version_line(parser.prog, home))
         parser.exit()
-
-
-EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 
 
 def speak_utf8():
@@ -2084,26 +2153,40 @@ def verifier_main(argv=None):
     return args.func(args)
 
 
+def reader_gone(error):
+    """True when `error` is the reader hanging up on stdout (`loxodonta
+    report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
+    reports a plain EINVAL from the closed handle instead, so match on
+    both or the quiet death is a traceback on half the platforms. EINVAL
+    means nothing about pipes off Windows."""
+    return isinstance(error, BrokenPipeError) or (
+        os.name == "nt" and isinstance(error, OSError)
+        and error.errno == errno.EINVAL)
+
+
 def run_main(main):
-    """Run a command line to its exit code, as both files' entry point."""
+    """Run a command line to its exit code, as both files' entry point.
+    Two endings are not the command's own (ADR-0037). The reader hung
+    up: no verdict was asked of the lines that went unread, so it dies
+    quietly with 141, what a shell reports for a writer its pipe's
+    reader left. Never 0, which a script reads as VALID, though a BROKEN
+    line may be among the unread ones, and never 1, which is BROKEN and
+    nothing else. Or the tool itself failed: the traceback goes to
+    stderr, as Python would print it, and the exit is 70, sysexits'
+    internal error, so a crash is never read as a verdict. SystemExit
+    (argparse's 64, `--version`'s 0) and Ctrl-C are not failures of the
+    tool, and pass through as Python ends them."""
     try:
         speak_utf8()  # before anything prints
-        sys.exit(main())
-    except OSError as e:
-        # The reader hung up (`loxodonta report | head`) — no verdict was
-        # asked of the lines that went unread; die quietly, not loudly.
-        # (This exit 1 reuses a verdict number, the only one left now that
-        # usage errors exit 64 on their own, so scripts should trust the
-        # stdout verdict line, never the exit code alone.)
-        # POSIX raises BrokenPipeError (EPIPE); Windows reports a plain
-        # EINVAL from the closed handle instead, so match on both or the
-        # quiet death is a traceback on half the platforms.
-        if not isinstance(e, BrokenPipeError) and not (
-                os.name == "nt" and e.errno == errno.EINVAL):
-            raise  # EINVAL means nothing about pipes off Windows: let it fly
+        code = main()
+    except Exception as e:  # noqa: BLE001 - every failure gets its exit
+        if not reader_gone(e):
+            traceback.print_exc()
+            sys.exit(EX_SOFTWARE)
         # Give the interpreter a sink to flush into, or shutdown re-raises.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        sys.exit(1)
+        sys.exit(EXIT_READER_GONE)
+    sys.exit(code)
 
 
 if __name__ == "__main__":

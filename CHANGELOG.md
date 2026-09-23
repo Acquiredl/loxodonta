@@ -10,6 +10,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- Exit 1 now means `BROKEN` and nothing else. A missing, empty or unreadable log exits 66, an internal error 70, a held lock 75, a closed pipe 141; writers use 65, 69 and 73 too (ADR-0037, #299).
+- The hashing is frozen across format versions, so `verify` walks the hashes whatever the genesis `v` claims: an edit is `BROKEN`, and `UNSUPPORTED-VERSION` (exit 4) means every hash holds (ADR-0036, #299).
+
 ### Fixed
 
 - The receiver gives each request its own thread and drops one not whole within 60 seconds, so a slow sender no longer holds the door (#300).

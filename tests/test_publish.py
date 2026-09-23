@@ -857,7 +857,7 @@ class InstallPublishHeadTest(unittest.TestCase):
         # still refused, profile or no profile.
         refused = self.install("--codex", "--profile", "custom",
                                "--anchor-at-session-end")
-        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(refused.returncode, 64)
         self.assertIn("--anchor-every", refused.stderr)
 
     def test_codex_still_refuses_the_session_end_anchor(self):
@@ -867,7 +867,7 @@ class InstallPublishHeadTest(unittest.TestCase):
 
         result = self.install("--codex", "--anchor-at-session-end")
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 64)
         self.assertIn("--anchor-at-session-end", result.stderr)
         self.assertIn("--anchor-every", result.stderr)
         self.assertFalse((self.home / ".codex" / "hooks.json").exists())

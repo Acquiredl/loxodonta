@@ -154,7 +154,7 @@ Mapped onto `verify`'s own (ADR-0026 ruling 7), so a script that reads those lea
 | 4 | `UNSUPPORTED-FORMAT`, a refusal | `UNSUPPORTED-VERSION` |
 | 5 | `TRANSCRIPT-DIVERGED` | `TRANSCRIPT-DIVERGED` |
 
-Usage errors exit `64` (sysexits `EX_USAGE`) in both tools (ADR-0026 ruling 7, #175), so a verdict exit is never an argparse error; the README's advice still stands as good advice: read the verdict line, not the code alone.
+Usage errors exit `64` (sysexits `EX_USAGE`) in both tools (ADR-0026 ruling 7, #175), so a verdict exit is never an argparse error. A package path that is not there exits `66` (`EX_NOINPUT`) and an internal error `70` (`EX_SOFTWARE`), so exit 1 is `CHAIN-BROKEN` and nothing else (ADR-0037). A chain file inside the package that is empty is a finding, not a missing input, since the manifest lists a chain there: `CHAIN-BROKEN`. Reading the verdict line as well as the code is still good advice.
 
 A seal file the manifest does not declare (an anchor sidecar beside a manifest declaring `[]`, a `.sig` or a `manifest.json.stamps.jsonl` beside one declaring `["anchor"]`) is not judged: it prints as `unlisted`, since the declared set is what a seal is judged against (ADR-0007), and a seal the manifest never claimed is not one a stripped file could be missing from.
 

@@ -93,7 +93,7 @@ The supervisor reads the store on the same machine the agent works on, so what i
 | The agent lying at write time | no | the chain keeps what it was given |
 | A tool call that never reached the hook | not by the chain | the supervisor alarms when a live Claude Code session stops producing receipts |
 
-For scripts, `verify` exits 0 `VALID`, 1 `BROKEN`, 2 files diverged, 3 head mismatch, 4 a format it does not speak, 5 transcript diverged, and 64 on a usage error ([docs/SPEC.md](docs/SPEC.md#6-verification-algorithm)).
+For scripts, `verify` exits 0 `VALID`, 1 `BROKEN` and nothing else, 2 files diverged, 3 head mismatch, 4 a format it does not speak whose hashes all hold, 5 transcript diverged, 64 on a usage error, 66 when the log is missing or empty, and 70 when the tool itself fails ([docs/SPEC.md](docs/SPEC.md#6-verification-algorithm)).
 
 ## Why not just…
 

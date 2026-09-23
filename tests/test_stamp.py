@@ -351,7 +351,7 @@ class StampCommandTest(unittest.TestCase):
                               "--authority", self.authority.url,
                               cwd=self.workdir)
 
-        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.returncode, 73, result.stdout)
         self.assertIn("the authority granted a token and it could not be "
                       "written", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -365,7 +365,7 @@ class StampCommandTest(unittest.TestCase):
 
         result = self.stamp()
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)
         self.assertIn("the reply is larger than 64 KiB", result.stderr)
         self.assertNotIn("not a timestamp response", result.stderr)
         self.assertEqual(token_rows(self.sidecar), [])
@@ -386,7 +386,7 @@ class StampCommandTest(unittest.TestCase):
 
         result = self.stamp()
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)
         self.assertIn("the head was not stamped: the authority answered "
                       "status 2 (rejection)", result.stderr)
         self.assertEqual(token_rows(self.sidecar), [],
@@ -402,7 +402,7 @@ class StampCommandTest(unittest.TestCase):
 
         result = self.stamp()
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)
         self.assertIn("not a timestamp response", result.stderr)
         self.assertEqual(token_rows(self.sidecar), [])
         (note,) = attempt_rows(self.sidecar)
@@ -413,7 +413,7 @@ class StampCommandTest(unittest.TestCase):
 
         result = self.stamp()
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)
         self.assertIn("the remote answered 404", result.stderr)
         self.assertEqual(token_rows(self.sidecar), [])
         (note,) = attempt_rows(self.sidecar)
@@ -422,7 +422,7 @@ class StampCommandTest(unittest.TestCase):
     def test_an_unreachable_authority_fails_cleanly(self):
         result = self.stamp("http://127.0.0.1:9/tsr")  # discard port
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)
         self.assertIn("not stamped", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(token_rows(self.sidecar), [])
@@ -663,7 +663,7 @@ class ReplyBodyTest(unittest.TestCase):
 
         # 15 seconds is the verb's own bound, well under the 20 the
         # remote sits on: it waited, and then gave up on its own clock.
-        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.returncode, 69, result.stdout)
         self.assertIn("no answer within 15 seconds", result.stderr)
         self.assertGreater(elapsed, 5, "the stamp did not wait for the token")
         self.assertFalse(

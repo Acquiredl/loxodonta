@@ -9,6 +9,7 @@ CLI in temp directories. No mocks, no internals.
 
 import base64
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -601,25 +602,53 @@ class ScanVerdictTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
 
+    def foreign_chain(self, edit=False):
+        """A chain whose genesis claims another format, every hash
+        recomputed so the chain holds as a hash chain (ADR-0036); with
+        `edit`, entry 1 is then changed and its hash left as it was."""
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        entries = [json.loads(line) for line in
+                   log.read_text(encoding="utf-8").splitlines()]
+        entries[0]["v"] = "receipts/v99"
+        prev = None
+        for entry in entries:
+            entry.pop("entry_hash")
+            entry["prev"] = prev
+            entry["entry_hash"] = prev = hashlib.sha256(json.dumps(
+                entry, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False).encode("utf-8")).hexdigest()
+        if edit:
+            entries[1]["action"] = "rewritten after the fact"
+        log.write_text("".join(json.dumps(e) + "\n" for e in entries),
+                       encoding="utf-8")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+
     def test_a_foreign_versioned_chain_is_reported_as_a_refusal(self):
         # UNSUPPORTED-VERSION is a refusal to judge, not a verdict — but a
         # chain nobody can judge still demands the operator's attention.
-        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        lines = log.read_text(encoding="utf-8").splitlines()
-        genesis = json.loads(lines[0])
-        genesis["v"] = "receipts/v99"
-        lines[0] = json.dumps(genesis)
-        log.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
-        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        self.foreign_chain()
 
         result = run_scan(self.root, env=self.env)
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 4, result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
         (foreign,) = sessions[("alpha", "sess-aaaa")]
         self.assertEqual(foreign["verdict"], "UNSUPPORTED-VERSION")
         (good,) = sessions[("beta", "sess-bbbb")]
         self.assertEqual(good["verdict"], "VALID")
+
+    def test_an_edited_foreign_versioned_chain_is_broken_not_a_refusal(self):
+        # The hashing is frozen across versions (ADR-0036): an edit is
+        # BROKEN whatever the genesis claims, and the scan counts it so.
+        self.foreign_chain(edit=True)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        (foreign,) = chains_by_session(report)[("alpha", "sess-aaaa")]
+        self.assertEqual(foreign["verdict"], "BROKEN")
+        self.assertEqual(foreign["exit"], 1)
 
     def test_a_chain_verify_cannot_judge_at_all_is_still_reported(self):
         # An empty file draws an error, not a verdict line. The scan says
@@ -632,10 +661,13 @@ class ScanVerdictTest(unittest.TestCase):
 
         result = run_scan(self.root, env=self.env)
 
-        self.assertNotEqual(result.returncode, 0)
+        # verify says 66, no input (ADR-0037); the scan counts a chain
+        # nobody could judge on the refused rung, 4, and never as broken.
+        self.assertEqual(result.returncode, 4, result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
         (hollow,) = sessions[("alpha", "sess-hollow")]
         self.assertEqual(hollow["verdict"], "NO-VERDICT")
+        self.assertEqual(hollow["exit"], 4)
         self.assertTrue(hollow["detail"], "verify's refusal is the evidence")
         (good,) = sessions[("beta", "sess-bbbb")]
         self.assertEqual(good["verdict"], "VALID")

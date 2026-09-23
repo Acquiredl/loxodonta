@@ -440,26 +440,51 @@ class DemoStorePackageTest(PackageCase):
                         .startswith("UNSUPPORTED-FORMAT"), judged.stdout)
         self.assertNotIn("Traceback", judged.stderr)
 
-    def test_a_chain_of_another_format_is_a_refusal_on_the_last_line(self):
-        # A packaged chain whose genesis claims a format this verifier
-        # does not speak: the recorder refuses it, and the package verdict
-        # says so on the last line instead of failing to find a word.
+    def relabel_a_chain(self, rehash):
+        """The package's first chain with its genesis claiming format
+        9.9; with `rehash`, every hash recomputed so the hash chain holds
+        (ADR-0036), else the genesis left hashed as it was."""
         folder = self.folder_package()
         chain = next(p for p in folder.iterdir()
                      if p.name.startswith("receipts-")
-                     and not p.name.endswith(".anchors.jsonl"))
-        lines = chain.read_text("utf-8").splitlines()
-        genesis = json.loads(lines[0])
-        genesis["v"] = "9.9"
-        lines[0] = json.dumps(genesis, sort_keys=True, separators=(",", ":"))
-        chain.write_text("\n".join(lines) + "\n", "utf-8")
+                     and p.name.endswith(".jsonl") and p.name.count(".") == 1)
+        entries = [json.loads(line)
+                   for line in chain.read_text("utf-8").splitlines()]
+        entries[0]["v"] = "9.9"
+        prev = None
+        for entry in entries if rehash else []:
+            entry.pop("entry_hash")
+            entry["prev"] = prev
+            entry["entry_hash"] = prev = hashlib.sha256(json.dumps(
+                entry, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False).encode("utf-8")).hexdigest()
+        chain.write_text("".join(json.dumps(e, sort_keys=True,
+                                            separators=(",", ":")) + "\n"
+                                 for e in entries), "utf-8")
+        return folder
 
-        result = self.verify_package(folder)
+    def test_a_chain_of_another_format_is_a_refusal_on_the_last_line(self):
+        # A packaged chain whose genesis claims a format this verifier
+        # does not speak, every hash holding: the recorder refuses it, and
+        # the package verdict says so on the last line instead of failing
+        # to find a word.
+        result = self.verify_package(self.relabel_a_chain(rehash=True))
 
         self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         last = result.stdout.strip().splitlines()[-1]
         self.assertTrue(last.startswith("UNSUPPORTED-FORMAT"), last)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_relabeled_chain_whose_hash_fails_is_chain_broken(self):
+        # The hashing is frozen across versions (ADR-0036): a version
+        # claim does not excuse a hash that fails, in a package either.
+        result = self.verify_package(self.relabel_a_chain(rehash=False))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        last = result.stdout.strip().splitlines()[-1]
+        self.assertTrue(last.startswith("CHAIN-BROKEN"), last)
+        self.assertIn("BROKEN at entry 0", result.stdout)
+        self.assertNotIn("UNSUPPORTED", result.stdout)
 
     def test_out_into_a_missing_folder_is_created(self):
         result = self.package(BAD_DAY_SESSION, "--out",

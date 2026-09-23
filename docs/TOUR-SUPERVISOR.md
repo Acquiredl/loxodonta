@@ -267,7 +267,8 @@ genesis entries excluded — each genesis is administrative, so witnessed
 count equals receipts owed.
 
 The exit ladder is a `max()`, worst wins: 1–4 the gravest verify exit
-(a stood-down tear contributes nothing — ADR-0004 already handled it),
+(a stood-down tear contributes nothing — ADR-0004 already handled it;
+a chain verify could not judge at all counts as 4, ADR-0037),
 5 a baseline event appends cannot explain, 6 a *live* completeness
 alarm. Only live alarms raise the exit: an ended deficit is evidence,
 and a siren that never stops sounding trains the operator to ignore
