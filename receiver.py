@@ -515,6 +515,22 @@ class VersionAction(argparse.Action):
         parser.exit()
 
 
+def speak_utf8():
+    """Write stdout and stderr in UTF-8, whatever encoding the console
+    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
+    which has no CJK and no emoji: one such character in a receipt killed
+    the verb mid-output with UnicodeEncodeError, and a hook reading
+    through a pipe got nothing. The text printed is unchanged; only its
+    bytes are. UTF-8 carries every character but a lone surrogate (a file
+    name that did not decode), which backslashreplace prints as its
+    escape rather than crash on. A stream without `reconfigure` (None
+    under pythonw, or one an embedder swapped in) is left as it is."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own, as the other
     two files have it: a wrong flag exits 64, never a number a script
@@ -559,4 +575,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    speak_utf8()  # before anything prints
     sys.exit(main(sys.argv[1:]))

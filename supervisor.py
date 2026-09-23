@@ -3529,9 +3529,11 @@ def search_root(root, query, store=False):
 # session-start injection, `show` fetches one entry by entry address,
 # `search` and `timeline` are the ladder past the digest window. All of
 # it is recall — testimony rendered from chains, verdicts owned by
-# nobody here (GLOSSARY: Digest, Entry address, Unlisted). Output is
-# plain ASCII on purpose: it lands in hook-injected context and in
-# whatever console encoding the operator's shell dealt.
+# nobody here (GLOSSARY: Digest, Entry address, Unlisted). The text
+# around the receipts is plain ASCII on purpose: it lands in
+# hook-injected context. What the receipts say need not be, and
+# reaches the console as UTF-8, CJK and emoji included, whatever
+# encoding the operator's shell dealt (speak_utf8, #294).
 
 UNLISTED_NAME = ".unlisted"
 
@@ -8817,6 +8819,22 @@ class VersionAction(argparse.Action):
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 
 
+def speak_utf8():
+    """Write stdout and stderr in UTF-8, whatever encoding the console
+    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
+    which has no CJK and no emoji: one such character in a receipt killed
+    the verb mid-output with UnicodeEncodeError, and a hook reading
+    through a pipe got nothing. The text printed is unchanged; only its
+    bytes are. UTF-8 carries every character but a lone surrogate (a file
+    name that did not decode), which backslashreplace prints as its
+    escape rather than crash on. A stream without `reconfigure` (None
+    under pythonw, or one an embedder swapped in) is left as it is."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own, the recorder's
     class twice over. A wrong flag, a missing argument, or a malformed
@@ -9130,4 +9148,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    speak_utf8()  # before anything prints
     sys.exit(main(sys.argv[1:]))

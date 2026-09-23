@@ -4695,6 +4695,22 @@ class VersionAction(argparse.Action):
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 
 
+def speak_utf8():
+    """Write stdout and stderr in UTF-8, whatever encoding the console
+    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
+    which has no CJK and no emoji: one such character in a receipt killed
+    the verb mid-output with UnicodeEncodeError, and a hook reading
+    through a pipe got nothing. The text printed is unchanged; only its
+    bytes are. UTF-8 carries every character but a lone surrogate (a file
+    name that did not decode), which backslashreplace prints as its
+    escape rather than crash on. A stream without `reconfigure` (None
+    under pythonw, or one an embedder swapped in) is left as it is."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's
@@ -4995,6 +5011,7 @@ def main(argv=None):
 
 if __name__ == "__main__":
     try:
+        speak_utf8()  # before anything prints
         sys.exit(main())
     except OSError as e:
         # The reader hung up (`loxodonta report | head`) — no verdict was
