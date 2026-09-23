@@ -15,8 +15,13 @@ guard itself lives in tests/home_guard.py, which says what it covers;
 these tests hold it to refusing the six home-reading supervisor verbs and
 the four home-writing verbs (#274) when any one home is the machine's,
 and to naming the line that made the start.
+
+The escaping of receipt text (#295) is written twice, once in the
+recorder and once in the supervisor, because neither file imports the
+other (ADR-0035); a test here holds the two copies equal.
 """
 
+import ast
 import os
 import re
 import subprocess
@@ -196,6 +201,45 @@ class WriterHomeGuardTest(unittest.TestCase):
             [sys.executable, str(RECORDER), "verify", "--help"],
             capture_output=True, encoding="utf-8")
         self.assertEqual(done.returncode, 0, done.stderr)
+
+
+# The escaping rule for receipt text (#295) lives twice: in the recorder,
+# for report, explain and verify's messages, and in the supervisor, for
+# every recall surface. The files never import each other (ADR-0035), so
+# nothing but this test keeps the two copies saying the same thing.
+ESCAPING_NAMES = ("NAMED_ESCAPES", "STEERING_CATEGORIES", "visible")
+
+
+def escaping_source(path):
+    """{name: source} for the escaping table(s) and `visible`, read as
+    text from the file, never imported."""
+    text = path.read_text(encoding="utf-8")
+    found = {}
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.FunctionDef):
+            names = [node.name]
+        elif isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        else:
+            continue
+        for name in names:
+            if name in ESCAPING_NAMES:
+                found[name] = ast.get_source_segment(text, node)
+    return found
+
+
+class TwinEscapingTest(unittest.TestCase):
+
+    def test_the_recorder_and_the_supervisor_escape_alike(self):
+        recorder = escaping_source(RECORDER)
+        supervisor = escaping_source(SUPERVISOR)
+        self.assertEqual(sorted(recorder), sorted(ESCAPING_NAMES))
+        for name in ESCAPING_NAMES:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    recorder[name], supervisor[name],
+                    f"{name} differs between loxodonta.py and "
+                    "supervisor.py: change both (#295)")
 
 
 if __name__ == "__main__":

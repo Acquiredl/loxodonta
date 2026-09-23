@@ -2430,6 +2430,52 @@ def shape_problem(entry):
     return None
 
 
+# Receipt text is written by the agent under observation, and report
+# prints it to a terminal, explain hands it to a model, and verify's
+# messages name a writer's odd field names to whoever reads the verdict,
+# recall's agents among them (#295). A newline could forge a timeline
+# row, a verdict line or a line that reads as an order, an ANSI sequence
+# can clear or recolour the screen, and a bidi override reorders what
+# the eye sees. So every such character is printed as its escape.
+# Which characters: every one whose Unicode category says it steers
+# rather than reads. Cc is the controls (C0 with tab, newline and
+# carriage return among them, DEL, C1 with NEL among them); Cf the format
+# characters (the bidi marks, embeddings, overrides and isolates, the
+# Arabic letter mark, zero-width spaces and joiners, the byte-order mark,
+# and the tag characters a model reads and a person does not see); Cs a
+# lone surrogate, which JSON allows as `\ud800` and no encoder accepts;
+# Zl and Zp the line and paragraph separators. An emoji built with a
+# zero-width joiner prints as its parts and a `\u200d`: the price of
+# naming the category rather than listing characters.
+# Display only: verify hashes the raw entry. A backslash stays as it is,
+# so the chain file is where the exact bytes are read. The twin of
+# supervisor.py's `visible`, which every recall surface uses; the files
+# never import each other (ADR-0035), and tests/test_suite_shape.py
+# holds the two copies equal. It sits above `walk`, which calls it.
+NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
+STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
+
+
+def visible(text):
+    """`text` with every steering character written as its escape: `\\n`,
+    `\\x1b`, `\\u202e`, `\\U000e0041`. One line in, one line out,
+    whatever the writer put in it."""
+    shown = []
+    for char in str(text):
+        code = ord(char)
+        if char in NAMED_ESCAPES:
+            shown.append(NAMED_ESCAPES[char])
+        elif unicodedata.category(char) not in STEERING_CATEGORIES:
+            shown.append(char)
+        elif code <= 0xff:
+            shown.append(f"\\x{code:02x}")
+        elif code <= 0xffff:
+            shown.append(f"\\u{code:04x}")
+        else:
+            shown.append(f"\\U{code:08x}")
+    return "".join(shown)
+
+
 def walk(lines):
     """The mechanical walk of SPEC §6, shared by verify (which judges) and
     report (which narrates). Returns (entries, breaks, warns): entries[n] is
@@ -2494,10 +2540,12 @@ def walk(lines):
         expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
         if set(entry) != expected_fields:
             odd = set(entry) ^ expected_fields
-            # Escape text for a smuggled key's lone surrogate, which
-            # could not otherwise be printed (#292).
+            # The odd names are the writer's, and this message reaches
+            # agents through recall's verify tool: escaped like any other
+            # receipt text (`visible`, #295), a lone surrogate among the
+            # characters it escapes (#292).
             breaks.append((n, f"BROKEN at entry {n}: schema mismatch: "
-                              f"{receipt_text(', '.join(sorted(odd)))}"))
+                              f"{', '.join(visible(k) for k in sorted(odd))}"))
         # The right field names and the right hash do not make an entry
         # when a value is the wrong type (SPEC §6 step 1): a `files` that
         # is a string would crash every reader that resolves references.
@@ -3531,19 +3579,22 @@ def cmd_verify_package(args):
 
 def timeline_lines(entries, breaks, warns):
     """The human timeline, one string per line — report prints it, and
-    explain hands it to the narrating model."""
+    explain hands it to the narrating model. Every writer-supplied value
+    goes through `visible`, so one entry is one line whatever it holds."""
     flags = {}
     for n, message in breaks + warns:
         flags.setdefault(n, []).append(message)
     out = []
     for n, entry in enumerate(entries):
         if entry is not None:
-            out.append(f"  {n:>4}  {entry.get('ts')}  "
-                       f"{entry.get('actor')}: {entry.get('action')}")
+            out.append(f"  {n:>4}  {visible(entry.get('ts'))}  "
+                       f"{visible(entry.get('actor'))}: "
+                       f"{visible(entry.get('action'))}")
             for ref in entry.get("files", []):
-                out.append(f"        - {ref['path']} ({ref['sha256'][:12]}…)")
+                out.append(f"        - {visible(ref['path'])} "
+                           f"({visible(ref['sha256'][:12])}…)")
         for message in flags.get(n, []):
-            out.append(f"        !! {message}")
+            out.append(f"        !! {visible(message)}")
     return out
 
 
