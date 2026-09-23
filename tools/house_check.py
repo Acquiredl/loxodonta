@@ -753,8 +753,8 @@ def adr_slug_findings(tracked):
 def tracked_files():
     """Every Markdown file git tracks under the working directory, and the
     tool files the code pass reads. Tracked, not present: a scratch file
-    in the tree is nobody's front door yet, and the operator-side journals
-    the .gitignore lists are not the repo's."""
+    in the tree is nobody's front door yet, and an untracked local file
+    is not the repo's."""
     listing = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.md", *CODE_FILES],
         capture_output=True, encoding="utf-8", check=True).stdout

@@ -273,7 +273,7 @@ class HookTest(unittest.TestCase):
         # reaches it differently: os.path.relpath RAISES across drives
         # on Windows instead of returning a '..' path, so the "outside
         # the project" branch was never reached and the hook died
-        # before writing anything. A scratchpad on C: and a repo on S:
+        # before writing anything. A scratchpad on C: and a repo on D:
         # is an ordinary layout, and every receipt for it went missing.
         here = str(self.workdir)[:1].upper()
         other = next((d for d in "CDEFGHIJKLMNOPQRSTUVWXYZ"

@@ -1,6 +1,6 @@
 # ADR-0034: A failed call owes a receipt when its words say it ran, and receipts pay tool by tool (ADR-0016 ruling 1 amended)
 
-**Status:** proposed 2026-09-18, a draft for the author's review (#239)
+**Status:** accepted 2026-09-18, built (#239, PR #280)
 **Deciders:** Acquiredl
 
 ## Context
