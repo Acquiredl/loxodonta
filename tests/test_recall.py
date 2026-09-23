@@ -759,8 +759,8 @@ class HostileReceiptTest(RecallBase):
                               separators=(",", ":")) + "\n"
                    for line in self.log.read_text(
                        encoding="utf-8").split("\n") if line]
-        self.log.write_text("".join(armored), encoding="utf-8",
-                            newline="\n")
+        # Bytes, not write_text(newline=), which 3.9 lacks: LF everywhere.
+        self.log.write_bytes("".join(armored).encode("utf-8"))
         self.address = self.hashes[2][:8]
 
     def assert_printed_as_data(self, out):
