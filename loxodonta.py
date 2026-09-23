@@ -470,7 +470,8 @@ def cmd_run(args):
         return missing_log(args.log)
     command_line = " ".join(args.command_argv)
 
-    # The first signal to arrive decides how the receipt ends. The handlers
+    # The first signal handled decides how the receipt ends (signals that
+    # arrive together are handled in signal-number order). The handlers
     # go in before the command starts, so no moment exists in which a
     # signal could end the wrapper with the command running unrecorded,
     # and they stay until the receipt is on disk, so a second one cannot
@@ -493,13 +494,19 @@ def cmd_run(args):
             received.append(signum)
         pass_on(signum)
 
-    caught = run_signals()
+    # A signal already set to "ignore" is left alone. That is how `nohup`
+    # and a shell's background `&` protect a command: the ignore is
+    # inherited through the wrapper. A caught signal is reset to its
+    # default in the command, so catching one here would undo it, and the
+    # hangup nohup was asked to survive would end the command.
+    caught = [signum for signum in run_signals()
+              if signal.getsignal(signum) is not signal.SIG_IGN]
     previous = {signum: signal.signal(signum, on_signal) for signum in caught}
     try:
         # Run first, hash after: the receipt records what the command
-        # actually did, and the command cannot prevent or shape it by its
-        # exit status, by interrupting the wrapper, or by failing to start
-        # (SPEC §7).
+        # actually did, however it ended: by its exit status, with the
+        # wrapper interrupted or signalled, or by failing to start (SPEC
+        # §7).
         try:
             child = subprocess.Popen(args.command_argv)
         except OSError as e:
@@ -516,14 +523,21 @@ def cmd_run(args):
             # 475), so the wrapper outlives the command whatever it was
             # sent, and the receipt's files are hashed after the command
             # has finished touching them.
+            # The command's exit status is kept in every case, as the
+            # subprocess module reports it (a negative number is a POSIX
+            # death by that signal): what the wrapper was sent and what
+            # became of the command are two facts, and the receipt holds
+            # both.
             returncode = child.wait()
+            outcome = f"exit {returncode}"
             if not received:
-                code, outcome = returncode, f"exit {returncode}"
+                code = returncode
             elif received[0] == signal.SIGINT:
-                code, outcome = 128 + signal.SIGINT, "interrupted"
+                code, outcome = 128 + signal.SIGINT, f"interrupted, {outcome}"
             else:
                 code = 128 + received[0]
-                outcome = f"terminated by signal {int(received[0])}"
+                outcome = (f"terminated by signal {int(received[0])}, "
+                           f"{outcome}")
         action = f"run: {command_line} ({outcome})"
         if append_entry(args.log, args.actor, action, args.file) != 0:
             # A lost receipt must never hide behind the command's exit code.
