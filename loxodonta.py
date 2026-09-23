@@ -1014,19 +1014,22 @@ def check_stamps(log, entries, chain_file):
 
 # --- The verdicts: verify and head --------------------------------------------
 
-def cmd_verify(args, mechanisms=None):
-    """`verify PATH`: the walk, then whatever the flags add, then the
-    verdict as the exit code. `mechanisms` is the package judge's out-
-    parameter and nobody else's: it collects the exit-3 findings' words,
-    because a package names the mechanism in its own verdict line and
-    "anchor" is never the word for an authority timestamp (ADR-0032
-    ruling 1)."""
+def verify_log(log, files=False, expect_head=None, transcript=None,
+               anchors=False, stamps=False, authority_chain=None,
+               mechanisms=None):
+    """The walk of one chain, then whatever the checks add, then the
+    verdict as the exit code: `verify PATH` and the package judge both
+    call this, each with the checks it asked for. `mechanisms` is the
+    package judge's out-parameter and nobody else's: it collects the
+    exit-3 findings' words, because a package names the mechanism in its
+    own verdict line and "anchor" is never the word for an authority
+    timestamp (ADR-0032 ruling 1)."""
     try:
-        lines = read_log_to_judge(args.log)
+        lines = read_log_to_judge(log)
     except FileNotFoundError:
-        return missing_log(args.log)
+        return missing_log(log)
     if not lines:
-        print(f"error: {args.log} is empty — not a receipt log", file=sys.stderr)
+        print(f"error: {log} is empty — not a receipt log", file=sys.stderr)
         return 1
 
     # SPEC §2.1: read the genesis version before applying any other rule.
@@ -1061,13 +1064,13 @@ def cmd_verify(args, mechanisms=None):
         return 1
 
     diverged = 0
-    if args.files:
+    if files:
         # Latest reference per path is authoritative (GLOSSARY: file reference).
         latest = {}
         for entry in entries:
             for ref in entry["files"]:
                 latest[ref["path"]] = ref["sha256"]
-        base, problem = files_base(args.log)
+        base, problem = files_base(log)
         if problem:
             # Honest unresolvability, a different sentence from "file
             # diverged" (ADR-0012): the check could not run, and
@@ -1098,14 +1101,13 @@ def cmd_verify(args, mechanisms=None):
 
     # Transcript commitments (SPEC §2.2, ADR-0017): monotonicity is
     # judged on every walk; the prefix hashes only under --transcript.
-    transcript_diverged = check_transcript(entries, args.transcript)
+    transcript_diverged = check_transcript(entries, transcript)
 
     # Anchor, stamp and head-record findings share the exit-3 tier: all
     # mean "this is not the recorded history", the graver verdict, never
     # masked by a files divergence (SPEC §6, docs/ANCHORING.md §3 and §6).
-    anchors_bad = args.anchors and check_anchors(args.log, entries)
-    stamps_bad = args.stamps and check_stamps(args.log, entries,
-                                              args.authority_chain)
+    anchors_bad = anchors and check_anchors(log, entries)
+    stamps_bad = stamps and check_stamps(log, entries, authority_chain)
     if mechanisms is not None:
         mechanisms += (["ANCHOR-MISMATCH"] if anchors_bad else []) \
             + (["STAMP-INVALID"] if stamps_bad else [])
@@ -1119,11 +1121,11 @@ def cmd_verify(args, mechanisms=None):
               "transcript prefix no longer holds")
 
     chain_head = entries[-1]["entry_hash"] if entries else None
-    if args.expect_head is not None and chain_head != args.expect_head:
+    if expect_head is not None and chain_head != expect_head:
         # Internally consistent, but not the chain the operator recorded —
         # the signature of whole-chain regeneration.
         print(f"HEAD-MISMATCH: chain head is {chain_head}, expected "
-              f"{args.expect_head} — this is not the recorded history")
+              f"{expect_head} — this is not the recorded history")
         return 3
     if anchors_bad or stamps_bad:
         return 3
@@ -1137,6 +1139,15 @@ def cmd_verify(args, mechanisms=None):
 
     print("VALID")
     return 0
+
+
+def cmd_verify(args):
+    """`verify PATH`: the flags, handed to the one walk."""
+    return verify_log(args.log, files=args.files,
+                      expect_head=args.expect_head,
+                      transcript=args.transcript, anchors=args.anchors,
+                      stamps=args.stamps,
+                      authority_chain=args.authority_chain)
 
 
 def cmd_head(args):
@@ -1203,7 +1214,7 @@ PACKAGE_WORDS = {
 }
 # The exit-3 tier holds two mechanisms now, the anchor's and the
 # authority timestamp's, and a chain's verify exit alone cannot say which
-# fired; `cmd_verify` hands the word back through `mechanisms`, and this
+# fired; `verify_log` hands the word back through `mechanisms`, and this
 # table is the fallback for an exit with no word beside it.
 CHAIN_WORDS = {1: "CHAIN-BROKEN", 3: "ANCHOR-MISMATCH",
                4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED"}
@@ -1357,26 +1368,23 @@ def judge_chain(folder, listing, chain_file=None):
         print(f"{named}: MISSING (named on this chain, not in the package); "
               "its commitments go unjudged")
         transcript = None
-    # Every flag `cmd_verify` reads is named here, the package judge
-    # being the one caller that builds its own arguments: a flag left
-    # out is an attribute error mid-verdict rather than a default. The
-    # packaged stamps sidecar is judged exactly as `verify --stamps`
-    # judges one (ADR-0032 ruling 5): through openssl against the chain
-    # file the recipient named, or as an honest note when they named
-    # none. Only when the manifest lists it, though: a sidecar the
-    # manifest does not vouch for is named `unlisted` and judged by
-    # nobody, which is the rule every other unlisted file follows, and
-    # a package from before stamps travelled verifies as it always did,
-    # with no NO-STAMPS line pointing a recipient at a temporary copy.
+    # The checks `verify_log` runs are named here: never the files, since
+    # a package carries no working tree, and never a head the recipient
+    # was not given. The packaged stamps sidecar is judged exactly as
+    # `verify --stamps` judges one (ADR-0032 ruling 5): through openssl
+    # against the chain file the recipient named, or as an honest note
+    # when they named none. Only when the manifest lists it, though: a
+    # sidecar the manifest does not vouch for is named `unlisted` and
+    # judged by nobody, which is the rule every other unlisted file
+    # follows, and a package from before stamps travelled verifies as it
+    # always did, with no NO-STAMPS line pointing a recipient at a
+    # temporary copy.
     # `mechanisms` carries back which of the two exit-3 findings fired,
     # since the package names it.
     mechanisms = []
-    code = cmd_verify(argparse.Namespace(log=log, files=False,
-                                         expect_head=None,
-                                         transcript=transcript, anchors=True,
-                                         stamps=bool(listing.get("stamps")),
-                                         authority_chain=chain_file),
-                      mechanisms)
+    code = verify_log(log, transcript=transcript, anchors=True,
+                      stamps=bool(listing.get("stamps")),
+                      authority_chain=chain_file, mechanisms=mechanisms)
     if mechanisms:
         findings = [(3, word) for word in mechanisms]
     else:
