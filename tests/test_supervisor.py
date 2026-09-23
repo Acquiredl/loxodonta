@@ -3350,6 +3350,22 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertEqual(recorder["state"], "unknown")
         self.assertIsNone(recorder["branch"])
 
+    def test_a_recorder_wired_under_the_home_is_found_there(self):
+        # The shell running the hook expands `~`, so the notice does
+        # too (#303): a recorder wired as ~/x/loxodonta.py is the file
+        # under the home, not a path that is "not on disk".
+        home = Path(self.env["HOME"])
+        script = home / "x" / "loxodonta.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("# recorder under the home\n", encoding="utf-8")
+        install_witness_hook(self.witness,
+                             command="python ~/x/loxodonta.py hook")
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["path"], script.as_posix())
+        self.assertNotIn("not on disk", recorder["note"])
+
     def test_an_install_from_before_the_failure_event_says_so(self):
         # #239: an install from before it wired completed calls alone,
         # and a failed call leaves no receipt until install-hook runs
