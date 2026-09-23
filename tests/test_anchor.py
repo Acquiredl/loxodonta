@@ -20,6 +20,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import socketserver
 from pathlib import Path
 
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_anchor`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_supervisor import home_outside, isolated_env  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
@@ -180,10 +186,12 @@ class SessionEndAnchorTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.chain = self.workdir / f"receipts-{self.SESSION}.jsonl"
         self.sidecar = self.workdir / f"receipts-{self.SESSION}.jsonl.anchors.jsonl"
+        self.home = home_outside(self)
 
     def hook(self, payload, *extra):
-        env = clean_env()
-        env["PYTHONIOENCODING"] = "utf-8"
+        # No CLAUDE_PROJECT_DIR, so the chain lands in the working
+        # directory; every home one of the test's own (#274).
+        env = isolated_env(self.home, PYTHONIOENCODING="utf-8")
         result = subprocess.run(
             [sys.executable, str(LOXODONTA), "hook", *extra],
             cwd=self.workdir, input=json.dumps(payload).encode("utf-8"),

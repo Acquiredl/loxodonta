@@ -1481,9 +1481,11 @@ class SessionEndUnderFullTest(PublishBase):
         self.tool_call("echo one")
         self.tool_call("echo two")
 
-        env = clean_env()
-        env["CLAUDE_PROJECT_DIR"] = str(self.project)
-        env["LOXODONTA_HOME"] = str(self.store)
+        # The homes the installer wrote into, so the marker it read back
+        # is the one this session end reads too (#274).
+        env = isolated_env(self.home, CLAUDE_PROJECT_DIR=str(self.project),
+                           LOXODONTA_HOME=str(self.store),
+                           PYTHONIOENCODING="utf-8")
         payload = {"session_id": self.SESSION,
                    "hook_event_name": "SessionEnd",
                    "reason": "prompt_input_exit",

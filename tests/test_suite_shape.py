@@ -11,10 +11,10 @@ That test imports every `tests/test_*.py` the way that loop does, as
 module names itself instead of taking the parent interpreter with it.
 
 The home guard is armed and says where a start came from (#242). The
-guard itself lives in tests/home_guard.py, which says what it covers and
-what it leaves to #274; these tests hold it to refusing the six
-home-reading supervisor verbs when any one home is the machine's, and to
-naming the line that made the start.
+guard itself lives in tests/home_guard.py, which says what it covers;
+these tests hold it to refusing the six home-reading supervisor verbs and
+the four home-writing verbs (#274) when any one home is the machine's,
+and to naming the line that made the start.
 """
 
 import os
@@ -34,6 +34,7 @@ from test_supervisor import isolated_env
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = REPO_ROOT / "tests"
 SUPERVISOR = REPO_ROOT / "supervisor.py"
+RECORDER = REPO_ROOT / "loxodonta.py"
 # Written out here rather than read from the guard, so a home dropped
 # from the guard's list fails these tests instead of passing with it.
 EVERY_HOME = {"LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME"}
@@ -80,7 +81,10 @@ class HomeGuardTest(unittest.TestCase):
 
         said = str(refused.exception)
         self.assertIn("supervisor.py scan", said)
-        self.assertEqual(named_homes(said), EVERY_HOME, said)
+        # A project inherited from a harness is refused with the homes.
+        inherited = ({"CLAUDE_PROJECT_DIR"}
+                     if os.environ.get("CLAUDE_PROJECT_DIR") else set())
+        self.assertEqual(named_homes(said), EVERY_HOME | inherited, said)
         # It names the line that started it, so the offender is found
         # without a search.
         where = re.search(r"tests/test_suite_shape\.py:(\d+) in (\w+)", said)
@@ -97,11 +101,11 @@ class HomeGuardTest(unittest.TestCase):
 
             for name in sorted(EVERY_HOME):
                 with self.subTest(home=name):
-                    leaky = dict(isolated)
-                    if name in os.environ:
-                        leaky[name] = os.environ[name]
-                    else:
-                        del leaky[name]
+                    # The machine's own, or where it has none, a folder
+                    # that is no temporary one: an unset store or Codex
+                    # home is allowed beside the test's HOME (#274).
+                    leaky = {**isolated,
+                             name: os.environ.get(name) or str(REPO_ROOT)}
                     with self.assertRaises(AssertionError) as refused:
                         subprocess.run(self.command, capture_output=True,
                                        env=leaky)
@@ -112,6 +116,86 @@ class HomeGuardTest(unittest.TestCase):
                                   encoding="utf-8", env=isolated)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("usage", done.stdout)
+
+
+class WriterHomeGuardTest(unittest.TestCase):
+    """The verbs that write into a home, the recorder's three and the
+    supervisor's `adopt`, under the same guard (#274). `--help` again, so
+    a probe past a disarmed guard writes nothing."""
+
+    def command(self, verb):
+        return [sys.executable, str(RECORDER), verb, "--help"]
+
+    def test_each_home_writing_verb_is_refused_with_the_inherited_home(self):
+        for verb in ("hook", "install-hook", "uninstall-hook"):
+            with self.subTest(verb=verb):
+                with self.assertRaises(AssertionError) as refused:
+                    subprocess.run(self.command(verb), capture_output=True)
+                said = str(refused.exception)
+                self.assertIn("loxodonta.py %s started" % verb, said)
+                # Only a hook reads the project, so only a hook is
+                # refused one inherited from a harness.
+                inherited = ({"CLAUDE_PROJECT_DIR"}
+                             if verb == "hook"
+                             and os.environ.get("CLAUDE_PROJECT_DIR")
+                             else set())
+                self.assertEqual(named_homes(said), EVERY_HOME | inherited,
+                                 said)
+                self.assertIn("tests/test_suite_shape.py:", said)
+
+    def test_adopt_is_refused_with_the_inherited_home(self):
+        with self.assertRaises(AssertionError) as refused:
+            subprocess.run([sys.executable, str(SUPERVISOR), "adopt",
+                            "--help"], capture_output=True)
+        self.assertIn("supervisor.py adopt started", str(refused.exception))
+
+    def test_an_unset_store_or_codex_home_falls_back_inside_the_test(self):
+        # The tools fall back to ~/.loxodonta and ~/.codex, so with the
+        # test's own HOME and USERPROFILE an unset one stays inside the
+        # test; with the machine's HOME it is refused with it.
+        with tempfile.TemporaryDirectory() as home:
+            isolated = {**isolated_env(Path(home).resolve()),
+                        "PYTHONIOENCODING": "utf-8"}
+            fallback = {k: v for k, v in isolated.items()
+                        if k not in ("LOXODONTA_HOME", "CODEX_HOME")}
+            done = subprocess.run(self.command("install-hook"),
+                                  capture_output=True, encoding="utf-8",
+                                  env=fallback)
+            self.assertEqual(done.returncode, 0, done.stderr)
+
+            machine = {**fallback,
+                       "HOME": os.environ.get("HOME") or str(REPO_ROOT)}
+            with self.assertRaises(AssertionError) as refused:
+                subprocess.run(self.command("install-hook"),
+                               capture_output=True, env=machine)
+        self.assertEqual(named_homes(refused.exception),
+                         {"HOME", "LOXODONTA_HOME", "CODEX_HOME"})
+
+    def test_a_hook_with_a_project_the_test_did_not_choose_is_refused(self):
+        # The project names the drawer a hook writes into: the inherited
+        # one if this process runs under a harness, else a folder that is
+        # no temporary one of the test's own.
+        project = os.environ.get("CLAUDE_PROJECT_DIR") or str(REPO_ROOT)
+        with tempfile.TemporaryDirectory() as home:
+            isolated = {**isolated_env(Path(home).resolve()),
+                        "PYTHONIOENCODING": "utf-8"}
+            with self.assertRaises(AssertionError) as refused:
+                subprocess.run(self.command("hook"), capture_output=True,
+                               env={**isolated, "CLAUDE_PROJECT_DIR": project})
+            self.assertEqual(named_homes(refused.exception),
+                             {"CLAUDE_PROJECT_DIR"})
+
+            # The test's own homes and no project: the same start goes ahead.
+            done = subprocess.run(self.command("hook"), capture_output=True,
+                                  encoding="utf-8", env=isolated)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("usage", done.stdout)
+
+    def test_a_recorder_verb_that_stays_in_its_log_is_not_guarded(self):
+        done = subprocess.run(
+            [sys.executable, str(RECORDER), "verify", "--help"],
+            capture_output=True, encoding="utf-8")
+        self.assertEqual(done.returncode, 0, done.stderr)
 
 
 if __name__ == "__main__":
