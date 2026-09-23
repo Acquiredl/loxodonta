@@ -1,9 +1,10 @@
 # The release, cut by the tag. Every promotion to main that moves the
-# tools gets a tag and a GitHub release carrying the three files,
-# loxodonta.py, supervisor.py and receiver.py, and a SHA256SUMS file over
-# all three, so a stranger can check the files that record, read and keep
+# tools gets a tag and a GitHub release carrying the four files,
+# loxodonta.py, supervisor.py, receiver.py and verifier.py, the last cut
+# from the first at the same commit (ADR-0035), and a SHA256SUMS file over
+# all four, so a stranger can check the files that record, read and keep
 # their sessions against what the author published (ADR-0022, ADR-0028,
-# ADR-0031). The tag has to match TOOL_VERSION in all three files, and
+# ADR-0031). The tag has to match TOOL_VERSION in all four files, and
 # the release notes are the matching CHANGELOG section; a mismatch or a
 # missing section stops the release rather than publishing a wrong one.
 # No third-party action: the release is created by the gh CLI the
@@ -27,7 +28,10 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: the tag matches TOOL_VERSION in all three files
+      - name: verifier.py is the copy of this commit's recorder
+        run: python tools/build_verifier.py --check
+
+      - name: the tag matches TOOL_VERSION in all four files
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -37,19 +41,20 @@ jobs:
           want = tag[1:] if tag.startswith("v") else tag
           constant = re.compile(r'^TOOL_VERSION = "(\d+\.\d+\.\d+)"$', re.M)
           wrong = []
-          for name in ("loxodonta.py", "supervisor.py", "receiver.py"):
+          for name in ("loxodonta.py", "supervisor.py", "receiver.py",
+                       "verifier.py"):
               found = constant.findall(open(name, encoding="utf-8").read())
               have = found[0] if len(found) == 1 else "none"
               if have != want:
                   wrong.append(f"{name} says TOOL_VERSION {have}, tag {tag} says {want}")
           if wrong:
               sys.exit("tag and tool version disagree:\n  " + "\n  ".join(wrong))
-          print(f"all three files say {want}, tag {tag} agrees")
+          print(f"all four files say {want}, tag {tag} agrees")
           PY
 
-      - name: SHA256SUMS over the three files
+      - name: SHA256SUMS over the four files
         run: |
-          sha256sum loxodonta.py supervisor.py receiver.py > SHA256SUMS
+          sha256sum loxodonta.py supervisor.py receiver.py verifier.py > SHA256SUMS
           cat SHA256SUMS
 
       - name: release notes from the CHANGELOG section
@@ -75,10 +80,11 @@ jobs:
           print(notes)
           PY
 
-      - name: the release, with the three files and their sums attached
+      - name: the release, with the four files and their sums attached
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" loxodonta.py supervisor.py receiver.py SHA256SUMS \
+          gh release create "$TAG" loxodonta.py supervisor.py receiver.py verifier.py \
+            SHA256SUMS \
             --title "$TAG" --notes-file RELEASE_NOTES.md

@@ -10,18 +10,10 @@ import errno
 import hashlib
 import json
 import os
-import shlex
-import signal
-import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import unicodedata
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 
 # Two versions, moving independently (ADR-0022): TOOL_VERSION says which
@@ -38,11 +30,13 @@ GENESIS_FIELDS = ENTRY_FIELDS | {"v"}
 
 # === The verifier (ADR-0035) ==================================================
 #
-# From here to the line that closes it, the file is the verify side, in
-# reading order: the format, reading a chain, the walk, then the judges
-# and the verdicts. Nothing in it appends to a chain, sends, stamps or
-# installs, and nothing in it calls a definition below the closing line.
-# It is the part a recipient's verifier.py holds (ADR-0035).
+# The verify side, in reading order: the format, reading a chain, the
+# walk, the judges and the verdicts, then the command line that speaks
+# them. Nothing in it appends to a chain, sends, stamps or installs. In
+# loxodonta.py a closing line ends it, and nothing in it calls a
+# definition past that line; tools/build_verifier.py copies it, with the
+# imports and constants above it, into verifier.py, the file a recipient
+# runs (ADR-0035).
 
 
 # --- Canonical form (SPEC §4) -------------------------------------------------
@@ -1906,10 +1900,219 @@ def cmd_verify_package(args):
         return judge_package(path, unpacked, args.authority_chain)
 
 
+# --- The verifier's command line ----------------------------------------------
+# The three verbs a recipient needs, and the parsing both files share:
+# the recorder's `main` adds them beside its writers, and `verifier_main`
+# is the whole of verifier.py's command line.
+
+def head_record(value):
+    """argparse validator: a head record is 64 lowercase hex characters."""
+    v = value.lower()
+    if len(v) != 64 or any(c not in "0123456789abcdef" for c in v):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a chain head (need 64 hex characters)"
+        )
+    return v
+
+
+def checkout_commit(home):
+    """The short commit of the checkout `home` sits in, or "unknown" —
+    the same fact the recorder notice reports (ADR-0015). Local git only:
+    a version is a label on the file, never a channel to fetch a newer
+    one."""
+    try:
+        asked = subprocess.run(
+            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
+            capture_output=True, encoding="utf-8")
+    except (OSError, ValueError):
+        return "unknown"
+    return asked.stdout.strip() if asked.returncode == 0 else "unknown"
+
+
+def version_line(prog, home):
+    """Three identities on one line: tool, format, commit (ADR-0022)."""
+    return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
+            f"commit {checkout_commit(home)})")
+
+
+class VersionAction(argparse.Action):
+    """`--version`, answered only when asked: the commit is one git
+    question, and the hook path must not pay for it on every call."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        home = os.path.dirname(os.path.abspath(__file__))
+        print(version_line(parser.prog, home))
+        parser.exit()
+
+
+EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
+
+
+def speak_utf8():
+    """Write stdout and stderr in UTF-8, whatever encoding the console
+    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
+    which has no CJK and no emoji: one such character in a receipt killed
+    the verb mid-output with UnicodeEncodeError, and a hook reading
+    through a pipe got nothing. The text printed is unchanged; only its
+    bytes are. UTF-8 carries every character but a lone surrogate (a file
+    name that did not decode), which backslashreplace prints as its
+    escape rather than crash on. A stream without `reconfigure` (None
+    under pythonw, or one an embedder swapped in) is left as it is."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+class UsageParser(argparse.ArgumentParser):
+    """argparse, with usage errors on an exit of their own. A wrong flag, a
+    missing argument, or a malformed value exits 64 instead of argparse's
+    stock 2, so no verdict exit is ever an argparse error (ADR-0026
+    ruling 7). The message is argparse's, unchanged, on stderr. Subparsers
+    inherit this class, so every command speaks the same number."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
+
+
+def add_verify_commands(sub, common):
+    """`head`, `verify` and `verify-package`, added to a command line. The
+    recorder and the verifier both build their parsers from this one
+    definition, so their flags cannot differ. Returns the verify parser,
+    for the usage rule argparse cannot state (`verify_usage`)."""
+    sub.add_parser("head", parents=[common],
+                   help="print the chain head (record it out of the writer's reach)"
+                   ).set_defaults(func=cmd_head)
+    verify_parser = sub.add_parser("verify", parents=[common],
+                                   help="walk the chain and report a verdict")
+    verify_parser.add_argument("--files", action="store_true",
+                               help="also compare referenced files against disk")
+    verify_parser.add_argument("--expect-head", metavar="HEX", type=head_record,
+                               help="operator-held head record to compare against")
+    verify_parser.add_argument("--transcript", metavar="PATH", default=None,
+                               help="judge transcript commitments against "
+                                    "this harness transcript (ADR-0017); a "
+                                    "missing file is noted, never a verdict")
+    verify_parser.add_argument("--anchors", action="store_true",
+                               help="also judge anchor proofs, offline")
+    verify_parser.add_argument("--stamps", action="store_true",
+                               help="also judge authority timestamps, "
+                                    "offline, through openssl (ADR-0032); "
+                                    "without --authority-chain, or without "
+                                    "openssl, each is noted as not judged")
+    verify_parser.add_argument("--authority-chain", metavar="FILE",
+                               default=None,
+                               help="the authority's certificate chain "
+                                    "(PEM) you saved, for --stamps. Every "
+                                    "token is judged against this one "
+                                    "file, so when the sidecar holds "
+                                    "tokens from more than one authority, "
+                                    "give one chain file holding every "
+                                    "authority's certificates "
+                                    "(concatenated PEM)")
+    verify_parser.set_defaults(func=cmd_verify)
+    package_parser = sub.add_parser(
+        "verify-package",
+        help="judge a package written by `supervisor package`, a zip or a "
+             "folder, layer by layer: each chain verbatim, each artifact "
+             "against the manifest, each declared seal (the anchor here, "
+             "the signature through ssh-keygen), the package verdict last "
+             "(ADR-0026)")
+    package_parser.add_argument("path", metavar="PATH",
+                                help="the package: a zip, or its unpacked "
+                                     "folder")
+    package_parser.add_argument("--authority-chain", metavar="FILE",
+                                default=None,
+                                help="the certificate chain (PEM) you saved "
+                                     "from the authority, for the tokens "
+                                     "this package carries (ADR-0032); "
+                                     "without it a token is present and not "
+                                     "judged, and the seal earns no rung. "
+                                     "Every token in the package, the "
+                                     "manifest's and each chain's, is "
+                                     "judged against this one file, so when "
+                                     "the records name more than one "
+                                     "authority, give one chain file "
+                                     "holding every authority's "
+                                     "certificates (concatenated PEM)")
+    package_parser.set_defaults(func=cmd_verify_package)
+    return verify_parser
+
+
+def verify_usage(args, verify_parser):
+    """The usage rule for the verify verbs that argparse cannot state."""
+    if args.command == "verify" and args.authority_chain and not args.stamps:
+        # The operator who names a chain file named it in order to have
+        # the tokens judged against it. Ignoring the flag would print
+        # `VALID` with nothing judged, which is the one outcome ADR-0032
+        # ruling 5 exists to prevent: a verdict that sounds like the
+        # tokens passed. A command spoken wrong is told so, exit 64, as
+        # a raw flag beside a named profile is.
+        verify_parser.error("--authority-chain is the file --stamps judges "
+                            "tokens against; add --stamps, or drop it")
+
+
+def verifier_main(argv=None):
+    """verifier.py's command line (ADR-0035): the three verbs that judge,
+    and nothing that writes, sends, stamps or installs."""
+    # The docstring's first two paragraphs: what it is, what it judges.
+    parser = UsageParser(prog="verifier",
+                         description="\n\n".join(__doc__.split("\n\n")[:2]))
+    parser.add_argument("--version", action=VersionAction,
+                        help="print tool version, format version, and "
+                             "the checkout's commit, then exit")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--log", default=DEFAULT_LOG, help="receipt log path")
+    sub = parser.add_subparsers(dest="command", required=True)
+    verify_parser = add_verify_commands(sub, common)
+    args = parser.parse_args(argv)
+    verify_usage(args, verify_parser)
+    return args.func(args)
+
+
+def run_main(main):
+    """Run a command line to its exit code, as both files' entry point."""
+    try:
+        speak_utf8()  # before anything prints
+        sys.exit(main())
+    except OSError as e:
+        # The reader hung up (`loxodonta report | head`) — no verdict was
+        # asked of the lines that went unread; die quietly, not loudly.
+        # (This exit 1 reuses a verdict number, the only one left now that
+        # usage errors exit 64 on their own, so scripts should trust the
+        # stdout verdict line, never the exit code alone.)
+        # POSIX raises BrokenPipeError (EPIPE); Windows reports a plain
+        # EINVAL from the closed handle instead, so match on both or the
+        # quiet death is a traceback on half the platforms.
+        if not isinstance(e, BrokenPipeError) and not (
+                os.name == "nt" and e.errno == errno.EINVAL):
+            raise  # EINVAL means nothing about pipes off Windows: let it fly
+        # Give the interpreter a sink to flush into, or shutdown re-raises.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(1)
+
+
 # === End of the verifier (ADR-0035) ===========================================
 #
 # Everything below records, sends, stamps or installs. It may call into
 # the region above; nothing above calls into it.
+
+
+# The imports only the writers use. They sit below the verifier so that
+# the copy a recipient runs imports nothing that opens a socket or starts
+# a thread (ADR-0035).
+import shlex
+import signal
+import socket
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 
 # --- Writing a line -----------------------------------------------------------
@@ -5093,78 +5296,8 @@ def cmd_uninstall_hook(args):
     return 0
 
 
-def head_record(value):
-    """argparse validator: a head record is 64 lowercase hex characters."""
-    v = value.lower()
-    if len(v) != 64 or any(c not in "0123456789abcdef" for c in v):
-        raise argparse.ArgumentTypeError(
-            f"{value!r} is not a chain head (need 64 hex characters)"
-        )
-    return v
 
 
-def checkout_commit(home):
-    """The short commit of the checkout `home` sits in, or "unknown" —
-    the same fact the recorder notice reports (ADR-0015). Local git only:
-    a version is a label on the file, never a channel to fetch a newer
-    one."""
-    try:
-        asked = subprocess.run(
-            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
-            capture_output=True, encoding="utf-8")
-    except (OSError, ValueError):
-        return "unknown"
-    return asked.stdout.strip() if asked.returncode == 0 else "unknown"
-
-
-def version_line(prog, home):
-    """Three identities on one line: tool, format, commit (ADR-0022)."""
-    return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
-            f"commit {checkout_commit(home)})")
-
-
-class VersionAction(argparse.Action):
-    """`--version`, answered only when asked: the commit is one git
-    question, and the hook path must not pay for it on every call."""
-
-    def __init__(self, option_strings, dest, **kwargs):
-        super().__init__(option_strings, dest, nargs=0, **kwargs)
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        home = os.path.dirname(os.path.abspath(__file__))
-        print(version_line(parser.prog, home))
-        parser.exit()
-
-
-EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
-
-
-def speak_utf8():
-    """Write stdout and stderr in UTF-8, whatever encoding the console
-    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
-    which has no CJK and no emoji: one such character in a receipt killed
-    the verb mid-output with UnicodeEncodeError, and a hook reading
-    through a pipe got nothing. The text printed is unchanged; only its
-    bytes are. UTF-8 carries every character but a lone surrogate (a file
-    name that did not decode), which backslashreplace prints as its
-    escape rather than crash on. A stream without `reconfigure` (None
-    under pythonw, or one an embedder swapped in) is left as it is."""
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            reconfigure(encoding="utf-8", errors="backslashreplace")
-
-
-class UsageParser(argparse.ArgumentParser):
-    """argparse, with usage errors on an exit of their own. A wrong flag, a
-    missing argument, or a malformed value exits 64 instead of argparse's
-    stock 2, so no verdict exit is ever an argparse error (ADR-0026
-    ruling 7). The message is argparse's, unchanged, on stderr. Subparsers
-    inherit this class, so every command speaks the same number."""
-
-    def error(self, message):
-        self.print_usage(sys.stderr)
-        self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
 
 
 def main(argv=None):
@@ -5196,62 +5329,7 @@ def main(argv=None):
     sub.add_parser("report", parents=[common],
                    help="render the log as a human-readable timeline"
                    ).set_defaults(func=cmd_report)
-    sub.add_parser("head", parents=[common],
-                   help="print the chain head (record it out of the writer's reach)"
-                   ).set_defaults(func=cmd_head)
-    verify_parser = sub.add_parser("verify", parents=[common],
-                                   help="walk the chain and report a verdict")
-    verify_parser.add_argument("--files", action="store_true",
-                               help="also compare referenced files against disk")
-    verify_parser.add_argument("--expect-head", metavar="HEX", type=head_record,
-                               help="operator-held head record to compare against")
-    verify_parser.add_argument("--transcript", metavar="PATH", default=None,
-                               help="judge transcript commitments against "
-                                    "this harness transcript (ADR-0017); a "
-                                    "missing file is noted, never a verdict")
-    verify_parser.add_argument("--anchors", action="store_true",
-                               help="also judge anchor proofs, offline")
-    verify_parser.add_argument("--stamps", action="store_true",
-                               help="also judge authority timestamps, "
-                                    "offline, through openssl (ADR-0032); "
-                                    "without --authority-chain, or without "
-                                    "openssl, each is noted as not judged")
-    verify_parser.add_argument("--authority-chain", metavar="FILE",
-                               default=None,
-                               help="the authority's certificate chain "
-                                    "(PEM) you saved, for --stamps. Every "
-                                    "token is judged against this one "
-                                    "file, so when the sidecar holds "
-                                    "tokens from more than one authority, "
-                                    "give one chain file holding every "
-                                    "authority's certificates "
-                                    "(concatenated PEM)")
-    verify_parser.set_defaults(func=cmd_verify)
-    package_parser = sub.add_parser(
-        "verify-package",
-        help="judge a package written by `supervisor package`, a zip or a "
-             "folder, layer by layer: each chain verbatim, each artifact "
-             "against the manifest, each declared seal (the anchor here, "
-             "the signature through ssh-keygen), the package verdict last "
-             "(ADR-0026)")
-    package_parser.add_argument("path", metavar="PATH",
-                                help="the package: a zip, or its unpacked "
-                                     "folder")
-    package_parser.add_argument("--authority-chain", metavar="FILE",
-                                default=None,
-                                help="the certificate chain (PEM) you saved "
-                                     "from the authority, for the tokens "
-                                     "this package carries (ADR-0032); "
-                                     "without it a token is present and not "
-                                     "judged, and the seal earns no rung. "
-                                     "Every token in the package, the "
-                                     "manifest's and each chain's, is "
-                                     "judged against this one file, so when "
-                                     "the records name more than one "
-                                     "authority, give one chain file "
-                                     "holding every authority's "
-                                     "certificates (concatenated PEM)")
-    package_parser.set_defaults(func=cmd_verify_package)
+    verify_parser = add_verify_commands(sub, common)
     anchor_parser = sub.add_parser(
         "anchor", parents=[common],
         help="commit the chain head to Bitcoin via OpenTimestamps")
@@ -5431,15 +5509,7 @@ def main(argv=None):
         if not command_argv:
             parser.error("run requires `-- <command> [args...]` after its flags")
         args.command_argv = command_argv
-    if args.command == "verify" and args.authority_chain and not args.stamps:
-        # The operator who names a chain file named it in order to have
-        # the tokens judged against it. Ignoring the flag would print
-        # `VALID` with nothing judged, which is the one outcome ADR-0032
-        # ruling 5 exists to prevent: a verdict that sounds like the
-        # tokens passed. A command spoken wrong is told so, exit 64, as
-        # a raw flag beside a named profile is.
-        verify_parser.error("--authority-chain is the file --stamps judges "
-                            "tokens against; add --stamps, or drop it")
+    verify_usage(args, verify_parser)
     if args.command == "install-hook":
         # The profile and the raw flags are one choice (ADR-0031 ruling
         # 1); a contradiction between them is a usage error, exit 64.
@@ -5454,21 +5524,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    try:
-        speak_utf8()  # before anything prints
-        sys.exit(main())
-    except OSError as e:
-        # The reader hung up (`loxodonta report | head`) — no verdict was
-        # asked of the lines that went unread; die quietly, not loudly.
-        # (This exit 1 reuses a verdict number, the only one left now that
-        # usage errors exit 64 on their own, so scripts should trust the
-        # stdout verdict line, never the exit code alone.)
-        # POSIX raises BrokenPipeError (EPIPE); Windows reports a plain
-        # EINVAL from the closed handle instead, so match on both or the
-        # quiet death is a traceback on half the platforms.
-        if not isinstance(e, BrokenPipeError) and not (
-                os.name == "nt" and e.errno == errno.EINVAL):
-            raise  # EINVAL means nothing about pipes off Windows: let it fly
-        # Give the interpreter a sink to flush into, or shutdown re-raises.
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        sys.exit(1)
+    run_main(main)

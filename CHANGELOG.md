@@ -14,6 +14,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - The supervisor writes its baseline, day book and views whole or not at all, so a crash mid-write no longer leaves a baseline the next scan cannot read, and the tripwire keeps its memory of heads (#300).
 
+### Added
+
+- `verifier.py`: the recorder's `head`, `verify` and `verify-package` on their own, with nothing that writes or sends. It is copied from `loxodonta.py`, never edited by hand; CI fails a stale copy, and releases carry it (ADR-0035, #299).
+
 ## [0.8.1] - 2026-09-23
 
 Receipts that survive hostile input. Every fix here came from an outside review that tested the README's claims against the code. The receipt format is untouched.

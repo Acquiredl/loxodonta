@@ -440,6 +440,7 @@ ROOT_ALLOWED = {
     "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md",
     "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "AGENTS.md", "CLAUDE.md",
     "loxodonta.py", "supervisor.py", "receiver.py",   # the three tools
+    "verifier.py",   # the recorder's verify side, copied out (ADR-0035)
 }
 # ...and, for anything else, where it could live instead (first match).
 WHERE_IT_COULD_LIVE = [
