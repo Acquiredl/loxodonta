@@ -214,6 +214,83 @@ def superseded(log, detail):
             and sibling_of(log).exists())
 
 
+# --- Writing state whole ------------------------------------------------------
+# The supervisor keeps three files of its own between looks: the baseline,
+# the day book and the views. Each is rewritten whole every time, and a
+# rewrite in place — truncate, then write — has a moment where the file
+# on disk is empty or half written. A crash or a full disk in that moment
+# left a baseline the next look could not read, and an unreadable
+# baseline is replaced, so the tripwire forgot every head it was holding
+# (#300). The chains and the sidecars are not written this way: they only
+# ever grow by appended lines, and the recorder's own lock and torn-tail
+# rules govern those.
+#
+# Two supervisor processes can write the same file: `serve`'s tick and a
+# hand-run `scan` both write the baseline and the day book, and
+# `calibrate` writes the baseline. Inside one `serve` its locks already
+# take turns. Across processes there is no lock, and the swap is what
+# makes that safe: each writer puts down a whole file it computed, so a
+# reader sees one writer's version and never a splice of two, and the
+# last to finish wins. What the overwritten write can lose is a day-book
+# count or a keeper attempt time (the keeper asks again a little early),
+# testimony that decides no verdict; the heads it held are seen again by
+# the next look. The one loss worth knowing: a
+# `calibrate` seed made while another process's scan is mid-walk can be
+# overwritten by that scan, which read the baseline before the seed; run
+# the seed again. A lock that closed that gap would have to be held
+# across a whole scan, and a stranded one would stop the supervisor
+# looking, which is a worse failure than a seed to restate.
+
+REPLACE_TRIES = 20  # Windows only; see write_whole
+REPLACE_PAUSE = 0.05  # seconds between tries, so a second at most
+
+
+def write_whole(path, text):
+    """Write `text` to `path` whole or not at all: into a temporary file
+    in the same folder, flushed and synced to disk, then moved onto the
+    name with os.replace, which is atomic within one filesystem, and a
+    file in the same folder is on the same filesystem. A crash leaves
+    the old file or the new one, never part of either. LF line endings
+    on every platform, like write_lf. A file that already exists keeps
+    its permission bits; a new one keeps mkstemp's owner-only ones. A
+    path that is a symbolic link is written through, so the link stays
+    a link."""
+    path = os.path.realpath(path)
+    folder = os.path.dirname(path)
+    fd, temp = tempfile.mkstemp(dir=folder, suffix=".tmp",
+                                prefix=os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(temp, os.stat(path).st_mode & 0o7777)
+        except OSError:
+            pass  # no file there yet
+        for attempt in range(REPLACE_TRIES):
+            try:
+                os.replace(temp, path)
+                break
+            except PermissionError:
+                # Windows refuses to replace a file another process has
+                # open, and every Python reader opens it that way: the
+                # other supervisor reading the baseline, the page asking
+                # for the views, a virus scanner looking at a new file.
+                # Those holds last milliseconds, so waiting a moment turns
+                # a spurious failure into the write that was asked for.
+                # POSIX replaces under open readers and never lands here.
+                if attempt == REPLACE_TRIES - 1:
+                    raise
+                time.sleep(REPLACE_PAUSE)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
 # --- Baseline -----------------------------------------------------------------
 # The tripwire's memory (GLOSSARY: Baseline): every chain's last-seen
 # head, kept beside what it watches — the store's home in store mode
@@ -327,9 +404,8 @@ def write_daybook(path, days, now):
     oldest = (now - timedelta(days=DAYBOOK_SEASON)).strftime("%Y-%m-%d")
     kept = {day: row for day, row in sorted(days.items()) if day >= oldest}
     try:
-        path.write_text(
-            json.dumps({"purpose": DAYBOOK_PURPOSE, "days": kept},
-                       indent=2) + "\n", encoding="utf-8")
+        write_whole(path, json.dumps(
+            {"purpose": DAYBOOK_PURPOSE, "days": kept}, indent=2) + "\n")
     except OSError:
         pass
     return kept
@@ -439,9 +515,8 @@ def write_views(path, views):
     views are a convenience, and no verdict lives here."""
     kept = views[:VIEW_LIMIT]
     try:
-        path.write_text(
-            json.dumps({"purpose": VIEWS_PURPOSE, "views": kept},
-                       indent=2) + "\n", encoding="utf-8")
+        write_whole(path, json.dumps(
+            {"purpose": VIEWS_PURPOSE, "views": kept}, indent=2) + "\n")
     except OSError:
         pass
     return kept
@@ -2957,7 +3032,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                            "log": relpath, "change": "vanished",
                            "investigate": CHANGE_WORDS["vanished"]})
 
-    baseline_path.write_text(json.dumps({
+    write_whole(baseline_path, json.dumps({
         "purpose": "the supervisor's memory between looks — "
                    "writer-reachable, trusted for nothing",
         "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2965,7 +3040,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "keeper": keeper,
         "calibration": calibration,
         "sessionend": sessionend,
-    }, indent=2) + "\n", encoding="utf-8")
+    }, indent=2) + "\n")
     if events:
         worst = max(worst, 5)
 
@@ -3232,7 +3307,7 @@ def cmd_calibrate(args):
                   "is what this supervisor saw", file=sys.stderr)
             return 64
         data["calibration"] = kept
-        write_lf(path, json.dumps(data, indent=2))
+        write_whole(path, json.dumps(data, indent=2))
         print(f"forgotten: your statement about {args.forget} is gone; "
               "sessions it covered fall back to whatever epoch now "
               "precedes them, or to BEFORE-MEMORY")
@@ -3252,7 +3327,7 @@ def cmd_calibrate(args):
     restated = len(kept) != len(calibration)
     data["calibration"] = sorted(kept + [seeded],
                                  key=lambda epoch: epoch.get("since") or "")
-    write_lf(path, json.dumps(data, indent=2))
+    write_whole(path, json.dumps(data, indent=2))
     print(f"{'restated' if restated else 'seeded'}: from {args.since}, "
           f"coverage was {' '.join(args.matchers)} — your word, not this "
           "supervisor's observation, and marked as such wherever it judges")

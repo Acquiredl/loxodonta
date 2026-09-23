@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- The supervisor writes its baseline, day book and views whole or not at all, so a crash mid-write no longer leaves a baseline the next scan cannot read, and the tripwire keeps its memory of heads (#300).
+
 ## [0.8.1] - 2026-09-23
 
 Receipts that survive hostile input. Every fix here came from an outside review that tested the README's claims against the code. The receipt format is untouched.

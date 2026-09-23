@@ -823,6 +823,81 @@ class BaselineTest(unittest.TestCase):
                          "remembering resumes from the fresh look")
 
 
+def hold(test, path):
+    """A second name for the file at `path` right now: what a reader that
+    opened it before the next write is holding, and what a crash
+    mid-write would leave behind if that write went into this file
+    rather than beside it (#300). A hard link, in a folder of the test's
+    own on the same volume, so it sits in no census. Skips where the
+    filesystem has no hard links."""
+    held = Path(test._tmp.name).resolve() / "held" / path.name
+    held.parent.mkdir(exist_ok=True)
+    try:
+        os.link(path, held)
+    except (OSError, NotImplementedError) as refused:
+        test.skipTest(f"no hard links here: {refused}")
+    return held
+
+
+def assert_replaced_whole(test, held, before, live):
+    """The file a reader held is untouched and still whole, and the name
+    now points at a different, whole file: the state was swapped in,
+    never truncated and rewritten where it stood."""
+    test.assertEqual(held.read_text(encoding="utf-8"), before,
+                     f"{live.name} was rewritten in place — a crash "
+                     "mid-write would leave it torn")
+    json.loads(held.read_text(encoding="utf-8"))
+    json.loads(live.read_text(encoding="utf-8"))
+    test.assertNotEqual(live.read_text(encoding="utf-8"), before,
+                        f"{live.name} should hold this tick's state")
+
+
+class StateSwapTest(unittest.TestCase):
+    """The supervisor's state files (the baseline, the day book, the
+    views) are written whole or not at all (#300): a new file beside the
+    old, then swapped onto its name. The fault this closes was a crash
+    or a full disk between truncating the baseline and finishing the
+    write, which left a file the next look could not read and so reset
+    the memory the tripwire diffs against. A crash cannot be staged
+    through the CLI, so these watch the property that rules it out: the
+    old file is never written into, and nothing temporary is left."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name).resolve() / "storehome"
+        self.witness = Path(self._tmp.name).resolve() / "no-witness"
+        self.witness.mkdir()
+        drawer = self.home / "receipts" / "alpha-11111111"
+        drawer.mkdir(parents=True)
+        (drawer / "project.json").write_text(
+            json.dumps({"path": "C:/work/alpha"}), encoding="utf-8")
+        self.log = make_chain(drawer, "sess-aaaa")
+
+    def test_a_scan_swaps_its_baseline_and_day_book_in_whole(self):
+        first = run_store_scan(self.home, self.witness)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        state = [self.home / "baseline.json", self.home / "daybook.json"]
+        before = [path.read_text(encoding="utf-8") for path in state]
+        held = [hold(self, path) for path in state]
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(self.log),
+             "--actor", "claude-code", "--action", "one more step"],
+            capture_output=True, check=True)
+
+        second = run_store_scan(self.home, self.witness)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        for kept, was, live in zip(held, before, state):
+            assert_replaced_whole(self, kept, was, live)
+        self.assertEqual(sorted(p.name for p in self.home.glob("*.tmp")), [],
+                         "a finished write leaves nothing temporary behind")
+        report = json.loads(second.stdout)
+        self.assertEqual(report["baseline"]["events"], [])
+        self.assertNotIn("note", report["baseline"],
+                         "the memory survived the swap and was read back")
+
+
 def munge(path):
     """A project path the way the harness names its transcript folder:
     every character that isn't a letter, digit, or dash becomes a dash."""
@@ -2526,6 +2601,20 @@ class BeforeMemoryTest(unittest.TestCase):
 
         self.assertEqual(forgot.returncode, 0, forgot.stdout + forgot.stderr)
         self.assertEqual(self.watch(self.scan())["before_memory"]["count"], 1)
+
+    def test_a_seed_swaps_the_baseline_in_whole(self):
+        # calibrate rewrites the same file every scan diffs against, so
+        # it takes the same swap (#300): a crash while seeding must not
+        # cost the store its memory of heads.
+        self.scan()
+        before = self.baseline.read_text(encoding="utf-8")
+        held = hold(self, self.baseline)
+
+        seeded = self.calibrate("--since", ago(9000), "--matchers", "Bash")
+
+        self.assertEqual(seeded.returncode, 0, seeded.stdout + seeded.stderr)
+        assert_replaced_whole(self, held, before, self.baseline)
+        self.assertEqual(sorted(p.name for p in self.root.glob("*.tmp")), [])
 
     def test_a_seed_may_not_restate_what_the_supervisor_watched(self):
         # The hard refusal, with no --force behind it: observed time is

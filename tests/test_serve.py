@@ -28,7 +28,8 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_serve`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import home_outside, isolated_env
+from test_supervisor import (assert_replaced_whole, hold, home_outside,
+                             isolated_env)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
@@ -587,6 +588,22 @@ class DashboardTest(ServerFixture):
             OPENER.open(request, timeout=30)
         self.assertEqual(caught.exception.code, 400)
         self.assertEqual(self.views(), [])
+
+    def test_a_saved_view_swaps_the_file_in_whole(self):
+        # The views are state like the baseline and take its swap
+        # (#300): a crash mid-save leaves the old list, never half a
+        # new one the next read would throw away.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        self.views({"save": {"name": "first", "repo": "alpha"}})
+        book = self.root / ".supervisor-views.json"
+        before = book.read_text(encoding="utf-8")
+        held = hold(self, book)
+
+        self.views({"save": {"name": "second", "repo": "alpha"}})
+
+        assert_replaced_whole(self, held, before, book)
+        self.assertEqual(sorted(p.name for p in self.root.glob("*.tmp")), [])
 
     def test_a_hand_edited_views_file_is_read_through_the_same_gate(self):
         # The file is writer-reachable, like the baseline and the day
