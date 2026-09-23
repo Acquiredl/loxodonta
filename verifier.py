@@ -88,21 +88,36 @@ def receipt_text(text):
 # The log's lines, the tail, and the files an entry names, read and
 # never written.
 
+def split_lines(data):
+    """The lines of a chain's or a sidecar's bytes, by the one rule every
+    reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
+    and nothing else ends one. U+2028, U+2029 and NEL are characters a
+    JSON string holds raw, and a `\\r` alone is whitespace between two
+    JSON tokens; a reader that ended a line at any of them would read
+    one entry of another conforming writer as two broken ones. A `\\r`
+    just before the `\\n` belongs to the ending, so a file whose endings
+    a Windows tool rewrote to `\\r\\n` reads as the same lines. The bytes
+    after the last `\\n`, when there are any, are a line too: the torn
+    tail a crash leaves, which the walk names. Written the same way in
+    loxodonta.py, supervisor.py and receiver.py, which never import one
+    another; tests/test_suite_shape.py holds the copies equal."""
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    return [line[:-1] if line.endswith(b"\r") else line for line in lines]
+
+
 def read_log(path):
-    """All lines of the receipt log; FileNotFoundError if it doesn't exist."""
-    with open(path, encoding="utf-8") as f:
-        return f.read().splitlines()
-
-
-def read_log_to_judge(path):
-    """`read_log` for the readers that walk the chain (verify, report,
-    explain, the package's walk). A byte that is not UTF-8 arrives as a
-    lone surrogate (surrogateescape) instead of ending the whole read in
-    a traceback, so the walk can refuse the one line it sits on by name
-    (SPEC §6). The recorder only ever writes ASCII lines, so no line it
-    wrote is read any differently."""
-    with open(path, encoding="utf-8", errors="surrogateescape") as f:
-        return f.read().splitlines()
+    """All lines of the receipt log, split by `split_lines`, for every
+    reader and writer here; FileNotFoundError if it doesn't exist. A
+    byte that is not UTF-8 arrives as a lone surrogate (surrogateescape)
+    instead of ending the whole read in a traceback: the walk refuses
+    the one line it sits on by name (SPEC §6), and `tail_entry` calls a
+    tail holding one damaged. The recorder only ever writes ASCII lines,
+    so no line it wrote is read any differently."""
+    with open(path, "rb") as f:
+        return [line.decode("utf-8", "surrogateescape")
+                for line in split_lines(f.read())]
 
 
 def missing_log(path):
@@ -120,12 +135,19 @@ def tail_entry(lines):
     bury an innocent race under later receipts until it read as
     tampering in the middle of the file, so the fork ends the chain the
     way a tear does, and damage stays at the tail, where the readers
-    that name it honestly expect it (SPEC §6, §8)."""
+    that name it honestly expect it (SPEC §6, §8). A tail holding a byte
+    that is not UTF-8 is torn in the same sense, since a crash in the
+    middle of a character leaves one (#299)."""
     if not lines:
         return None
     try:
+        # A byte that is not UTF-8 arrives from `read_log` as a lone
+        # surrogate, which has no UTF-8 form. Every refusal of the reader
+        # is a ValueError, the too-long integer's among them; nesting too
+        # deep is a RecursionError.
+        lines[-1].encode("utf-8")
         last = json.loads(lines[-1])
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
         return None
@@ -312,8 +334,8 @@ def walk(lines):
         # other line that is not an entry, never a traceback that leaves
         # the reader with no verdict at all (SPEC §6, #292).
         try:
-            # A byte that is not UTF-8 arrives from `read_log_to_judge`
-            # as a lone surrogate, the one thing UTF-8 cannot encode.
+            # A byte that is not UTF-8 arrives from `read_log` as a
+            # lone surrogate, the one thing UTF-8 cannot encode.
             line.encode("utf-8")
             entry = json.loads(line, object_pairs_hook=object_with_each_key_once)
         except UnicodeEncodeError:
@@ -684,7 +706,10 @@ def anchors_path(log):
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
-    as None, so a judge can name it rather than skip it."""
+    as None, so a judge can name it rather than skip it, and so does a
+    line the reader cannot take apart: a byte that is not UTF-8 (a lone
+    surrogate from `read_log`), an integer too long to read, nesting too
+    deep (#299)."""
     try:
         lines = read_log(path)
     except FileNotFoundError:
@@ -692,10 +717,11 @@ def read_sidecar_records(path):
     records = []
     for line in lines:
         try:
+            line.encode("utf-8")
             record = json.loads(line)
             if not isinstance(record, dict):
                 record = None
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             record = None
         records.append(record)
     return records
@@ -1062,7 +1088,7 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
     own verdict line and "anchor" is never the word for an authority
     timestamp (ADR-0032 ruling 1)."""
     try:
-        lines = read_log_to_judge(log)
+        lines = read_log(log)
     except FileNotFoundError:
         return missing_log(log)
     if not lines:
@@ -1380,7 +1406,7 @@ def walked_listing(log):
     count, how many file references its entries carry, and how many
     transcript commitments it holds. The same walk verify uses; a chain
     is judged by walking, never by file hash (ADR-0026 ruling 3)."""
-    lines = read_log_to_judge(log)
+    lines = read_log(log)
     entries, _, _ = walk(lines)
     head = None
     references = 0

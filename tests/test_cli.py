@@ -1932,3 +1932,178 @@ class UnreadableLineTest(TamperTest):
         self.assertIn("schema mismatch: x" + BACKSLASH + "ud800",
                       result.stdout)
         self.assertNotIn("Traceback", result.stderr)
+
+
+# The characters `str.splitlines()` ends a line at and SPEC section 1
+# does not: the line and paragraph separators and NEL. A JSON string
+# holds each of them raw, and SPEC section 4 rule 3 hashes them raw.
+SEPARATORS = "  \u0085"
+
+
+class LineRuleTest(ReceiptsCliTest):
+    """SPEC section 1: a line is the bytes before each newline, less a
+    carriage return just before it, and nothing else ends one (#299).
+    The recorder writes ASCII lines and a newline alone, so every chain
+    here is rewritten the way another conforming writer might write it:
+    raw UTF-8, or Windows line endings. Each must read as the chain it
+    is, never as a false BROKEN."""
+
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+        for i in (1, 2):
+            run_receipts("log", "--actor", "agent", "--action", f"step {i}",
+                         cwd=self.workdir)
+
+    def rewrite(self, change, ending=b"\n"):
+        """Every entry through `change`, rechained and rehashed by the
+        spec, and written back in raw UTF-8 with `ending` after each
+        line. Returns the new chain head."""
+        entries = [json.loads(line) for line in
+                   self.log_path.read_bytes().split(b"\n") if line]
+        prev = None
+        written = b""
+        for entry in entries:
+            del entry["entry_hash"]
+            change(entry)
+            entry["prev"] = prev
+            entry["entry_hash"] = prev = spec_hash(entry)
+            written += json.dumps(entry, sort_keys=True, separators=(",", ":"),
+                                  ensure_ascii=False).encode("utf-8") + ending
+        self.log_path.write_bytes(written)
+        return prev
+
+    def assert_valid(self):
+        result = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "VALID")
+
+    def test_a_raw_line_separator_in_an_action_is_one_line_of_one_entry(self):
+        def separate(entry):
+            if entry["n"] == 1:
+                entry["action"] = "say" + SEPARATORS + "done"
+        head = self.rewrite(separate)
+        for char in SEPARATORS:
+            self.assertIn(char.encode("utf-8"), self.log_path.read_bytes())
+
+        self.assert_valid()
+        shown = run_receipts("head", cwd=self.workdir)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(shown.stdout.strip(), head)
+        # The writer counts the lines as the walk does: the next entry is 3.
+        logged = run_receipts("log", "--actor", "agent", "--action", "step 3",
+                              cwd=self.workdir)
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+        self.assertEqual(logged.stdout.strip(), "logged entry 3")
+        self.assert_valid()
+        report = run_receipts("report", cwd=self.workdir)
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertNotIn("Traceback", report.stderr)
+
+    def test_windows_line_endings_read_as_the_same_chain(self):
+        head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.log_path.write_bytes(
+            self.log_path.read_bytes().replace(b"\n", b"\r\n"))
+
+        self.assert_valid()
+        self.assertEqual(run_receipts("head", cwd=self.workdir).stdout.strip(),
+                         head)
+        # The recorder appends with a newline alone, and a chain holding
+        # both endings is still one chain.
+        logged = run_receipts("log", "--actor", "agent", "--action", "step 3",
+                              cwd=self.workdir)
+        self.assertEqual(logged.stdout.strip(), "logged entry 3", logged.stderr)
+        self.assertTrue(self.log_path.read_bytes().endswith(b"}\n"))
+        self.assertIn(b"}\r\n", self.log_path.read_bytes())
+        self.assert_valid()
+
+    def test_a_carriage_return_alone_ends_no_line(self):
+        # A carriage return between two keys is JSON whitespace. A reader
+        # that ended a line there would read one entry as two broken ones.
+        lines = self.log_path.read_bytes().split(b"\n")
+        lines[1] = lines[1].replace(b',"actor":', b',\r"actor":')
+        self.log_path.write_bytes(b"\n".join(lines))
+
+        self.assert_valid()
+        logged = run_receipts("log", "--actor", "agent", "--action", "step 3",
+                              cwd=self.workdir)
+        self.assertEqual(logged.stdout.strip(), "logged entry 3", logged.stderr)
+
+
+class NotUtf8LogTest(ReceiptsCliTest):
+    """#299, from the #292 review: `verify` names a line that is not
+    UTF-8 as BROKEN, and `head` and the writing verbs ended in a
+    traceback on the same log. They read it as the walk does now. On the
+    tail it is a damaged tail, as a crash in the middle of a character
+    leaves one: `head` has no head to print and the writing verbs refuse
+    to build on it (the hook starts a sibling, test_concurrency). Before
+    the tail it is damage in the middle of the file, which these verbs
+    read past as they read past any other, and `verify` names."""
+
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+        for i in (1, 2):
+            run_receipts("log", "--actor", "agent", "--action", f"step {i}",
+                         cwd=self.workdir)
+
+    def spoil(self, index):
+        """A byte that is not UTF-8 in line `index`; the file's bytes."""
+        lines = self.log_path.read_bytes().split(b"\n")
+        lines[index] = lines[index].replace(b"step", b"st\xffep")
+        self.log_path.write_bytes(b"\n".join(lines))
+        return self.log_path.read_bytes()
+
+    def test_head_refuses_a_tail_that_is_not_utf8_by_name(self):
+        self.spoil(2)
+
+        result = run_receipts("head", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("damaged tail", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_every_writing_verb_refuses_that_tail_and_writes_nothing(self):
+        before = self.spoil(2)
+        # Nothing listens at the URL, and nothing is sent: the refusal
+        # comes first.
+        nowhere = "http://127.0.0.1:9/x"
+        for verb in (["log", "--actor", "agent", "--action", "step 3"],
+                     ["run", "--actor", "agent", "--", sys.executable, "-c",
+                      "pass"],
+                     ["anchor", "--calendar", nowhere],
+                     ["publish", nowhere],
+                     ["stamp", "--authority", nowhere]):
+            with self.subTest(verb=verb[0]):
+                result = run_receipts(*verb, cwd=self.workdir)
+                self.assertEqual(result.returncode, 1,
+                                 result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn("damaged tail", result.stderr)
+                self.assertEqual(self.log_path.read_bytes(), before)
+
+    def test_a_byte_before_the_tail_is_read_past_as_other_damage_is(self):
+        self.spoil(1)
+        tail = json.loads(self.log_path.read_bytes().split(b"\n")[2])
+
+        shown = run_receipts("head", cwd=self.workdir)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(shown.stdout.strip(), tail["entry_hash"])
+        logged = run_receipts("log", "--actor", "agent", "--action", "step 3",
+                              cwd=self.workdir)
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+        self.assertEqual(logged.stdout.strip(), "logged entry 3")
+        judged = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(judged.returncode, 1, judged.stdout + judged.stderr)
+        self.assertIn("BROKEN at entry 1: line is not valid UTF-8",
+                      judged.stdout)
+
+    def test_a_sidecar_line_that_is_not_utf8_is_named_not_a_crash(self):
+        anchors = Path(str(self.log_path) + ".anchors.jsonl")
+        anchors.write_bytes(b'{"head":"\xff"}\n')
+
+        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("sidecar line is not a record", result.stdout)
