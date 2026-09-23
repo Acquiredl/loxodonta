@@ -108,7 +108,7 @@ TWINNED = {
                  "UnreadableLineTest", "LineRuleTest", "NotUtf8LogTest",
                  "UnknownVersionTest", "NoInputTest"],
     "test_concurrency": ["ForkedTailTest"],
-    "test_anchor": ["AnchorTest"],
+    "test_anchor": ["AnchorTest", "BlockHeaderTest"],
     "test_stamp": ["JudgedStampTest", "OutlivedCertificateTest"],
     "test_package": ["DemoStorePackageTest"],
     "test_package_anchor": ["SealedPackageTest"],

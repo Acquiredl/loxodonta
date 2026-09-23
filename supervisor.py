@@ -623,8 +623,12 @@ def fortnight(days, now):
 UPGRADE_EVERY_SECONDS = int(
     os.environ.get("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600))
 
+# Both of verify's ANCHORED lines: the block an attestation claims, not
+# checked, and the block a --block-header checked (ruling 3 on #299). The
+# span is the same either way; the height is the attestation's word in
+# both, which is all the panel shows it as.
 ANCHORED_LINE = re.compile(
-    r"^ANCHORED: entries 0\.\.(\d+) existed by Bitcoin block (\d+)")
+    r"^ANCHORED: entries 0\.\.(\d+)\b.*?Bitcoin block (\d+)")
 PENDING_LINE = re.compile(
     r"^ANCHOR-PENDING: head (\S+) submitted (\S+) via (\S+)")
 
@@ -5447,10 +5451,13 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "reordered since the chain was written. It does not show that "
         "the recorder was told the truth: the agent's harness supplied "
         "every action line, and the timestamps are its word.",
-        "- An anchor line under a chain shows that chain's head existed "
-        "by the Bitcoin block it names; the printed merkle root is yours "
-        "to confirm against a block source you trust. An anchor speaks "
-        "for its chain, never for this package as a set.",
+        "- An anchor line under a chain names the Bitcoin block its "
+        "attestation claims. It says the chain's head existed by that "
+        "block only when `verify-package --block-header HEX` was given "
+        "a header, from a source you trust, holding the merkle root the "
+        "proof replays to; otherwise the printed merkle root is yours to "
+        "confirm against a block source you trust. An anchor speaks for "
+        "its chain, never for this package as a set.",
     ]
     if transcripts and any(transcripts.values()):
         lines.append(
@@ -7470,8 +7477,8 @@ const CLAIM = {
   broken: "chain integrity failed — history was altered after the fact",
   refused: "no verdict — a chain nobody can judge still demands attention",
   valid: "intact against itself — tamper-evident, not yet anchored",
-  anchored: "intact and anchored — this history existed by the named " +
-            "Bitcoin block",
+  anchored: "intact and anchored — an attestation names a Bitcoin " +
+            "block, and its merkle root is yours to check",
   superseded: "torn tail, already handled — recording continued in a " +
               "sibling chain; kept as quiet evidence",
 };
