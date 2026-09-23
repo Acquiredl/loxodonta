@@ -16,9 +16,10 @@ these tests hold it to refusing the six home-reading supervisor verbs and
 the four home-writing verbs (#274) when any one home is the machine's,
 and to naming the line that made the start.
 
-The escaping of receipt text (#295) is written twice, once in the
-recorder and once in the supervisor, because neither file imports the
-other (ADR-0035); a test here holds the two copies equal.
+Two rules are written twice, once in the recorder and once in the
+supervisor, because neither file imports the other (ADR-0035): the
+escaping of receipt text (#295) and which hook entries are the
+recorder's (#293, #303). A test here holds each pair of copies equal.
 """
 
 import ast
@@ -205,25 +206,35 @@ class WriterHomeGuardTest(unittest.TestCase):
 
 # The escaping rule for receipt text (#295) lives twice: in the recorder,
 # for report, explain and verify's messages, and in the supervisor, for
-# every recall surface. The files never import each other (ADR-0035), so
-# nothing but this test keeps the two copies saying the same thing.
+# every recall surface.
 ESCAPING_NAMES = ("NAMED_ESCAPES", "STEERING_CATEGORIES", "visible")
 
+# The rule for which hook entries are the recorder's (#293) lives twice:
+# in the recorder, where install-hook and uninstall-hook claim entries by
+# it, and in the supervisor, where the scan reads the wired matchers, the
+# SessionEnd wiring and the recorder's path by it (#303).
+OWNERSHIP_NAMES = ("RECORDER_NAMES", "DIGEST_NAMES", "WIRED_VERB",
+                   "command_words", "file_name", "is_interpreter",
+                   "owned_script", "beside_a_recorder")
 
-def escaping_source(path):
-    """{name: source} for the escaping table(s) and `visible`, read as
-    text from the file, never imported."""
+# The files never import each other (ADR-0035), so nothing but these
+# tests keeps each pair of copies saying the same thing.
+
+
+def top_level_source(path, names):
+    """{name: source} for the top-level functions and assignments in
+    `path` carrying one of `names`, read as text, never imported."""
     text = path.read_text(encoding="utf-8")
     found = {}
     for node in ast.parse(text).body:
         if isinstance(node, ast.FunctionDef):
-            names = [node.name]
+            named = [node.name]
         elif isinstance(node, ast.Assign):
-            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            named = [t.id for t in node.targets if isinstance(t, ast.Name)]
         else:
             continue
-        for name in names:
-            if name in ESCAPING_NAMES:
+        for name in named:
+            if name in names:
                 found[name] = ast.get_source_segment(text, node)
     return found
 
@@ -231,15 +242,29 @@ def escaping_source(path):
 class TwinEscapingTest(unittest.TestCase):
 
     def test_the_recorder_and_the_supervisor_escape_alike(self):
-        recorder = escaping_source(RECORDER)
-        supervisor = escaping_source(SUPERVISOR)
+        recorder = top_level_source(RECORDER, ESCAPING_NAMES)
+        supervisor = top_level_source(SUPERVISOR, ESCAPING_NAMES)
         self.assertEqual(sorted(recorder), sorted(ESCAPING_NAMES))
         for name in ESCAPING_NAMES:
             with self.subTest(name=name):
                 self.assertEqual(
-                    recorder[name], supervisor[name],
+                    recorder[name], supervisor.get(name),
                     f"{name} differs between loxodonta.py and "
                     "supervisor.py: change both (#295)")
+
+
+class TwinOwnershipTest(unittest.TestCase):
+
+    def test_the_recorder_and_the_supervisor_claim_hooks_alike(self):
+        recorder = top_level_source(RECORDER, OWNERSHIP_NAMES)
+        supervisor = top_level_source(SUPERVISOR, OWNERSHIP_NAMES)
+        self.assertEqual(sorted(recorder), sorted(OWNERSHIP_NAMES))
+        for name in OWNERSHIP_NAMES:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    recorder[name], supervisor.get(name),
+                    f"{name} differs between loxodonta.py and "
+                    "supervisor.py: change both (#303)")
 
 
 if __name__ == "__main__":
