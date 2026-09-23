@@ -549,7 +549,12 @@ class FileReferenceTest(ReceiptsCliTest):
         self.write_file("report.md", "content\n")
         before = self.log_path.read_text(encoding="utf-8")
 
-        for bad_path in (str(self.workdir / "report.md"), "../escape.md"):
+        # The third is rooted without a drive (`\Users\...` on Windows),
+        # which Python 3.13 there no longer calls absolute: it used to be
+        # hashed at the drive's root and recorded as `/Users/...` (#299).
+        rooted = os.path.splitdrive(str(self.workdir / "report.md"))[1]
+        for bad_path in (str(self.workdir / "report.md"), "../escape.md",
+                         rooted):
             result = run_receipts(
                 "log", "--actor", "agent", "--action", "bad path",
                 "--file", bad_path, cwd=self.workdir,
@@ -1618,6 +1623,65 @@ class ShapeTest(TamperTest):
         result = self.assert_broken(at_entry=1)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_a_reference_path_that_leaves_the_project_is_broken_never_opened(self):
+        # #299: a reference path comes from the chain being judged, so a
+        # `..` or an absolute one would have `verify --files` hash a file
+        # of the writer's choosing on the recipient's machine. SPEC
+        # section 3 refuses them at the writer, so a chain holding one
+        # was written past that refusal or forged: the walk refuses the
+        # entry by name, on every platform alike, and nothing opens it.
+        outside = self.workdir.parent / f"{self.workdir.name}-outside.txt"
+        outside.write_text("not the chain's to hash\n", encoding="utf-8")
+        self.addCleanup(outside.unlink)
+        digest = hashlib.sha256(outside.read_bytes()).hexdigest()
+        rooted = os.path.splitdrive(str(outside))[1]
+        spellings = [
+            f"../{outside.name}",
+            f"sub/../../{outside.name}",
+            f"..{BACKSLASH}{outside.name}",
+            str(outside),
+            str(outside).replace(BACKSLASH, "/"),
+            rooted,
+            rooted.replace(BACKSLASH, "/"),
+            f"C:{outside.name}",
+            f"//server/share/{outside.name}",
+            f"{BACKSLASH * 2}server{BACKSLASH}share{BACKSLASH}{outside.name}",
+        ]
+        for path in spellings:
+            with self.subTest(path=path):
+                self.setUp()
+                self.rehashed(1, lambda e: e.__setitem__(
+                    "files", [{"path": path, "sha256": digest}]))
+
+                result = run_receipts("verify", "--files", cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 1,
+                                 result.stdout + result.stderr)
+                self.assertIn("BROKEN at entry 1: files names a path that "
+                              "leaves the project", result.stdout)
+                self.assertNotIn("CURRENT", result.stdout)
+                self.assertNotIn("VALID", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_name_that_only_starts_with_dots_stays_in_the_project(self):
+        # The rule is by segment: `..hidden` and `a..b` are names, not a
+        # step up.
+        (self.workdir / "..hidden").write_text("x", encoding="utf-8")
+        digest = hashlib.sha256(b"x").hexdigest()
+        self.rehashed(1, lambda e: e.__setitem__(
+            "files", [{"path": "..hidden", "sha256": digest},
+                      {"path": "a..b/c", "sha256": digest}]))
+        self.rehashed(2, lambda e: e.__setitem__(
+            "prev", json.loads(self.read_lines()[1])["entry_hash"]))
+        self.rehashed(3, lambda e: e.__setitem__(
+            "prev", json.loads(self.read_lines()[2])["entry_hash"]))
+
+        result = run_receipts("verify", "--files", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CURRENT: ..hidden", result.stdout)
+        self.assertIn("MISSING (not on disk): a..b/c", result.stdout)
+
     def test_no_reader_crashes_on_a_wrong_typed_chain(self):
         # The readers that do more than walk: --files resolves references,
         # report narrates, log --file scans every earlier reference for a
@@ -1714,6 +1778,30 @@ class LoneSurrogateTest(ReceiptsCliTest):
         self.assertEqual(ref["path"], "note" + BACKSLASH + "udcff.txt")
         self.assertEqual(ref["sha256"], hashlib.sha256(b"x").hexdigest())
         self.assert_valid()
+
+    def test_a_name_whose_escape_text_leaves_the_project_is_refused(self):
+        # A name that starts with a byte that is not UTF-8, or with `..`
+        # and then one, is a name here, but its receipt spelling
+        # (`\udcff...`, `..\udcff`) is rooted or steps up a folder on
+        # Windows, so the writer refuses it as the walk would refuse the
+        # chain (#299).
+        if sys.platform == "darwin":
+            self.skipTest("APFS refuses a file name that is not UTF-8")
+        for name in (LONE + "note.txt", ".." + LONE):
+            with self.subTest(name=ascii(name)):
+                try:
+                    (self.workdir / name).write_text("x", encoding="utf-8")
+                except (OSError, UnicodeError):
+                    self.skipTest("this filesystem cannot hold the name")
+
+                result = run_receipts("log", "--actor", "agent", "--action",
+                                      "wrote", "--file", name,
+                                      cwd=self.workdir)
+
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("error", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(len(self.entries()), 1)
 
 
 class UnopenableReferenceTest(ReceiptsCliTest):

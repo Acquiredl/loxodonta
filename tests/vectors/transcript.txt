@@ -1,0 +1,3 @@
+{"role":"user","text":"list the files"}
+{"role":"assistant","text":"notes.txt"}
+{"role":"user","text":"thanks"}

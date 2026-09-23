@@ -16,10 +16,13 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The supervisor writes its baseline, day book and views whole or not at all, so a crash mid-write no longer leaves a baseline the next scan cannot read, and the tripwire keeps its memory of heads (#300).
 - Every reader ends a line at `\n` alone, so a raw U+2028 in another writer's entry no longer reads as a false `BROKEN`; `\r\n` endings still read as the same chain (SPEC §1, #299).
 - `head` and the writing verbs no longer end in a traceback on a log holding invalid UTF-8: such a tail is a damaged tail, refused, and the hook starts a sibling (#299).
+- `verify` calls an entry `BROKEN` when a file reference could lead outside the project (`..`, absolute, a drive), so `--files` never hashes a file the chain chose; the recorder refuses the same spellings, `\Users\x` on Windows included (#299).
+- `verify-package` refuses a zip holding two members that unpack to one file, which let a tampered chain verify `SELF-CONSISTENT`, and a manifest giving a key twice: both `UNSUPPORTED-FORMAT`, exit 4 (#299).
 
 ### Added
 
 - `verifier.py`: the recorder's `head`, `verify` and `verify-package` on their own, with nothing that writes or sends. It is copied from `loxodonta.py`, never edited by hand; CI fails a stale copy, and releases carry it (ADR-0035, #299).
+- Conformance vectors in `tests/vectors/`: small chains with the verdict each must get, run against `loxodonta.py` and `verifier.py`, for a second implementation to check itself against. SPEC section 4 now pins string escaping to RFC 8785's (ADR-0035, #299).
 - The receiver caps what it keeps, 1024 MiB a file and 10240 MiB in all (`--file-cap`, `--total-cap`), answering `507` past a cap and trimming nothing (#300).
 
 ## [0.8.1] - 2026-09-23
