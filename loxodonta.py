@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -448,20 +449,104 @@ def cmd_log(args):
     return append_entry(args.log, args.actor, args.action, args.file)
 
 
+def run_signals():
+    """The signals `run` catches while its command runs (#296).
+
+    Every one of them would otherwise end the wrapper before it wrote the
+    receipt. What is missing from this list cannot be caught, and is the
+    limit of the guarantee: SIGKILL anywhere, and on Windows a SIGTERM,
+    which `os.kill` there turns into TerminateProcess, as it does a Task
+    Manager "End task". Windows has no SIGHUP; Ctrl-Break is its SIGBREAK.
+    """
+    names = ["SIGINT"]
+    names += ["SIGBREAK"] if os.name == "nt" else ["SIGTERM", "SIGHUP"]
+    return [getattr(signal, name) for name in names if hasattr(signal, name)]
+
+
 def cmd_run(args):
     # No log means no receipt could be written — refuse before the command
     # runs, or the wrapper would execute work it cannot record.
     if not os.path.exists(args.log):
         return missing_log(args.log)
-    # Run first, hash after: the receipt records what the command actually
-    # did, and the invoked process cannot prevent or shape it (SPEC §7).
-    completed = subprocess.run(args.command_argv)
-    action = f"run: {' '.join(args.command_argv)} (exit {completed.returncode})"
-    if append_entry(args.log, args.actor, action, args.file) != 0:
-        # A lost receipt must never hide behind the command's success code.
-        print(f"error: receipt not written for: {action}", file=sys.stderr)
-        return 1
-    return completed.returncode
+    command_line = " ".join(args.command_argv)
+
+    # The first signal handled decides how the receipt ends (signals that
+    # arrive together are handled in signal-number order). The handlers
+    # go in before the command starts, so no moment exists in which a
+    # signal could end the wrapper with the command running unrecorded,
+    # and they stay until the receipt is on disk, so a second one cannot
+    # tear the line being written.
+    received = []
+    child = None
+    # SIGTERM and SIGHUP were sent to the wrapper alone, by `kill` or by
+    # the command itself, so they are passed on, or the command runs on
+    # and the wrapper waits for ever. Ctrl-C and Ctrl-Break are not: the
+    # console already sent them to the command too, and a second one is
+    # "stop now, skip the cleanup" to many tools.
+    console_keys = (signal.SIGINT, getattr(signal, "SIGBREAK", None))
+
+    def pass_on(signum):
+        if signum not in console_keys and child is not None:
+            child.send_signal(signum)  # a no-op once the child is reaped
+
+    def on_signal(signum, frame):
+        if not received:
+            received.append(signum)
+        pass_on(signum)
+
+    # A signal already set to "ignore" is left alone. That is how `nohup`
+    # and a shell's background `&` protect a command: the ignore is
+    # inherited through the wrapper. A caught signal is reset to its
+    # default in the command, so catching one here would undo it, and the
+    # hangup nohup was asked to survive would end the command.
+    caught = [signum for signum in run_signals()
+              if signal.getsignal(signum) is not signal.SIG_IGN]
+    previous = {signum: signal.signal(signum, on_signal) for signum in caught}
+    try:
+        # Run first, hash after: the receipt records what the command
+        # actually did, however it ended: by its exit status, with the
+        # wrapper interrupted or signalled, or by failing to start (SPEC
+        # §7).
+        try:
+            child = subprocess.Popen(args.command_argv)
+        except OSError as e:
+            # Not found, not executable: the shell's 127 and 126, and a
+            # receipt for the attempt instead of a traceback.
+            print(f"error: could not start {args.command_argv[0]}: "
+                  f"{e.strerror or e}", file=sys.stderr)
+            code = 126 if isinstance(e, PermissionError) else 127
+            outcome = f"could not start: {type(e).__name__}"
+        else:
+            if received:
+                pass_on(received[0])  # it came while the command started
+            # Popen.wait resumes by itself after a handler returns (PEP
+            # 475), so the wrapper outlives the command whatever it was
+            # sent, and the receipt's files are hashed after the command
+            # has finished touching them.
+            # The command's exit status is kept in every case, as the
+            # subprocess module reports it (a negative number is a POSIX
+            # death by that signal): what the wrapper was sent and what
+            # became of the command are two facts, and the receipt holds
+            # both.
+            returncode = child.wait()
+            outcome = f"exit {returncode}"
+            if not received:
+                code = returncode
+            elif received[0] == signal.SIGINT:
+                code, outcome = 128 + signal.SIGINT, f"interrupted, {outcome}"
+            else:
+                code = 128 + received[0]
+                outcome = (f"terminated by signal {int(received[0])}, "
+                           f"{outcome}")
+        action = f"run: {command_line} ({outcome})"
+        if append_entry(args.log, args.actor, action, args.file) != 0:
+            # A lost receipt must never hide behind the command's exit code.
+            print(f"error: receipt not written for: {action}", file=sys.stderr)
+            return 1
+        return code
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def cmd_head(args):

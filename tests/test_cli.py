@@ -9,9 +9,11 @@ there.
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1064,6 +1066,142 @@ class RunTest(ReceiptsCliTest):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("doomed.txt", result.stderr)
         self.assertIn("receipt", result.stderr)
+
+    def assert_chain_valid(self):
+        result = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VALID", result.stdout)
+
+    def test_run_of_command_that_cannot_start_leaves_a_receipt(self):
+        # #296: a command that is not there used to end in a traceback and
+        # no receipt. The attempt is itself the thing to record.
+        missing = str(self.workdir / "no-such-command")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--", missing, "--flag",
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("could not start", result.stderr)
+        entry = self.last_entry()
+        self.assertEqual(entry["n"], 1)
+        self.assertEqual(
+            entry["action"],
+            f"run: {missing} --flag (could not start: FileNotFoundError)",
+        )
+        self.assert_chain_valid()
+
+    @unittest.skipIf(os.name == "nt", "a file without an execute bit is POSIX")
+    def test_run_of_command_without_execute_permission_exits_126(self):
+        script = self.workdir / "not-executable.sh"
+        script.write_text("#!/bin/sh\necho ran\n", encoding="utf-8")
+        script.chmod(0o644)
+        if os.access(script, os.X_OK):
+            self.skipTest("running as a user every file is executable for")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--", str(script),
+            cwd=self.workdir,
+        )
+
+        self.assertEqual(result.returncode, 126, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {script} (could not start: PermissionError)",
+        )
+
+    @unittest.skipIf(os.name == "nt", "a child cannot send SIGTERM to its "
+                     "parent on Windows: os.kill there is TerminateProcess")
+    def test_run_killed_by_its_child_with_sigterm_still_leaves_a_receipt(self):
+        # #296: the child ends its own wrapper. The wrapper passes the
+        # signal on, waits for the child, writes the receipt, and exits
+        # the way a shell reports a death by signal: 128 + N.
+        kill_parent = ("import os, signal, time; "
+                       "os.kill(os.getppid(), signal.SIGTERM); time.sleep(30)")
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--", sys.executable, "-c", kill_parent,
+            cwd=self.workdir,
+        )
+
+        # The command's own exit status is kept beside the signal: the
+        # child died of the SIGTERM passed on to it.
+        self.assertEqual(result.returncode, 128 + signal.SIGTERM, result.stderr)
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {sys.executable} -c {kill_parent} "
+            f"(terminated by signal {int(signal.SIGTERM)}, "
+            f"exit {-int(signal.SIGTERM)})",
+        )
+        self.assert_chain_valid()
+
+    # A command that marks when it started, runs two seconds, and marks
+    # when it finished: long enough to be signalled while it runs.
+    SLOW_CHILD = ("import time; open('started', 'w').close(); time.sleep(2); "
+                  "open('finished', 'w').close()")
+
+    def start_wrapper_in_background(self, launcher=(), **popen_args):
+        """Start `run` around SLOW_CHILD and return once the child runs."""
+        wrapper = subprocess.Popen(
+            [*launcher, sys.executable, str(LOXODONTA), "run",
+             "--actor", "agent", "--", sys.executable, "-c", self.SLOW_CHILD],
+            cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            **popen_args,
+        )
+        self.addCleanup(lambda: wrapper.poll() is None and wrapper.kill())
+        started = self.workdir / "started"
+        deadline = time.monotonic() + 30
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(started.exists(), "the child never started")
+        return wrapper
+
+    @unittest.skipIf(os.name == "nt", "SIGINT cannot be sent to one process "
+                     "on Windows, only a Ctrl-C to a whole console")
+    def test_run_interrupted_waits_for_the_child_and_leaves_a_receipt(self):
+        # #296: Ctrl-C used to raise KeyboardInterrupt out of the wait and
+        # leave no receipt. The interrupt is sent to the wrapper alone
+        # (a console would send it to the child as well), so the child
+        # finishes on its own and the wrapper must still be waiting.
+        wrapper = self.start_wrapper_in_background()
+        wrapper.send_signal(signal.SIGINT)
+        out, err = wrapper.communicate(timeout=60)
+
+        self.assertEqual(wrapper.returncode, 130, err)
+        self.assertNotIn("Traceback", err)
+        self.assertTrue((self.workdir / "finished").exists(),
+                        "the wrapper did not wait")
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {sys.executable} -c {self.SLOW_CHILD} (interrupted, exit 0)",
+        )
+        self.assert_chain_valid()
+
+    @unittest.skipIf(os.name == "nt", "Windows has no SIGHUP")
+    def test_run_under_nohup_leaves_an_ignored_hangup_ignored(self):
+        # `nohup loxodonta run ...` sets SIGHUP to "ignore" and relies on
+        # the command inheriting it. Catching SIGHUP in the wrapper would
+        # reset the command's copy to the default, and a closed terminal
+        # would then kill the very command nohup was protecting.
+        nohup = [sys.executable, "-c",
+                 "import os, signal, sys; "
+                 "signal.signal(signal.SIGHUP, signal.SIG_IGN); "
+                 "os.execv(sys.argv[1], sys.argv[1:])"]
+        wrapper = self.start_wrapper_in_background(
+            launcher=nohup, start_new_session=True)
+        os.killpg(wrapper.pid, signal.SIGHUP)  # the whole group, as a hangup
+        out, err = wrapper.communicate(timeout=60)
+
+        self.assertEqual(wrapper.returncode, 0, err)
+        self.assertTrue((self.workdir / "finished").exists())
+        self.assertEqual(
+            self.last_entry()["action"],
+            f"run: {sys.executable} -c {self.SLOW_CHILD} (exit 0)",
+        )
 
     def test_chain_verifies_valid_after_several_runs(self):
         run_receipts(
