@@ -10,20 +10,6 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
-### Changed
-
-- Exit 1 now means `BROKEN` and nothing else. A missing, empty or unreadable log exits 66, an internal error 70, a held lock 75, a closed pipe 141; writers use 65, 69 and 73 too (ADR-0037, #299).
-- The hashing is frozen across format versions, so `verify` walks the hashes whatever the genesis `v` claims: an edit is `BROKEN`, and `UNSUPPORTED-VERSION` (exit 4) means every hash holds (ADR-0036, #299).
-
-### Fixed
-
-- The receiver gives each request its own thread and drops one not whole within 60 seconds, so a slow sender no longer holds the door (#300).
-- The supervisor writes its baseline, day book and views whole or not at all, so a crash mid-write no longer leaves a baseline the next scan cannot read, and the tripwire keeps its memory of heads (#300).
-- Every reader ends a line at `\n` alone, so a raw U+2028 in another writer's entry no longer reads as a false `BROKEN`; `\r\n` endings still read as the same chain (SPEC §1, #299).
-- `head` and the writing verbs no longer end in a traceback on a log holding invalid UTF-8: such a tail is a damaged tail, refused, and the hook starts a sibling (#299).
-- `verify` calls an entry `BROKEN` when a file reference could lead outside the project (`..`, absolute, a drive), so `--files` never hashes a file the chain chose; the recorder refuses the same spellings, `\Users\x` on Windows included (#299).
-- `verify-package` refuses a zip holding two members that unpack to one file, which let a tampered chain verify `SELF-CONSISTENT`, and a manifest giving a key twice: both `UNSUPPORTED-FORMAT`, exit 4 (#299).
-
 ### Added
 
 - `verifier.py`: the recorder's `head`, `verify` and `verify-package` on their own, with nothing that writes or sends. It is copied from `loxodonta.py`, never edited by hand; CI fails a stale copy, and releases carry it (ADR-0035, #299).
@@ -33,7 +19,18 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Changed
 
+- Exit 1 now means `BROKEN` and nothing else. A missing, empty or unreadable log exits 66, an internal error 70, a held lock 75, a closed pipe 141; writers use 65, 69 and 73 too (ADR-0037, #299).
+- The hashing is frozen across format versions, so `verify` walks the hashes whatever the genesis `v` claims: an edit is `BROKEN`, and `UNSUPPORTED-VERSION` (exit 4) means every hash holds (ADR-0036, #299).
 - An anchor line says its attestation claims block H and the block was not checked, since a regenerated chain can carry a made-up attestation; only a matching `--block-header` makes it say the entries existed by that block (#299).
+
+### Fixed
+
+- The receiver gives each request its own thread and drops one not whole within 60 seconds, so a slow sender no longer holds the door (#300).
+- The supervisor writes its baseline, day book and views whole or not at all, so a crash mid-write no longer leaves a baseline the next scan cannot read, and the tripwire keeps its memory of heads (#300).
+- Every reader ends a line at `\n` alone, so a raw U+2028 in another writer's entry no longer reads as a false `BROKEN`; `\r\n` endings still read as the same chain (SPEC §1, #299).
+- `head` and the writing verbs no longer end in a traceback on a log holding invalid UTF-8: such a tail is a damaged tail, refused, and the hook starts a sibling (#299).
+- `verify` calls an entry `BROKEN` when a file reference could lead outside the project (`..`, absolute, a drive), so `--files` never hashes a file the chain chose; the recorder refuses the same spellings, `\Users\x` on Windows included (#299).
+- `verify-package` refuses a zip holding two members that unpack to one file, which let a tampered chain verify `SELF-CONSISTENT`, and a manifest giving a key twice: both `UNSUPPORTED-FORMAT`, exit 4 (#299).
 
 ## [0.8.1] - 2026-09-23
 
