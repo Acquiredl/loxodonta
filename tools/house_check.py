@@ -12,6 +12,7 @@ Stdlib only, like everything here.
     python tools/house_check.py            # every tracked Markdown file,
                                            # and the tool files (below)
     python tools/house_check.py README.md  # just these paths
+    python tools/house_check.py --front-door   # the presentation rules
 
 With no paths it judges the checkout it is run from: run it from the root
 of any checkout, not only this one, and it reads that checkout's tracked
@@ -20,14 +21,21 @@ files. A path ending in `.py` is read as code (the code pass, below).
 Findings print one per line as `file:line: rule: excerpt`, warnings as
 `file:line: rule (warning): excerpt`. The exit code is 1 when any finding
 is a failure, 0 otherwise. CI runs the same command.
+
+`--front-door` runs a separate set of rules instead, about the shape a
+stranger meets rather than the words (issue #298, the section of that
+name below). It takes no paths, judges the whole checkout, and exits 1 on
+any finding. CI does not run it yet.
 """
 
 import io
+import posixpath
 import re
 import subprocess
 import sys
 import tokenize
 from pathlib import Path
+from urllib.parse import unquote
 
 # --- the rules -------------------------------------------------------------
 
@@ -393,6 +401,338 @@ def excerpt(line, match):
     return line[start:end].strip()
 
 
+# --- the front door, measured (--front-door) -------------------------------
+#
+# The rules above judge words. These judge the shape a stranger meets
+# before reading a word closely: the README's first screen, the pictures,
+# the indexes, what sits at the root, the changelog, the ADR file names
+# (issue #298; an outside review of v0.8.0 scored the presentation below
+# the engineering, and a fix held by memory drifts back). They report and
+# do not gate: `--front-door` exits 1 on any finding, and CI runs only the
+# default pass until the presentation pass makes these pass.
+#
+# Every number and list the rules use is in this one table, so an argument
+# with a threshold is an edit to one line. Paths are relative to the root
+# of the checkout, with forward slashes, as `git ls-files` prints them.
+
+# 1. The README's first screen.
+FIRST_PARAGRAPH_WORDS = 60       # the first prose paragraph, at most
+FIRST_IMAGE_WITHIN = 15          # a picture within the README's first lines,
+WORDMARK = "docs/images/wordmark.svg"  # and the wordmark is not that picture
+WHY_NOT = "Why not"              # a README heading starts with these words
+# 2. Pictures: every file here is shown by some tracked Markdown file,
+#    except the sources a picture is made from (a VHS `.tape` script).
+IMAGES = "docs/images/"
+IMAGE_SOURCES = {".tape"}
+# 3. Indexes: (the index page, the pages it must link, said in words).
+#    An index does not have to link itself.
+INDEXES = [
+    ("docs/README.md", r"docs/[^/]+\.md", "every page in docs/"),
+    ("adrs/README.md", r"adrs/\d{4}-[^/]+\.md", "every ADR"),
+]
+# 4. The root: the only files tracked there, besides any dotfile.
+ROOT_ALLOWED = {
+    "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md",
+    "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "AGENTS.md", "CLAUDE.md",
+    "loxodonta.py", "supervisor.py", "receiver.py",   # the three tools
+}
+# ...and, for anything else, where it could live instead (first match).
+WHERE_IT_COULD_LIVE = [
+    (r"\.md$", "docs/"),
+    (r"\.py$", "tools/"),
+    (r"\.(?:toml|ya?ml|json|ini|cfg)$",
+     ".github/ (a tool that reads a config file can be told its path)"),
+    (r".", "docs/, tools/ or .github/, by what reads it"),
+]
+# 5. The changelog: each bullet under a version newer than this one, and
+#    under [Unreleased], which is newer than every version, at most so
+#    many words. The versions already released keep their bullets.
+CHANGELOG_JUDGED_AFTER = (0, 8, 0)
+CHANGELOG_BULLET_WORDS = 40
+# 6. ADR file names: from this number on, a slug of at most so many
+#    characters. The ADRs already written keep their names.
+ADR_SLUG_FROM = 36
+ADR_SLUG_CHARS = 60
+
+# A link or image target in Markdown: `[text](target)`, `![alt](target)`,
+# `<a href="target">`, `<img src="target">`, and a reference definition
+# `[name]: target`. A reference-style use (`![alt][name]`) is found through
+# its definition.
+LINK_TARGETS = [
+    r"\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'(][^)]*)?\)",
+    r"\b(?:src|href)\s*=\s*[\"']([^\"']+)[\"']",
+    r"^\s{0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s|$)",
+]
+IMAGE_TARGETS = [
+    r"!\[[^\]]*\]\(\s*<?([^)\s>]+)",
+    r"<img\b[^>]*\bsrc\s*=\s*[\"']([^\"']+)[\"']",
+]
+# An image by itself, or an image inside a link (a badge).
+_IMAGE = r"!\[[^\]]*\]\([^)]*\)"
+IMAGES_ONLY = r"(?:\s*(?:\[" + _IMAGE + r"\]\([^)]*\)|" + _IMAGE + r"))+\s*"
+
+
+def front_door_main():
+    """Run the front-door rules on the checkout the command is run in and
+    print each finding. Exit 1 when there is any, 0 otherwise."""
+    top = Path(subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, encoding="utf-8", check=True).stdout.strip())
+    listing = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=top,
+        capture_output=True, encoding="utf-8", check=True).stdout
+    tracked = sorted(name for name in listing.split("\0") if name)
+    found = front_door_findings(top, tracked)
+    for where, rule, text in found:
+        print(f"{where}: {rule}: {text}")
+    return 1 if found else 0
+
+
+def front_door_findings(top, tracked):
+    """Every front-door finding, as (where, rule, text). `where` is
+    `file:line` when the finding has a line, and the file alone when it
+    is about the whole file (a picture nothing shows, a file at the root).
+    Every file set is the tracked one, read from the working tree: a
+    scratch file is nobody's front door yet, as for the default pass."""
+    def read(name):
+        return (top / name).read_text(encoding="utf-8")
+
+    pages = [name for name in tracked if name.endswith(".md")]
+    targets = {name: list(link_targets(name, read(name))) for name in pages}
+    found = []
+    if "README.md" in tracked:
+        found += readme_findings(read("README.md"))
+    else:
+        found.append(("README.md", "first-screen", "there is no README.md"))
+    found += orphan_images(tracked, targets)
+    found += index_findings(tracked, targets)
+    found += root_findings(tracked)
+    if "CHANGELOG.md" in tracked:
+        found += changelog_findings(read("CHANGELOG.md"))
+    found += adr_slug_findings(tracked)
+    return found
+
+
+def readme_findings(text):
+    """Rule 1: the README's first paragraph, first picture and Why-not
+    heading."""
+    lines = text.splitlines()
+    found = []
+    number, paragraph = first_paragraph(lines)
+    if paragraph is not None:
+        words = count_words(paragraph)
+        if words > FIRST_PARAGRAPH_WORDS:
+            found.append((f"README.md:{number}", "first-paragraph",
+                          f"{words} words, at most {FIRST_PARAGRAPH_WORDS}: "
+                          f"{paragraph[:60]}..."))
+    pictures = [target for line in lines[:FIRST_IMAGE_WITHIN]
+                for pattern in IMAGE_TARGETS
+                for target in re.findall(pattern, line)
+                if resolve("README.md", target) not in (None, WORDMARK)]
+    if not pictures:
+        found.append(("README.md", "first-image",
+                      f"no image but the wordmark in the first "
+                      f"{FIRST_IMAGE_WITHIN} lines (a badge is served from "
+                      f"elsewhere and does not count)"))
+    headings = [line for line, fenced in unfenced(lines)
+                if not fenced and re.match(r"#{1,6}\s+" + re.escape(WHY_NOT) + r"\b",
+                                           line, re.IGNORECASE)]
+    if not headings:
+        found.append(("README.md", "why-not",
+                      f'no heading starts "{WHY_NOT}"'))
+    return found
+
+
+def first_paragraph(lines):
+    """(line number, text) of the README's first paragraph of ordinary
+    prose, or (None, None) when it has none. On the way down, every line
+    that is not ordinary prose is passed over:
+
+    - blank lines, and HTML comments (a `<!-- -->` on one line or several),
+    - a line of images and nothing else: the wordmark, and a line of badges
+      (each an image inside a link),
+    - the tagline: a line wholly in italics, `*like this*` or `_this_`,
+    - headings, HTML lines (`<p align=...>`), fenced code, list items,
+      table rows and quotations, none of which is a paragraph.
+
+    The first line left starts the paragraph, and it runs to the next blank
+    line. Its words are counted as they read (see count_words)."""
+    in_comment = fenced = False
+    start, paragraph = None, []
+    for number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if start is None:
+            if in_comment:
+                in_comment = "-->" not in stripped
+                continue
+            if stripped.startswith("<!--"):
+                in_comment = "-->" not in stripped
+                continue
+            if re.match(FENCE, line):
+                fenced = not fenced
+                continue
+            if (fenced or not stripped
+                    or re.fullmatch(IMAGES_ONLY, stripped)
+                    or re.fullmatch(r"\*[^*].*\*|_[^_].*_", stripped)
+                    or re.match(r"(?:#|<|\||>|[-*+]\s|\d+[.)]\s)", stripped)):
+                continue
+            start = number
+        if not stripped:
+            break
+        paragraph.append(stripped)
+    return (start, " ".join(paragraph)) if start else (None, None)
+
+
+def count_words(text):
+    """Words as a reader meets them: a link is its text, an image is
+    nothing, and a token with no letter or digit in it (a lone dash or
+    colon) is not a word."""
+    text = re.sub(_IMAGE, " ", text)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    return len(re.findall(r"\S*\w\S*", text))
+
+
+def unfenced(lines):
+    """(line, fenced) for each line: whether it sits in a fenced block."""
+    fenced = False
+    for line in lines:
+        if re.match(FENCE, line):
+            fenced = not fenced
+            yield line, True
+        else:
+            yield line, fenced
+
+
+def link_targets(page, text):
+    """Every link or image target in a Markdown page, outside fenced code."""
+    for line, fenced in unfenced(text.splitlines()):
+        if fenced:
+            continue
+        for pattern in LINK_TARGETS:
+            yield from re.findall(pattern, line)
+
+
+def resolve(page, target):
+    """The tracked-file path a link on `page` points at, or None for a
+    link to a URL or to a place in the same page. `/x` is from the root
+    of the checkout, anything else from the page's own folder; a `#part`
+    or `?query` is dropped."""
+    target = unquote(re.split(r"[#?]", target, maxsplit=1)[0])
+    if not target or re.match(r"[a-z][a-z0-9+.-]*:", target, re.IGNORECASE):
+        return None
+    if target.startswith("/"):
+        return posixpath.normpath(target.lstrip("/"))
+    return posixpath.normpath(posixpath.join(posixpath.dirname(page), target))
+
+
+def links_to(targets, name):
+    """True when some page's link reaches `name`: by its path, or by a
+    URL whose path ends in it (a raw.githubusercontent.com address)."""
+    return any(resolve(page, target) == name
+               or (resolve(page, target) is None
+                   and re.split(r"[#?]", target, maxsplit=1)[0].endswith("/" + name))
+               for page, page_targets in targets.items()
+               for target in page_targets)
+
+
+def orphan_images(tracked, targets):
+    """Rule 2: a picture under docs/images/ that no tracked page shows."""
+    return [(name, "orphan-image", "no tracked Markdown file links it")
+            for name in tracked
+            if name.startswith(IMAGES)
+            and posixpath.splitext(name)[1] not in IMAGE_SOURCES
+            and not links_to(targets, name)]
+
+
+def index_findings(tracked, targets):
+    """Rule 3: an index page that is missing (one finding, however many
+    pages it would list), or that does not link one of its pages."""
+    found = []
+    for index, pattern, pages in INDEXES:
+        listed = [name for name in tracked
+                  if re.fullmatch(pattern, name) and name != index]
+        if not listed:
+            continue
+        if index not in tracked:
+            found.append((index, "index",
+                          f"missing; it would link {pages}, "
+                          f"{len(listed)} pages"))
+            continue
+        own = {index: targets.get(index, [])}
+        found += [(index, "index", f"does not link {name}")
+                  for name in listed if not links_to(own, name)]
+    return found
+
+
+def root_findings(tracked):
+    """Rule 4: a file at the root that is neither allowed nor a dotfile,
+    and where it could live instead."""
+    found = []
+    for name in tracked:
+        if "/" in name or name.startswith(".") or name in ROOT_ALLOWED:
+            continue
+        home = next(where for pattern, where in WHERE_IT_COULD_LIVE
+                    if re.search(pattern, name))
+        found.append((name, "root-file",
+                      f"not on the root allowlist; it could live in {home}"))
+    return found
+
+
+def changelog_findings(text):
+    """Rule 5: a changelog bullet too long, under [Unreleased] or a version
+    newer than CHANGELOG_JUDGED_AFTER. A bullet runs from its marker to
+    the next blank line, heading or bullet, so a wrapped bullet is counted
+    whole and reported at its first line."""
+    found = []
+    judged = False
+    bullets = []                     # [line number, text] of each judged bullet
+    current = None
+    for number, (line, fenced) in enumerate(unfenced(text.splitlines()), 1):
+        heading = re.match(r"##\s+\[([^\]]+)\]", line)
+        if not fenced and re.match(r"#{1,2}\s", line):
+            judged = bool(heading) and newer_than_judged(heading.group(1))
+            current = None
+        elif fenced or not line.strip() or line.startswith("#"):
+            current = None
+        elif re.match(r"\s*[-*+]\s", line):
+            current = [number, line.strip()[1:]] if judged else None
+            if current:
+                bullets.append(current)
+        elif current:
+            current[1] += " " + line.strip()
+    for number, bullet in bullets:
+        words = count_words(bullet)
+        if words > CHANGELOG_BULLET_WORDS:
+            found.append((f"CHANGELOG.md:{number}", "changelog-bullet",
+                          f"{words} words, at most {CHANGELOG_BULLET_WORDS}: "
+                          f"{bullet.strip()[:60]}..."))
+    return found
+
+
+def newer_than_judged(version):
+    """True for [Unreleased] and for a version newer than the last one
+    whose bullets are left alone. A heading that names no version is not
+    judged."""
+    if version.strip().lower() == "unreleased":
+        return True
+    numbers = re.match(r"v?(\d+)\.(\d+)\.(\d+)", version.strip())
+    return bool(numbers) and tuple(map(int, numbers.groups())) > CHANGELOG_JUDGED_AFTER
+
+
+def adr_slug_findings(tracked):
+    """Rule 6: an ADR numbered ADR_SLUG_FROM or later whose file name,
+    past its number, is longer than ADR_SLUG_CHARS characters."""
+    found = []
+    for name in tracked:
+        adr = re.fullmatch(r"adrs/(\d{4})-(.+)\.md", name)
+        if adr and int(adr.group(1)) >= ADR_SLUG_FROM \
+                and len(adr.group(2)) > ADR_SLUG_CHARS:
+            found.append((name, "adr-slug",
+                          f"slug of {len(adr.group(2))} characters, at most "
+                          f"{ADR_SLUG_CHARS}"))
+    return found
+
+
 # --- the command -----------------------------------------------------------
 
 def tracked_files():
@@ -406,10 +746,22 @@ def tracked_files():
     return [Path(name) for name in listing.split("\0") if name]
 
 
+USAGE = ("usage: house_check.py [PATH ...]\n"
+         "       house_check.py --front-door   (takes no paths: it judges "
+         "the whole checkout)")
+
+
 def main(argv):
     # Findings quote the documents, which carry arrows and curly quotes; a
     # console that cannot show them must still show the finding.
     sys.stdout.reconfigure(errors="backslashreplace")
+    if "--front-door" in argv:
+        if len(argv) != 1:
+            # Exit 2, as argparse does in the three tools, for a command
+            # line that asks for something the checker does not do.
+            print(USAGE, file=sys.stderr)
+            return 2
+        return front_door_main()
     paths = [Path(p) for p in argv] or tracked_files()
     failures = 0
     for path in paths:
