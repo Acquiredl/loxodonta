@@ -27,7 +27,7 @@
 ## Constraints
 
 - Python stdlib only for the core tool — no dependencies, ever. (Anchoring vendors nothing: ADR-0003 chose a minimal in-file OpenTimestamps subset.)
-- Single-file `loxodonta.py`, readable top-to-bottom by a non-expert. Readability outranks cleverness everywhere in this repo. `adapters/` holds per-harness spoons, not tools: each is stdlib-only, imports its SDK only if present, and speaks to the recorder solely through `loxodonta hook` (ADR-0020). Single-file is a security property as well as a readability one: a directly run script is compiled from source every time, while an imported sibling can be swapped through its bytecode cache with its checksum unmoved, so nothing here imports anything (ADR-0035, which also rules how the recipient's `verifier.py` is copied out of the recorder).
+- Single-file `loxodonta.py`, readable top-to-bottom by a non-expert. Readability outranks cleverness everywhere in this repo. `adapters/` holds per-harness spoons, not tools: each is stdlib-only, imports its SDK only if present, and speaks to the recorder solely through `loxodonta hook` (ADR-0020). Single-file is kept for readability, and for one narrow security reason: a directly run script is compiled from source every time, while an imported sibling can be swapped through its bytecode cache with its checksum unmoved, so nothing here imports anything. It does not make the hashed file the code that ran: the script's own folder is first on `sys.path`, so a module dropped beside it shadows the standard library, which `python -I` prevents (ADR-0035 and its 2026-09-23 addendum, which also rule how the recipient's `verifier.py` is copied out of the recorder).
 - Tests verify behavior through the public CLI surface, not internals.
 
 ## Branching model
