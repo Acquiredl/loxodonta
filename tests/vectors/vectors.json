@@ -1,0 +1,357 @@
+{
+  "format": "0.1",
+  "about": "Conformance vectors for the receipt format (docs/SPEC.md). Run each row's args from inside this folder; the exit and the last line of stdout must be as given. See README.md.",
+  "vectors": [
+    {
+      "name": "genesis-only",
+      "about": "A chain of its genesis alone.",
+      "args": [
+        "verify",
+        "--log",
+        "genesis-only.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID"
+    },
+    {
+      "name": "genesis-only-head",
+      "about": "The head of a genesis-only chain is the genesis entry's hash.",
+      "args": [
+        "head",
+        "--log",
+        "genesis-only.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "f20b1b3b9b0dd649fc6f00125ad29f374143b0d5c0b4d0a68749bbb5657c1fd4"
+    },
+    {
+      "name": "valid-chain",
+      "about": "Genesis and three entries, one with a file reference, as the recorder wrote them.",
+      "args": [
+        "verify",
+        "--log",
+        "valid-chain.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID"
+    },
+    {
+      "name": "valid-chain-files",
+      "about": "The file reference checked against notes.txt beside the chain: CURRENT, then VALID.",
+      "args": [
+        "verify",
+        "--files",
+        "--log",
+        "valid-chain.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID"
+    },
+    {
+      "name": "valid-chain-head",
+      "about": "head prints the last entry's entry_hash.",
+      "args": [
+        "head",
+        "--log",
+        "valid-chain.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35"
+    },
+    {
+      "name": "expect-head-match",
+      "about": "The head record matches the chain head.",
+      "args": [
+        "verify",
+        "--expect-head",
+        "fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35",
+        "--log",
+        "valid-chain.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID"
+    },
+    {
+      "name": "expect-head-mismatch",
+      "about": "A head record from another chain: internally valid, but not the recorded history.",
+      "args": [
+        "verify",
+        "--expect-head",
+        "6da336801769a2bb75cc6a22c67c852069597548afd3d0fa20e822951169ec11",
+        "--log",
+        "valid-chain.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "HEAD-MISMATCH: chain head is fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35, expected 6da336801769a2bb75cc6a22c67c852069597548afd3d0fa20e822951169ec11 \u2014 this is not the recorded history"
+    },
+    {
+      "name": "entry-edited",
+      "about": "Entry 2's action edited, its hash left as it was.",
+      "args": [
+        "verify",
+        "--log",
+        "entry-edited.jsonl"
+      ],
+      "exit": 1,
+      "last_line": "BROKEN at entry 2: entry_hash does not match canonical form"
+    },
+    {
+      "name": "entry-deleted",
+      "about": "Entry 2 removed: the next entry's n and prev no longer fit.",
+      "args": [
+        "verify",
+        "--log",
+        "entry-deleted.jsonl"
+      ],
+      "exit": 1,
+      "last_line": "BROKEN at entry 2: prev does not match predecessor's entry_hash"
+    },
+    {
+      "name": "entries-swapped",
+      "about": "Entries 1 and 2 swapped.",
+      "args": [
+        "verify",
+        "--log",
+        "entries-swapped.jsonl"
+      ],
+      "exit": 1,
+      "last_line": "BROKEN at entry 3: prev does not match predecessor's entry_hash"
+    },
+    {
+      "name": "tail-truncated",
+      "about": "The last entry cut away cleanly: the rest walks clean, which is why a head record is kept.",
+      "args": [
+        "verify",
+        "--log",
+        "tail-truncated.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID"
+    },
+    {
+      "name": "tail-truncated-expect-head",
+      "about": "The same cut, against the head recorded before it.",
+      "args": [
+        "verify",
+        "--expect-head",
+        "fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35",
+        "--log",
+        "tail-truncated.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "HEAD-MISMATCH: chain head is 6da336801769a2bb75cc6a22c67c852069597548afd3d0fa20e822951169ec11, expected fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35 \u2014 this is not the recorded history"
+    },
+    {
+      "name": "tail-torn",
+      "about": "The last line cut off mid-write, with no line ending: the signature of a crash, named as such.",
+      "args": [
+        "verify",
+        "--log",
+        "tail-torn.jsonl"
+      ],
+      "exit": 1,
+      "last_line": "BROKEN: torn tail at line 3 (crash-truncated append; entries 0..2 intact)"
+    },
+    {
+      "name": "tail-torn-head",
+      "about": "A torn tail has no head: nothing on stdout, the reason on stderr.",
+      "args": [
+        "head",
+        "--log",
+        "tail-torn.jsonl"
+      ],
+      "exit": 1,
+      "last_line": ""
+    },
+    {
+      "name": "key-given-twice",
+      "about": "Entry 3 names action twice; its hash holds for the last of the two.",
+      "args": [
+        "verify",
+        "--log",
+        "key-given-twice.jsonl"
+      ],
+      "exit": 1,
+      "last_line": "BROKEN at entry 3: key 'action' given twice"
+    },
+    {
+      "name": "wrong-type-files",
+      "about": "Entry 3's files is a string, with a hash that holds for it.",
+      "args": [
+        "verify",
+        "--log",
+        "wrong-type-files.jsonl"
+      ],
+      "exit": 1,
+      "last_line": "BROKEN at entry 3: files is not an array"
+    },
+    {
+      "name": "wrong-type-n",
+      "about": "Entry 3's n is true, a boolean, with a hash that holds for it.",
+      "args": [
+        "verify",
+        "--log",
+        "wrong-type-n.jsonl"
+      ],
+      "exit": 1,
+      "last_line": "BROKEN at entry 3: n is not an integer"
+    },
+    {
+      "name": "non-ascii",
+      "about": "CJK and an emoji, stored as the recorder writes them: \\u escapes, the emoji as a surrogate pair. The canonical form holds them as UTF-8.",
+      "args": [
+        "verify",
+        "--log",
+        "non-ascii.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "canonical": {
+        "entry": 1,
+        "text": "{\"action\":\"\u8a18\u9332\u3092\u66f8\u3044\u305f \ud83d\udc18 \u8c61\",\"actor\":\"\u30a8\u30fc\u30b8\u30a7\u30f3\u30c8\",\"files\":[],\"n\":1,\"prev\":\"f20b1b3b9b0dd649fc6f00125ad29f374143b0d5c0b4d0a68749bbb5657c1fd4\",\"ts\":\"2026-09-23T12:01:00Z\"}"
+      }
+    },
+    {
+      "name": "non-ascii-raw",
+      "about": "The same entries stored as raw UTF-8: another spelling of the line, the same hashes.",
+      "args": [
+        "verify",
+        "--log",
+        "non-ascii-raw.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID"
+    },
+    {
+      "name": "non-ascii-raw-head",
+      "about": "Its head is the non-ascii chain's head.",
+      "args": [
+        "head",
+        "--log",
+        "non-ascii-raw.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0"
+    },
+    {
+      "name": "escapes",
+      "about": "An action needing every escape SPEC section 4 pins, exactly as RFC 8785 section 3.2.2.2 spells them: \\\" and \\\\, the short forms \\b \\t \\n \\f \\r, lowercase \\u00xx for the other controls, and DEL, NEL, U+2028 and U+2029 as they stand.",
+      "args": [
+        "verify",
+        "--log",
+        "escapes.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "canonical": {
+        "entry": 1,
+        "text": "{\"action\":\"say \\\"hi\\\" \\\\ then\\nnext\\ttab\\rcr\\bbs\\fff \\u0000\\u0001\\u001f / \u007f \u0085 \u2028 \u2029 end\",\"actor\":\"agent\",\"files\":[],\"n\":1,\"prev\":\"f20b1b3b9b0dd649fc6f00125ad29f374143b0d5c0b4d0a68749bbb5657c1fd4\",\"ts\":\"2026-09-23T12:01:00Z\"}"
+      }
+    },
+    {
+      "name": "escapes-other-spelling",
+      "about": "The same entry, its action stored as uppercase \\u escapes throughout: the line is spelled differently, the canonical form is not, and the hash holds.",
+      "args": [
+        "verify",
+        "--log",
+        "escapes-other-spelling.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID"
+    },
+    {
+      "name": "escapes-hashed-wrong",
+      "about": "The same entry hashed over a canonical form that spells its controls as uppercase \\u hex and escapes DEL, NEL and the separators: what a verifier with other escaping would compute. It does not hold.",
+      "args": [
+        "verify",
+        "--log",
+        "escapes-hashed-wrong.jsonl"
+      ],
+      "exit": 1,
+      "last_line": "BROKEN at entry 1: entry_hash does not match canonical form"
+    },
+    {
+      "name": "lone-surrogate-text",
+      "about": "The escape text the recorder writes for a lone surrogate (#292): six ASCII characters, canonical like any text.",
+      "args": [
+        "verify",
+        "--log",
+        "lone-surrogate-text.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "canonical": {
+        "entry": 1,
+        "text": "{\"action\":\"read the file name caf\\\\udce9.txt\",\"actor\":\"agent\",\"files\":[],\"n\":1,\"prev\":\"f20b1b3b9b0dd649fc6f00125ad29f374143b0d5c0b4d0a68749bbb5657c1fd4\",\"ts\":\"2026-09-23T12:01:00Z\"}"
+      }
+    },
+    {
+      "name": "lone-surrogate-json",
+      "about": "The same entry with the escape read as JSON: a lone surrogate, which has no UTF-8 form and so no canonical form.",
+      "args": [
+        "verify",
+        "--log",
+        "lone-surrogate-json.jsonl"
+      ],
+      "exit": 1,
+      "last_line": "BROKEN at entry 1: a string holds a lone surrogate, which has no canonical form"
+    },
+    {
+      "name": "transcript-commitment",
+      "about": "Two transcript commitments (SPEC section 2.2), byte counts growing: judged from the chain alone.",
+      "args": [
+        "verify",
+        "--log",
+        "transcript-commitment.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID"
+    },
+    {
+      "name": "transcript-commitment-transcript",
+      "about": "The same chain against transcript.txt: both commitments hold, and the tail after them is stated.",
+      "args": [
+        "verify",
+        "--transcript",
+        "transcript.txt",
+        "--log",
+        "transcript-commitment.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID"
+    },
+    {
+      "name": "transcript-commitment-shrank",
+      "about": "A later commitment of fewer bytes than an earlier one: a growing transcript never shrinks.",
+      "args": [
+        "verify",
+        "--log",
+        "transcript-commitment-shrank.jsonl"
+      ],
+      "exit": 5,
+      "last_line": "TRANSCRIPT-DIVERGED: chain intact, but a committed transcript prefix no longer holds"
+    },
+    {
+      "name": "unsupported-version",
+      "about": "Genesis claims format 0.2, every hash holding.",
+      "args": [
+        "verify",
+        "--log",
+        "unsupported-version.jsonl"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-VERSION: log is format \"0.2\"; this verifier speaks \"0.1\""
+    },
+    {
+      "name": "unsupported-version-edited",
+      "about": "Genesis claims format 0.2 and entry 2 is edited. Today's behaviour: the version refusal comes before the walk. The #299 ruling to freeze the hashing makes this BROKEN, exit 1.",
+      "args": [
+        "verify",
+        "--log",
+        "unsupported-version-edited.jsonl"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-VERSION: log is format \"0.2\"; this verifier speaks \"0.1\""
+    }
+  ]
+}
