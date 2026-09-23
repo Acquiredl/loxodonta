@@ -628,6 +628,74 @@ def judge_proof(head_hex, proof_bytes):
     raise ProofError("proof contains no attestation this verifier can judge")
 
 
+# --- Checking the block (ruling 3 on #299) ------------------------------------
+# A Bitcoin attestation is eight bytes of tag and a height, and replaying
+# the proof ends at a 32-byte merkle root. Nothing in either says a block
+# with that root was ever mined: a regenerated chain can carry an
+# attestation made up whole, with any height it likes. What closes that is
+# the block's header, which the recipient fetches from a source they trust
+# (`--block-header`): 80 bytes, the merkle root at bytes 36 to 68, stored
+# in the order the proof's final double sha256 leaves it, so the two are
+# compared byte for byte. A header carries no height, so it is matched to
+# an attestation by that root, never by the height either one names, and
+# a matched block is named by its hash, the value a second source can
+# confirm. Explorers print a hash, and a merkle root, byte-reversed.
+
+BLOCK_HEADER_BYTES = 80
+
+
+def header_root(header):
+    """The merkle root field of an 80-byte block header, as stored."""
+    return header[36:68]
+
+
+def header_hash(header):
+    """The block's hash as explorers print it: double sha256, reversed."""
+    return hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1].hex()
+
+
+def headers_by_root(headers):
+    """The headers the recipient gave, keyed by the merkle root each holds."""
+    return {header_root(header): header for header in headers or ()}
+
+
+def attestation_words(subject, height, root, headers, used):
+    """What a completed proof shows about `subject`, said no further than
+    it was checked. Without a header holding its root, the attestation's
+    height is its own claim; with one, the entries existed by the block
+    that header is, named by its hash. `used` collects the roots a header
+    matched, so the headers that matched nothing can be named after."""
+    shown = root[::-1].hex()
+    header = headers.get(root)
+    if header is None:
+        return (f"{subject}: the attestation claims Bitcoin block {height}, "
+                "and the block was not checked; that block's merkle root "
+                f"must read {shown}, which --block-header with its header "
+                "checks")
+    used.add(root)
+    return (f"{subject} existed by the block whose header hashes to "
+            f"{header_hash(header)}, whose merkle root {shown} is the one "
+            "the proof replays to; the attestation calls it Bitcoin block "
+            f"{height}, which is your header source's word, and the hash is "
+            "what a second source can confirm")
+
+
+def note_unmatched_headers(headers, used):
+    """A header that matched no attestation checked nothing: a note, never
+    a verdict, since without a height nobody can say which attestation it
+    was fetched for. The note says what the recipient can: if they fetched
+    it for a height an attestation claims, that attestation does not
+    replay to their block."""
+    for root, header in headers.items():
+        if root not in used:
+            print(f"HEADER-UNMATCHED: the block header with hash "
+                  f"{header_hash(header)} holds merkle root "
+                  f"{root[::-1].hex()}, which no Bitcoin attestation judged "
+                  "here replays to; it checked nothing, and an attestation "
+                  "claiming the height you fetched it for does not replay "
+                  "to that block")
+
+
 def sidecar_path(log, suffix):
     """A file beside a chain that is not a chain: the anchor sidecar,
     the publish memo. Named after the chain so the two travel together."""
@@ -699,10 +767,13 @@ def is_attempt(record):
 
 # --- Judging anchors (docs/ANCHORING.md §3) -----------------------------------
 
-def check_anchors(log, entries):
+def check_anchors(log, entries, headers, used):
     """The --anchors half of verify (docs/ANCHORING.md §3): judge every
-    sidecar record against the chain, offline. Returns True if any record
-    is evidence against this log (mismatch or invalid — exit-3 tier)."""
+    sidecar record against the chain, offline. `headers` are the block
+    headers the recipient gave, by root, and `used` collects the roots
+    that checked a block here. Returns True if any record is evidence
+    against this log (mismatch or invalid — exit-3 tier); a block left
+    unchecked is said so, and is never that."""
     records = read_anchor_records(log)
     if records is None:
         print(f"NO-ANCHORS: {anchors_path(log)} not found — anchoring is "
@@ -744,9 +815,8 @@ def check_anchors(log, entries):
     for record, kind, *detail in judged:
         if kind == "bitcoin":
             height, root = detail
-            print(f"ANCHORED: entries 0..{hash_to_n[record['head']]} existed "
-                  f"by Bitcoin block {height} — confirm merkle root "
-                  f"{root[::-1].hex()} against a block source you trust")
+            subject = f"ANCHORED: entries 0..{hash_to_n[record['head']]}"
+            print(attestation_words(subject, height, root, headers, used))
         elif kind == "pending":
             if (record["head"], record.get("calendar")) in completed:
                 continue  # this submission's own upgraded record supersedes it
@@ -1010,14 +1080,19 @@ def check_stamps(log, entries, chain_file):
 
 def verify_log(log, files=False, expect_head=None, transcript=None,
                anchors=False, stamps=False, authority_chain=None,
-               mechanisms=None):
+               block_headers=None, headers_used=None, mechanisms=None):
     """The walk of one chain, then whatever the checks add, then the
     verdict as the exit code: `verify PATH` and the package judge both
-    call this, each with the checks it asked for. `mechanisms` is the
-    package judge's out-parameter and nobody else's: it collects the
-    exit-3 findings' words, because a package names the mechanism in its
-    own verdict line and "anchor" is never the word for an authority
-    timestamp (ADR-0032 ruling 1)."""
+    call this, each with the checks it asked for. `block_headers` are the
+    headers `--block-header` gave, by root, for the anchors to be checked
+    against. `headers_used` and `mechanisms` are the package judge's
+    out-parameters and nobody else's. The first collects the roots a
+    header matched, because a package has more anchors than one chain
+    holds, and a header is noted as matching nothing only once every one
+    of them was judged; without it, this chain's walk notes its own. The
+    second collects the exit-3 findings' words, because a package names
+    the mechanism in its own verdict line and "anchor" is never the word
+    for an authority timestamp (ADR-0032 ruling 1)."""
     try:
         lines = read_log_to_judge(log)
     except FileNotFoundError:
@@ -1100,7 +1175,11 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
     # Anchor, stamp and head-record findings share the exit-3 tier: all
     # mean "this is not the recorded history", the graver verdict, never
     # masked by a files divergence (SPEC §6, docs/ANCHORING.md §3 and §6).
-    anchors_bad = anchors and check_anchors(log, entries)
+    headers = block_headers or {}
+    used = set() if headers_used is None else headers_used
+    anchors_bad = anchors and check_anchors(log, entries, headers, used)
+    if anchors and headers_used is None:
+        note_unmatched_headers(headers, used)
     stamps_bad = stamps and check_stamps(log, entries, authority_chain)
     if mechanisms is not None:
         mechanisms += (["ANCHOR-MISMATCH"] if anchors_bad else []) \
@@ -1141,7 +1220,8 @@ def cmd_verify(args):
                       expect_head=args.expect_head,
                       transcript=args.transcript, anchors=args.anchors,
                       stamps=args.stamps,
-                      authority_chain=args.authority_chain)
+                      authority_chain=args.authority_chain,
+                      block_headers=headers_by_root(args.block_header))
 
 
 def cmd_head(args):
@@ -1336,14 +1416,15 @@ def walked_listing(log):
     return head, len(lines), references, commitments
 
 
-def judge_chain(folder, listing, chain_file=None):
+def judge_chain(folder, listing, chain_file=None, headers=None, used=None):
     """One chain of the package: the recorder's own verify, anchors and
     authority timestamps included, verbatim; then its walked head and
     length against the manifest's. `chain_file` is the authority's
     certificate chain the recipient saved, which `--authority-chain`
     gives and without which a packaged token is present and not judged.
-    Returns (findings, file references counted); a finding is (exit code,
-    verdict word)."""
+    `headers` are `--block-header`'s, by root, and `used` the package's
+    record of the roots they matched. Returns (findings, file references
+    counted); a finding is (exit code, verdict word)."""
     name, head = listing["path"], listing["head"]
     print(f"chain: {name} (manifest: head {head[:12]}…, "
           f"{listing['entries']} entries)")
@@ -1378,7 +1459,9 @@ def judge_chain(folder, listing, chain_file=None):
     mechanisms = []
     code = verify_log(log, transcript=transcript, anchors=True,
                       stamps=bool(listing.get("stamps")),
-                      authority_chain=chain_file, mechanisms=mechanisms)
+                      authority_chain=chain_file, block_headers=headers,
+                      headers_used=set() if used is None else used,
+                      mechanisms=mechanisms)
     if mechanisms:
         findings = [(3, word) for word in mechanisms]
     else:
@@ -1427,14 +1510,18 @@ def judge_artifact(folder, listing):
     return False
 
 
-def judge_manifest_anchor(folder):
+def judge_manifest_anchor(folder, headers, used):
     """The anchor seal (ADR-0026 rulings 4 and 6), judged offline the way
     check_anchors judges a chain's: every record of
     manifest.json.anchors.jsonl must name this manifest's sha256 and
-    replay. Returns (findings, height): the lowest block a completed
-    proof reached, or None while the rung is unearned. Only the
-    manifest's own anchor can earn the package rung; the chains' anchors
-    printed above are detail, since they seal a different object."""
+    replay, and a header the recipient gave checks its block. Returns
+    (findings, height, block): the lowest height a completed proof
+    names, or None while the rung is unearned, and the hash of the
+    header that checked it, or None when that block was not checked.
+    A checked block outranks a lower claimed one, since a claim nobody
+    checked is not a lower bound on anything. Only the manifest's own
+    anchor can earn the package rung; the chains' anchors printed above
+    are detail, since they seal a different object."""
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
     records = read_anchor_records(manifest)
@@ -1446,9 +1533,9 @@ def judge_manifest_anchor(folder):
         what = "is not in this package" if records is None else "holds no record"
         print(f"seal anchor: SEAL-MISSING: {anchors_path('manifest.json')} "
               f"{what} — the manifest declares an anchor it does not carry")
-        return [(3, "SEAL-MISSING")], None
+        return [(3, "SEAL-MISSING")], None, None
     findings = []
-    height = None
+    claimed = []   # (height, header hash or None), one per completed proof
     completed = set()
     pending = []
     for record in records:
@@ -1468,10 +1555,10 @@ def judge_manifest_anchor(folder):
                     pending.append(record)
                     continue
                 _, block, root = verdict
-                print(f"seal anchor: ANCHORED: the manifest existed by "
-                      f"Bitcoin block {block} — confirm merkle root "
-                      f"{root[::-1].hex()} against a block source you trust")
-                height = block if height is None else min(height, block)
+                print(attestation_words("seal anchor: ANCHORED: the manifest",
+                                        block, root, headers, used))
+                header = headers.get(root)
+                claimed.append((block, header_hash(header) if header else None))
                 completed.add(record.get("calendar"))
                 continue
         print(f"seal anchor: SEAL-INVALID: {reason} — evidence that does "
@@ -1493,7 +1580,10 @@ def judge_manifest_anchor(folder):
               "package and run `loxodonta anchor --upgrade --manifest=<its "
               "manifest.json>` after a few hours; the rung is not earned "
               "until the proof completes")
-    return findings, height
+    checked = [c for c in claimed if c[1] is not None]
+    height, block = min(checked or claimed, key=lambda c: c[0],
+                        default=(None, None))
+    return findings, height, block
 
 
 def judge_manifest_stamp(folder, chain_file):
@@ -1672,19 +1762,23 @@ def judge_manifest_signature(folder):
     return [], fingerprint, None
 
 
-def judge_seals(folder, manifest, chain_file=None):
+def judge_seals(folder, manifest, chain_file=None, headers=None, used=None):
     """Each declared seal against what the package carries, in the
     declared order: the anchor, the authority timestamp and the
     signature are judged; a kind this verifier does not know is named as
     such and adds nothing to the verdict, so the recipient is never told
-    a seal was checked when it was not. Returns (findings, earned): what
-    the seals earned toward the rungs, as ceiling_lines reads it."""
+    a seal was checked when it was not. `headers` and `used` are the
+    block headers and the roots they matched, as judge_chain has them.
+    Returns (findings, earned): what the seals earned toward the rungs,
+    as ceiling_lines reads it."""
     findings = []
-    earned = {"height": None, "key": None, "stamped": False, "unjudged": []}
+    earned = {"height": None, "block": None, "key": None, "stamped": False,
+              "unjudged": []}
     for kind in manifest["seals"]:
         found = []
         if kind == "anchor":
-            found, earned["height"] = judge_manifest_anchor(folder)
+            found, earned["height"], earned["block"] = judge_manifest_anchor(
+                folder, headers or {}, set() if used is None else used)
         elif kind == "stamp":
             found, earned["stamped"], why = judge_manifest_stamp(folder,
                                                                  chain_file)
@@ -1748,7 +1842,8 @@ def series(items):
 def ceiling_lines(manifest, earned):
     """The two closing lines of a package with no finding, the residual
     trust and then the verdict, built from what the declared seals
-    earned: `height`, the block the manifest anchor reached; `stamped`,
+    earned: `height`, the block the manifest anchor names, and `block`,
+    that block's header hash when a header checked it; `stamped`,
     whether openssl accepted the authority's token over the manifest;
     `key`, the fingerprint the signature verified under; `unjudged`, the
     seals this machine could not judge. Each rung adds its words in
@@ -1761,14 +1856,30 @@ def ceiling_lines(manifest, earned):
     verdict carries its limit: what a regeneration would also produce,
     and why the rung is unearned."""
     height, key, seals = earned["height"], earned["key"], manifest["seals"]
+    block = earned["block"]
     stamped = earned["stamped"]
     rungs, given, trusted = "", "", ""
     unsaid = ["the record inside is true and complete"]
-    if height is not None:
+    if height is not None and block is not None:
+        # A header the recipient gave holds the root the proof replays
+        # to: the block is theirs, named by its hash, and its height is
+        # the word of the attestation and of their header's source.
         rungs += " + ANCHORED"
-        given += f", and the manifest existed by Bitcoin block {height}"
+        given += (", and the manifest existed by the block whose header "
+                  f"hashes to {block}, which its anchor calls Bitcoin block "
+                  f"{height}")
         trusted += (f", and it existed by Bitcoin block {height} if the "
-                    "merkle root printed beside that block is the block's")
+                    "header given for it is that block's, which its hash "
+                    f"{block} lets you check against a second source")
+    elif height is not None:
+        # The proof completes to an attestation, and nothing checked the
+        # block it names (ruling 3 on #299): a claim, said as one.
+        rungs += " + ANCHORED"
+        given += (f", and the manifest's anchor claims Bitcoin block "
+                  f"{height}, a block not checked here")
+        trusted += (f", and it existed by Bitcoin block {height} if the "
+                    "merkle root printed beside that block is the block's, "
+                    "which --block-header checks")
     elif not stamped:
         unsaid.append("that it existed before today")
     if stamped:
@@ -1822,7 +1933,7 @@ def ceiling_lines(manifest, earned):
     return trust, verdict
 
 
-def judge_package(shown, folder, chain_file=None):
+def judge_package(shown, folder, chain_file=None, block_headers=None):
     """The ladder, in ADR-0026 ruling 5's order: the manifest's summary,
     each chain, the file references, each artifact, each declared seal,
     the unlisted files, one line of residual trust when the ladder allows
@@ -1830,7 +1941,9 @@ def judge_package(shown, folder, chain_file=None):
     it is for `verify`. `chain_file` is `--authority-chain`: the
     certificate chain the recipient saved from the authority, which every
     token in this package is judged against and without which each is a
-    note (ADR-0032 ruling 5)."""
+    note (ADR-0032 ruling 5). `block_headers` are `--block-header`'s, by
+    root, checked against every anchor the package carries; one that
+    matched none of them is noted once, after the seals."""
     manifest, refusal = read_manifest(folder)
     if refusal:
         print(refusal)
@@ -1838,8 +1951,10 @@ def judge_package(shown, folder, chain_file=None):
     print_manifest_summary(shown, manifest)
     findings = []
     references = 0
+    headers, used = block_headers or {}, set()
     for listing in manifest["chains"]:
-        found, counted = judge_chain(folder, listing, chain_file)
+        found, counted = judge_chain(folder, listing, chain_file, headers,
+                                     used)
         findings += found
         references += counted
     # Off the machine the project record points nowhere and FILES-
@@ -1849,8 +1964,9 @@ def judge_package(shown, folder, chain_file=None):
           "machine")
     if any([judge_artifact(folder, a) for a in manifest["artifacts"]]):
         findings.append((2, "ARTIFACT-DIVERGED"))
-    found, earned = judge_seals(folder, manifest, chain_file)
+    found, earned = judge_seals(folder, manifest, chain_file, headers, used)
     findings += found
+    note_unmatched_headers(headers, used)
     print_unlisted(folder, manifest)
     code, word = gravest(findings)
     if code != 0:
@@ -1874,8 +1990,9 @@ def cmd_verify_package(args):
     damaged past what its end record shows, is refused unopened."""
     import zipfile  # only this command reads zips; the hook never pays for it
     path = args.path
+    headers = headers_by_root(args.block_header)
     if os.path.isdir(path):
-        return judge_package(path, path, args.authority_chain)
+        return judge_package(path, path, args.authority_chain, headers)
     if not os.path.isfile(path):
         print(f"error: {path} not found", file=sys.stderr)
         return 1
@@ -1897,7 +2014,7 @@ def cmd_verify_package(args):
             print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked ({e}); "
                   "not a loxodonta package")
             return 4
-        return judge_package(path, unpacked, args.authority_chain)
+        return judge_package(path, unpacked, args.authority_chain, headers)
 
 
 # --- The verifier's command line ----------------------------------------------
@@ -1913,6 +2030,19 @@ def head_record(value):
             f"{value!r} is not a chain head (need 64 hex characters)"
         )
     return v
+
+
+def block_header(value):
+    """argparse validator: a block header is 80 bytes, given as 160 hex
+    characters (`bitcoin-cli getblockheader HASH false` prints one)."""
+    v = value.strip().lower()
+    if len(v) != 2 * BLOCK_HEADER_BYTES \
+            or any(c not in "0123456789abcdef" for c in v):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a block header (need 160 hex characters, "
+            f"the {BLOCK_HEADER_BYTES} bytes of one)"
+        )
+    return bytes.fromhex(v)
 
 
 def checkout_commit(home):
@@ -1979,6 +2109,14 @@ class UsageParser(argparse.ArgumentParser):
         self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
 
 
+BLOCK_HEADER_HELP = (
+    "a Bitcoin block header (80 bytes as 160 hex characters) from a "
+    "source you trust, for the anchors (repeatable, one per anchored "
+    "block): an anchor whose proof replays to the merkle root it holds "
+    "existed by that block, named by its hash; without one, a block an "
+    "attestation claims is reported as not checked")
+
+
 def add_verify_commands(sub, common):
     """`head`, `verify` and `verify-package`, added to a command line. The
     recorder and the verifier both build their parsers from this one
@@ -1999,6 +2137,9 @@ def add_verify_commands(sub, common):
                                     "missing file is noted, never a verdict")
     verify_parser.add_argument("--anchors", action="store_true",
                                help="also judge anchor proofs, offline")
+    verify_parser.add_argument("--block-header", metavar="HEX",
+                               type=block_header, action="append",
+                               default=[], help=BLOCK_HEADER_HELP)
     verify_parser.add_argument("--stamps", action="store_true",
                                help="also judge authority timestamps, "
                                     "offline, through openssl (ADR-0032); "
@@ -2039,6 +2180,9 @@ def add_verify_commands(sub, common):
                                      "authority, give one chain file "
                                      "holding every authority's "
                                      "certificates (concatenated PEM)")
+    package_parser.add_argument("--block-header", metavar="HEX",
+                                type=block_header, action="append",
+                                default=[], help=BLOCK_HEADER_HELP)
     package_parser.set_defaults(func=cmd_verify_package)
     return verify_parser
 
@@ -2054,6 +2198,12 @@ def verify_usage(args, verify_parser):
         # a raw flag beside a named profile is.
         verify_parser.error("--authority-chain is the file --stamps judges "
                             "tokens against; add --stamps, or drop it")
+    if args.command == "verify" and args.block_header and not args.anchors:
+        # The same rule, for the same reason: a header was given to check
+        # an anchor, and `VALID` with no anchor judged would sound like
+        # it did.
+        verify_parser.error("--block-header checks the blocks --anchors "
+                            "judges; add --anchors, or drop it")
 
 
 def verifier_main(argv=None):

@@ -26,8 +26,10 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package_anchor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import (FakeCalendar, FakeCalendarHandler,
-                         expected_merkle_root, start_calendar)
+from test_anchor import (GENESIS_HASH, GENESIS_HEADER, FakeCalendar,
+                         FakeCalendarHandler, block_header,
+                         expected_merkle_root, header_hash, replayed_root,
+                         start_calendar)
 from test_package import (LOXODONTA, SUPERVISOR, PackageCase, completed_anchor,
                           neutral_env, run)
 
@@ -148,7 +150,8 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertIn("anchored", result.stdout)
         self.assertIn("--upgrade --manifest", result.stdout)
 
-    CHAIN_DETAIL = "ANCHORED: entries 0..2 existed by Bitcoin block 850000"
+    CHAIN_DETAIL = ("ANCHORED: entries 0..2: the attestation claims Bitcoin "
+                    "block 850000, and the block was not checked")
 
     def test_a_pending_manifest_anchor_leaves_the_rung_unearned_with_a_note(self):
         # The proof names the calendar and no block yet: the verdict
@@ -205,19 +208,114 @@ class SealedPackageTest(AnchoredStoreCase):
         seal = next((l for l in lines
                      if l.startswith("seal anchor: ANCHORED")), None)
         self.assertIsNotNone(seal, out)
-        self.assertIn(f"block {self.server.height}", seal)
+        # No header was given, so the block is the attestation's claim,
+        # and neither the seal line nor the verdict says the manifest
+        # existed by it (ruling 3 on #299).
+        self.assertTrue(seal.startswith(
+            "seal anchor: ANCHORED: the manifest: the attestation claims "
+            f"Bitcoin block {self.server.height}, and the block was not "
+            "checked"), seal)
         self.assertIn(expected_merkle_root(digest, self.server.nonce,
                                            self.server.prefix,
                                            self.server.suffix), seal)
         self.assertNotIn("ANCHOR-PENDING: the manifest", out)
         self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + ANCHORED:"),
                         lines[-1])
-        self.assertIn(f"block {self.server.height}", lines[-1])
+        self.assertIn(f"claims Bitcoin block {self.server.height}, a block "
+                      "not checked here", lines[-1])
+        self.assertNotIn("existed by", lines[-1])
         self.assertNotIn("indistinguishable", lines[-1])
         self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
         self.assertIn(f"block {self.server.height}", lines[-2])
         # The chain's own anchor is still detail, at its own block.
         self.assertIn(self.CHAIN_DETAIL, out)
+
+    def upgraded_folder(self):
+        """A folder package whose manifest anchor has completed, and the
+        manifest's replayed root, as the proof computes it."""
+        folder = self.anchored_folder()
+        self.server.mode = "complete"
+        upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
+                      str(folder / "manifest.json"), env=self.env)
+        self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
+        root = replayed_root(self.manifest_digest(folder), self.server.nonce,
+                             self.server.prefix, self.server.suffix)
+        return folder, root
+
+    def test_a_header_for_the_manifest_block_says_existed_by_it(self):
+        # verify-package takes --block-header too: a header holding the
+        # manifest anchor's root turns the claim into the block the
+        # recipient named, by its hash, on the seal line and the verdict.
+        folder, root = self.upgraded_folder()
+        header = block_header(root)
+
+        judged = self.verify_package(folder, "--block-header", header.hex())
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        lines = out.strip().splitlines()
+        seal = next(l for l in lines if l.startswith("seal anchor: ANCHORED"))
+        self.assertTrue(seal.startswith(
+            "seal anchor: ANCHORED: the manifest existed by the block whose "
+            f"header hashes to {header_hash(header)}"), seal)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + ANCHORED:"),
+                        lines[-1])
+        self.assertIn("the manifest existed by the block whose header hashes "
+                      f"to {header_hash(header)}", lines[-1])
+        self.assertIn(f"Bitcoin block {self.server.height}", lines[-1])
+        self.assertNotIn("not checked", lines[-1])
+        self.assertIn(header_hash(header), lines[-2])
+        self.assertNotIn("HEADER-UNMATCHED", out)
+        # The chain's anchor has a root of its own, so it stays unchecked.
+        self.assertIn(self.CHAIN_DETAIL, out)
+
+    def test_a_header_for_a_chain_anchor_checks_it_and_is_not_noted(self):
+        # Headers are matched across the whole package: one that checks a
+        # chain's anchor and not the manifest's is used, never noted as
+        # matching nothing, and it earns the package rung nothing.
+        folder, _ = self.upgraded_folder()
+        chain_root = hashlib.sha256(bytes.fromhex(
+            run(LOXODONTA, "head", "--log", str(self.chain)).stdout.strip())
+        ).digest()   # completed_anchor's proof: one sha256, then the block
+        header = block_header(chain_root)
+
+        judged = self.verify_package(folder, "--block-header", header.hex())
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        self.assertIn("ANCHORED: entries 0..2 existed by the block whose "
+                      f"header hashes to {header_hash(header)}", out)
+        self.assertNotIn("HEADER-UNMATCHED", out)
+        lines = out.strip().splitlines()
+        self.assertIn("a block not checked here", lines[-1])
+
+    def test_a_header_matching_nothing_in_the_package_is_noted_once(self):
+        folder, _ = self.upgraded_folder()
+
+        judged = self.verify_package(folder, "--block-header", GENESIS_HEADER)
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        lines = out.strip().splitlines()
+        self.assertEqual(out.count("HEADER-UNMATCHED"), 1, out)
+        note = next(i for i, l in enumerate(lines)
+                    if l.startswith("HEADER-UNMATCHED"))
+        self.assertIn(GENESIS_HASH, lines[note])
+        # After every anchor line it speaks for, before the verdict.
+        seal = next(i for i, l in enumerate(lines)
+                    if l.startswith("seal anchor: ANCHORED"))
+        self.assertGreater(note, seal)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + ANCHORED:"),
+                        lines[-1])
+        self.assertIn("a block not checked here", lines[-1])
+
+    def test_a_malformed_header_is_a_usage_error(self):
+        folder = self.anchored_folder()
+
+        judged = self.verify_package(folder, "--block-header", "00" * 79)
+
+        self.assertEqual(judged.returncode, 64, judged.stdout + judged.stderr)
+        self.assertIn("160 hex characters", judged.stderr)
 
     def test_a_manifest_settled_by_one_calendar_stops_advising_the_other(self):
         # #199 reaches the seal too: the anchor's claim is about the
