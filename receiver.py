@@ -229,24 +229,39 @@ def receipt_of(line):
     return n, digest
 
 
-def chain_lines(body):
-    """A chain batch as [(line, n, entry_hash)], each line without its
-    newline (a carriage return before it is dropped too, so a proxy that
-    rewrote the line endings changes nothing on disk). The sender's
-    trailing newline is not an empty last line. A batch with no lines,
-    or with any line that is not shaped like an entry, raises ValueError
-    naming the line: the whole batch is refused, nothing of it written,
-    because a file that is a receipt log must hold entries and nothing
-    else."""
-    lines = body.split(b"\n")
-    if lines and lines[-1] == b"":
+def split_lines(data):
+    """The lines of a chain's or a sidecar's bytes, by the one rule every
+    reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
+    and nothing else ends one. U+2028, U+2029 and NEL are characters a
+    JSON string holds raw, and a `\\r` alone is whitespace between two
+    JSON tokens; a reader that ended a line at any of them would read
+    one entry of another conforming writer as two broken ones. A `\\r`
+    just before the `\\n` belongs to the ending, so a file whose endings
+    a Windows tool rewrote to `\\r\\n` reads as the same lines. The bytes
+    after the last `\\n`, when there are any, are a line too: the torn
+    tail a crash leaves, which the walk names. Written the same way in
+    loxodonta.py, supervisor.py and receiver.py, which never import one
+    another; tests/test_suite_shape.py holds the copies equal."""
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
         lines.pop()
+    return [line[:-1] if line.endswith(b"\r") else line for line in lines]
+
+
+def chain_lines(body):
+    """A chain batch as [(line, n, entry_hash)], each line as
+    `split_lines` reads it: without its newline, and without a carriage
+    return before it, so a proxy that rewrote the line endings changes
+    nothing on disk. The sender's trailing newline is not an empty last
+    line. A batch with no lines, or with any line that is not shaped
+    like an entry, raises ValueError naming the line: the whole batch is
+    refused, nothing of it written, because a file that is a receipt log
+    must hold entries and nothing else."""
+    lines = split_lines(body)
     if not lines:
         raise ValueError("the batch holds no lines")
     batch = []
     for number, line in enumerate(lines, 1):
-        if line.endswith(b"\r"):
-            line = line[:-1]
         receipt = receipt_of(line)
         if receipt is None:
             raise ValueError(f"line {number} is not an entry (a JSON object "
@@ -258,7 +273,10 @@ def chain_lines(body):
 def known_pairs(path):
     """Every (n, entry_hash) the chain file already holds, so a resent
     line is known and a rewritten one is not. A file that is not there
-    yet knows nothing."""
+    yet knows nothing. Read a line at a time, since a file may run to
+    its cap: a file opened for bytes ends a line at `\\n` and nowhere
+    else, the rule of `split_lines`, and the `\\n` itself, with any
+    `\\r` before it, is whitespace to the JSON reader in `receipt_of`."""
     known = set()
     try:
         with open(path, "rb") as f:

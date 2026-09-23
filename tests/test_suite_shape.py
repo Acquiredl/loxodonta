@@ -19,7 +19,9 @@ and to naming the line that made the start.
 Two rules are written twice, once in the recorder and once in the
 supervisor, because neither file imports the other (ADR-0035): the
 escaping of receipt text (#295) and which hook entries are the
-recorder's (#293, #303). A test here holds each pair of copies equal.
+recorder's (#293, #303). A third, where a line of a chain ends (#299),
+is written three times, the receiver's copy beside those two. A test
+here holds each set of copies equal.
 """
 
 import ast
@@ -217,8 +219,15 @@ OWNERSHIP_NAMES = ("RECORDER_NAMES", "DIGEST_NAMES", "WIRED_VERB",
                    "command_words", "file_name", "is_interpreter",
                    "owned_script", "beside_a_recorder")
 
+# The line rule (SPEC section 1, #299) lives three times: in the
+# recorder, whose verify side the recipient's verifier.py is copied
+# from, in the supervisor, which lists and displays chains, and in the
+# receiver, which counts the lines of a batch and of the file it keeps.
+LINE_RULE_NAMES = ("split_lines",)
+RECEIVER = REPO_ROOT / "receiver.py"
+
 # The files never import each other (ADR-0035), so nothing but these
-# tests keeps each pair of copies saying the same thing.
+# tests keeps each set of copies saying the same thing.
 
 
 def top_level_source(path, names):
@@ -265,6 +274,21 @@ class TwinOwnershipTest(unittest.TestCase):
                     recorder[name], supervisor.get(name),
                     f"{name} differs between loxodonta.py and "
                     "supervisor.py: change both (#303)")
+
+
+class TwinLineRuleTest(unittest.TestCase):
+
+    def test_the_three_files_split_lines_alike(self):
+        recorder = top_level_source(RECORDER, LINE_RULE_NAMES)
+        self.assertEqual(sorted(recorder), sorted(LINE_RULE_NAMES))
+        for other in (SUPERVISOR, RECEIVER):
+            copy = top_level_source(other, LINE_RULE_NAMES)
+            for name in LINE_RULE_NAMES:
+                with self.subTest(file=other.name, name=name):
+                    self.assertEqual(
+                        recorder[name], copy.get(name),
+                        f"{name} differs between loxodonta.py and "
+                        f"{other.name}: change all three (#299)")
 
 
 if __name__ == "__main__":

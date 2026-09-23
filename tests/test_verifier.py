@@ -105,7 +105,7 @@ TWINNED = {
     "test_cli": ["VerifyTest", "TranscriptVerifyTest", "FileReferenceTest",
                  "HeadTest", "TamperTest", "TornTailTest", "GoldenFixtureTest",
                  "ShapeTest", "LoneSurrogateTest", "UnopenableReferenceTest",
-                 "UnreadableLineTest"],
+                 "UnreadableLineTest", "LineRuleTest", "NotUtf8LogTest"],
     "test_concurrency": ["ForkedTailTest"],
     "test_anchor": ["AnchorTest"],
     "test_stamp": ["JudgedStampTest", "OutlivedCertificateTest"],

@@ -14,6 +14,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - The receiver gives each request its own thread and drops one not whole within 60 seconds, so a slow sender no longer holds the door (#300).
 - The supervisor writes its baseline, day book and views whole or not at all, so a crash mid-write no longer leaves a baseline the next scan cannot read, and the tripwire keeps its memory of heads (#300).
+- Every reader ends a line at `\n` alone, so a raw U+2028 in another writer's entry no longer reads as a false `BROKEN`; `\r\n` endings still read as the same chain (SPEC §1, #299).
+- `head` and the writing verbs no longer end in a traceback on a log holding invalid UTF-8: such a tail is a damaged tail, refused, and the hook starts a sibling (#299).
 
 ### Added
 

@@ -23,6 +23,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from test_publish_chain import rewritten_raw
 from test_supervisor import isolated_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -620,6 +621,26 @@ class HookStorePackageTest(PackageCase):
         self.assertEqual(judged.stdout.count("\nchain: "), 3, judged.stdout)
         self.assertTrue(judged.stdout.strip().splitlines()[-1]
                         .startswith("SELF-CONSISTENT"))
+
+    def test_a_raw_line_separator_is_counted_alike_by_packer_and_judge(self):
+        # SPEC section 1 (#299): a line ends at a newline and nowhere
+        # else. The supervisor lists the chain's entry count in the
+        # manifest and the verifier walks the chain to check it, so a
+        # raw U+2028 in an action, as another conforming writer leaves
+        # it, must be one line to both.
+        lines = rewritten_raw(self.sibling, 1, "Edit: say  done")
+        folder = self.work / "pkg"
+
+        packed = self.package(SESSION, "--folder", "--out", str(folder))
+
+        self.assertEqual(packed.returncode, 0, packed.stdout + packed.stderr)
+        listed = {c["path"]: c for c in self.manifest_of(folder)["chains"]}
+        self.assertEqual(listed[self.sibling.name]["entries"],
+                         lines.count(b"\n"))
+        judged = self.verify_package(folder)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("SELF-CONSISTENT"), judged.stdout)
 
     def test_a_drawer_holding_half_a_split_session_is_refused_naming_it(self):
         # Half of the session also sits in a drawer no selector reaches
