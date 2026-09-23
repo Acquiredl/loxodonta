@@ -1578,6 +1578,44 @@ class LoneSurrogateTest(ReceiptsCliTest):
         self.assert_valid()
 
 
+class UnopenableReferenceTest(ReceiptsCliTest):
+    """#292 review: a well-hashed entry can carry a path this machine
+    cannot open as a file: a NUL (ValueError everywhere), a directory
+    (PermissionError on Windows, IsADirectoryError elsewhere), a name
+    Windows refuses (`a<b`, EINVAL, which the broken-pipe handler used
+    to swallow, so verify exited 1 printing nothing). `verify --files`
+    says MISSING for each, as for a file not on disk, and the verdict
+    and exit code are the chain's."""
+
+    def test_verify_files_names_each_unopenable_path_missing(self):
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "wrote",
+                     cwd=self.workdir)
+        (self.workdir / "sub").mkdir()
+        paths = sorted(["a" + chr(0) + "b", "sub", "a<b"])
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        entry = json.loads(lines[-1])
+        del entry["entry_hash"]
+        entry["files"] = [{"path": p, "sha256": "0" * 64} for p in paths]
+        entry["entry_hash"] = spec_hash(entry)
+        lines[-1] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        self.log_path.write_text("".join(l + "\n" for l in lines),
+                                 encoding="utf-8")
+
+        result = run_receipts("verify", "--files", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        out = result.stdout.splitlines()
+        self.assertEqual(out[-1], "VALID")
+        # A directory is on disk but is no file to fingerprint; `a<b` is
+        # an unopenable name on Windows and simply absent elsewhere.
+        self.assertIn("MISSING (not a readable file here): sub", out)
+        self.assertTrue(any(l.startswith("MISSING (") and l.endswith(": a<b")
+                            for l in out), out)
+        self.assertEqual(sum(l.startswith("MISSING (") for l in out), 3, out)
+
+
 class UnreadableLineTest(TamperTest):
     """SPEC section 6: a line that is not an entry is refused by name.
     Four lines the reader cannot even take apart (a byte that is not

@@ -203,6 +203,40 @@ class CodexHookTest(unittest.TestCase):
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertIn("VALID", judged.stdout)
 
+    def test_a_project_folder_named_with_a_lone_surrogate_still_records(self):
+        # #292 review: the drawer's name hashes the project path, and a
+        # lone surrogate in it (a folder name that is not UTF-8, on
+        # POSIX) crashed that hash on every call for the project. Hook
+        # in, digest out: both copies of the slug agree on the drawer.
+        if sys.platform == "darwin":
+            self.skipTest("APFS refuses a file name that is not UTF-8")
+        project = self.root / ("odd" + chr(0xDCFF) + "project")
+        try:
+            project.mkdir()
+        except (OSError, UnicodeError):
+            self.skipTest("this filesystem cannot hold the name")
+
+        result = self.hook(codex_payload(project, tool="Bash",
+                                         tool_input={"command": "make"}))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = drawer_of(self.store, "odd-project") \
+            / "receipts-019374ab-codex-session.jsonl"
+        self.assertEqual(entries(log)[-1]["action"], "Bash: make")
+        start = {"session_id": "019374ab-codex-session",
+                 "hook_event_name": "SessionStart", "source": "startup",
+                 "transcript_path": None, "cwd": str(project)}
+        # The digest prints the project's path, and printing a lone
+        # surrogate is the renderer's own matter (not this slug's), so
+        # stdout here escapes what it cannot encode.
+        out = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "digest", "--payload"],
+            input=json.dumps(start).encode("utf-8"), capture_output=True,
+            cwd=str(self.root),
+            env={**self.env, "PYTHONIOENCODING": "utf-8:backslashreplace"})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(b"Bash: make", out.stdout)
+
     def test_session_end_seals_the_rollout_transcript(self):
         rollout = self.root / "rollout-2026-09-02.jsonl"
         rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")

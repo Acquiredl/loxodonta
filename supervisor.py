@@ -142,7 +142,9 @@ def read_entries(log):
         for line in lines:
             try:
                 entry = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
+                # Not JSON, an integer past the digit limit, or nesting
+                # past the recursion limit: garbled all the same (#292).
                 continue
             if isinstance(entry, dict):
                 entries.append(entry)
@@ -3487,7 +3489,9 @@ def walk_chain(root, asked):
             raw = raw.rstrip("\n")
             try:
                 entry = json.loads(raw)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
+                # An integer past the digit limit or nesting past the
+                # recursion limit is damage too, never a crash (#292).
                 lines.append({"damage": raw})
                 continue
             if isinstance(entry, dict):
@@ -3621,7 +3625,11 @@ def project_slug(project):
     normalized full path's SHA256 (ADR-0011)."""
     p = os.path.abspath(str(project))
     key = os.path.normcase(p).replace(os.sep, "/")
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    # A lone surrogate (a folder name that is not UTF-8, on POSIX) is
+    # hashed as its escape text, as a receipt holds it (#292); every
+    # other path hashes exactly as before, so no drawer moves.
+    digest = hashlib.sha256(
+        key.encode("utf-8", "backslashreplace")).hexdigest()[:8]
     base = os.path.basename(p.rstrip("/\\")) or "root"
     safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in base)
     return f"{safe}-{digest}"
@@ -4909,12 +4917,14 @@ def chain_listing(log):
     entry count, never by file hash. The head is the commitment, and
     the verifier recomputes it by walking, so a Windows unzip that
     changes line endings changes nothing the manifest says."""
-    lines = log.read_text(encoding="utf-8").splitlines()
+    # errors="replace" and RecursionError: a line no reader can take
+    # apart is packaged as it stands, and the verifier names it (#292).
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
     head = None
     for line in lines:
         try:
             entry = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(entry, dict) and isinstance(entry.get("entry_hash"), str):
             head = entry["entry_hash"]

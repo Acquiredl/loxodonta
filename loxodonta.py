@@ -2644,6 +2644,13 @@ def cmd_verify(args, mechanisms=None):
             except FileNotFoundError:
                 print(f"MISSING (not on disk): {path}")
                 continue
+            except (OSError, ValueError):
+                # A path this machine cannot open as a file: a directory,
+                # a name the platform refuses, a NUL (#292). Nothing to
+                # fingerprint, so it is missing in the same sense, and
+                # the verdict stays the chain's.
+                print(f"MISSING (not a readable file here): {path}")
+                continue
             if on_disk == latest[path]:
                 print(f"CURRENT: {path}")
             else:
@@ -3763,7 +3770,11 @@ def project_slug(project):
     two together behaviorally (hook in, digest out)."""
     p = os.path.abspath(str(project))
     key = os.path.normcase(p).replace(os.sep, "/")
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    # A lone surrogate (a folder name that is not UTF-8, on POSIX) is
+    # hashed as its escape text, as a receipt holds it (#292); every
+    # other path hashes exactly as before, so no drawer moves.
+    digest = hashlib.sha256(
+        key.encode("utf-8", "backslashreplace")).hexdigest()[:8]
     base = os.path.basename(p.rstrip("/\\")) or "root"
     safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in base)
     return f"{safe}-{digest}"

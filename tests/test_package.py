@@ -786,6 +786,32 @@ class HookStorePackageTest(PackageCase):
         self.assertTrue(any(l.startswith(f"{self.sidecar.name}: DIVERGED")
                             for l in lines), judged.stdout)
 
+    def test_a_hostile_line_is_packaged_as_it_stands_and_judged_broken(self):
+        # #292: a line no reader can take apart (an integer past the
+        # digit limit, nesting past the recursion limit, a byte that is
+        # not UTF-8) ended the packer in a traceback while it counted the
+        # chain for the manifest. It is packaged as it stands, and the
+        # verifier names it.
+        raw = self.sibling.read_bytes()
+        self.sibling.write_bytes(
+            raw + b'{"n":' + b"9" * 5000 + b"}\n"
+            + b"[" * 100000 + b"]" * 100000 + b"\n"
+            + b'{"action":"\xff"}\n')
+        folder = self.work / "pkg"
+        result = self.package("--repo", str(self.project), "--folder",
+                              "--out", str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 1, judged.stdout + judged.stderr)
+        self.assertNotIn("Traceback", judged.stderr)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("CHAIN-BROKEN"), judged.stdout)
+        self.assertIn("nesting too deep to read", judged.stdout)
+        self.assertIn("line is not valid UTF-8", judged.stdout)
+
     def test_a_drawer_with_a_broken_sibling_is_chain_broken_exit_1(self):
         # The drawer is packaged as it stands, the broken sibling with it:
         # the verifier walks every chain the manifest lists and says so in
