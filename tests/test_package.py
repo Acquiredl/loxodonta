@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from test_publish_chain import rewritten_raw
 from test_supervisor import isolated_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -397,6 +399,73 @@ class DemoStorePackageTest(PackageCase):
             self.assertNotIn("outside-secret", result.stdout)
             self.assertNotIn("Traceback", result.stderr)
 
+    def crafted_zip(self, members):
+        """A zip of `members`, (name, bytes) pairs in the order given.
+        Python's zipfile warns at a repeated name and writes it anyway,
+        which is the archive under test."""
+        crafted = self.work / "crafted.zip"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with zipfile.ZipFile(crafted, "w") as package:
+                for name, data in members:
+                    package.writestr(name, data)
+        return crafted
+
+    def test_a_zip_holding_two_members_that_unpack_to_one_file_is_refused(self):
+        # #299: a tampered chain first and the original second verified
+        # SELF-CONSISTENT, since unpacking keeps the last copy while
+        # `unzip -p` shows the first. Names that land on one file only
+        # on some systems are refused too, on every system, so the
+        # verdict never depends on where the recipient unpacks.
+        self.assertEqual(self.package(BAD_DAY_SESSION).returncode, 0)
+        with zipfile.ZipFile(next(self.work.glob("*.zip"))) as package:
+            members = [(n, package.read(n)) for n in package.namelist()]
+        chain = f"receipts-{BAD_DAY_SESSION}.jsonl"
+        original = dict(members)[chain]
+        tampered = original.replace(b"Read: .env", b"Read: README")
+        self.assertNotEqual(tampered, original)
+        manifest = dict(members)["manifest.json"]
+        cases = {
+            "the same name twice": [(chain, tampered)] + members,
+            "another case": [(chain.upper(), tampered)] + members,
+            "a leading ./": [("./" + chain, tampered)] + members,
+            "a trailing space": members + [("manifest.json ", manifest)],
+            "either slash": members + [("notes/a.txt", b"one"),
+                                       ("notes\\a.txt", b"two")],
+        }
+        for words, crafted_members in cases.items():
+            with self.subTest(words):
+                result = self.verify_package(self.crafted_zip(crafted_members))
+
+                self.assertEqual(result.returncode, 4,
+                                 words + ": " + result.stdout + result.stderr)
+                lines = result.stdout.strip().splitlines()
+                # Refused unopened: nothing else is judged or printed.
+                self.assertEqual(len(lines), 1, result.stdout)
+                self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"),
+                                lines[0])
+                self.assertIn("unpack to one file", lines[0])
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_manifest_giving_a_key_twice_is_refused(self):
+        # #299: the manifest was read last-wins, so two `head` keys on a
+        # chain passed on the second while a first-wins reader saw the
+        # first. The walk's guard reads it now: no reading of it counts.
+        folder = self.folder_package()
+        path = folder / "manifest.json"
+        text = path.read_text("utf-8")
+        self.assertIn('"head": ', text)
+        path.write_text(text.replace('"head": ', '"head": "' + "0" * 64
+                                     + '", "head": ', 1), "utf-8")
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"), lines[0])
+        self.assertIn("'head' given twice", lines[0])
+
     def test_a_malformed_manifest_is_refused_not_a_traceback(self):
         folder = self.folder_package()
         shapes = {
@@ -645,6 +714,26 @@ class HookStorePackageTest(PackageCase):
         self.assertEqual(judged.stdout.count("\nchain: "), 3, judged.stdout)
         self.assertTrue(judged.stdout.strip().splitlines()[-1]
                         .startswith("SELF-CONSISTENT"))
+
+    def test_a_raw_line_separator_is_counted_alike_by_packer_and_judge(self):
+        # SPEC section 1 (#299): a line ends at a newline and nowhere
+        # else. The supervisor lists the chain's entry count in the
+        # manifest and the verifier walks the chain to check it, so a
+        # raw U+2028 in an action, as another conforming writer leaves
+        # it, must be one line to both.
+        lines = rewritten_raw(self.sibling, 1, "Edit: say  done")
+        folder = self.work / "pkg"
+
+        packed = self.package(SESSION, "--folder", "--out", str(folder))
+
+        self.assertEqual(packed.returncode, 0, packed.stdout + packed.stderr)
+        listed = {c["path"]: c for c in self.manifest_of(folder)["chains"]}
+        self.assertEqual(listed[self.sibling.name]["entries"],
+                         lines.count(b"\n"))
+        judged = self.verify_package(folder)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("SELF-CONSISTENT"), judged.stdout)
 
     def test_a_drawer_holding_half_a_split_session_is_refused_naming_it(self):
         # Half of the session also sits in a drawer no selector reaches

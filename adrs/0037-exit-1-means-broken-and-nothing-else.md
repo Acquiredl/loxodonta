@@ -59,7 +59,12 @@ Verb by verb, what moved off 1:
 - **`verify`**: a log missing, empty or unreadable as a file, 66. A
   line that cannot be read stays `BROKEN`, since that is the walk's
   verdict on a line and not a failure to open the file.
-- **`head`**: missing, empty or unreadable, 66. A damaged tail stays 1.
+- **`head`**: missing, empty or unreadable, 66. A damaged tail stays 1,
+  and since the line rule (#323) that includes a tail line that is not
+  UTF-8, or that holds an over-long integer or over-deep nesting: the
+  same fact the walk calls `BROKEN`, found at the tail, where it used to
+  end in a traceback. The writers that read the tail (`log`, `run`,
+  `publish`, `stamp`, `anchor`) refuse such a tail the same way, exit 1.
 - **`verify-package`**: a path that is not there, 66.
   Inside a package, a chain file that is empty is a finding, not a
   missing input, since the manifest lists a chain there: it stays
