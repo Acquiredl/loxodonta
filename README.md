@@ -7,7 +7,7 @@
 
 Every tool call your AI coding agent makes leaves a receipt, and one command tells you whether anyone, the agent included, rewrote them afterwards.
 
-It is for people who let Claude Code, Codex CLI or the OpenAI Agents SDK work on real code, and for whoever has to believe the record later.
+It is for anyone who lets Claude Code, Codex CLI or the OpenAI Agents SDK loose on real code, and for whoever has to believe the record afterwards.
 
 Python 3.9 or newer, standard library only: download from the [releases page](https://github.com/Acquiredl/loxodonta/releases) and run `python loxodonta.py install-hook`.
 
@@ -80,8 +80,6 @@ python supervisor.py digest    # this project's recent history, the text a new s
 python supervisor.py serve     # the dashboard, bound to 127.0.0.1 only
 ```
 
-![The supervisor dashboard over a demo store: a verdict strip reading all quiet, an attention list, a fourteen-day band, and a sessions table.](docs/images/dashboard.png)
-
 The supervisor reads the store on the same machine the agent works on, so what it says is a reason to look, never proof. [docs/TOPOLOGY.md](docs/TOPOLOGY.md) draws where each file runs and what a verdict is worth there.
 
 ## What it catches, and what it does not
@@ -103,9 +101,9 @@ For scripts, `verify` exits 0 `VALID`, 1 `BROKEN`, 2 files diverged, 3 head mism
 
 **…git history?** Git records what was committed. Receipts record every tool call, including the reads, the web fetches and the commands that never touched a file, and git history is one more thing the agent can rewrite.
 
-**…shipping logs to another machine?** That is the right instinct, and the `full` profile does it (below). The chain adds that any copy, wherever it sits, can be checked for edits without trusting the machine that holds it.
+**…shipping logs to another machine?** The right instinct, and the `full` profile does exactly that (below). What the chain adds is that any copy, wherever it sits, can be checked for edits without trusting the machine that holds it.
 
-**…a tracing or observability tool?** Those hold payloads, costs and trace views, and loxodonta does not try to. They record what happened; they are not built so that the agent rewriting the record shows.
+**…a tracing or observability tool?** Those hold payloads, costs and trace views, and loxodonta does not try to. They record what happened; they are not built so that an agent rewriting the record gets caught.
 
 **…a public transparency log?** Those record signed artifacts and need an identity to sign with. Here nothing is signed by the agent, and at the `timestamped` profile only a 32-byte head leaves the machine.
 
