@@ -2409,10 +2409,12 @@ def walk(lines):
         expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
         if set(entry) != expected_fields:
             odd = set(entry) ^ expected_fields
-            # Escape text for a smuggled key's lone surrogate, which
-            # could not otherwise be printed (#292).
+            # The odd names are the writer's, and this message reaches
+            # agents through recall's verify tool: escaped like any other
+            # receipt text (`visible`, #295), a lone surrogate among the
+            # characters it escapes (#292).
             breaks.append((n, f"BROKEN at entry {n}: schema mismatch: "
-                              f"{receipt_text(', '.join(sorted(odd)))}"))
+                              f"{', '.join(visible(k) for k in sorted(odd))}"))
         # The right field names and the right hash do not make an entry
         # when a value is the wrong type (SPEC §6 step 1): a `files` that
         # is a string would crash every reader that resolves references.
@@ -3444,21 +3446,60 @@ def cmd_verify_package(args):
         return judge_package(path, unpacked, args.authority_chain)
 
 
+# Receipt text is written by the agent under observation, and report
+# prints it to a terminal while explain hands it to a model (#295). A
+# newline in an action could forge a timeline row or a line that reads
+# as an order, an ANSI sequence can clear or recolour the screen, and a
+# bidi override reorders what the eye sees. So every such character is
+# printed as its escape: C0 controls (tab, newline and carriage return
+# among them), DEL, C1 controls (NEL U+0085 among them), the line and
+# paragraph separators, the bidi marks, embeddings, overrides and
+# isolates, and lone surrogates, which JSON allows and no encoder
+# accepts. Display only: verify hashes the raw entry. A backslash stays
+# as it is, so the chain file is where the exact bytes are read. The
+# twin of supervisor.py's `visible`, which every recall surface uses;
+# the files never import each other (ADR-0035), so keep the two alike.
+NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
+BIDI_CONTROLS = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+                          "\u2066\u2067\u2068\u2069")
+
+
+def visible(text):
+    """`text` with every steering character written as its escape: `\\n`,
+    `\\x1b`, `\\u202e`. One line in, one line out."""
+    shown = []
+    for char in str(text):
+        code = ord(char)
+        if char in NAMED_ESCAPES:
+            shown.append(NAMED_ESCAPES[char])
+        elif code < 0x20 or 0x7f <= code <= 0x9f:
+            shown.append(f"\\x{code:02x}")
+        elif (char in "\u2028\u2029" or char in BIDI_CONTROLS
+              or 0xd800 <= code <= 0xdfff):
+            shown.append(f"\\u{code:04x}")
+        else:
+            shown.append(char)
+    return "".join(shown)
+
+
 def timeline_lines(entries, breaks, warns):
     """The human timeline, one string per line — report prints it, and
-    explain hands it to the narrating model."""
+    explain hands it to the narrating model. Every writer-supplied value
+    goes through `visible`, so one entry is one line whatever it holds."""
     flags = {}
     for n, message in breaks + warns:
         flags.setdefault(n, []).append(message)
     out = []
     for n, entry in enumerate(entries):
         if entry is not None:
-            out.append(f"  {n:>4}  {entry.get('ts')}  "
-                       f"{entry.get('actor')}: {entry.get('action')}")
+            out.append(f"  {n:>4}  {visible(entry.get('ts'))}  "
+                       f"{visible(entry.get('actor'))}: "
+                       f"{visible(entry.get('action'))}")
             for ref in entry.get("files", []):
-                out.append(f"        - {ref['path']} ({ref['sha256'][:12]}…)")
+                out.append(f"        - {visible(ref['path'])} "
+                           f"({visible(ref['sha256'][:12])}…)")
         for message in flags.get(n, []):
-            out.append(f"        !! {message}")
+            out.append(f"        !! {visible(message)}")
     return out
 
 
