@@ -424,6 +424,11 @@ WHY_NOT = "Why not"              # a README heading starts with these words
 #    except the sources a picture is made from (a VHS `.tape` script).
 IMAGES = "docs/images/"
 IMAGE_SOURCES = {".tape"}
+# ...and the pictures shown somewhere no Markdown file reaches, with where.
+IMAGES_SHOWN_ELSEWHERE = {
+    "docs/images/social-preview.png":
+        "the GitHub social preview, uploaded by hand in the repository settings",
+}
 # 3. Indexes: (the index page, the pages it must link, said in words).
 #    An index does not have to link itself.
 INDEXES = [
@@ -467,9 +472,16 @@ IMAGE_TARGETS = [
     r"!\[[^\]]*\]\(\s*<?([^)\s>]+)",
     r"<img\b[^>]*\bsrc\s*=\s*[\"']([^\"']+)[\"']",
 ]
-# An image by itself, or an image inside a link (a badge).
+# An image by itself, or an image inside a link (a badge), the link
+# inline `[![t](image)](url)` or by reference `[![t](image)][ci]`.
 _IMAGE = r"!\[[^\]]*\]\([^)]*\)"
-IMAGES_ONLY = r"(?:\s*(?:\[" + _IMAGE + r"\]\([^)]*\)|" + _IMAGE + r"))+\s*"
+IMAGES_ONLY = (r"(?:\s*(?:\[" + _IMAGE + r"\](?:\([^)]*\)|\[[^\]]*\])|"
+               + _IMAGE + r"))+\s*")
+# The tagline: a line wholly in italics or bold, with asterisks or
+# underscores: `*this*`, `**this**`, `_this_`, `__this__`.
+TAGLINE = r"\*{1,2}[^*].*\*{1,2}|_{1,2}[^_].*_{1,2}"
+# A list item: `- `, `* `, `+ `, `1. ` or `1) `.
+LIST_ITEM = r"\s*(?:[-*+]|\d+[.)])\s"
 
 
 def front_door_main():
@@ -551,7 +563,7 @@ def first_paragraph(lines):
     - blank lines, and HTML comments (a `<!-- -->` on one line or several),
     - a line of images and nothing else: the wordmark, and a line of badges
       (each an image inside a link),
-    - the tagline: a line wholly in italics, `*like this*` or `_this_`,
+    - the tagline: a line wholly in italics or bold (TAGLINE),
     - headings, HTML lines (`<p align=...>`), fenced code, list items,
       table rows and quotations, none of which is a paragraph.
 
@@ -573,7 +585,7 @@ def first_paragraph(lines):
                 continue
             if (fenced or not stripped
                     or re.fullmatch(IMAGES_ONLY, stripped)
-                    or re.fullmatch(r"\*[^*].*\*|_[^_].*_", stripped)
+                    or re.fullmatch(TAGLINE, stripped)
                     or re.match(r"(?:#|<|\||>|[-*+]\s|\d+[.)]\s)", stripped)):
                 continue
             start = number
@@ -641,6 +653,7 @@ def orphan_images(tracked, targets):
             for name in tracked
             if name.startswith(IMAGES)
             and posixpath.splitext(name)[1] not in IMAGE_SOURCES
+            and name not in IMAGES_SHOWN_ELSEWHERE
             and not links_to(targets, name)]
 
 
@@ -688,14 +701,16 @@ def changelog_findings(text):
     bullets = []                     # [line number, text] of each judged bullet
     current = None
     for number, (line, fenced) in enumerate(unfenced(text.splitlines()), 1):
-        heading = re.match(r"##\s+\[([^\]]+)\]", line)
+        # `## [0.9.0] - date`, `## 0.10.0`, `## [Unreleased]`, `## Unreleased`
+        heading = re.match(r"##\s+\[?([^\]\s]+)", line)
         if not fenced and re.match(r"#{1,2}\s", line):
             judged = bool(heading) and newer_than_judged(heading.group(1))
             current = None
         elif fenced or not line.strip() or line.startswith("#"):
             current = None
-        elif re.match(r"\s*[-*+]\s", line):
-            current = [number, line.strip()[1:]] if judged else None
+        elif re.match(LIST_ITEM, line):
+            body = re.sub(r"^" + LIST_ITEM, "", line)
+            current = [number, body] if judged else None
             if current:
                 bullets.append(current)
         elif current:

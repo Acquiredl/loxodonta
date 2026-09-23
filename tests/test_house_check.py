@@ -725,6 +725,32 @@ class FrontDoorTest(Fixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
 
+    def test_a_bold_or_underscored_tagline_is_passed_over(self):
+        # Were the tagline measured, its 70 words would fail.
+        tagline = " ".join(["tagline"] * 70)
+        for form in (f"**{tagline}**", f"_{tagline}_", f"__{tagline}__"):
+            with self.subTest(form=form[:3]):
+                self.write("README.md", COMPLIANT_README.replace(
+                    "*A flight recorder for AI agents.*", form))
+
+                result = self.front_door()
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), "")
+
+    def test_a_line_of_reference_style_badges_is_passed_over(self):
+        # `[![t](image)][ci]`, with its definition at the foot of the page.
+        badges = " ".join(["[![t](https://example.com/b.svg)][ci]"] * 70)
+        self.write("README.md", COMPLIANT_README.replace(
+            "[![tests](https://example.com/badge.svg)](https://example.com/ci) "
+            "[![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)",
+            badges) + "\n[ci]: https://example.com/ci\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
     def test_no_picture_but_the_wordmark_and_badges_fails(self):
         self.write("README.md", COMPLIANT_README.replace(
             "![the tamper demo](docs/images/demo.gif)", ""))
@@ -777,6 +803,15 @@ class FrontDoorTest(Fixture):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.findings(result), [
             "docs/images/dashboard.png: orphan-image: no tracked Markdown file links it"])
+
+    def test_the_social_preview_is_shown_elsewhere_and_passes_unlinked(self):
+        # Uploaded by hand in the repository settings; no page links it.
+        self.write("docs/images/social-preview.png", "x\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
 
     def test_a_picture_shown_by_any_page_in_any_spelling_passes(self):
         self.write("docs/images/a.png", "x\n")
@@ -868,6 +903,26 @@ class FrontDoorTest(Fixture):
             "CHANGELOG.md:5: changelog-bullet: 41 words, at most 40:"), found)
         self.assertTrue(found[1].startswith(
             "CHANGELOG.md:12: changelog-bullet: 41 words, at most 40:"), found)
+
+    def test_headings_without_brackets_and_numbered_items_are_judged(self):
+        long = " ".join(["word"] * 41)
+        self.write("CHANGELOG.md", "\n".join([
+            "# Changelog", "",
+            "## Unreleased", "", "1. " + long, "",
+            "## 0.10.0 - 2026-11-01", "", "### Fixed", "",
+            "2) " + long, "",
+            "## 0.8.0 - 2026-09-22", "", "1. " + long, "",
+        ]) + "\n")
+
+        result = self.front_door()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        found = self.findings(result)
+        self.assertEqual(len(found), 2, result.stdout)
+        self.assertTrue(found[0].startswith(
+            "CHANGELOG.md:5: changelog-bullet: 41 words, at most 40:"), found)
+        self.assertTrue(found[1].startswith(
+            "CHANGELOG.md:11: changelog-bullet: 41 words, at most 40:"), found)
 
     # 6. ADR slugs.
 
