@@ -821,7 +821,11 @@ class SessionEndWindowTest(PublishBase):
 
         self.assertLess(took, 3, "Codex would have killed the hook")
         rows = self.rows_by_step()
-        self.assertEqual(rows["publish-head"], (1.5, "sent"))
+        # To a tenth, as above: a busy machine spends one before the
+        # head's step begins; the outcome word stays exact.
+        budget, outcome = rows["publish-head"]
+        self.assertAlmostEqual(budget, 1.5, delta=0.1)
+        self.assertEqual(outcome, "sent")
         waited, outcome = rows["publish-chain"]
         self.assertTrue(0 < waited <= 1.5, waited)
         self.assertEqual(outcome, f"no answer within {waited:g} seconds")

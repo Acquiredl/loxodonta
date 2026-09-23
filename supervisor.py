@@ -5729,7 +5729,17 @@ def run_drill(root, asked):
 
 def cmd_drill(args):
     root = Path(args.root).resolve()
-    report, code = run_drill(root, args.log)
+    asked = args.log
+    # `--log` is read against the root first, then against the folder
+    # the command runs in (#297), so the line a reader copies from a
+    # clone (`--root docs/demo --log docs/demo/...`) works as written.
+    # Either way it must land on a chain under the root. The second
+    # reading lives here, not in resolve_chain: the page's drill route
+    # shares that gate, and a request must never be read against the
+    # folder the server happens to run in.
+    if resolve_chain(root, asked) is None and not Path(asked).is_absolute():
+        asked = str(Path.cwd() / asked)
+    report, code = run_drill(root, asked)
     if report is None:
         print(f"error: {args.log} is not a chain under {root}",
               file=sys.stderr)
@@ -8969,7 +8979,8 @@ def main(argv):
     drill.add_argument("--root", required=True,
                        help="the folder your repos live in")
     drill.add_argument("--log", required=True,
-                       help="the chain to copy and drill")
+                       help="the chain to copy and drill, under --root; "
+                       "named from the root or from the current folder")
     drill.add_argument("--json", action="store_true",
                        help="compact machine output (default "
                             "pretty-prints)")
