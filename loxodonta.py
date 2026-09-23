@@ -184,11 +184,37 @@ def object_with_each_key_once(pairs):
     return seen
 
 
+def path_leaving_base(path):
+    """How a reference path's spelling could lead outside the reference
+    base, named; None when it cannot (SPEC §3). A leading slash of
+    either kind is absolute (`\\\\server\\share` too), a letter and a
+    colon is a drive (`C:\\x`, and `C:x`, which Windows reads from that
+    drive's current folder), and a `..` segment steps up, with either
+    slash as the separator since Windows reads both.
+    The rule is spelling, the same on every platform, so a chain's
+    verdict never depends on the machine that judges it. The recorder
+    applies it to what a receipt stores and the walk to what a chain
+    holds, so a chain the recorder wrote never fails it (#299). It is
+    not containment: a symbolic link under the base is followed where
+    it leads, by `log` and by `verify --files` alike (SPEC §3)."""
+    if path[:1] in ("/", "\\"):
+        return "absolute"
+    if path[1:2] == ":":
+        return "a drive"
+    if ".." in path.replace("\\", "/").split("/"):
+        return "a '..' segment"
+    return None
+
+
 def shape_problem(entry):
     """The first way `entry`'s values fail SPEC §2's types, named; None
-    when each is of its type. Type only: whether a string is hex, or a
-    timestamp well-formed, is the hash comparison's and the reader's
-    business, and a mistyped value is what makes a reader crash."""
+    when each is of its type. Type only, with one exception: whether a
+    string is hex, or a timestamp well-formed, is the hash comparison's
+    and the reader's business, and a mistyped value is what makes a
+    reader crash. The exception is a reference path that could leave the
+    project: `verify --files` would open it on the recipient's machine,
+    and no chain the recorder wrote holds one, so it was written past
+    the recorder's refusal or forged (SPEC §3, §6 step 1; #299)."""
     n = entry.get("n")
     if isinstance(n, bool) or not isinstance(n, int):
         return "n is not an integer"
@@ -207,6 +233,13 @@ def shape_problem(entry):
     for ref in files:
         if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}                 or not all(isinstance(value, str) for value in ref.values()):
             return "files holds something that is not a reference"
+    for ref in files:
+        how = path_leaving_base(ref["path"])
+        if how is not None:
+            # Escaped for display (`visible`, below): the path is the
+            # writer's text.
+            return (f"files names a path that leaves the project ({how}): "
+                    f"{visible(ref['path'])}")
     return None
 
 
@@ -1062,6 +1095,12 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
 
     diverged = 0
     if files:
+        # Every path below comes from the chain being judged, and every
+        # one stays under the base by its spelling: an entry naming a
+        # path that could leave it is refused by the walk above, BROKEN,
+        # so this is never reached for it and nothing here opens it
+        # (`path_leaving_base`, #299). A symbolic link is followed, as the
+        # recorder followed it when it logged the file (SPEC §3).
         # Latest reference per path is authoritative (GLOSSARY: file reference).
         latest = {}
         for entry in entries:
@@ -1293,9 +1332,18 @@ def read_manifest(folder):
     format tag, and a shape this verifier cannot judge are refusals, the
     way UNSUPPORTED-VERSION is."""
     try:
+        # Read with the walk's guard (SPEC §6 step 1): a manifest giving
+        # one key twice says two things, one to a reader keeping the
+        # first and another to one keeping the last, and whatever this
+        # verifier judged, the recipient's own tools may read the other
+        # (#299).
         with open(os.path.join(folder, "manifest.json"), encoding="utf-8") as f:
-            manifest = json.load(f)
-    except (OSError, ValueError):
+            manifest = json.load(f, object_pairs_hook=object_with_each_key_once)
+    except KeyGivenTwice as twice:
+        return None, (f"UNSUPPORTED-FORMAT: manifest.json has key "
+                      f"{visible(repr(twice.key))} given twice; no reading "
+                      "of it is the manifest")
+    except (OSError, ValueError, RecursionError):
         return None, ("UNSUPPORTED-FORMAT: no readable manifest.json at the "
                       "top of this package; not a loxodonta package")
     refusal = manifest_refusal(manifest)
@@ -1869,12 +1917,51 @@ def judge_package(shown, folder, chain_file=None):
     return 0
 
 
+# The characters a Windows unzip turns into `_` in a member's name.
+WINDOWS_UNZIP_UNDERSCORES = str.maketrans(':<>|"?*', "_" * 7)
+
+
+def landing_name(name):
+    """The file a zip member's name unpacks to, folded so that two names
+    landing on one file on any system compare equal: a drive or a
+    `\\\\server\\share` prefix dropped and either slash a separator
+    (Windows), empty, `.` and `..` segments dropped (every unzip), a
+    segment's trailing dots and spaces dropped and `:<>|"?*` read as `_`
+    (Windows), one Unicode normal form (macOS), and case folded (Windows
+    and macOS). The fold is the union of those systems' rules, applied on
+    every system, so a package's verdict never depends on where the
+    recipient unpacks it; it folds a little more than any one system
+    does, and a package the supervisor wrote, flat and plainly named,
+    never comes near it (#299)."""
+    import ntpath  # Windows's own path rules, the same on every system
+    _, rest = ntpath.splitdrive(name.replace("/", "\\"))
+    segments = (segment.rstrip(". ") for segment in rest.split("\\"))
+    landed = "/".join(segment for segment in segments if segment)
+    landed = landed.translate(WINDOWS_UNZIP_UNDERSCORES)
+    return unicodedata.normalize("NFC", landed).casefold()
+
+
+def one_file_twice(names):
+    """The first two of a zip's member names that unpack to one file, or
+    None. Unpacking writes both and keeps the last, while `unzip -p` and
+    a zip reader that stops at the first show the first: a tampered
+    chain ahead of the original verified SELF-CONSISTENT (#299)."""
+    seen = {}
+    for name in names:
+        landed = landing_name(name)
+        if landed in seen:
+            return seen[landed], name
+        seen[landed] = name
+    return None
+
+
 def cmd_verify_package(args):
     """`verify-package PATH`: a zip or an unpacked folder, the manifest at
     its top. A zip is unpacked into a temporary folder and judged there,
     so a Windows unzip and this command see the same bytes the same way;
-    one that declares more than PACKAGE_MAX_BYTES unpacked, or that is
-    damaged past what its end record shows, is refused unopened."""
+    one that declares more than PACKAGE_MAX_BYTES unpacked, that holds
+    two members unpacking to one file, or that is damaged past what its
+    end record shows, is refused unopened."""
     import zipfile  # only this command reads zips; the hook never pays for it
     path = args.path
     if os.path.isdir(path):
@@ -1895,8 +1982,21 @@ def cmd_verify_package(args):
                           "bytes unpacked, more than this verifier will "
                           f"unpack ({PACKAGE_MAX_BYTES})")
                     return 4
+                twice = one_file_twice(package.namelist())
+                if twice is not None:
+                    first, second = (visible(repr(name)) for name in twice)
+                    which = (f"{first} twice" if twice[0] == twice[1]
+                             else f"{first} and {second}")
+                    print(f"UNSUPPORTED-FORMAT: {path} holds two members "
+                          f"that unpack to one file, {which}; which one is "
+                          "read depends on the tool that unpacks it, so "
+                          "this verifier refuses it unopened")
+                    return 4
                 package.extractall(unpacked)
-        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as e:
+        # ValueError: a member whose name leaves nothing to unpack to,
+        # such as `..`, which extractall refuses by raising.
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError,
+                ValueError) as e:
             print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked ({e}); "
                   "not a loxodonta package")
             return 4
@@ -2299,19 +2399,25 @@ def file_reference(base, raw_path):
     stored and hashed relative to the reference base — the project
     root, which for a local log is the log's own directory."""
     path = raw_path.replace("\\", "/")
+    # The file is read by its own name; the receipt holds the name as
+    # text it can carry, and the caller sorts what it holds.
+    stored = receipt_text(path)
     # SPEC §3: absolute and `..` paths are rejected, never silently rewritten —
     # a file outside the log's directory usually means the log is misplaced.
-    if os.path.isabs(path) or (len(path) > 1 and path[1] == ":"):
-        raise ValueError(f"absolute path not allowed: {raw_path}")
-    if ".." in path.split("/"):
-        raise ValueError(f"path may not contain '..': {raw_path}")
+    # The rule is the walk's own, applied to the spelling the receipt
+    # stores, so the recorder never writes a chain the walk refuses
+    # (#299). That catches `\Users\x`, which Python 3.13 on Windows no
+    # longer calls absolute, and a name starting with a byte that is not
+    # UTF-8, or with `..` and then one, whose escape text (`\udcff...`,
+    # `..\udcff`) Windows reads as rooted or as a step up.
+    how = path_leaving_base(stored)
+    if how is not None:
+        raise ValueError(f"path not allowed ({how}): {raw_path}")
     try:
         sha256 = sha256_file(os.path.join(base, path))
     except FileNotFoundError:
         raise ValueError(f"file not found: {raw_path}")
-    # The file is read by its own name; the receipt holds the name as
-    # text it can carry, and the caller sorts what it holds.
-    return {"path": receipt_text(path), "sha256": sha256}
+    return {"path": stored, "sha256": sha256}
 
 
 def build_references(log, file_paths):

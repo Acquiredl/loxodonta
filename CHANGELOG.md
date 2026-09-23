@@ -14,6 +14,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - The receiver gives each request its own thread and drops one not whole within 60 seconds, so a slow sender no longer holds the door (#300).
 - The supervisor writes its baseline, day book and views whole or not at all, so a crash mid-write no longer leaves a baseline the next scan cannot read, and the tripwire keeps its memory of heads (#300).
+- `verify` calls an entry `BROKEN` when a file reference could lead outside the project (`..`, absolute, a drive), so `--files` never hashes a file the chain chose; the recorder refuses the same spellings, `\Users\x` on Windows included (#299).
+- `verify-package` refuses a zip holding two members that unpack to one file, which let a tampered chain verify `SELF-CONSISTENT`, and a manifest giving a key twice: both `UNSUPPORTED-FORMAT`, exit 4 (#299).
 
 ### Added
 
