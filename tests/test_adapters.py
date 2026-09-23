@@ -188,6 +188,49 @@ class CodexHookTest(unittest.TestCase):
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertIn("VALID", judged.stdout)
 
+    def test_a_lone_surrogate_in_a_codex_call_is_recorded_as_escape_text(self):
+        # #292: json.dumps sends the character as the JSON escape the
+        # harness would, and the receipt holds that escape as text.
+        self.hook(codex_payload(self.project, tool="Bash",
+                                tool_input={"command": "echo " + chr(0xD800)}))
+        self.hook(codex_payload(self.project, tool="Bash",
+                                tool_input={"command": "ls"}))
+        log = drawer_of(self.store, "someproject") \
+            / "receipts-019374ab-codex-session.jsonl"
+        self.assertEqual([e["action"] for e in entries(log)[1:]],
+                         ["Bash: echo " + chr(92) + "ud800", "Bash: ls"])
+        judged = run_loxodonta("verify", "--log", str(log), env=self.env)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertIn("VALID", judged.stdout)
+
+    def test_a_project_folder_named_with_a_lone_surrogate_still_records(self):
+        # #292 review: the drawer's name hashes the project path, and a
+        # lone surrogate in it (a folder name that is not UTF-8, on
+        # POSIX) crashed that hash on every call for the project. Hook
+        # in, digest out: both copies of the slug agree on the drawer.
+        if sys.platform == "darwin":
+            self.skipTest("APFS refuses a file name that is not UTF-8")
+        project = self.root / ("odd" + chr(0xDCFF) + "project")
+        try:
+            project.mkdir()
+        except (OSError, UnicodeError):
+            self.skipTest("this filesystem cannot hold the name")
+
+        result = self.hook(codex_payload(project, tool="Bash",
+                                         tool_input={"command": "make"}))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = drawer_of(self.store, "odd-project") \
+            / "receipts-019374ab-codex-session.jsonl"
+        self.assertEqual(entries(log)[-1]["action"], "Bash: make")
+        start = {"session_id": "019374ab-codex-session",
+                 "hook_event_name": "SessionStart", "source": "startup",
+                 "transcript_path": None, "cwd": str(project)}
+        out = run_supervisor("digest", "--payload", stdin=start,
+                             env=self.env, cwd=str(self.root))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("Bash: make", out.stdout)
+
     def test_session_end_seals_the_rollout_transcript(self):
         rollout = self.root / "rollout-2026-09-02.jsonl"
         rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
@@ -403,6 +446,22 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         last = entries(self.chain())[-1]
         self.assertEqual(last["action"], "run_shell: make")
         self.assertNotIn("exit 2", json.dumps(last))
+
+    def test_a_lone_surrogate_in_the_arguments_is_recorded_as_escape_text(self):
+        # #292: the SDK hands the arguments over as JSON text, which may
+        # carry the escape of half a UTF-16 pair; it reaches the recorder
+        # through arguments_of and must still leave its receipt.
+        escape = chr(92) + "ud800"
+        self.recorder.on_span_end(span(
+            "function", "run_shell", '{"command": "echo ' + escape + ' hi"}'))
+        self.recorder.on_span_end(span(
+            "function", "run_shell", '{"command": "pytest"}'))
+        log = self.chain()
+        self.assertEqual([e["action"] for e in entries(log)[1:]],
+                         ["run_shell: echo " + escape + " hi",
+                          "run_shell: pytest"])
+        judged = run_loxodonta("verify", "--log", str(log))
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
 
     def test_a_run_is_one_chain_in_span_order_and_it_verifies(self):
         steps = [("read_file", '{"path": "a.py"}'),

@@ -1498,3 +1498,211 @@ class ShapeTest(TamperTest):
         self.assertEqual(verify.returncode, 1, verify.stdout + verify.stderr)
         self.assertIn("BROKEN at entry 1", verify.stdout)
         self.assertIn("BROKEN at entry 2", verify.stdout)
+
+
+# A backslash, spelled so no layer between here and the child (Python
+# literal, shell, JSON) can read it as the start of an escape.
+BACKSLASH = chr(92)
+# A lone low surrogate: what POSIX hands Python for an undecodable byte
+# in argv or a file name (surrogateescape), and a code point Windows
+# argv can carry as it stands, so the same character reaches the
+# recorder on every platform the suite runs on.
+LONE = chr(0xDCFF)
+
+
+class LoneSurrogateTest(ReceiptsCliTest):
+    """#292: a lone surrogate has no UTF-8 form, so the canonical form
+    cannot hold it and the receipt used to be lost to a traceback while
+    the chain went on verifying VALID. The ruling (2026-09-22): the
+    receipt records it as its six ASCII characters of escape text, and
+    the format does not change."""
+
+    def setUp(self):
+        super().setUp()
+        run_receipts("init", cwd=self.workdir)
+
+    def entries(self):
+        return [json.loads(line) for line in
+                self.log_path.read_text(encoding="utf-8").splitlines()]
+
+    def assert_valid(self):
+        verify = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertEqual(verify.stdout.strip(), "VALID")
+
+    def test_log_records_a_lone_surrogate_as_its_escape_text(self):
+        result = run_receipts("log", "--actor", "agent" + LONE,
+                              "--action", "echo " + LONE + " hi",
+                              cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+        entry = self.entries()[1]
+        self.assertEqual(entry["actor"], "agent" + BACKSLASH + "udcff")
+        self.assertEqual(entry["action"],
+                         "echo " + BACKSLASH + "udcff hi")
+        # The chain keeps receipting after the escaped call, and walks.
+        run_receipts("log", "--actor", "agent", "--action", "after",
+                     cwd=self.workdir)
+        self.assertEqual([e["n"] for e in self.entries()], [0, 1, 2])
+        self.assert_valid()
+
+    def test_run_records_a_lone_surrogate_in_its_command_as_escape_text(self):
+        result = run_receipts("run", "--actor", "agent", "--",
+                              sys.executable, "-c", "pass", LONE,
+                              cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+        action = self.entries()[1]["action"]
+        self.assertTrue(action.endswith(" " + BACKSLASH + "udcff (exit 0)"),
+                        action)
+        self.assert_valid()
+
+    def test_a_file_path_with_a_lone_surrogate_is_recorded_as_escape_text(self):
+        if sys.platform == "darwin":
+            self.skipTest("APFS refuses a file name that is not UTF-8")
+        name = "note" + LONE + ".txt"
+        try:
+            (self.workdir / name).write_text("x", encoding="utf-8")
+        except (OSError, UnicodeError):
+            self.skipTest("this filesystem cannot hold the name")
+
+        result = run_receipts("log", "--actor", "agent", "--action", "wrote",
+                              "--file", name, cwd=self.workdir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        ref = self.entries()[1]["files"][0]
+        self.assertEqual(ref["path"], "note" + BACKSLASH + "udcff.txt")
+        self.assertEqual(ref["sha256"], hashlib.sha256(b"x").hexdigest())
+        self.assert_valid()
+
+
+class UnopenableReferenceTest(ReceiptsCliTest):
+    """#292 review: a well-hashed entry can carry a path this machine
+    cannot open as a file: a NUL (ValueError everywhere), a directory
+    (PermissionError on Windows, IsADirectoryError elsewhere), a name
+    Windows refuses (`a<b`, EINVAL, which the broken-pipe handler used
+    to swallow, so verify exited 1 printing nothing). `verify --files`
+    says MISSING for each, as for a file not on disk, and the verdict
+    and exit code are the chain's."""
+
+    def test_verify_files_names_each_unopenable_path_missing(self):
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "wrote",
+                     cwd=self.workdir)
+        (self.workdir / "sub").mkdir()
+        paths = sorted(["a" + chr(0) + "b", "sub", "a<b"])
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        entry = json.loads(lines[-1])
+        del entry["entry_hash"]
+        entry["files"] = [{"path": p, "sha256": "0" * 64} for p in paths]
+        entry["entry_hash"] = spec_hash(entry)
+        lines[-1] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        self.log_path.write_text("".join(l + "\n" for l in lines),
+                                 encoding="utf-8")
+
+        result = run_receipts("verify", "--files", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        out = result.stdout.splitlines()
+        self.assertEqual(out[-1], "VALID")
+        # A directory is on disk but is no file to fingerprint; `a<b` is
+        # an unopenable name on Windows and simply absent elsewhere.
+        self.assertIn("MISSING (not a readable file here): sub", out)
+        self.assertTrue(any(l.startswith("MISSING (") and l.endswith(": a<b")
+                            for l in out), out)
+        self.assertEqual(sum(l.startswith("MISSING (") for l in out), 3, out)
+
+
+class UnreadableLineTest(TamperTest):
+    """SPEC section 6: a line that is not an entry is refused by name.
+    Four lines the reader cannot even take apart (a byte that is not
+    UTF-8, a string holding a lone surrogate, which has no canonical
+    form, an integer past Python's digit limit, nesting past its
+    recursion limit) used to end verify in a traceback. Each is BROKEN
+    at its entry, exit 1, on every reader of the walk (#292)."""
+
+    def write_raw(self, index, raw):
+        lines = self.log_path.read_bytes().split(b"\n")
+        lines[index] = raw
+        self.log_path.write_bytes(b"\n".join(lines))
+
+    def assert_refused(self, at_entry, reason):
+        result = self.assert_broken(at_entry)
+        self.assertIn(reason, result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        for verb in (["report"], ["verify", "--files"]):
+            again = run_receipts(*verb, cwd=self.workdir)
+            self.assertNotIn("Traceback", again.stderr, " ".join(verb))
+        self.assertEqual(run_receipts("report", cwd=self.workdir).returncode, 0)
+
+    def entry_line(self, index, **fields):
+        entry = json.loads(self.read_lines()[index])
+        entry.update(fields)
+        return json.dumps(entry, sort_keys=True,
+                          separators=(",", ":")).encode("ascii")
+
+    def test_a_byte_that_is_not_utf8_is_broken_by_name(self):
+        line = self.read_lines()[2].encode("ascii")
+        self.write_raw(2, line.replace(b"step 2", b"step 2 \xff"))
+
+        self.assert_refused(2, "BROKEN at entry 2: line is not valid UTF-8")
+
+    def test_a_lone_surrogate_in_a_stored_string_is_broken_by_name(self):
+        # The JSON escape decodes to a lone surrogate, which has no UTF-8
+        # form, so there is no canonical form to hash (SPEC section 4).
+        line = self.entry_line(2, action="step 2")
+        self.write_raw(2, line.replace(
+            b"step 2", b"step 2 " + BACKSLASH.encode() + b"ud800"))
+
+        self.assert_refused(2, "BROKEN at entry 2: a string holds a lone "
+                               "surrogate")
+
+    def test_an_integer_past_the_digit_limit_is_broken_not_a_crash(self):
+        # Python 3.11 and later refuse to read it; 3.9 reads it and the
+        # sequence rule refuses it. Either way, a verdict.
+        line = self.entry_line(2).replace(b'"n":2', b'"n":' + b"9" * 5000)
+        self.write_raw(2, line)
+
+        self.assert_refused(2, "BROKEN at entry 2")
+
+    def test_nesting_past_the_recursion_limit_is_broken_by_name(self):
+        self.write_raw(2, b"[" * 100000 + b"]" * 100000)
+
+        self.assert_refused(2, "BROKEN at entry 2: nesting too deep to read")
+
+    def test_an_unreadable_genesis_is_broken_not_a_crash(self):
+        # The genesis is read once before the walk, for its version claim.
+        # The long integer is not the claim itself: on 3.9, which reads
+        # it, a number claimed as the version is a refusal, not a break.
+        for raw in (b"[" * 100000 + b"]" * 100000,
+                    b'{"n":' + b"9" * 5000 + b'}',
+                    self.read_lines()[0].encode("ascii").replace(
+                        b"genesis", b"genesis\xff")):
+            with self.subTest(raw=raw[:20]):
+                self.setUp()
+                self.write_raw(0, raw)
+                self.assert_refused(0, "BROKEN at entry 0")
+
+    def test_a_version_claim_holding_a_lone_surrogate_is_named_not_a_crash(self):
+        line = self.entry_line(0).replace(
+            b'"v":"0.1"', b'"v":"0.1' + BACKSLASH.encode() + b'ud800"')
+        self.write_raw(0, line)
+
+        result = run_receipts("verify", cwd=self.workdir)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("UNSUPPORTED-VERSION", result.stdout)
+        self.assertIn("0.1" + BACKSLASH + "ud800", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_schema_key_holding_a_lone_surrogate_is_named_not_a_crash(self):
+        line = self.entry_line(2).replace(
+            b'"ts":', b'"x' + BACKSLASH.encode() + b'ud800":1,"ts":')
+        self.write_raw(2, line)
+
+        result = self.assert_broken(at_entry=2)
+        self.assertIn("schema mismatch: x" + BACKSLASH + "ud800",
+                      result.stdout)
+        self.assertNotIn("Traceback", result.stderr)

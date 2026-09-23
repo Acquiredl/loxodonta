@@ -52,6 +52,24 @@ def entry_hash(entry_without_hash):
     return hashlib.sha256(canonical_bytes(entry_without_hash)).hexdigest()
 
 
+def receipt_text(text):
+    """`text` as a receipt can hold it: each lone surrogate written as
+    its six ASCII characters of escape text (`\\ud800`), everything
+    else exactly as it stands (#292).
+
+    A lone surrogate is half of a UTF-16 pair with no other half. JSON
+    lets a model type one into any tool argument, and POSIX hands Python
+    one for every byte of argv or a file name that is not UTF-8. It has
+    no UTF-8 form, so the canonical form above cannot hold it: the
+    append used to die in a traceback, leaving no receipt while the
+    chain went on verifying VALID. Written as escape text, the receipt
+    says what was sent and the format does not change. The codec's
+    backslashreplace is exactly that rule, since a lone surrogate is the
+    only thing UTF-8 cannot encode. Every string an entry takes from
+    outside passes through here: actor, action, file paths."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def now_ts():
     # SOURCE_DATE_EPOCH (the reproducible-builds convention: integer Unix
     # seconds, UTC) overrides the wall clock so the demo store builder
@@ -100,6 +118,17 @@ def write_line_to_disk(path, mode, line):
 def read_log(path):
     """All lines of the receipt log; FileNotFoundError if it doesn't exist."""
     with open(path, encoding="utf-8") as f:
+        return f.read().splitlines()
+
+
+def read_log_to_judge(path):
+    """`read_log` for the readers that walk the chain (verify, report,
+    explain, the package's walk). A byte that is not UTF-8 arrives as a
+    lone surrogate (surrogateescape) instead of ending the whole read in
+    a traceback, so the walk can refuse the one line it sits on by name
+    (SPEC §6). The recorder only ever writes ASCII lines, so no line it
+    wrote is read any differently."""
+    with open(path, encoding="utf-8", errors="surrogateescape") as f:
         return f.read().splitlines()
 
 
@@ -306,7 +335,9 @@ def file_reference(base, raw_path):
         sha256 = sha256_file(os.path.join(base, path))
     except FileNotFoundError:
         raise ValueError(f"file not found: {raw_path}")
-    return {"path": path, "sha256": sha256}
+    # The file is read by its own name; the receipt holds the name as
+    # text it can carry, and the caller sorts what it holds.
+    return {"path": receipt_text(path), "sha256": sha256}
 
 
 def build_references(log, file_paths):
@@ -393,8 +424,11 @@ def append_locked(log, actor, action, files):
     entry = {
         "n": last["n"] + 1,
         "ts": now_ts(),
-        "actor": actor,
-        "action": action,
+        # Every writer (log, run, hook, the transcript commitments)
+        # comes through here, so this is the one place a lone surrogate
+        # becomes escape text (#292).
+        "actor": receipt_text(actor),
+        "action": receipt_text(action),
         "files": files,
         "prev": last["entry_hash"],
     }
@@ -2323,8 +2357,19 @@ def walk(lines):
     prev_hash = None
     prev_ts = None
     for n, line in enumerate(lines):
+        # A line the reader cannot take apart is refused by name like any
+        # other line that is not an entry, never a traceback that leaves
+        # the reader with no verdict at all (SPEC §6, #292).
         try:
+            # A byte that is not UTF-8 arrives from `read_log_to_judge`
+            # as a lone surrogate, the one thing UTF-8 cannot encode.
+            line.encode("utf-8")
             entry = json.loads(line, object_pairs_hook=object_with_each_key_once)
+        except UnicodeEncodeError:
+            breaks.append((n, f"BROKEN at entry {n}: line is not valid UTF-8"))
+            entries.append(None)
+            prev_hash = None
+            continue
         except KeyGivenTwice as twice:
             breaks.append((n, f"BROKEN at entry {n}: key {twice.key!r} "
                               "given twice"))
@@ -2342,6 +2387,20 @@ def walk(lines):
             entries.append(None)
             prev_hash = None
             continue
+        except ValueError:
+            # Python 3.11 and later refuse to read an integer of more
+            # than 4,300 digits; the JSON is well formed, but no reader
+            # here can hold it.
+            breaks.append((n, f"BROKEN at entry {n}: an integer is too "
+                              "long to read"))
+            entries.append(None)
+            prev_hash = None
+            continue
+        except RecursionError:
+            breaks.append((n, f"BROKEN at entry {n}: nesting too deep to read"))
+            entries.append(None)
+            prev_hash = None
+            continue
         if not isinstance(entry, dict):
             breaks.append((n, f"BROKEN at entry {n}: line is not a JSON object"))
             entries.append(None)
@@ -2350,8 +2409,10 @@ def walk(lines):
         expected_fields = GENESIS_FIELDS if n == 0 else ENTRY_FIELDS
         if set(entry) != expected_fields:
             odd = set(entry) ^ expected_fields
+            # Escape text for a smuggled key's lone surrogate, which
+            # could not otherwise be printed (#292).
             breaks.append((n, f"BROKEN at entry {n}: schema mismatch: "
-                              f"{', '.join(sorted(odd))}"))
+                              f"{receipt_text(', '.join(sorted(odd)))}"))
         # The right field names and the right hash do not make an entry
         # when a value is the wrong type (SPEC §6 step 1): a `files` that
         # is a string would crash every reader that resolves references.
@@ -2366,6 +2427,23 @@ def walk(lines):
             stored = entry.get("entry_hash")
             prev_hash = stored if isinstance(stored, str) else None
             continue
+        # A string holding a lone surrogate (a JSON escape reads as one)
+        # has no UTF-8 form, so the entry has no canonical form to hash
+        # (SPEC §4): not an entry, refused the way a wrong type is. The
+        # recorder never writes one; it writes the escape text instead.
+        stored_hash = entry.get("entry_hash")
+        hashed_form = {k: v for k, v in entry.items() if k != "entry_hash"}
+        try:
+            recomputed = entry_hash(hashed_form)
+        except (UnicodeEncodeError, RecursionError) as unhashable:
+            reason = ("nesting too deep to read"
+                      if isinstance(unhashable, RecursionError) else
+                      "a string holds a lone surrogate, which has no "
+                      "canonical form")
+            breaks.append((n, f"BROKEN at entry {n}: {reason}"))
+            entries.append(None)
+            prev_hash = stored_hash
+            continue
         entries.append(entry)
         if entry.get("n") != n:
             breaks.append((n, f"BROKEN at entry {n}: sequence number is "
@@ -2373,9 +2451,7 @@ def walk(lines):
         if entry.get("prev") != prev_hash:
             breaks.append((n, f"BROKEN at entry {n}: prev does not match "
                               "predecessor's entry_hash"))
-        stored_hash = entry.get("entry_hash")
-        hashed_form = {k: v for k, v in entry.items() if k != "entry_hash"}
-        if entry_hash(hashed_form) != stored_hash:
+        if recomputed != stored_hash:
             breaks.append((n, f"BROKEN at entry {n}: entry_hash does not "
                               "match canonical form"))
         # ts is writer-supplied testimony, not a mechanical fact: a backward
@@ -2510,7 +2586,7 @@ def cmd_verify(args, mechanisms=None):
     "anchor" is never the word for an authority timestamp (ADR-0032
     ruling 1)."""
     try:
-        lines = read_log(args.log)
+        lines = read_log_to_judge(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
     if not lines:
@@ -2523,14 +2599,19 @@ def cmd_verify(args, mechanisms=None):
     # the walk's business — that's tampering to judge, not a dialect to
     # politely decline.
     try:
+        # A line that is not UTF-8, or that the reader cannot take apart
+        # at all, claims no version: the walk names it (#292).
+        lines[0].encode("utf-8")
         genesis = json.loads(lines[0])
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         genesis = None
     log_version = genesis.get("v", FORMAT_VERSION) if isinstance(genesis, dict) \
         else FORMAT_VERSION
     if log_version != FORMAT_VERSION:
+        # Escape text, so a claim holding a lone surrogate prints (#292).
+        claimed = receipt_text(str(log_version))
         print(
-            f'UNSUPPORTED-VERSION: log is format "{log_version}"; '
+            f'UNSUPPORTED-VERSION: log is format "{claimed}"; '
             f'this verifier speaks "{FORMAT_VERSION}"'
         )
         return 4
@@ -2562,6 +2643,13 @@ def cmd_verify(args, mechanisms=None):
                 on_disk = sha256_file(os.path.join(base, path))
             except FileNotFoundError:
                 print(f"MISSING (not on disk): {path}")
+                continue
+            except (OSError, ValueError):
+                # A path this machine cannot open as a file: a directory,
+                # a name the platform refuses, a NUL (#292). Nothing to
+                # fingerprint, so it is missing in the same sense, and
+                # the verdict stays the chain's.
+                print(f"MISSING (not a readable file here): {path}")
                 continue
             if on_disk == latest[path]:
                 print(f"CURRENT: {path}")
@@ -2775,7 +2863,7 @@ def walked_listing(log):
     count, how many file references its entries carry, and how many
     transcript commitments it holds. The same walk verify uses; a chain
     is judged by walking, never by file hash (ADR-0026 ruling 3)."""
-    lines = read_log(log)
+    lines = read_log_to_judge(log)
     entries, _, _ = walk(lines)
     head = None
     references = 0
@@ -3376,7 +3464,7 @@ def timeline_lines(entries, breaks, warns):
 
 def cmd_report(args):
     try:
-        lines = read_log(args.log)
+        lines = read_log_to_judge(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
 
@@ -3443,7 +3531,7 @@ def split_command(text):
 
 def cmd_explain(args):
     try:
-        lines = read_log(args.log)
+        lines = read_log_to_judge(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
     if not lines:
@@ -3531,7 +3619,11 @@ def transcript_commitment_action(transcript_path):
     try:
         with open(transcript_path, "rb") as f:
             data = f.read()
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a path no filesystem can name, one holding a NUL
+        # or, on POSIX, a lone surrogate (#292). The payload is the
+        # harness's word, and a path that cannot be opened is skipped
+        # like one that is not there.
         return None
     return (f"transcript-commitment: bytes={len(data)} "
             f"sha256={hashlib.sha256(data).hexdigest()}")
@@ -3678,7 +3770,11 @@ def project_slug(project):
     two together behaviorally (hook in, digest out)."""
     p = os.path.abspath(str(project))
     key = os.path.normcase(p).replace(os.sep, "/")
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    # A lone surrogate (a folder name that is not UTF-8, on POSIX) is
+    # hashed as its escape text, as a receipt holds it (#292); every
+    # other path hashes exactly as before, so no drawer moves.
+    digest = hashlib.sha256(
+        key.encode("utf-8", "backslashreplace")).hexdigest()[:8]
     base = os.path.basename(p.rstrip("/\\")) or "root"
     safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in base)
     return f"{safe}-{digest}"

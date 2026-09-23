@@ -661,6 +661,37 @@ class SearchTest(RecallBase):
         self.assertIn("showing 2", out)
 
 
+class HostileLineRecallTest(RecallBase):
+    """#292: a chain line the reader cannot take apart (an integer past
+    Python's digit limit, nesting past its recursion limit, a byte that
+    is not UTF-8) is simply not remembered by recall, like any other
+    garbled line; it never ends digest or search in a traceback. verify
+    is where damage gets its name."""
+
+    def test_digest_and_search_read_past_a_hostile_line(self):
+        alpha = self.repo("alpha")
+        log, hashes = forge_chain(alpha, "e0e01111-2222-3333-4444-555566667777", [
+            ("2026-08-20T10:00:00Z", "Bash: needle before"),
+            ("2026-08-20T10:05:00Z", "Bash: needle after"),
+        ])
+        lines = log.read_bytes().split(b"\n")
+        hostile = [b'{"n":' + b"9" * 5000 + b',"action":"needle"}',
+                   b"[" * 100000 + b"]" * 100000,
+                   b'{"action":"needle \xff"}']
+        log.write_bytes(b"\n".join(lines[:2] + hostile + lines[2:]))
+
+        digest = run_py(SUPERVISOR, "digest", "--repo", str(alpha))
+        self.assertEqual(digest.returncode, 0, digest.stderr)
+        self.assertNotIn("Traceback", digest.stderr)
+        self.assertIn(hashes[2][:8], digest.stdout)
+
+        search = run_py(SUPERVISOR, "search", "needle", "--repo", str(alpha))
+        self.assertEqual(search.returncode, 0, search.stderr)
+        self.assertNotIn("Traceback", search.stderr)
+        self.assertIn(hashes[1][:8], search.stdout)
+        self.assertIn(hashes[2][:8], search.stdout)
+
+
 class TimelineTest(RecallBase):
     def test_context_rows_around_anchor(self):
         repo = self.repo("alpha")
