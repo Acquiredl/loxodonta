@@ -51,7 +51,10 @@ GENESIS_FIELDS = ENTRY_FIELDS | {"v"}
 # The entry_hash is SHA256 over the canonical JSON of the entry minus its
 # entry_hash field: keys sorted, compact separators, UTF-8, no trailing
 # newline. These bytes are the format's ground truth — an independent
-# implementation must reproduce them exactly.
+# implementation must reproduce them exactly. json.dumps escapes a string
+# exactly as RFC 8785 section 3.2.2.2 does, which is what SPEC §4 pins:
+# `\n` and the other short forms, lowercase `\u001b` for the rest of the
+# controls, everything else as it stands. tests/vectors/ holds it there.
 
 def canonical_bytes(entry_without_hash):
     return json.dumps(

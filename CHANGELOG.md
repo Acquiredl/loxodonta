@@ -20,6 +20,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Added
 
 - `verifier.py`: the recorder's `head`, `verify` and `verify-package` on their own, with nothing that writes or sends. It is copied from `loxodonta.py`, never edited by hand; CI fails a stale copy, and releases carry it (ADR-0035, #299).
+- Conformance vectors in `tests/vectors/`: small chains with the verdict each must get, run against `loxodonta.py` and `verifier.py`, for a second implementation to check itself against. SPEC section 4 now pins string escaping to RFC 8785's (ADR-0035, #299).
 - The receiver caps what it keeps, 1024 MiB a file and 10240 MiB in all (`--file-cap`, `--total-cap`), answering `507` past a cap and trimming nothing (#300).
 
 ## [0.8.1] - 2026-09-23
