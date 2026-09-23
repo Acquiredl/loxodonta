@@ -151,8 +151,8 @@ format, which stays at `0.1`. The ritual, in order:
 2. In that pull request, move the entries under `## [Unreleased]` in
    `CHANGELOG.md` to a new `## [x.y.z] - YYYY-MM-DD` heading, add the
    version's compare link at the bottom, and bump `TOOL_VERSION` in
-   `loxodonta.py`, `supervisor.py` and `receiver.py` to `x.y.z`. Minor per
-   promotion; patch for a hotfix cherry-picked to `main`. The three files
+   `loxodonta.py`, `supervisor.py` and `receiver.py` to `x.y.z`. Minor per promotion; patch for a promotion that
+   carries only fixes, and for a hotfix cherry-picked to `main`. The three files
    carry one version and the suite checks that they agree.
 3. Merge the pull request once the suite and the house checker are green.
 4. On `main`, tag the merge commit `vx.y.z` and push the tag:

@@ -47,7 +47,7 @@ Download what you need from the [releases page](https://github.com/Acquiredl/lox
 
 ```
 sha256sum -c --ignore-missing SHA256SUMS   # Windows: certutil -hashfile loxodonta.py SHA256, then compare
-python loxodonta.py --version   # loxodonta 0.8.0 (format 0.1, commit unknown)
+python loxodonta.py --version   # loxodonta 0.8.1 (format 0.1, commit unknown)
 ```
 
 No harness? `run` wraps any command and writes its receipt after it exits:

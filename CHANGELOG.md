@@ -10,6 +10,32 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-23
+
+Receipts that survive hostile input. Every fix here came from an outside review that tested the README's claims against the code. The receipt format is untouched.
+
+### Fixed
+
+- A tool call carrying a lone surrogate (`\ud800`) now leaves its receipt, recorded as escape text; before, it was lost and the chain still read `VALID` (#292).
+- `verify` gives a verdict, never a traceback, on a line it cannot read: invalid UTF-8, a lone surrogate, an over-long integer, over-deep nesting (#292).
+- `install-hook` and `uninstall-hook` touch only the hook entries they wrote, keep the first backup, write atomically and write through a symlinked settings file (#293).
+- The supervisor reads a user's own hooks as theirs too, so after `uninstall-hook` a hook named like `upload_receipts.py` no longer reads as the recorder (#303).
+- On Windows, `digest`, `show`, `search`, `timeline` and `report` no longer crash on a receipt holding an emoji or CJK character; all three tools write UTF-8 (#294).
+- Recall prints receipt text as data: control, bidi, zero-width and tag characters become visible escapes, and the digest and MCP say the text is never instructions (#295).
+- A receipt field named to forge a `VALID` line no longer fools the supervisor's reading of `verify` (#295).
+- `run` leaves its receipt when interrupted, when signalled by its own command, and when the command cannot start, keeping the command's exit status; a signal ignored at start stays ignored (#296).
+- The README's `drill` line runs as printed (#297).
+
+### Added
+
+- `python tools/house_check.py --front-door`: the first screen, orphan images, doc and ADR indexes, root files and CHANGELOG bullet length, now gated in CI (#298).
+- `docs/README.md` and `adrs/README.md`, an index for each folder.
+
+### Changed
+
+- The README's first screen says what it is, who it is for and how to install, shows the demo GIF, and answers "Why not just…".
+- `GLOSSARY.md` moves to `docs/GLOSSARY.md`; `lychee.toml` moves to `.github/`.
+
 ## [0.8.0] - 2026-09-22
 
 The release that carries two arcs and a change of direction. The profiles arc gave the installer one word for what leaves the machine, and gave the entries themselves somewhere to go: `receiver.py`, the third single file, the far end of a URL that can only add. A bugfix round then wired the failed-call event, made a headless `serve` keep its keepers turning, and drew the topology on one page. The direction grill that closed the cycle ruled who the design answers to first, the person handed a package who must decide alone whether to believe it, and wrote down where the project is going, the published work it stands on, and what it can and cannot claim. Four fixes came out of testing an outside review's claims rather than taking them: a verifier that no longer says `VALID` of a line that is not an entry, a forked chain that ends the way a torn one does, an append that reaches the disk before it is reported, and a setting that no longer stops every verb. The receipt format is untouched.
@@ -168,7 +194,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.8.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.8.1...dev
+[0.8.1]: https://github.com/Acquiredl/loxodonta/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Acquiredl/loxodonta/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Acquiredl/loxodonta/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Acquiredl/loxodonta/compare/v0.5.0...v0.6.0
