@@ -10,6 +10,32 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-23
+
+The recipient's verifier. `verifier.py` is the recorder's verify side on its own, copied from the same source, never edited by hand, and held to a set of conformance vectors that both files must pass. The verdicts were tightened where an outside review found them saying more than they knew: a relabeled format no longer hides an edit, an anchor no longer claims a block nobody checked, and exit 1 now means `BROKEN` and nothing else. Scripts that read exit codes should read the new ones. The receipt format is untouched, and its hashing is now frozen across versions.
+
+### Added
+
+- `verifier.py`: the recorder's `head`, `verify` and `verify-package` on their own, with nothing that writes or sends. It is copied from `loxodonta.py`, never edited by hand; CI fails a stale copy, and releases carry it (ADR-0035, #299).
+- Conformance vectors in `tests/vectors/`: small chains with the verdict each must get, run against `loxodonta.py` and `verifier.py`, for a second implementation to check itself against. SPEC section 4 now pins string escaping to RFC 8785's (ADR-0035, #299).
+- The receiver caps what it keeps, 1024 MiB a file and 10240 MiB in all (`--file-cap`, `--total-cap`), answering `507` past a cap and trimming nothing (#300).
+- `--block-header HEX` on `verify --anchors` and `verify-package`: a Bitcoin block header from a source you trust, matched to anchors by merkle root, offline. A match names the block by its hash (#299).
+
+### Changed
+
+- Exit 1 now means `BROKEN` and nothing else. A missing, empty or unreadable log exits 66, an internal error 70, a held lock 75, a closed pipe 141; writers use 65, 69 and 73 too (ADR-0037, #299).
+- The hashing is frozen across format versions, so `verify` walks the hashes whatever the genesis `v` claims: an edit is `BROKEN`, and `UNSUPPORTED-VERSION` (exit 4) means every hash holds (ADR-0036, #299).
+- An anchor line says its attestation claims block H and the block was not checked, since a regenerated chain can carry a made-up attestation; only a matching `--block-header` makes it say the entries existed by that block (#299).
+
+### Fixed
+
+- The receiver gives each request its own thread and drops one not whole within 60 seconds, so a slow sender no longer holds the door (#300).
+- The supervisor writes its baseline, day book and views whole or not at all, so a crash mid-write no longer leaves a baseline the next scan cannot read, and the tripwire keeps its memory of heads (#300).
+- Every reader ends a line at `\n` alone, so a raw U+2028 in another writer's entry no longer reads as a false `BROKEN`; `\r\n` endings still read as the same chain (SPEC §1, #299).
+- `head` and the writing verbs no longer end in a traceback on a log holding invalid UTF-8: such a tail is a damaged tail, refused, and the hook starts a sibling (#299).
+- `verify` calls an entry `BROKEN` when a file reference could lead outside the project (`..`, absolute, a drive), so `--files` never hashes a file the chain chose; the recorder refuses the same spellings, `\Users\x` on Windows included (#299).
+- `verify-package` refuses a zip holding two members that unpack to one file, which let a tampered chain verify `SELF-CONSISTENT`, and a manifest giving a key twice: both `UNSUPPORTED-FORMAT`, exit 4 (#299).
+
 ## [0.8.1] - 2026-09-23
 
 Receipts that survive hostile input. Every fix here came from an outside review that tested the README's claims against the code. The receipt format is untouched.
@@ -194,7 +220,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.8.1...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.9.0...dev
+[0.9.0]: https://github.com/Acquiredl/loxodonta/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Acquiredl/loxodonta/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Acquiredl/loxodonta/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Acquiredl/loxodonta/compare/v0.6.0...v0.7.0

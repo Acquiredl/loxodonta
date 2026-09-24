@@ -8,6 +8,8 @@ An anchor commits a chain head to Bitcoin via [OpenTimestamps](https://opentimes
 
 An anchor proves **existence by block H**: entries `0..n` (whose head was anchored) existed, byte-exact, when block H was mined. It proves nothing about who wrote them (ADR-0001) and cannot prevent re-anchoring a regenerated chain — but a regenerated chain can only carry *young* anchors, so verify reports every anchor's height and the operator judges freshness: a log claiming months of history with only yesterday's anchors is a rewrite.
 
+That proof has two halves, and the proof file holds only one. The attestation at its end names a height, and replaying the operations gives a merkle root; nothing in either shows that a block with that root was ever mined, so a regenerated chain can carry an attestation made up whole, claiming any height it likes. The other half is the block's header, which the recipient fetches from a source they trust. `verify --anchors` says which halves it held: without a header, the block an attestation claims and the words *not checked*; with a header whose merkle root is the one the proof replays to, existence by that block (§3, *Checking the block*).
+
 ## 2. The sidecar file
 
 Anchors for `<log>` live in `<log>.anchors.jsonl` (e.g. `receipts.jsonl.anchors.jsonl`), one JSON object per line, append-only by convention:
@@ -34,9 +36,10 @@ loxodonta anchor --upgrade [...]                    # complete pending proofs
 loxodonta anchor --manifest PATH [--calendar URL]...  # anchor a package manifest's sha256
 loxodonta anchor --upgrade --manifest PATH          # complete that proof
 loxodonta verify --anchors [...]                    # judge proofs, offline
+loxodonta verify --anchors --block-header HEX [...] # ... and check their blocks
 ```
 
-**`anchor`** reads the current head, POSTs the raw 32-byte digest to each calendar (`POST <calendar>/digest`), and appends one sidecar record per calendar that answered. Success is ≥1 record written (exit 0); no calendar reachable is exit 1. Default calendars: `a.pool.opentimestamps.org`, `b.pool.opentimestamps.org`, `a.pool.eternitywall.com`, `ots.btc.catallaxy.com`.
+**`anchor`** reads the current head, POSTs the raw 32-byte digest to each calendar (`POST <calendar>/digest`), and appends one sidecar record per calendar that answered. Success is ≥1 record written (exit 0); no calendar reachable is exit 69 (`EX_UNAVAILABLE`, ADR-0037). Default calendars: `a.pool.opentimestamps.org`, `b.pool.opentimestamps.org`, `a.pool.eternitywall.com`, `ots.btc.catallaxy.com`.
 
 **`anchor --upgrade`** replays each pending proof to its calendar commitment, asks the calendar for the completion (`GET <calendar>/timestamp/<commitment-hex>`), and appends an upgraded record (same `head`, spliced proof ending in a Bitcoin attestation). Still-pending proofs (typically for a few hours after submission) are reported and left alone. A pending proof whose head another calendar has already settled is skipped with a line saying why, rather than re-asked every run: the anchor's claim is about the head, not about any one calendar (#199).
 
@@ -47,11 +50,35 @@ loxodonta verify --anchors [...]                    # judge proofs, offline
 1. The record's `head` must equal the `entry_hash` of some entry in the log — the chain up to that entry *is* the anchored history. No match: `ANCHOR-MISMATCH` (this log is not the anchored history — the regeneration signature), **exit 3**, same tier as `HEAD-MISMATCH`.
 2. The proof must replay from the head digest without error. Failed replay or a malformed proof: `ANCHOR-INVALID`, also exit 3 — evidence that doesn't verify is not evidence.
 3. A clean replay reports one of:
-   - `ANCHORED: entries 0..n existed by Bitcoin block H — confirm merkle root <R> against a block source you trust` — the offline tier ends at the block-header commitment; the printed root and height are exactly what to check (ADR-0003).
+   - `ANCHORED: entries 0..n: the attestation claims Bitcoin block H, and the block was not checked; that block's merkle root must read <R>, which --block-header with its header checks`: the proof completes to a Bitcoin attestation, and nothing here has seen the block. Not a failure, and the exit is unchanged. The printed root and height are exactly what to check, by hand against a block source you trust or with `--block-header` (ADR-0003; ruling 3 on #299).
+   - `ANCHORED: entries 0..n existed by the block whose header hashes to <X>, whose merkle root <R> is the one the proof replays to; the attestation calls it Bitcoin block H, which is your header source's word, and the hash is what a second source can confirm`: a header given with `--block-header` holds the root the proof replays to.
    - `ANCHOR-PENDING: head <h>… submitted <ts> via <calendar> — run loxodonta anchor --upgrade` — not a failure; exit unchanged.
    - `ANCHOR-UNANSWERED: head <h>… submitted <ts> via <calendar> never came back, and another calendar settled this head — no upgrade is owed` — the record stays in the sidecar as evidence of where the submission went, and the line stops advising a command that cannot help. Calendars disagreeing is ordinary, and four of them is the default (#199).
 
+A header that matched no attestation prints `HEADER-UNMATCHED: the block header with hash <X> holds merkle root <R>, which no Bitcoin attestation judged here replays to; ...` after the anchor lines and before the verdict. It checked nothing, and it is a note, never a verdict (below).
+
 A missing sidecar under `--anchors` prints `NO-ANCHORS` and leaves the exit code to the other checks — anchoring is optional, and absence of local evidence is a fact for the operator (who knows whether they anchor) rather than a verdict. Verdict precedence is unchanged from SPEC §6: `BROKEN` (1) short-circuits; exit-3 findings (head, anchor or stamp) outrank `FILES-DIVERGED` (2).
+
+### Checking the block
+
+**`--block-header HEX`** gives the verifier one Bitcoin block header: its 80 bytes as 160 hex characters, from any source you trust. It is repeatable, one header per anchored block, and it needs `--anchors`. Given without it, the command is a usage error, exit 64, because the header was given to check an anchor, and a `VALID` with no anchor judged would read as though it had. A value that is not 160 hex characters is a usage error too. Nothing is fetched: the header is on the command line, or the block is not checked.
+
+What is compared is 32 bytes. A header is version, previous block hash, merkle root, time, bits and nonce, and the merkle root is bytes 36 to 68, stored in the order Bitcoin's double sha256 leaves it. The last operations of a Bitcoin proof are that double sha256 (the transaction id, then each step up the block's merkle tree), so the digest the attestation sits on is compared with those bytes as they stand. Explorers print the root and the block hash byte-reversed, and so does the verifier, so the printed values read directly against an explorer's page.
+
+A header carries no height, so the verifier cannot know that it is block H: it knows only which merkle root the header holds. Headers are matched to attestations by that root.
+
+- An attestation whose root a header holds prints the second `ANCHORED` line, naming the block by the header's hash (double sha256 of the 80 bytes, reversed, as explorers show it). That hash is what to cross-check: ask a second source which block has it. The height the line repeats is the attestation's word and your source's, never the verifier's.
+- An attestation whose root no header holds keeps the first line, *not checked*, whatever headers were given.
+- A header whose root no attestation replays to prints `HEADER-UNMATCHED`. If you fetched it for a height an attestation claims, that attestation does not replay to that block, which is what a made-up attestation looks like. The verifier cannot know what the header was fetched for, so it notes the fact and draws no verdict from it.
+
+The exit code does not move for any of this. A block not checked is not a failure, and neither is a header that checked nothing. `ANCHOR-MISMATCH` and `ANCHOR-INVALID` keep their meaning and their exit 3: a proof for a head this log does not hold, or one that does not replay, whatever headers were given. A script that must know a block was checked reads for the second `ANCHORED` line, and one that must know every header was used reads for `HEADER-UNMATCHED`.
+
+**Getting a header.** The attestation names the height, so ask for that height's header, and check what comes back against a second source:
+
+- A node you run: `bitcoin-cli getblockhash H`, then `bitcoin-cli getblockheader <hash> false`, which prints the 160 hex characters.
+- A block explorer: most show a block's hash and merkle root by height, and many serve the raw header from their API. Take it from two explorers run by different people, and compare the block hash the verifier prints with the one both show for height H.
+
+`verify-package` takes `--block-header` too (docs/PACKAGE.md §5). Each header is checked against every anchor the package carries, the chains' and the manifest's, and one that matched none of them is noted once, after the seals.
 
 ## 4. The OTS subset (wire format)
 
@@ -61,7 +88,7 @@ loxodonta implements the subset of the OTS format that calendar proofs actually 
 - **varbytes**: varint length, then the bytes.
 - **operations** (applied to the current digest `msg`): `0x08` sha256 → `SHA256(msg)`; `0xf0` append `arg` → `msg‖arg`; `0xf1` prepend `arg` → `arg‖msg`. Binary ops carry their operand as varbytes.
 - **timestamp tree**: a sequence of elements; every element except the last is prefixed `0xff`. An element is either an attestation (`0x00`, then an 8-byte tag, then varbytes payload) or an operation (tag byte, operand if binary, then the subtree that continues from the new digest).
-- **attestations**: Bitcoin block header = tag `05 88 96 0d 73 d7 19 01`, payload = varint block height, meaning "the current digest is the merkle root of block H". Pending calendar = tag `83 df e3 0d 2e f9 0c 8e`, payload = varbytes UTF-8 calendar URI. Unknown tags are preserved on rewrite and reported as unverifiable.
+- **attestations**: Bitcoin block header = tag `05 88 96 0d 73 d7 19 01`, payload = varint block height, meaning "the current digest is the merkle root of block H", in the byte order the header stores it (§3, *Checking the block*). Pending calendar = tag `83 df e3 0d 2e f9 0c 8e`, payload = varbytes UTF-8 calendar URI. Unknown tags are preserved on rewrite and reported as unverifiable.
 - **calendar HTTP**: `POST /digest` (body: raw digest bytes) returns a serialized timestamp starting at the digest; `GET /timestamp/<hex>` returns the continuation from a commitment, or HTTP 404 while Bitcoin confirmation is pending.
 
 Proof bytes are stored exactly as calendars produced them (plus splicing on upgrade); the interoperability contract is that `ots verify` on the same bytes reaches the same block.
@@ -72,7 +99,7 @@ Stage A: record the head out of the writer's reach, compare with `verify --expec
 Stage B replaces remembering a secret with two cheaper habits:
 
 1. **Anchor at meaningful moments** — end of a session, end of a pipeline run: `loxodonta anchor` (later, `--upgrade` once, any time after a few hours). Or opt in once and let the hook do it: `loxodonta install-hook --anchor-at-session-end` anchors every session's head when the session ends, after the tail commitment, under a twelve-second budget, quietly on failure, and spends the leftover budget upgrading the drawer's pending proofs (ADR-0024). What leaves the machine is the 32-byte head digest, to the public calendars, from your address, only after the opt-in. A remote is a head record when the credentials on this machine cannot delete or overwrite what they wrote there (ADR-0025): a gist under your login is not one, because the `gh` token deletes it; a chat webhook or a retention-locked bucket is, and `install-hook --publish-head URL` sends each session's head there before the anchor.
-2. **When verifying, read the heights.** `verify --anchors` proves the math; only the operator can judge whether "existed by block H" is *old enough* to cover the history the log claims.
+2. **When verifying, check the blocks and read the heights.** `verify --anchors` proves the math up to a merkle root, and `--block-header` with each anchored block's header, from a source you trust, turns an attestation's claim into a checked block. Only the operator can judge whether "existed by block H" is *old enough* to cover the history the log claims.
 
 Copying the sidecar off-machine remains recommended and makes the story airtight: proofs in hand, nothing on the writer's machine to trust at all.
 
@@ -109,7 +136,7 @@ supervisor package ... --stamp URL                        # seal a package with 
 loxodonta verify-package PATH --authority-chain FILE      # judge a package's tokens
 ```
 
-**`stamp`** reads the current head and POSTs a DER `TimeStampReq` to the authority as `application/timestamp-query`: version 1, a SHA-256 imprint of the head, a nonce, and `certReq` true, so the token carries the certificate that signed it and can be judged later from the authority's chain file alone. The recorder reads only the response's status — granted (0), or granted with modifications (1), or not granted — and appends one record for a token it was granted. Exit 0 with a record written, or with `already stamped ...` when this head already holds a token and nothing was asked. Exit 1, one line on stderr naming which, and an attempt row in place of a token row when the authority refused, answered something that is not a timestamp response, could not be reached, sent more than this file reads back (64 KiB, and the line says the cap is ours), or granted a token this machine could not write down. That last one is never recorded as `granted`: a token nobody kept is not a stamp.
+**`stamp`** reads the current head and POSTs a DER `TimeStampReq` to the authority as `application/timestamp-query`: version 1, a SHA-256 imprint of the head, a nonce, and `certReq` true, so the token carries the certificate that signed it and can be judged later from the authority's chain file alone. The recorder reads only the response's status — granted (0), or granted with modifications (1), or not granted — and appends one record for a token it was granted. Exit 0 with a record written, or with `already stamped ...` when this head already holds a token and nothing was asked. Exit 69 (`EX_UNAVAILABLE`, ADR-0037), one line on stderr naming which, and an attempt row in place of a token row when the authority refused, answered something that is not a timestamp response, could not be reached, or sent more than this file reads back (64 KiB, and the line says the cap is ours); exit 73 (`EX_CANTCREAT`), with the same line and row, when it granted a token this machine could not write down. That last one is never recorded as `granted`: a token nobody kept is not a stamp.
 
 **`--manifest PATH`** stamps a file's sha256 instead of a chain head, the shape `anchor --manifest` has: the token lands in `PATH.stamps.jsonl` and its record carries no `n`, because a manifest has no entries. This is how `supervisor package --stamp URL` seals a package, and `verify-package --authority-chain FILE` is how the recipient judges what it sealed — the seal earns `+ STAMPED` beside `+ ANCHORED`, a declared token that is absent is `SEAL-MISSING`, and the package carries each chain's stamps sidecar as it carries the anchors sidecar, judged as detail under its chain. The certificate chain is the one thing the package must not carry, since a chain shipped by the issuer is the issuer's word about whom to trust (docs/PACKAGE.md §2).
 

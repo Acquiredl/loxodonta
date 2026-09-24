@@ -359,7 +359,7 @@ class CodexInstallTest(unittest.TestCase):
     def test_refuses_to_clobber_broken_json(self):
         self.hooks_path.write_text("{not json", encoding="utf-8")
         result = self.install()
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 65)  # EX_DATAERR (ADR-0037)
         self.assertIn("refusing", result.stderr)
         self.assertEqual(self.hooks_path.read_text("utf-8"), "{not json")
 
@@ -427,7 +427,7 @@ class CodexInstallTest(unittest.TestCase):
 
                     result = run_loxodonta(verb, "--codex", env=self.env)
 
-                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertEqual(result.returncode, 65, result.stdout)
                     self.assertNotIn("Traceback", result.stderr)
                     self.assertIn("expected", result.stderr)
                     self.assertEqual(self.hooks_path.read_bytes(), before)

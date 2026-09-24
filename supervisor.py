@@ -23,8 +23,9 @@ here is a head record (GLOSSARY: Supervisor, Baseline).
 store (ADR-0011; --root walks a legacy folder of repos instead), a
 verdict for each, a baseline diff against the last look,
 machine-readable JSON on stdout, and an exit code cron can shout about —
-0 when nothing demands attention, 1–4 for the worst verify exit found,
-5 when the baseline saw a change appends cannot explain (a reason to
+0 when nothing demands attention, 1–4 for the worst verify exit found
+(a chain verify could not judge at all, empty or unreadable, counts as
+4, the refusal), 5 when the baseline saw a change appends cannot explain (a reason to
 investigate, never a verdict), 6 when a session is demonstrably active
 but its chain is behind the witness (the completeness alarm), 7 when a
 chain's transcript commitments contradict each other (verify's exit 5,
@@ -70,7 +71,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # supervisor is running and is tagged together with loxodonta.py — the
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
-TOOL_VERSION = "0.8.1"
+TOOL_VERSION = "0.9.0"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -134,22 +135,49 @@ def chain_identity(root, log):
     return repo, session, seq
 
 
+def split_lines(data):
+    """The lines of a chain's or a sidecar's bytes, by the one rule every
+    reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
+    and nothing else ends one. U+2028, U+2029 and NEL are characters a
+    JSON string holds raw, and a `\\r` alone is whitespace between two
+    JSON tokens; a reader that ended a line at any of them would read
+    one entry of another conforming writer as two broken ones. A `\\r`
+    just before the `\\n` belongs to the ending, so a file whose endings
+    a Windows tool rewrote to `\\r\\n` reads as the same lines. The bytes
+    after the last `\\n`, when there are any, are a line too: the torn
+    tail a crash leaves, which the walk names. Written the same way in
+    loxodonta.py, supervisor.py and receiver.py, which never import one
+    another; tests/test_suite_shape.py holds the copies equal."""
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    return [line[:-1] if line.endswith(b"\r") else line for line in lines]
+
+
+def read_lines(path, errors="replace"):
+    """A chain's or a sidecar's lines as text, split by `split_lines`.
+    A byte that is not UTF-8 reads as U+FFFD by default: the readers
+    here display and count, and the verify walk is where such a line
+    gets its name."""
+    with open(path, "rb") as f:
+        return [line.decode("utf-8", errors) for line in split_lines(f.read())]
+
+
 def read_entries(log):
     """Every line of a chain that still reads as an entry — the census's
     parsing half, display and diffing only (ADR-0005). Damage is not
     judged here: a torn or garbled line is simply not remembered; the
     verify walk is where damage gets its name."""
     entries = []
-    with open(log, encoding="utf-8", errors="replace") as lines:
-        for line in lines:
-            try:
-                entry = json.loads(line)
-            except (ValueError, RecursionError):
-                # Not JSON, an integer past the digit limit, or nesting
-                # past the recursion limit: garbled all the same (#292).
-                continue
-            if isinstance(entry, dict):
-                entries.append(entry)
+    for line in read_lines(log):
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            # Not JSON, an integer past the digit limit, or nesting
+            # past the recursion limit: garbled all the same (#292).
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
     return entries
 
 
@@ -194,6 +222,19 @@ def verify(log):
     return verdict, result.returncode, lines
 
 
+def scan_exit(code):
+    """verify's exit as the scan counts it. 0 to 5 are verify's verdicts
+    and its refusal (SPEC §6). Anything else is no verdict at all: 66, a
+    chain verify could not read, empty or not a file; 70, the recorder
+    failing on it; or a number this supervisor has never heard of. Each
+    counts as 4, the refused rung beside UNSUPPORTED-VERSION, which is
+    where the page already draws a chain with no verdict. A chain nobody
+    could judge is not in good standing, so it still raises the exit,
+    and it is not BROKEN, which exit 1 now says and nothing else
+    (ADR-0037)."""
+    return code if 0 <= code <= 5 else 4
+
+
 def sibling_of(log):
     """Where recording moved when this chain's tail tore (ADR-0004):
     receipts-<session>.jsonl continues in receipts-<session>-002.jsonl,
@@ -212,6 +253,83 @@ def superseded(log, detail):
     broken = [l for l in detail if l.startswith("BROKEN")]
     return (len(broken) == 1 and "torn tail" in broken[0]
             and sibling_of(log).exists())
+
+
+# --- Writing state whole ------------------------------------------------------
+# The supervisor keeps three files of its own between looks: the baseline,
+# the day book and the views. Each is rewritten whole every time, and a
+# rewrite in place — truncate, then write — has a moment where the file
+# on disk is empty or half written. A crash or a full disk in that moment
+# left a baseline the next look could not read, and an unreadable
+# baseline is replaced, so the tripwire forgot every head it was holding
+# (#300). The chains and the sidecars are not written this way: they only
+# ever grow by appended lines, and the recorder's own lock and torn-tail
+# rules govern those.
+#
+# Two supervisor processes can write the same file: `serve`'s tick and a
+# hand-run `scan` both write the baseline and the day book, and
+# `calibrate` writes the baseline. Inside one `serve` its locks already
+# take turns. Across processes there is no lock, and the swap is what
+# makes that safe: each writer puts down a whole file it computed, so a
+# reader sees one writer's version and never a splice of two, and the
+# last to finish wins. What the overwritten write can lose is a day-book
+# count or a keeper attempt time (the keeper asks again a little early),
+# testimony that decides no verdict; the heads it held are seen again by
+# the next look. The one loss worth knowing: a
+# `calibrate` seed made while another process's scan is mid-walk can be
+# overwritten by that scan, which read the baseline before the seed; run
+# the seed again. A lock that closed that gap would have to be held
+# across a whole scan, and a stranded one would stop the supervisor
+# looking, which is a worse failure than a seed to restate.
+
+REPLACE_TRIES = 20  # Windows only; see write_whole
+REPLACE_PAUSE = 0.05  # seconds between tries, so a second at most
+
+
+def write_whole(path, text):
+    """Write `text` to `path` whole or not at all: into a temporary file
+    in the same folder, flushed and synced to disk, then moved onto the
+    name with os.replace, which is atomic within one filesystem, and a
+    file in the same folder is on the same filesystem. A crash leaves
+    the old file or the new one, never part of either. LF line endings
+    on every platform, like write_lf. A file that already exists keeps
+    its permission bits; a new one keeps mkstemp's owner-only ones. A
+    path that is a symbolic link is written through, so the link stays
+    a link."""
+    path = os.path.realpath(path)
+    folder = os.path.dirname(path)
+    fd, temp = tempfile.mkstemp(dir=folder, suffix=".tmp",
+                                prefix=os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(temp, os.stat(path).st_mode & 0o7777)
+        except OSError:
+            pass  # no file there yet
+        for attempt in range(REPLACE_TRIES):
+            try:
+                os.replace(temp, path)
+                break
+            except PermissionError:
+                # Windows refuses to replace a file another process has
+                # open, and every Python reader opens it that way: the
+                # other supervisor reading the baseline, the page asking
+                # for the views, a virus scanner looking at a new file.
+                # Those holds last milliseconds, so waiting a moment turns
+                # a spurious failure into the write that was asked for.
+                # POSIX replaces under open readers and never lands here.
+                if attempt == REPLACE_TRIES - 1:
+                    raise
+                time.sleep(REPLACE_PAUSE)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
 
 
 # --- Baseline -----------------------------------------------------------------
@@ -327,9 +445,8 @@ def write_daybook(path, days, now):
     oldest = (now - timedelta(days=DAYBOOK_SEASON)).strftime("%Y-%m-%d")
     kept = {day: row for day, row in sorted(days.items()) if day >= oldest}
     try:
-        path.write_text(
-            json.dumps({"purpose": DAYBOOK_PURPOSE, "days": kept},
-                       indent=2) + "\n", encoding="utf-8")
+        write_whole(path, json.dumps(
+            {"purpose": DAYBOOK_PURPOSE, "days": kept}, indent=2) + "\n")
     except OSError:
         pass
     return kept
@@ -439,9 +556,8 @@ def write_views(path, views):
     views are a convenience, and no verdict lives here."""
     kept = views[:VIEW_LIMIT]
     try:
-        path.write_text(
-            json.dumps({"purpose": VIEWS_PURPOSE, "views": kept},
-                       indent=2) + "\n", encoding="utf-8")
+        write_whole(path, json.dumps(
+            {"purpose": VIEWS_PURPOSE, "views": kept}, indent=2) + "\n")
     except OSError:
         pass
     return kept
@@ -507,8 +623,12 @@ def fortnight(days, now):
 UPGRADE_EVERY_SECONDS = int(
     os.environ.get("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600))
 
+# Both of verify's ANCHORED lines: the block an attestation claims, not
+# checked, and the block a --block-header checked (ruling 3 on #299). The
+# span is the same either way; the height is the attestation's word in
+# both, which is all the panel shows it as.
 ANCHORED_LINE = re.compile(
-    r"^ANCHORED: entries 0\.\.(\d+) existed by Bitcoin block (\d+)")
+    r"^ANCHORED: entries 0\.\.(\d+)\b.*?Bitcoin block (\d+)")
 PENDING_LINE = re.compile(
     r"^ANCHOR-PENDING: head (\S+) submitted (\S+) via (\S+)")
 
@@ -839,16 +959,16 @@ def sidecar_records(sidecar):
     judging the proofs stays with verify. A missing file, a torn line,
     or a line that is not an object yields nothing."""
     try:
-        with open(sidecar, encoding="utf-8", errors="replace") as lines:
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(record, dict):
-                    yield record
+        lines = read_lines(sidecar)
     except FileNotFoundError:
         return
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            yield record
 
 
 def is_attempt(record):
@@ -2804,7 +2924,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         if posted:
             keeper["publish:" + relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        verdict, exit_code, detail = verify(log)
+        verdict, code, detail = verify(log)
+        exit_code = scan_exit(code)
         stood_down = exit_code != 0 and superseded(log, detail)
         chain = {
             "log": log.as_posix(),
@@ -2957,7 +3078,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                            "log": relpath, "change": "vanished",
                            "investigate": CHANGE_WORDS["vanished"]})
 
-    baseline_path.write_text(json.dumps({
+    write_whole(baseline_path, json.dumps({
         "purpose": "the supervisor's memory between looks — "
                    "writer-reachable, trusted for nothing",
         "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2965,7 +3086,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "keeper": keeper,
         "calibration": calibration,
         "sessionend": sessionend,
-    }, indent=2) + "\n", encoding="utf-8")
+    }, indent=2) + "\n")
     if events:
         worst = max(worst, 5)
 
@@ -3232,7 +3353,7 @@ def cmd_calibrate(args):
                   "is what this supervisor saw", file=sys.stderr)
             return 64
         data["calibration"] = kept
-        write_lf(path, json.dumps(data, indent=2))
+        write_whole(path, json.dumps(data, indent=2))
         print(f"forgotten: your statement about {args.forget} is gone; "
               "sessions it covered fall back to whatever epoch now "
               "precedes them, or to BEFORE-MEMORY")
@@ -3252,7 +3373,7 @@ def cmd_calibrate(args):
     restated = len(kept) != len(calibration)
     data["calibration"] = sorted(kept + [seeded],
                                  key=lambda epoch: epoch.get("since") or "")
-    write_lf(path, json.dumps(data, indent=2))
+    write_whole(path, json.dumps(data, indent=2))
     print(f"{'restated' if restated else 'seeded'}: from {args.since}, "
           f"coverage was {' '.join(args.matchers)} — your word, not this "
           "supervisor's observation, and marked as such wherever it judges")
@@ -3566,20 +3687,18 @@ def walk_chain(root, asked):
         return None
     relpath = path.relative_to(root.resolve()).as_posix()
     lines = []
-    with open(path, encoding="utf-8", errors="replace") as chain:
-        for raw in chain:
-            raw = raw.rstrip("\n")
-            try:
-                entry = json.loads(raw)
-            except (ValueError, RecursionError):
-                # An integer past the digit limit or nesting past the
-                # recursion limit is damage too, never a crash (#292).
-                lines.append({"damage": raw})
-                continue
-            if isinstance(entry, dict):
-                lines.append({"entry": entry})
-            else:
-                lines.append({"damage": raw})
+    for raw in read_lines(path):
+        try:
+            entry = json.loads(raw)
+        except (ValueError, RecursionError):
+            # An integer past the digit limit or nesting past the
+            # recursion limit is damage too, never a crash (#292).
+            lines.append({"damage": raw})
+            continue
+        if isinstance(entry, dict):
+            lines.append({"entry": entry})
+        else:
+            lines.append({"damage": raw})
     return {"log": relpath, "testimony": TESTIMONY, "lines": lines}
 
 
@@ -4176,7 +4295,12 @@ def cmd_verify(args):
     this is one chain, by the handle the digest hands out."""
     match, code = resolve_address(args)
     if match is None:
-        return code
+        # The recall commands say 1 for an address they cannot resolve;
+        # here 1 is the recorder's BROKEN and nothing else (ADR-0037).
+        # An address spelled wrong is the command spoken wrong, 64; one
+        # that names no single chain leaves no chain to judge, 66.
+        well_formed = ADDRESS_RE.match(args.address.lower())
+        return EX_NOINPUT if well_formed else EX_USAGE
     log = match[0]
     judged = subprocess.run(
         [sys.executable, str(LOXODONTA), "verify", f"--log={log}"],
@@ -5066,9 +5190,10 @@ def chain_listing(log):
     entry count, never by file hash. The head is the commitment, and
     the verifier recomputes it by walking, so a Windows unzip that
     changes line endings changes nothing the manifest says."""
-    # errors="replace" and RecursionError: a line no reader can take
-    # apart is packaged as it stands, and the verifier names it (#292).
-    lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    # U+FFFD for a byte that is not UTF-8, and RecursionError: a line no
+    # reader can take apart is packaged as it stands, and the verifier
+    # names it (#292). Counted by the verifier's own line rule (#299).
+    lines = read_lines(log)
     head = None
     for line in lines:
         try:
@@ -5326,10 +5451,13 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "reordered since the chain was written. It does not show that "
         "the recorder was told the truth: the agent's harness supplied "
         "every action line, and the timestamps are its word.",
-        "- An anchor line under a chain shows that chain's head existed "
-        "by the Bitcoin block it names; the printed merkle root is yours "
-        "to confirm against a block source you trust. An anchor speaks "
-        "for its chain, never for this package as a set.",
+        "- An anchor line under a chain names the Bitcoin block its "
+        "attestation claims. It says the chain's head existed by that "
+        "block only when `verify-package --block-header HEX` was given "
+        "a header, from a source you trust, holding the merkle root the "
+        "proof replays to; otherwise the printed merkle root is yours to "
+        "confirm against a block source you trust. An anchor speaks for "
+        "its chain, never for this package as a set.",
     ]
     if transcripts and any(transcripts.values()):
         lines.append(
@@ -5818,7 +5946,7 @@ def run_drill(root, asked):
     log = resolve_chain(root, asked)
     if log is None:
         return None, 1
-    lines = log.read_text(encoding="utf-8").splitlines()
+    lines = read_lines(log, errors="strict")
     if len(lines) < 3:
         return {"log": asked, "refused": "too short to drill — the "
                 "battery plays with middle entries; give it at least "
@@ -6004,7 +6132,8 @@ def metrics_text(report, age_seconds):
     # The scan itself: what cron would shout about, and how old it is.
     gauge("loxodonta_scan_exit_code",
           "The last scan's exit code: 0 nothing demanding attention, 1 to "
-          "4 the worst verify exit among the chains, 5 the baseline saw a "
+          "4 the worst verify exit among the chains (a chain verify could "
+          "not judge at all counts as 4), 5 the baseline saw a "
           "change appends cannot explain, 6 a live session is behind its "
           "witness, 7 a chain's transcript commitments contradict each "
           "other", "witness verdict", [((), report.get("exit") or 0)])
@@ -7348,8 +7477,8 @@ const CLAIM = {
   broken: "chain integrity failed — history was altered after the fact",
   refused: "no verdict — a chain nobody can judge still demands attention",
   valid: "intact against itself — tamper-evident, not yet anchored",
-  anchored: "intact and anchored — this history existed by the named " +
-            "Bitcoin block",
+  anchored: "intact and anchored — an attestation names a Bitcoin " +
+            "block, and its merkle root is yours to check",
   superseded: "torn tail, already handled — recording continued in a " +
               "sibling chain; kept as quiet evidence",
 };
@@ -8986,6 +9115,7 @@ class VersionAction(argparse.Action):
 
 
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
+EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: `verify` found no chain to judge
 
 
 def speak_utf8():
@@ -9185,7 +9315,8 @@ def main(argv):
         "verify", parents=[recall_common],
         help="the recorder's verdict on the chain holding one entry "
              "address (loxodonta verify --log, verbatim; exit code is "
-             "the recorder's)")
+             "the recorder's, or 64 or 66 for an address that names no "
+             "chain)")
     verify.add_argument("address", help="entry-hash prefix, 4+ hex chars")
     verify.set_defaults(func=cmd_verify)
     search = sub.add_parser(

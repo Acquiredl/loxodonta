@@ -196,8 +196,8 @@ about who shapes the record: refuse *before* running if there is no log
 (never execute work you cannot record); run first and hash after (the
 receipt records what actually happened, and the invoked process never
 sees or shapes its own receipt); and if the command succeeds but the
-receipt fails, exit 1 anyway — *a lost receipt must never hide behind the
-command's success code.*
+receipt fails, exit with the reason it failed (ADR-0037) — *a lost
+receipt must never hide behind the command's success code.*
 
 **`cmd_head`.** Print the top seal — 64 hex characters the operator
 copies somewhere the cook cannot reach. The smallest function in the
@@ -281,7 +281,7 @@ digest doubles as the claim-ticket number `upgrade` polls); else refuse.
 
 - `cmd_anchor` judges every proof *before* storing it — refuse to store
   what cannot replay. One counter failing is a warning; all counters
-  failing is exit 1, said plainly, because a silently unanchored head
+  failing is exit 69, said plainly, because a silently unanchored head
   defeats the whole trip.
 - `upgrade_anchors` appends the upgraded proof as a new record and never
   rewrites the pending one. The shoebox is append-only like the chain:
@@ -294,7 +294,12 @@ digest doubles as the claim-ticket number `upgrade` polls); else refuse.
 - The ANCHORED sentence ends at the honesty boundary: the verifier
   proves the fingerprint folds up to *that merkle root*; whether the
   root sits in the named block is a fact about the outside world,
-  confirmed against a block source the operator trusts. Reading the
+  confirmed against a block source the operator trusts. So without a
+  header the sentence says the attestation *claims* the block and the
+  block was not checked; `--block-header` hands the verifier that
+  block's 80 bytes, and only when their merkle root is the proof's does
+  it say the entries existed by the block, named by the header's hash
+  (ruling 3 on #299, ANCHORING.md §3). Reading the
   block height for freshness is likewise the operator's half of the
   regeneration defense (ANCHORING.md §5).
 - Verdict tiers: ANCHOR-MISMATCH and ANCHOR-INVALID share exit 3 with

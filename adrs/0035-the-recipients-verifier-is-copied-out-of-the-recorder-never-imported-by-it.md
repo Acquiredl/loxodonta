@@ -186,6 +186,50 @@ nothing at run time.
   kept. The recipient still downloads one checksummed file; it is a
   third the size.
 
+## Addendum, 2026-09-23: what running the script directly does and does not buy
+
+The context above says "the file you hashed is the code that ran" holds
+only while nothing is imported. That overstates it. The outside review
+of v0.8.0 (2026-09-22) found the gap, and it was reproduced here on
+CPython 3.13 the next day. A directly run script puts its own folder
+first on `sys.path`, ahead of the standard library. A sourceless
+`hashlib.pyc` dropped beside `loxodonta.py` was imported in place of the
+standard module: the recorder ran code that was in no file anyone
+hashed, its SHA-256 did not move, and `git status` showed nothing,
+because this repository's own `.gitignore` ignores `*.pyc`. The same
+holds for `verifier.py`, and for any module name either file imports.
+
+So the claim is narrower than the context put it. Restated:
+
+- **Keeping nothing imported removes one swap point, not every one.** An
+  imported sibling can be swapped through its bytecode cache with its
+  source untouched; a directly run script cannot, because Python never
+  reads a cache for the script it is asked to run. That finding stands,
+  and so does the rule that nothing here imports anything.
+- **The checksum covers the file, never the run.** The interpreter, the
+  standard library and every folder on `sys.path` are outside it. A
+  writer with the operator's filesystem access (ADR-0002) can reach
+  some of them on the operator's machine, and nothing in this file
+  prevents that. Detected where a check can see it, never prevented.
+- **`python -I` takes the script's folder off the path.** Isolated mode
+  leaves the script's directory and the user's site-packages off
+  `sys.path` and ignores `PYTHON*` variables; it exists in every Python
+  the README supports. Under it the shadowing module above was never
+  imported. The recipient, who runs `verifier.py` on a machine the
+  writer never touched, is told to run it that way. On the operator's
+  machine it narrows the gap and does not close it: the standard library
+  itself is still within the writer's reach there.
+- **Single-file stays, for the reason that holds.** It is kept for
+  readability, a recipient reading one file, and for the one swap point
+  it does remove. The security content of ADR-0005's rule is that
+  narrow sentence, not "the file you hashed is the code that ran".
+
+What this changes in practice goes in the docs a recipient reads
+(`python -I verifier.py verify-package PACKAGE`) once `verifier.py` is
+the file they are pointed at. Whether the installer should write `-I`
+into the hook command it wires is a separate question for the operator's
+side (#299).
+
 ## References
 
 - Related ADRs: `0002-writer-as-adversary.md` (purposes B and C; the

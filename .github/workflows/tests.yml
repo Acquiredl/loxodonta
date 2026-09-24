@@ -54,3 +54,5 @@ jobs:
         run: python tools/house_check.py
       - name: the front door
         run: python tools/house_check.py --front-door
+      - name: verifier.py is the copy of this recorder (ADR-0035)
+        run: python tools/build_verifier.py --check

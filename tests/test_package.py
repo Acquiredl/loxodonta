@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from test_publish_chain import rewritten_raw
 from test_supervisor import isolated_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -397,6 +399,73 @@ class DemoStorePackageTest(PackageCase):
             self.assertNotIn("outside-secret", result.stdout)
             self.assertNotIn("Traceback", result.stderr)
 
+    def crafted_zip(self, members):
+        """A zip of `members`, (name, bytes) pairs in the order given.
+        Python's zipfile warns at a repeated name and writes it anyway,
+        which is the archive under test."""
+        crafted = self.work / "crafted.zip"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with zipfile.ZipFile(crafted, "w") as package:
+                for name, data in members:
+                    package.writestr(name, data)
+        return crafted
+
+    def test_a_zip_holding_two_members_that_unpack_to_one_file_is_refused(self):
+        # #299: a tampered chain first and the original second verified
+        # SELF-CONSISTENT, since unpacking keeps the last copy while
+        # `unzip -p` shows the first. Names that land on one file only
+        # on some systems are refused too, on every system, so the
+        # verdict never depends on where the recipient unpacks.
+        self.assertEqual(self.package(BAD_DAY_SESSION).returncode, 0)
+        with zipfile.ZipFile(next(self.work.glob("*.zip"))) as package:
+            members = [(n, package.read(n)) for n in package.namelist()]
+        chain = f"receipts-{BAD_DAY_SESSION}.jsonl"
+        original = dict(members)[chain]
+        tampered = original.replace(b"Read: .env", b"Read: README")
+        self.assertNotEqual(tampered, original)
+        manifest = dict(members)["manifest.json"]
+        cases = {
+            "the same name twice": [(chain, tampered)] + members,
+            "another case": [(chain.upper(), tampered)] + members,
+            "a leading ./": [("./" + chain, tampered)] + members,
+            "a trailing space": members + [("manifest.json ", manifest)],
+            "either slash": members + [("notes/a.txt", b"one"),
+                                       ("notes\\a.txt", b"two")],
+        }
+        for words, crafted_members in cases.items():
+            with self.subTest(words):
+                result = self.verify_package(self.crafted_zip(crafted_members))
+
+                self.assertEqual(result.returncode, 4,
+                                 words + ": " + result.stdout + result.stderr)
+                lines = result.stdout.strip().splitlines()
+                # Refused unopened: nothing else is judged or printed.
+                self.assertEqual(len(lines), 1, result.stdout)
+                self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"),
+                                lines[0])
+                self.assertIn("unpack to one file", lines[0])
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_manifest_giving_a_key_twice_is_refused(self):
+        # #299: the manifest was read last-wins, so two `head` keys on a
+        # chain passed on the second while a first-wins reader saw the
+        # first. The walk's guard reads it now: no reading of it counts.
+        folder = self.folder_package()
+        path = folder / "manifest.json"
+        text = path.read_text("utf-8")
+        self.assertIn('"head": ', text)
+        path.write_text(text.replace('"head": ', '"head": "' + "0" * 64
+                                     + '", "head": ', 1), "utf-8")
+
+        result = self.verify_package(folder)
+
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"), lines[0])
+        self.assertIn("'head' given twice", lines[0])
+
     def test_a_malformed_manifest_is_refused_not_a_traceback(self):
         folder = self.folder_package()
         shapes = {
@@ -440,26 +509,51 @@ class DemoStorePackageTest(PackageCase):
                         .startswith("UNSUPPORTED-FORMAT"), judged.stdout)
         self.assertNotIn("Traceback", judged.stderr)
 
-    def test_a_chain_of_another_format_is_a_refusal_on_the_last_line(self):
-        # A packaged chain whose genesis claims a format this verifier
-        # does not speak: the recorder refuses it, and the package verdict
-        # says so on the last line instead of failing to find a word.
+    def relabel_a_chain(self, rehash):
+        """The package's first chain with its genesis claiming format
+        9.9; with `rehash`, every hash recomputed so the hash chain holds
+        (ADR-0036), else the genesis left hashed as it was."""
         folder = self.folder_package()
         chain = next(p for p in folder.iterdir()
                      if p.name.startswith("receipts-")
-                     and not p.name.endswith(".anchors.jsonl"))
-        lines = chain.read_text("utf-8").splitlines()
-        genesis = json.loads(lines[0])
-        genesis["v"] = "9.9"
-        lines[0] = json.dumps(genesis, sort_keys=True, separators=(",", ":"))
-        chain.write_text("\n".join(lines) + "\n", "utf-8")
+                     and p.name.endswith(".jsonl") and p.name.count(".") == 1)
+        entries = [json.loads(line)
+                   for line in chain.read_text("utf-8").splitlines()]
+        entries[0]["v"] = "9.9"
+        prev = None
+        for entry in entries if rehash else []:
+            entry.pop("entry_hash")
+            entry["prev"] = prev
+            entry["entry_hash"] = prev = hashlib.sha256(json.dumps(
+                entry, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False).encode("utf-8")).hexdigest()
+        chain.write_text("".join(json.dumps(e, sort_keys=True,
+                                            separators=(",", ":")) + "\n"
+                                 for e in entries), "utf-8")
+        return folder
 
-        result = self.verify_package(folder)
+    def test_a_chain_of_another_format_is_a_refusal_on_the_last_line(self):
+        # A packaged chain whose genesis claims a format this verifier
+        # does not speak, every hash holding: the recorder refuses it, and
+        # the package verdict says so on the last line instead of failing
+        # to find a word.
+        result = self.verify_package(self.relabel_a_chain(rehash=True))
 
         self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         last = result.stdout.strip().splitlines()[-1]
         self.assertTrue(last.startswith("UNSUPPORTED-FORMAT"), last)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_relabeled_chain_whose_hash_fails_is_chain_broken(self):
+        # The hashing is frozen across versions (ADR-0036): a version
+        # claim does not excuse a hash that fails, in a package either.
+        result = self.verify_package(self.relabel_a_chain(rehash=False))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        last = result.stdout.strip().splitlines()[-1]
+        self.assertTrue(last.startswith("CHAIN-BROKEN"), last)
+        self.assertIn("BROKEN at entry 0", result.stdout)
+        self.assertNotIn("UNSUPPORTED", result.stdout)
 
     def test_out_into_a_missing_folder_is_created(self):
         result = self.package(BAD_DAY_SESSION, "--out",
@@ -621,6 +715,26 @@ class HookStorePackageTest(PackageCase):
         self.assertTrue(judged.stdout.strip().splitlines()[-1]
                         .startswith("SELF-CONSISTENT"))
 
+    def test_a_raw_line_separator_is_counted_alike_by_packer_and_judge(self):
+        # SPEC section 1 (#299): a line ends at a newline and nowhere
+        # else. The supervisor lists the chain's entry count in the
+        # manifest and the verifier walks the chain to check it, so a
+        # raw U+2028 in an action, as another conforming writer leaves
+        # it, must be one line to both.
+        lines = rewritten_raw(self.sibling, 1, "Edit: say  done")
+        folder = self.work / "pkg"
+
+        packed = self.package(SESSION, "--folder", "--out", str(folder))
+
+        self.assertEqual(packed.returncode, 0, packed.stdout + packed.stderr)
+        listed = {c["path"]: c for c in self.manifest_of(folder)["chains"]}
+        self.assertEqual(listed[self.sibling.name]["entries"],
+                         lines.count(b"\n"))
+        judged = self.verify_package(folder)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("SELF-CONSISTENT"), judged.stdout)
+
     def test_a_drawer_holding_half_a_split_session_is_refused_naming_it(self):
         # Half of the session also sits in a drawer no selector reaches
         # (a pre-ADR-0023 split). A drawer package that looked complete
@@ -762,7 +876,8 @@ class HookStorePackageTest(PackageCase):
         self.assertEqual(out.count("\nchain: "), 2, out)
         # The recorder's own anchor line, under its chain, as detail
         # (ruling 6): the chain is anchored, the package is not.
-        self.assertIn("ANCHORED: entries 0..3 existed by Bitcoin block 850000",
+        self.assertIn("ANCHORED: entries 0..3: the attestation claims "
+                      "Bitcoin block 850000, and the block was not checked",
                       out)
         self.assertIn(f"{self.sidecar.name}: matches the manifest", out)
         lines = out.strip().splitlines()
@@ -840,7 +955,8 @@ class HookStorePackageTest(PackageCase):
         # The first chain still walks clean, and the anchor under it
         # still prints: the finding is the sibling's alone.
         self.assertIn("VALID", judged.stdout)
-        self.assertIn("ANCHORED: entries 0..3 existed by Bitcoin block 850000",
+        self.assertIn("ANCHORED: entries 0..3: the attestation claims "
+                      "Bitcoin block 850000, and the block was not checked",
                       judged.stdout)
         witness = json.loads((folder / "witness.json").read_text("utf-8"))
         verdicts = {c["log"]: c["verdict"] for c in witness["scan"]["chains"]}

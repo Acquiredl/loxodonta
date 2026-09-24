@@ -531,6 +531,14 @@ class VerifyTest(RecallBase):
         bad = run_py(SUPERVISOR, "verify", hashes[2][:8], "--repo", str(repo))
         self.assertEqual(bad.returncode, 1, bad.stdout + bad.stderr)
         self.assertIn("BROKEN", bad.stdout)
+        # Exit 1 is the recorder's BROKEN and nothing else (ADR-0037): an
+        # address that names no chain is not a verdict, and neither is
+        # one spelled wrong.
+        nowhere = run_py(SUPERVISOR, "verify", "ffff0000", "--repo", str(repo))
+        self.assertEqual(nowhere.returncode, 66, nowhere.stderr)
+        self.assertEqual(nowhere.stdout, "")
+        garbled = run_py(SUPERVISOR, "verify", "not-hex", "--repo", str(repo))
+        self.assertEqual(garbled.returncode, 64, garbled.stderr)
 
     def test_show_names_the_chains_full_path_and_the_verify_command(self):
         repo = self.repo("alpha")
@@ -1297,7 +1305,7 @@ class InstallerOwnershipTest(RecallBase):
 
                     result, _ = self.run_installer(verb)
 
-                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertEqual(result.returncode, 65, result.stdout)
                     self.assertNotIn("Traceback", result.stderr)
                     self.assertIn("refusing to touch", result.stderr)
                     self.assertIn("expected", result.stderr)

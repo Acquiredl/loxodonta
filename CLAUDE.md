@@ -17,6 +17,7 @@
 - `loxodonta.py` — the recorder: `init` / `log` / `run` / `head` / `verify` / `verify-package` / `report` / `anchor` / `publish` / `stamp` / `hook` / `explain` / `install-hook` / `uninstall-hook`.
 - `supervisor.py` — the reader: `scan` / `calibrate` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `verify` / `mcp` / `export` / `package`.
 - `receiver.py` — the receiver: `serve`, one verb; the URL that can only add, never delete (ADR-0031, `docs/RECEIVER.md`).
+- `verifier.py` — the recipient's verifier: `head` / `verify` / `verify-package`. Generated: `tools/build_verifier.py` copies the fenced verify region of `loxodonta.py`; edit the recorder, never this file (ADR-0035).
 - `adapters/` — per-harness recorder adapters (ADR-0020).
 - `tools/` — repo tooling; `house_check.py` enforces the vocabulary.
 - `tests/` — the suite, through the public CLI: `python -m unittest discover -s tests`.
@@ -27,7 +28,7 @@
 ## Constraints
 
 - Python stdlib only for the core tool — no dependencies, ever. (Anchoring vendors nothing: ADR-0003 chose a minimal in-file OpenTimestamps subset.)
-- Single-file `loxodonta.py`, readable top-to-bottom by a non-expert. Readability outranks cleverness everywhere in this repo. `adapters/` holds per-harness spoons, not tools: each is stdlib-only, imports its SDK only if present, and speaks to the recorder solely through `loxodonta hook` (ADR-0020). Single-file is a security property as well as a readability one: a directly run script is compiled from source every time, while an imported sibling can be swapped through its bytecode cache with its checksum unmoved, so nothing here imports anything (ADR-0035, which also rules how the recipient's `verifier.py` is copied out of the recorder).
+- Single-file `loxodonta.py`, readable top-to-bottom by a non-expert. Readability outranks cleverness everywhere in this repo. `adapters/` holds per-harness spoons, not tools: each is stdlib-only, imports its SDK only if present, and speaks to the recorder solely through `loxodonta hook` (ADR-0020). Single-file is kept for readability, and for one narrow security reason: a directly run script is compiled from source every time, while an imported sibling can be swapped through its bytecode cache with its checksum unmoved, so nothing here imports anything. It does not make the hashed file the code that ran: the script's own folder is first on `sys.path`, so a module dropped beside it shadows the standard library, which `python -I` prevents (ADR-0035 and its 2026-09-23 addendum, which also rule how the recipient's `verifier.py` is copied out of the recorder).
 - Tests verify behavior through the public CLI surface, not internals.
 
 ## Branching model

@@ -9,6 +9,7 @@ CLI in temp directories. No mocks, no internals.
 
 import base64
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -601,25 +602,53 @@ class ScanVerdictTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
 
+    def foreign_chain(self, edit=False):
+        """A chain whose genesis claims another format, every hash
+        recomputed so the chain holds as a hash chain (ADR-0036); with
+        `edit`, entry 1 is then changed and its hash left as it was."""
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        entries = [json.loads(line) for line in
+                   log.read_text(encoding="utf-8").splitlines()]
+        entries[0]["v"] = "receipts/v99"
+        prev = None
+        for entry in entries:
+            entry.pop("entry_hash")
+            entry["prev"] = prev
+            entry["entry_hash"] = prev = hashlib.sha256(json.dumps(
+                entry, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False).encode("utf-8")).hexdigest()
+        if edit:
+            entries[1]["action"] = "rewritten after the fact"
+        log.write_text("".join(json.dumps(e) + "\n" for e in entries),
+                       encoding="utf-8")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+
     def test_a_foreign_versioned_chain_is_reported_as_a_refusal(self):
         # UNSUPPORTED-VERSION is a refusal to judge, not a verdict — but a
         # chain nobody can judge still demands the operator's attention.
-        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        lines = log.read_text(encoding="utf-8").splitlines()
-        genesis = json.loads(lines[0])
-        genesis["v"] = "receipts/v99"
-        lines[0] = json.dumps(genesis)
-        log.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
-        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        self.foreign_chain()
 
         result = run_scan(self.root, env=self.env)
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 4, result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
         (foreign,) = sessions[("alpha", "sess-aaaa")]
         self.assertEqual(foreign["verdict"], "UNSUPPORTED-VERSION")
         (good,) = sessions[("beta", "sess-bbbb")]
         self.assertEqual(good["verdict"], "VALID")
+
+    def test_an_edited_foreign_versioned_chain_is_broken_not_a_refusal(self):
+        # The hashing is frozen across versions (ADR-0036): an edit is
+        # BROKEN whatever the genesis claims, and the scan counts it so.
+        self.foreign_chain(edit=True)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        (foreign,) = chains_by_session(report)[("alpha", "sess-aaaa")]
+        self.assertEqual(foreign["verdict"], "BROKEN")
+        self.assertEqual(foreign["exit"], 1)
 
     def test_a_chain_verify_cannot_judge_at_all_is_still_reported(self):
         # An empty file draws an error, not a verdict line. The scan says
@@ -632,10 +661,13 @@ class ScanVerdictTest(unittest.TestCase):
 
         result = run_scan(self.root, env=self.env)
 
-        self.assertNotEqual(result.returncode, 0)
+        # verify says 66, no input (ADR-0037); the scan counts a chain
+        # nobody could judge on the refused rung, 4, and never as broken.
+        self.assertEqual(result.returncode, 4, result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
         (hollow,) = sessions[("alpha", "sess-hollow")]
         self.assertEqual(hollow["verdict"], "NO-VERDICT")
+        self.assertEqual(hollow["exit"], 4)
         self.assertTrue(hollow["detail"], "verify's refusal is the evidence")
         (good,) = sessions[("beta", "sess-bbbb")]
         self.assertEqual(good["verdict"], "VALID")
@@ -821,6 +853,81 @@ class BaselineTest(unittest.TestCase):
         after = run_scan(self.root, env=self.env)
         self.assertNotIn("note", json.loads(after.stdout)["baseline"],
                          "remembering resumes from the fresh look")
+
+
+def hold(test, path):
+    """A second name for the file at `path` right now: what a reader that
+    opened it before the next write is holding, and what a crash
+    mid-write would leave behind if that write went into this file
+    rather than beside it (#300). A hard link, in a folder of the test's
+    own on the same volume, so it sits in no census. Skips where the
+    filesystem has no hard links."""
+    held = Path(test._tmp.name).resolve() / "held" / path.name
+    held.parent.mkdir(exist_ok=True)
+    try:
+        os.link(path, held)
+    except (OSError, NotImplementedError) as refused:
+        test.skipTest(f"no hard links here: {refused}")
+    return held
+
+
+def assert_replaced_whole(test, held, before, live):
+    """The file a reader held is untouched and still whole, and the name
+    now points at a different, whole file: the state was swapped in,
+    never truncated and rewritten where it stood."""
+    test.assertEqual(held.read_text(encoding="utf-8"), before,
+                     f"{live.name} was rewritten in place — a crash "
+                     "mid-write would leave it torn")
+    json.loads(held.read_text(encoding="utf-8"))
+    json.loads(live.read_text(encoding="utf-8"))
+    test.assertNotEqual(live.read_text(encoding="utf-8"), before,
+                        f"{live.name} should hold this tick's state")
+
+
+class StateSwapTest(unittest.TestCase):
+    """The supervisor's state files (the baseline, the day book, the
+    views) are written whole or not at all (#300): a new file beside the
+    old, then swapped onto its name. The fault this closes was a crash
+    or a full disk between truncating the baseline and finishing the
+    write, which left a file the next look could not read and so reset
+    the memory the tripwire diffs against. A crash cannot be staged
+    through the CLI, so these watch the property that rules it out: the
+    old file is never written into, and nothing temporary is left."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name).resolve() / "storehome"
+        self.witness = Path(self._tmp.name).resolve() / "no-witness"
+        self.witness.mkdir()
+        drawer = self.home / "receipts" / "alpha-11111111"
+        drawer.mkdir(parents=True)
+        (drawer / "project.json").write_text(
+            json.dumps({"path": "C:/work/alpha"}), encoding="utf-8")
+        self.log = make_chain(drawer, "sess-aaaa")
+
+    def test_a_scan_swaps_its_baseline_and_day_book_in_whole(self):
+        first = run_store_scan(self.home, self.witness)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        state = [self.home / "baseline.json", self.home / "daybook.json"]
+        before = [path.read_text(encoding="utf-8") for path in state]
+        held = [hold(self, path) for path in state]
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(self.log),
+             "--actor", "claude-code", "--action", "one more step"],
+            capture_output=True, check=True)
+
+        second = run_store_scan(self.home, self.witness)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        for kept, was, live in zip(held, before, state):
+            assert_replaced_whole(self, kept, was, live)
+        self.assertEqual(sorted(p.name for p in self.home.glob("*.tmp")), [],
+                         "a finished write leaves nothing temporary behind")
+        report = json.loads(second.stdout)
+        self.assertEqual(report["baseline"]["events"], [])
+        self.assertNotIn("note", report["baseline"],
+                         "the memory survived the swap and was read back")
 
 
 def munge(path):
@@ -2526,6 +2633,20 @@ class BeforeMemoryTest(unittest.TestCase):
 
         self.assertEqual(forgot.returncode, 0, forgot.stdout + forgot.stderr)
         self.assertEqual(self.watch(self.scan())["before_memory"]["count"], 1)
+
+    def test_a_seed_swaps_the_baseline_in_whole(self):
+        # calibrate rewrites the same file every scan diffs against, so
+        # it takes the same swap (#300): a crash while seeding must not
+        # cost the store its memory of heads.
+        self.scan()
+        before = self.baseline.read_text(encoding="utf-8")
+        held = hold(self, self.baseline)
+
+        seeded = self.calibrate("--since", ago(9000), "--matchers", "Bash")
+
+        self.assertEqual(seeded.returncode, 0, seeded.stdout + seeded.stderr)
+        assert_replaced_whole(self, held, before, self.baseline)
+        self.assertEqual(sorted(p.name for p in self.root.glob("*.tmp")), [])
 
     def test_a_seed_may_not_restate_what_the_supervisor_watched(self):
         # The hard refusal, with no --force behind it: observed time is

@@ -15,19 +15,22 @@ the evidence with it, as of the last send.
   python receiver.py serve --bind 127.0.0.1      # this address only
   python receiver.py serve --cert C --key K      # TLS from your own pair
   python receiver.py serve --new-token           # rotate the URL; the old one answers 404
+  python receiver.py serve --file-cap MIB --total-cap MIB   # what it may keep
   python receiver.py --version                   # tool, format, and commit
 
 What it keeps, in its data directory: `token`, the secret half of the
 URL; `heads.jsonl`, one line per published head; and one
 `receipts-<session>.jsonl` per chain, named by the sender and holding
 chain bytes from genesis on, so `loxodonta verify --log` judges it as
-it is. The operator on this box reads those files with the recorder;
+it is, up to a cap on each file and one on them all. The operator on
+this box reads those files with the recorder;
 nothing here serves them back over the wire. The wire contract, header
 names included, is docs/RECEIVER.md. Stdlib only, like everything here.
 """
 
 import argparse
 import hmac
+import io
 import json
 import os
 import re
@@ -37,8 +40,10 @@ import socketserver
 import ssl
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 # Two versions, moving independently (ADR-0022): TOOL_VERSION says which
@@ -46,7 +51,7 @@ from urllib.parse import urlsplit
 # supervisor.py — the three constants must agree (the suite says so).
 # FORMAT_VERSION is the frozen receipt format of the chain files it
 # keeps (SPEC §2.1).
-TOOL_VERSION = "0.8.1"
+TOOL_VERSION = "0.9.0"
 FORMAT_VERSION = "0.1"
 
 DEFAULT_PORT = 8790
@@ -74,6 +79,26 @@ CHAIN_NAME = re.compile(r"receipts-[A-Za-z0-9_-]{1,200}\.jsonl")
 # bytes per entry, so this holds many thousands of entries in one batch;
 # a body declared larger is refused before a byte of it is read.
 BODY_CAP = 8 * 1024 * 1024
+
+# What the receiver may keep, so a writer holding the URL cannot fill the
+# disk under the honest sends (#300): a cap on each file and one on the
+# data directory as a whole, in MiB, which --file-cap and --total-cap
+# change. A chain runs to a few hundred bytes per entry, so a file cap of
+# 1 GiB holds millions of entries, and the total holds thousands of
+# ordinary sessions. A request that would pass either cap is refused
+# whole; nothing already kept is ever trimmed to make room.
+MIB = 1024 * 1024
+FILE_CAP_MIB = 1024
+TOTAL_CAP_MIB = 10 * 1024
+
+# The whole of one request, headers and body, is due this many seconds
+# after its connection is taken, or the connection is dropped (#300). A
+# timeout per receive alone let a sender trickle one byte every 1.5
+# seconds and hold its request open for as long as it liked. Sixty
+# seconds carries a full 8 MiB batch at a little over one megabit a
+# second, and the recorder's own sends give up sooner. The env knob is
+# the test suite's handle, like the timeout's on the door below.
+DEADLINE_SECONDS = float(os.environ.get("RECEIVER_DEADLINE_SECONDS", 60))
 
 # The shape of a token this file mints (secrets.token_urlsafe), so a
 # hand-edited token file that would not make a clean URL is replaced.
@@ -157,6 +182,22 @@ def append_durably(path, lines):
         os.fsync(f.fileno())
 
 
+def size_of(path):
+    """The file's size in bytes, 0 for one that is not there yet."""
+    try:
+        return os.path.getsize(path)
+    except FileNotFoundError:
+        return 0
+
+
+def kept_size(data):
+    """Every byte the receiver keeps: the sizes of the files in its data
+    directory, read afresh each time, so a file the operator moves off
+    the box frees its room at once."""
+    with os.scandir(data) as entries:
+        return sum(entry.stat().st_size for entry in entries if entry.is_file())
+
+
 def head_line(body):
     """The one line a published head becomes: the JSON object that was
     posted, compact and key-sorted so the heads file reads one head per
@@ -188,24 +229,39 @@ def receipt_of(line):
     return n, digest
 
 
-def chain_lines(body):
-    """A chain batch as [(line, n, entry_hash)], each line without its
-    newline (a carriage return before it is dropped too, so a proxy that
-    rewrote the line endings changes nothing on disk). The sender's
-    trailing newline is not an empty last line. A batch with no lines,
-    or with any line that is not shaped like an entry, raises ValueError
-    naming the line: the whole batch is refused, nothing of it written,
-    because a file that is a receipt log must hold entries and nothing
-    else."""
-    lines = body.split(b"\n")
-    if lines and lines[-1] == b"":
+def split_lines(data):
+    """The lines of a chain's or a sidecar's bytes, by the one rule every
+    reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
+    and nothing else ends one. U+2028, U+2029 and NEL are characters a
+    JSON string holds raw, and a `\\r` alone is whitespace between two
+    JSON tokens; a reader that ended a line at any of them would read
+    one entry of another conforming writer as two broken ones. A `\\r`
+    just before the `\\n` belongs to the ending, so a file whose endings
+    a Windows tool rewrote to `\\r\\n` reads as the same lines. The bytes
+    after the last `\\n`, when there are any, are a line too: the torn
+    tail a crash leaves, which the walk names. Written the same way in
+    loxodonta.py, supervisor.py and receiver.py, which never import one
+    another; tests/test_suite_shape.py holds the copies equal."""
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
         lines.pop()
+    return [line[:-1] if line.endswith(b"\r") else line for line in lines]
+
+
+def chain_lines(body):
+    """A chain batch as [(line, n, entry_hash)], each line as
+    `split_lines` reads it: without its newline, and without a carriage
+    return before it, so a proxy that rewrote the line endings changes
+    nothing on disk. The sender's trailing newline is not an empty last
+    line. A batch with no lines, or with any line that is not shaped
+    like an entry, raises ValueError naming the line: the whole batch is
+    refused, nothing of it written, because a file that is a receipt log
+    must hold entries and nothing else."""
+    lines = split_lines(body)
     if not lines:
         raise ValueError("the batch holds no lines")
     batch = []
     for number, line in enumerate(lines, 1):
-        if line.endswith(b"\r"):
-            line = line[:-1]
         receipt = receipt_of(line)
         if receipt is None:
             raise ValueError(f"line {number} is not an entry (a JSON object "
@@ -217,7 +273,10 @@ def chain_lines(body):
 def known_pairs(path):
     """Every (n, entry_hash) the chain file already holds, so a resent
     line is known and a rewritten one is not. A file that is not there
-    yet knows nothing."""
+    yet knows nothing. Read a line at a time, since a file may run to
+    its cap: a file opened for bytes ends a line at `\\n` and nowhere
+    else, the rule of `split_lines`, and the `\\n` itself, with any
+    `\\r` before it, is whitespace to the JSON reader in `receipt_of`."""
     known = set()
     try:
         with open(path, "rb") as f:
@@ -249,9 +308,21 @@ def new_lines(batch, known):
 
 # --- The door ------------------------------------------------------------------
 
-class Receiver(HTTPServer):
-    """One request at a time: every append ends in an fsync, and a single
-    thread means two batches for the same chain can never interleave."""
+class Receiver(ThreadingHTTPServer):
+    """A thread for each request, so a slow sender holds its own
+    connection and no one else's (#300); daemon threads, so stopping the
+    receiver never waits on a stalled one. The appends still go one at a
+    time. `appending` is held from reading what a file already knows to
+    the fsync of the last line written, so two batches for one chain
+    never interleave, and two requests never both fit under a cap that
+    has room for one. One lock for every file, because the total cap is
+    a question about every file at once."""
+
+    daemon_threads = True
+
+    def __init__(self, address, handler):
+        super().__init__(address, handler)
+        self.appending = threading.Lock()
 
     def server_bind(self):
         # The stdlib's server_bind looks up the bound host's fully
@@ -261,13 +332,40 @@ class Receiver(HTTPServer):
         self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
-        # A sender that stalled past the timeout, or spoke plain HTTP to
-        # a TLS door, is dropped silently: a stalling stranger must not
-        # be able to fill the operator's log. Anything that is not a
-        # socket or TLS error is a bug in this file, and those still
-        # print the stdlib's traceback.
+        # A sender that stalled past the timeout or the deadline, or
+        # spoke plain HTTP to a TLS door, is dropped silently: a stalling
+        # stranger must not be able to fill the operator's log. Anything
+        # that is not a socket or TLS error is a bug in this file, and
+        # those still print the stdlib's traceback.
         if not isinstance(sys.exc_info()[1], OSError):
             super().handle_error(request, client_address)
+
+
+class Arrival(io.RawIOBase):
+    """A connection's incoming bytes, under one deadline for the whole
+    request. Before every receive the socket's timeout is set to what is
+    left of the deadline, or to one receive's own timeout when that is
+    shorter, so a sender that trickles runs out of time as surely as one
+    that stops. Past the deadline a read fails the way a timeout does,
+    and the stdlib drops the connection unanswered."""
+
+    def __init__(self, sock, deadline, per_receive):
+        self.sock = sock
+        self.due = time.monotonic() + deadline
+        self.per_receive = per_receive
+
+    def limit_wait(self):
+        left = self.due - time.monotonic()
+        if left <= 0:
+            raise socket.timeout("the request missed its deadline")
+        self.sock.settimeout(min(left, self.per_receive))
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        self.limit_wait()
+        return self.sock.recv_into(buffer)
 
 
 class Door(BaseHTTPRequestHandler):
@@ -275,19 +373,25 @@ class Door(BaseHTTPRequestHandler):
     away with a status and one short line, and the request path is
     never written anywhere, because the path is the credential."""
 
-    # A sender that stalls this long, mid-body or before a TLS handshake it
-    # never starts, is dropped, not waited on: the door is one thread, and
-    # one idle socket must not hold it against every honest sender behind
-    # it. The env knob is the test suite's handle.
+    # A sender that goes quiet this long, mid-body or before a TLS
+    # handshake it never starts, is dropped, not waited on, even with
+    # time left before the deadline. The env knob is the test suite's
+    # handle.
     timeout = float(os.environ.get("RECEIVER_TIMEOUT_SECONDS", 30))
 
     def setup(self):
-        # The stdlib sets the timeout here, so the TLS handshake runs
-        # after it and under it: wrapped with do_handshake_on_connect
-        # left on, the handshake would run inside accept() on a socket
-        # with no timeout at all.
+        # The stdlib sets the timeout and opens the reading side here.
+        # The reading side is swapped for one under the request's
+        # deadline, which starts now, before the TLS handshake, so a
+        # handshake that trickles is bounded too. The handshake runs
+        # here rather than inside accept(), where do_handshake_on_connect
+        # would run it on a socket with no timeout at all.
         super().setup()
+        self.rfile.close()
+        arrival = Arrival(self.connection, DEADLINE_SECONDS, self.timeout)
+        self.rfile = io.BufferedReader(arrival)
         if isinstance(self.connection, ssl.SSLSocket):
+            arrival.limit_wait()
             self.connection.do_handshake()
 
     def at_the_token(self):
@@ -367,7 +471,11 @@ class Door(BaseHTTPRequestHandler):
             self.answer(400, "a head is one JSON object")
             return
         path = os.path.join(self.server.data, HEADS_FILE)
-        if self.kept(path, [line]):
+        with self.server.appending:
+            refused = self.append(path, [line])
+        if refused:
+            self.answer(*refused)
+        else:
             self.ok({"appended": 1})
 
     def keep_batch(self, body, name):
@@ -377,22 +485,46 @@ class Door(BaseHTTPRequestHandler):
             self.answer(400, str(why))
             return
         path = os.path.join(self.server.data, name)
-        lines = new_lines(batch, known_pairs(path))
-        if self.kept(path, lines):
+        with self.server.appending:
+            lines = new_lines(batch, known_pairs(path))
+            refused = self.append(path, lines)
+        if refused:
+            self.answer(*refused)
+        else:
             self.ok({"appended": len(lines), "dropped": len(batch) - len(lines)})
 
-    def kept(self, path, lines):
-        """True once the lines are on disk (nothing to write counts). A
-        disk that refuses is a 500 with the reason, so the sender's memo
-        never advances over bytes that did not land."""
+    def append(self, path, lines):
+        """Put the lines on disk: None once they are there (nothing to
+        write counts), else the (status, reason) refusing them. Called
+        holding `appending`, and answering nothing itself, so a sender
+        slow to read its answer never holds the lock.
+
+        Past a cap is 507 Insufficient Storage, not 413. The request is
+        well formed and inside the body cap; it is this receiver's
+        storage that has no room for it, which is what 507 says (RFC
+        4918), and 413 stays the one answer for a body too large to take
+        at all, so the sender's failure line tells the two apart. A
+        refusal writes nothing and trims nothing: the receiver only adds.
+
+        A disk that refuses is a 500 with the reason. Either way the
+        sender's memo never advances over bytes that did not land."""
         if not lines:
-            return True
+            return None
+        server = self.server
+        adding = sum(len(line) + 1 for line in lines)
+        if ends_mid_line(path):
+            adding += 1  # the torn tail's newline
         try:
+            if size_of(path) + adding > server.file_cap:
+                return 507, (f"the file cap is {server.file_cap // MIB} MiB "
+                             "(--file-cap), and this would pass it")
+            if kept_size(server.data) + adding > server.total_cap:
+                return 507, (f"the total cap is {server.total_cap // MIB} MiB "
+                             "(--total-cap), and this would pass it")
             append_durably(path, lines)
         except OSError as e:
-            self.answer(500, f"could not write: {e.strerror or e}")
-            return False
-        return True
+            return 500, f"could not write: {e.strerror or e}"
+        return None
 
     def ok(self, counts):
         """The 200: what landed, as JSON, and said to be JSON."""
@@ -450,6 +582,8 @@ def cmd_serve(args):
         return 1
     server.data = data
     server.token = token
+    server.file_cap = args.file_cap * MIB
+    server.total_cap = args.total_cap * MIB
     scheme = "http"
     if args.cert:
         try:
@@ -466,7 +600,8 @@ def cmd_serve(args):
     port = server.server_address[1]
     everywhere = args.bind in ("", "0.0.0.0")
     host = socket.gethostname() if everywhere else args.bind
-    print(f"receiver {TOOL_VERSION} keeping {data}")
+    print(f"receiver {TOOL_VERSION} keeping {data}, at most "
+          f"{args.file_cap} MiB a file and {args.total_cap} MiB in all")
     print(f"listening on {args.bind}:{port} "
           f"({'all interfaces' if everywhere else 'this address only'}), "
           + (f"speaking TLS from {args.cert}" if args.cert else
@@ -531,6 +666,19 @@ def speak_utf8():
             reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+def mebibytes(text):
+    """A cap as typed at the command line: a whole number of MiB, one or
+    more. Anything else is a usage error naming the flag."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError("a cap is a whole number of MiB, "
+                                         "1 or more")
+    return value
+
+
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own, as the other
     two files have it: a wrong flag exits 64, never a number a script
@@ -568,6 +716,16 @@ def main(argv):
     serve.add_argument("--new-token", action="store_true",
                        help="mint a new token; the old URL answers 404 "
                             "from now on")
+    serve.add_argument("--file-cap", type=mebibytes, default=FILE_CAP_MIB,
+                       metavar="MIB",
+                       help="the most any one file may hold; past it a "
+                            f"request is refused with 507 (default: "
+                            f"{FILE_CAP_MIB} MiB)")
+    serve.add_argument("--total-cap", type=mebibytes, default=TOTAL_CAP_MIB,
+                       metavar="MIB",
+                       help="the most the data directory may hold in all; "
+                            f"past it a request is refused with 507 "
+                            f"(default: {TOTAL_CAP_MIB} MiB)")
     serve.set_defaults(func=cmd_serve)
 
     args = parser.parse_args(argv)

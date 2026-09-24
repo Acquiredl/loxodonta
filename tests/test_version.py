@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 SUPERVISOR = REPO_ROOT / "supervisor.py"
 RECEIVER = REPO_ROOT / "receiver.py"
+VERIFIER = REPO_ROOT / "verifier.py"
 
 # `<prog> <semver> (format <format>, commit <short-hash|unknown>)`
 VERSION_LINE = re.compile(
@@ -96,25 +97,38 @@ class VersionTest(unittest.TestCase):
         self.assertEqual(said["format"], "0.1")
         self.assertEqual(said["commit"], checkout_commit())
 
-    def test_the_three_files_carry_one_tool_version_and_agree(self):
+    def test_verifier_prints_the_same_three_identities(self):
+        # The copy answers for itself (ADR-0035): its own name, and the
+        # commit of the checkout it sits in.
+        result = run_version(VERIFIER)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 1, result.stdout)
+        said = VERSION_LINE.match(lines[0])
+        self.assertIsNotNone(said, lines[0])
+        self.assertEqual(said["prog"], "verifier")
+        self.assertEqual(said["format"], "0.1")
+        self.assertEqual(said["commit"], checkout_commit())
+
+    def test_the_four_files_carry_one_tool_version_and_agree(self):
         # ADR-0022: tagged together, so a bump to one is a bump to all
-        # three (the receiver joined with ADR-0031).
-        recorder = VERSION_LINE.match(run_version(LOXODONTA).stdout.strip())
-        supervisor = VERSION_LINE.match(run_version(SUPERVISOR).stdout.strip())
-        receiver = VERSION_LINE.match(run_version(RECEIVER).stdout.strip())
-        self.assertEqual(recorder["tool"], supervisor["tool"])
-        self.assertEqual(recorder["tool"], receiver["tool"])
-        self.assertEqual(recorder["format"], supervisor["format"])
-        self.assertEqual(recorder["format"], receiver["format"])
+        # of them (the receiver joined with ADR-0031, the verifier with
+        # ADR-0035, which cuts it from the recorder at the same commit).
+        said = {script: VERSION_LINE.match(run_version(script).stdout.strip())
+                for script in (LOXODONTA, SUPERVISOR, RECEIVER, VERIFIER)}
+        for script in (SUPERVISOR, RECEIVER, VERIFIER):
+            self.assertEqual(said[script]["tool"], said[LOXODONTA]["tool"],
+                             script.name)
+            self.assertEqual(said[script]["format"], said[LOXODONTA]["format"],
+                             script.name)
 
         # And each version lives in exactly one constant per file — the
         # place a release bump edits, and the only place.
         one_constant = re.compile(r'^TOOL_VERSION = "(\d+\.\d+\.\d+)"$', re.M)
-        for script, said in ((LOXODONTA, recorder), (SUPERVISOR, supervisor),
-                             (RECEIVER, receiver)):
+        for script, line in said.items():
             declared = one_constant.findall(script.read_text(encoding="utf-8"))
-            self.assertEqual(declared, [said["tool"]], script.name)
-
+            self.assertEqual(declared, [line["tool"]], script.name)
 
 if __name__ == "__main__":
     unittest.main()

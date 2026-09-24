@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -91,14 +92,48 @@ def bitcoin_continuation(prefix, suffix, height):
     )
 
 
-def expected_merkle_root(head_hex, nonce, prefix, suffix):
+def replayed_root(head_hex, nonce, prefix, suffix):
     """Replay the fake proofs by hand: the digest the Bitcoin attestation
-    claims as block merkle root, in explorer display order (reversed)."""
+    claims as block merkle root, as the proof computes it. That is the
+    order a block header stores its merkle root in: the proof's last two
+    operations are the double sha256 that makes a transaction id, and
+    Bitcoin hashes ids into the root in the order the hash comes out."""
     commitment = hashlib.sha256(bytes.fromhex(head_hex) + nonce).digest()
-    root = hashlib.sha256(
+    return hashlib.sha256(
         hashlib.sha256(prefix + commitment + suffix).digest()
     ).digest()
-    return root[::-1].hex()
+
+
+def expected_merkle_root(head_hex, nonce, prefix, suffix):
+    """The same root in explorer display order (reversed)."""
+    return replayed_root(head_hex, nonce, prefix, suffix)[::-1].hex()
+
+
+def block_header(merkle_root, prev=b"\x11" * 32, time=1720000000,
+                 bits=0x17034219, nonce=7):
+    """An 80-byte block header in Bitcoin's layout: version, the previous
+    block's hash, the merkle root, time, bits, nonce, every integer
+    little-endian. Synthetic, so a test can hold a header whose root is a
+    fake proof's; nothing checks that it was ever mined, and the
+    verifier does not claim to."""
+    return (struct.pack("<I", 0x20000000) + prev + merkle_root
+            + struct.pack("<III", time, bits, nonce))
+
+
+def header_hash(header):
+    """A header's hash as explorers print it: double sha256, reversed."""
+    return hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1].hex()
+
+
+# The Bitcoin genesis block's header, a real one: its hash and its merkle
+# root are the two most printed values in Bitcoin, so they pin the display
+# order of both against the world rather than against this file.
+GENESIS_HEADER = (
+    "01000000" + "00" * 32
+    + "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a"
+    + "29ab5f49" + "ffff001d" + "1dac2b7c")
+GENESIS_HASH = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+GENESIS_ROOT = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
 
 
 # --- Fake calendar ------------------------------------------------------------
@@ -403,7 +438,7 @@ class AnchorTest(unittest.TestCase):
             "anchor", "--calendar", "http://127.0.0.1:1", cwd=self.workdir
         )
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)  # EX_UNAVAILABLE (ADR-0037)
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.sidecar.exists())
 
@@ -415,7 +450,7 @@ class AnchorTest(unittest.TestCase):
             "anchor", "--calendar", self.server.url, cwd=empty
         )
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 66)  # EX_NOINPUT (ADR-0037)
         self.assertIn("init", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
@@ -445,8 +480,15 @@ class AnchorTest(unittest.TestCase):
         result = run_receipts("verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("ANCHORED", result.stdout)
-        self.assertIn(f"block {self.HEIGHT}", result.stdout)
+        # With no block header given, the attestation's height is its own
+        # claim: a regenerated chain can carry a made-up one, so the line
+        # says the block was not checked and never that the entries
+        # existed by it (ruling 3 on #299).
+        self.assertIn(f"ANCHORED: entries 0..1: the attestation claims "
+                      f"Bitcoin block {self.HEIGHT}, and the block was not "
+                      "checked", result.stdout)
+        self.assertNotIn("existed by", result.stdout)
+        self.assertIn("--block-header", result.stdout)
         self.assertIn(
             expected_merkle_root(self.head, self.server.nonce,
                                  self.server.prefix, self.server.suffix),
@@ -598,6 +640,148 @@ class AnchorTest(unittest.TestCase):
         result = run_receipts("verify", "--anchors", cwd=self.workdir)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count("ANCHOR-PENDING"), 2)
+
+
+class BlockHeaderTest(unittest.TestCase):
+    """Ruling 3 on #299: `verify --anchors` grades an anchor honestly. A
+    Bitcoin attestation names a height, and replaying the proof gives a
+    merkle root, and neither says a block with that root exists: a
+    regenerated chain can carry an attestation made up whole. So without
+    a header the line says the attestation claims block H and the block
+    was not checked; `--block-header HEX`, an 80-byte header the recipient
+    got from a source they trust, checks the replayed root against the
+    header's own, and only a match says the entries existed by that block.
+    A header carries no height, so headers are matched to attestations by
+    root, and the line names the header by its hash, the value a second
+    source can confirm."""
+
+    HEIGHT = 850000
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+        self.server = start_calendar(self, b"fake-nonce", self.HEIGHT)
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        submitted = run_receipts("anchor", "--calendar", self.server.url,
+                                 cwd=self.workdir)
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        self.server.mode = "complete"
+        upgraded = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+        self.root = replayed_root(self.head, self.server.nonce,
+                                  self.server.prefix, self.server.suffix)
+
+    def verify(self, *headers, anchors=True):
+        flags = [arg for header in headers
+                 for arg in ("--block-header", header)]
+        return run_receipts("verify", *(["--anchors"] if anchors else []),
+                            *flags, cwd=self.workdir)
+
+    def test_a_header_holding_the_replayed_root_says_existed_by_that_block(self):
+        header = block_header(self.root)
+
+        result = self.verify(header.hex())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(lines[-1], "VALID")
+        line = next(l for l in lines if l.startswith("ANCHORED"))
+        self.assertTrue(line.startswith(
+            "ANCHORED: entries 0..1 existed by the block whose header hashes "
+            f"to {header_hash(header)}"), line)
+        self.assertIn(self.root[::-1].hex(), line)
+        # The height is the attestation's word and the header source's;
+        # the verifier saw no height in the header, and says so.
+        self.assertIn(f"calls it Bitcoin block {self.HEIGHT}", line)
+        self.assertNotIn("not checked", result.stdout)
+        self.assertNotIn("HEADER-UNMATCHED", result.stdout)
+
+    def test_the_header_stores_the_root_as_the_proof_computes_it(self):
+        # The byte order, pinned: a header written with the root reversed
+        # (the explorer's display order) holds a different 32 bytes, and
+        # checks nothing. The root goes in as the double sha256 left it.
+        reversed_root = block_header(self.root[::-1])
+
+        result = self.verify(reversed_root.hex())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("the block was not checked", result.stdout)
+        self.assertNotIn("existed by", result.stdout)
+        self.assertIn("HEADER-UNMATCHED", result.stdout)
+
+    def test_a_real_header_that_matches_nothing_is_noted_by_its_hash(self):
+        # The genesis block's header, real bytes: its hash and its merkle
+        # root print in the order every explorer prints them. It is not
+        # this anchor's block, so it checked nothing, which is a note: the
+        # verdict stays the chain's, and the anchor stays not checked.
+        result = self.verify(GENESIS_HEADER)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(lines[-1], "VALID")
+        note = next(l for l in lines if l.startswith("HEADER-UNMATCHED"))
+        self.assertIn(GENESIS_HASH, note)
+        self.assertIn(GENESIS_ROOT, note)
+        self.assertIn("checked nothing", note)
+        self.assertIn(f"claims Bitcoin block {self.HEIGHT}, and the block "
+                      "was not checked", result.stdout)
+
+    def test_headers_repeat_and_each_is_matched_by_its_root(self):
+        header = block_header(self.root)
+
+        result = self.verify(GENESIS_HEADER, header.hex().upper())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"existed by the block whose header hashes to "
+                      f"{header_hash(header)}", result.stdout)
+        self.assertEqual(result.stdout.count("HEADER-UNMATCHED"), 1)
+        self.assertIn(GENESIS_HASH, result.stdout)
+
+    def test_with_no_sidecar_a_header_is_still_noted(self):
+        (self.workdir / "receipts.jsonl.anchors.jsonl").unlink()
+
+        result = self.verify(GENESIS_HEADER)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NO-ANCHORS", result.stdout)
+        self.assertIn("HEADER-UNMATCHED", result.stdout)
+
+    def test_a_regenerated_chain_is_still_anchor_mismatch_exit_3(self):
+        # A header changes what a completed proof is said to show; it
+        # changes nothing about a proof for a head this log does not hold.
+        header = block_header(self.root)
+        (self.workdir / "receipts.jsonl").unlink()
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "innocent step",
+                     cwd=self.workdir)
+
+        result = self.verify(header.hex())
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("ANCHOR-MISMATCH", result.stdout)
+
+    def test_a_header_without_anchors_is_a_usage_error(self):
+        # The header was given in order to check an anchor; a run that
+        # ignored it would answer VALID with nothing checked.
+        result = self.verify(block_header(self.root).hex(), anchors=False)
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("--anchors", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_a_header_that_is_not_80_bytes_of_hex_is_a_usage_error(self):
+        whole = block_header(self.root).hex()
+        for bad in (whole[:-2], whole + "00", "zz" + whole[2:], ""):
+            with self.subTest(length=len(bad)):
+                result = self.verify(bad)
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertIn("160 hex characters", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
 
 
 def start_calendar(case, nonce, height=850000):

@@ -164,7 +164,8 @@ class ConcurrentAppendTest(unittest.TestCase):
                               cwd=self.workdir,
                               extra_env={"LOXODONTA_LOCK_TIMEOUT": "0.5"})
 
-        self.assertNotEqual(result.returncode, 0)
+        # EX_TEMPFAIL (ADR-0037): try again, and never 1, which is BROKEN.
+        self.assertEqual(result.returncode, 75, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("lock", result.stderr.lower())
         self.assertEqual(len(self.entries()), 1, "nothing was written")
@@ -265,15 +266,9 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ForkedTailTest(unittest.TestCase):
-    """The second shape of tail damage (ADR-0004 addendum, 2026-09-21): a
-    lock taken from a holder that was paused and not dead leaves two
-    entries claiming one `n`. The tail parses, so before this ruling no
-    sibling started and every later receipt was laid over the fork,
-    until an innocent race read as tampering in the middle of the file.
-    A chain whose tail's `n` is not its line number cannot be extended
-    either: the hook starts a sibling, the operator's verbs refuse, and
-    innocent damage stays at the tail, where the glossary says it lives."""
+class TailDamageCase(unittest.TestCase):
+    """A session's chain in a hook's log folder, and the hook to fire at
+    it, for the tests of a chain whose tail cannot be built on."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -293,6 +288,17 @@ class ForkedTailTest(unittest.TestCase):
 
     def chain(self, suffix=""):
         return self.log_dir / f"receipts-sess-1234abcd{suffix}.jsonl"
+
+
+class ForkedTailTest(TailDamageCase):
+    """The second shape of tail damage (ADR-0004 addendum, 2026-09-21): a
+    lock taken from a holder that was paused and not dead leaves two
+    entries claiming one `n`. The tail parses, so before this ruling no
+    sibling started and every later receipt was laid over the fork,
+    until an innocent race read as tampering in the middle of the file.
+    A chain whose tail's `n` is not its line number cannot be extended
+    either: the hook starts a sibling, the operator's verbs refuse, and
+    innocent damage stays at the tail, where the glossary says it lives."""
 
     def fork(self, path):
         """Lay a second entry at the tail's own `n`, exactly as the second
@@ -351,3 +357,29 @@ class ForkedTailTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("BROKEN at entry 2", result.stdout)
         self.assertIn("sequence number is 1, expected 2", result.stdout)
+
+
+class NotUtf8TailTest(TailDamageCase):
+    """A tail holding a byte that is not UTF-8 is a damaged tail (#299):
+    the reader cannot take it apart, as it cannot take apart a line a
+    crash cut in the middle of a character. The hook used to end in a
+    traceback on it, recording nothing for the rest of the session; now
+    it starts a sibling, as for a torn tail or a forked one."""
+
+    def test_the_hook_starts_a_sibling_after_a_tail_that_is_not_utf8(self):
+        self.fire_hook(command="before the byte")
+        spoiled = self.chain().read_bytes().replace(b"before",
+                                                    b"bef\xffore")
+        self.chain().write_bytes(spoiled)
+
+        result = self.fire_hook(command="after the byte")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        sibling = self.chain("-002")
+        self.assertTrue(sibling.exists(), "recording continues in a sibling")
+        entries = [json.loads(l) for l
+                   in sibling.read_text(encoding="utf-8").splitlines()]
+        self.assertIn("after the byte", entries[1]["action"])
+        self.assertEqual(self.chain().read_bytes(), spoiled,
+                         "the damaged chain is evidence: untouched")

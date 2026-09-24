@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
-from test_receiver import make_chain, run_recorder
+from test_receiver import make_chain, post, run_recorder
 from test_supervisor import (ago, chain_head, chains_by_session,
                              home_outside, install_witness_hook,
                              isolated_env, keeper_env,
@@ -338,7 +338,7 @@ class PublishChainCommandTest(unittest.TestCase):
 
         refused = self.publish_chain(fake.url)
 
-        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertEqual(refused.returncode, 69, refused.stderr)
         self.assertEqual(refused.stdout, "")
         self.assertIn("the chain was not published", refused.stderr)
         self.assertIn("the remote answered 400", refused.stderr)
@@ -398,7 +398,7 @@ class PublishChainCommandTest(unittest.TestCase):
         result = run_capped(cap, "publish", "--chain", "--log", self.log,
                             fake.url)
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)
         self.assertIn("entry 2 is larger than the receiver's cap",
                       result.stderr)
         # Everything before it left, and the cursor stops where it did.
@@ -409,7 +409,7 @@ class PublishChainCommandTest(unittest.TestCase):
         # And it stays refused rather than stalling on a socket word.
         again = run_capped(cap, "publish", "--chain", "--log", self.log,
                            fake.url)
-        self.assertEqual(again.returncode, 1)
+        self.assertEqual(again.returncode, 69)
         self.assertIn("entry 2 is larger than the receiver's cap",
                       again.stderr)
         self.assertEqual(len(fake.received), 2)
@@ -450,6 +450,73 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertIn("nothing to send", again.stdout)
         self.assertIn("the tail after 1 is damaged", again.stdout)
         self.assertEqual(len(fake.received), 1)
+
+    def test_a_raw_line_separator_is_one_line_at_both_ends(self):
+        # SPEC section 1 (#299): a line ends at a newline and nowhere
+        # else. Another conforming writer puts U+2028 in an action raw;
+        # the sender, the receiver's accounting and the verifier of the
+        # receiver's file each count the one entry it is.
+        receiver = start_receiver(self, self.data)
+        make_chain(self.log, ["step 1", "step 2"], epoch=1700000000)
+        lines = rewritten_raw(self.log, 1, "say  \u0085done")
+
+        result = self.publish_chain(receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("published chain entries 0-2", result.stdout)
+        self.assertNotIn("damaged", result.stdout)
+        kept = self.data / self.log.name
+        self.assertEqual(kept.read_bytes(), lines)
+        judged = self.verify_receivers_file()
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(judged.stdout.strip(), "VALID")
+        # The receiver knows every line it holds: the whole chain again
+        # is three exact duplicates.
+        status, answer = post(receiver.url, lines, NDJSON,
+                              {"X-Loxodonta-Chain": self.log.name})
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(json.loads(answer), {"appended": 0, "dropped": 3})
+
+    def test_windows_line_endings_arrive_as_newlines_and_verify_there(self):
+        # SPEC section 1: a carriage return before the newline belongs to
+        # the ending, so the chain sent is the chain, and the receiver
+        # keeps it ended by newlines alone.
+        receiver = start_receiver(self, self.data)
+        lines = make_chain(self.log, ["step 1", "step 2"], epoch=1700000000)
+        self.log.write_bytes(lines.replace(b"\n", b"\r\n"))
+
+        result = self.publish_chain(receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("published chain entries 0-2", result.stdout)
+        self.assertNotIn("damaged", result.stdout)
+        self.assertEqual((self.data / self.log.name).read_bytes(), lines)
+        judged = self.verify_receivers_file()
+        self.assertEqual(judged.stdout.strip(), "VALID", judged.stderr)
+
+
+def rewritten_raw(log, n, action):
+    """The chain at `log` with entry `n`'s action replaced, every entry
+    rechained and rehashed by SPEC section 4, and each line written the
+    way another conforming writer might: raw UTF-8, newline-ended.
+    Returns the file's new bytes."""
+    written = b""
+    prev = None
+    for line in log.read_bytes().split(b"\n"):
+        if not line:
+            continue
+        entry = json.loads(line)
+        del entry["entry_hash"]
+        if entry["n"] == n:
+            entry["action"] = action
+        entry["prev"] = prev
+        canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=False).encode("utf-8")
+        entry["entry_hash"] = prev = hashlib.sha256(canonical).hexdigest()
+        written += json.dumps(entry, sort_keys=True, separators=(",", ":"),
+                              ensure_ascii=False).encode("utf-8") + b"\n"
+    log.write_bytes(written)
+    return written
 
 
 class PublishChainAtSessionEndTest(PublishBase):

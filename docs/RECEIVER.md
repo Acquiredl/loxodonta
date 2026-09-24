@@ -23,14 +23,16 @@ python receiver.py serve
 It prints where it keeps its files, where it listens and in what, and the URL:
 
 ```
-receiver 0.8.1 keeping /home/op/.loxodonta/receiver
+receiver 0.9.0 keeping /home/op/.loxodonta/receiver, at most 1024 MiB a file and 10240 MiB in all
 listening on 0.0.0.0:8790 (all interfaces), speaking plain HTTP (give --cert and --key for TLS)
 publish to http://shelf:8790/7qpsWUkU86ML-NOuaGjSaetfYCGgGffLyTRvOJFMYPo
   (shelf is this machine's name; use the address the sending machine reaches this one by)
 the URL is the credential: it can add and cannot read, list or delete; --new-token retires it
 ```
 
-It binds all interfaces by default, because its whole point is another machine; `--bind 127.0.0.1` narrows it to one address, for a receiver behind a reverse proxy or a tunnel. Every later start prints the same URL, so a restart never forces a rewire. Run it under whatever keeps a process up on that box (systemd, launchd, a scheduled task); it is one process and one thread, taking one request at a time, and each request ends in an fsync.
+It binds all interfaces by default, because its whole point is another machine; `--bind 127.0.0.1` narrows it to one address, for a receiver behind a reverse proxy or a tunnel. Every later start prints the same URL, so a restart never forces a rewire. Run it under whatever keeps a process up on that box (systemd, launchd, a scheduled task). It is one process that gives each request a thread of its own, so a slow sender holds only its own connection. The writes still take turns: one append at a time, each ending in an fsync, so two batches for one chain never interleave.
+
+Each request is due whole, headers and body, within sixty seconds of its connection opening, and a sender that goes quiet for thirty seconds is dropped sooner. That deadline carries a full 8 MiB batch at a little over one megabit a second. A sender that trickles its bytes to keep a connection open gets no longer than one that sends them all at once.
 
 | Flag | What it does |
 |---|---|
@@ -39,6 +41,8 @@ It binds all interfaces by default, because its whole point is another machine; 
 | `--port N` | the port (default 8790; `0` takes a free one and prints it) |
 | `--cert FILE --key FILE` | speak TLS from this PEM pair (section 5) |
 | `--new-token` | mint a new token; the old URL answers 404 from now on (section 3) |
+| `--file-cap MIB` | the most any one file in the data directory may hold (default 1024 MiB); past it a request is refused with `507` (section 4, *The caps*) |
+| `--total-cap MIB` | the most the data directory may hold in all (default 10240 MiB); past it a request is refused with `507` |
 | `--version` | tool version, format version, and the checkout's commit, in step with the recorder and the supervisor |
 
 What it keeps, in the data directory:
@@ -64,7 +68,7 @@ The sender side of this contract is the recorder. Any other sender, and any othe
 **Two content types, two destinations.**
 
 - `Content-Type: application/json` is a published head: one JSON object, the body ADR-0025 ruling 2 describes (`head`, `n`, `session`, `ts`, `event`, `text`, `content`). It is appended to `heads.jsonl` as one line, compact and key-sorted, whatever whitespace the sender used.
-- `Content-Type: application/x-ndjson` is a batch of a published chain: the chain's lines exactly as they sit in the chain file, newline-delimited, from genesis on the first send and from the entry after the last acknowledged one on later sends. It is appended to the file the chain header names.
+- `Content-Type: application/x-ndjson` is a batch of a published chain: the chain's lines as they sit in the chain file, each ended with `\n`, from genesis on the first send and from the entry after the last acknowledged one on later sends. It is appended to the file the chain header names.
 
 **The headers on a chain batch.**
 
@@ -79,13 +83,15 @@ The receiver reads the chain header and nothing else; the other three ride along
 
 **The chain header must be a receipt file name.** `receipts-`, then a session id of letters, digits, hyphens and underscores (the sibling suffix is made of the same), then `.jsonl`, at most 200 characters between the two. Anything else is refused with `400` and nothing is written: a separator (`/` or `\`), a parent reference (`..`), a dot inside the id, another extension, `.JSONL`, an empty header, a missing one. Nothing in a header ever becomes a path.
 
-**The body.** `Content-Length` is required; a body declared past the cap of 8 MiB (8,388,608 bytes) is refused with `413` before a byte of it is read. A chain batch must hold at least one line, and every line must be a JSON object carrying an integer `n` and a string `entry_hash`; a batch with a line that is not is refused whole with `400`, nothing written, because a file that is a receipt log holds entries and nothing else. The receiver judges nothing further about a line: judging is `verify`'s job.
+**The body.** `Content-Length` is required; a body declared past the cap of 8 MiB (8,388,608 bytes) is refused with `413` before a byte of it is read. A line ends at `\n` and nowhere else, a `\r` just before it being part of the ending, by the rule every reader of a chain keeps (docs/SPEC.md section 1). A chain batch must hold at least one line, and every line must be a JSON object carrying an integer `n` and a string `entry_hash`; a batch with a line that is not is refused whole with `400`, nothing written, because a file that is a receipt log holds entries and nothing else. The receiver judges nothing further about a line: judging is `verify`'s job.
 
 **The append rule** that keeps each chain file a receipt log (ADR-0031 ruling 4):
 
 1. A line whose `n` and `entry_hash` the file already holds is an exact duplicate, the sender's retry after a lost acknowledgement, and is dropped.
 2. A line whose `n` the file holds with a different `entry_hash` is a regenerated chain arriving after the original, and is appended: that collision is what the copy exists to show.
 3. Every other line is appended in the order received.
+
+**The caps.** Whoever holds the URL could otherwise post shape-valid batches until the disk is full and every honest send fails with it. So the receiver caps what it keeps: each file in its data directory at 1024 MiB, and the directory as a whole at 10240 MiB, unless `--file-cap` and `--total-cap` say otherwise. The sizes are the files as they are on disk, read at each request. Once the append rule has dropped the duplicates, a request whose remaining lines would take a file past its cap, or the directory past its own, is refused whole with `507` and one line naming the cap. Nothing is written, and nothing already kept is trimmed or rewritten to make room: the receiver only adds. A resend of lines the file already holds adds nothing, so it is never refused, and the sender's retry still gets its `2xx`. The status is `507 Insufficient Storage` rather than `413`, because the request is well formed and inside the body cap; it is this receiver's storage that has no room for it. `413` stays the one answer for a body too large to take at all, so the sender's failure line tells the two apart. The sender's memo does not advance on a `507`, so once the operator raises a cap or moves files off the box, the next send carries the same lines again.
 
 **The answer.** `200` with a small JSON body, `{"appended": 3, "dropped": 0}` for a chain batch and `{"appended": 1}` for a head, sent only after the bytes are on disk, flushed and fsynced. Any `2xx` means on disk; the recorder advances its memo on a `2xx` and on nothing else.
 
@@ -100,6 +106,7 @@ The receiver reads the chain header and nothing else; the other three ride along
 | `415` | a content type that is neither of the two |
 | `500` | the disk refused the write; nothing of the batch is acknowledged, and the sender's memo does not advance |
 | `501` | a verb the stdlib server does not know at all |
+| `507` | the lines would take a file past `--file-cap` or the data directory past `--total-cap`; nothing is written |
 
 A refusal carries one line of plain text saying why. The receiver's own log, on its stdout, is one line per request with the time, the client address, the verb and the status; the request path is on no line, because the path is the credential.
 
@@ -109,7 +116,7 @@ A refusal carries one line of plain text saying why. The receiver's own log, on 
 - **How it batches.** Lines go in the order they sit on disk while the body stays under the 8 MiB cap; a longer tail goes in several batches, each its own POST, each acknowledged and written down before the next begins. A single entry whose own line is past the cap is refused by the sender before it is sent, named by its `n` in the failure line and in the attempt row: the receiver would refuse it on the Content-Length and close, which reaches the sender as a bare connection word and would stall that chain on that line for good, since the cursor cannot pass what never landed.
 - **What it never sends.** Reading stops at the first line that is not an entry — a torn tail, damage — because a batch holding such a line is refused whole. The torn line stays on the writer's machine, as the damage `verify` reports.
 - **What it spends.** At session end the whole send runs under the head publish's budget, three seconds on Claude Code: each batch waits at most that long, name lookup included, and no batch begins once the budget is spent. Whatever did not fit is the keeper's, on its next turn, from the same cursor. On Codex, whose whole SessionEnd hook is capped at three seconds, the send gets what the head left of the session end's shared 1.5-second window, sends the batches that fit and leaves the rest at the cursor (docs/HOOK.md, *Codex CLI*).
-- **When it fails.** By hand, the command says why on stderr — never the URL — and exits 1. At session end it says nothing and appends one `attempt` row to the memo instead, step `publish-chain`, carrying the budget and what the socket said; no chain row is written, so the next send carries the same lines again.
+- **When it fails.** By hand, the command says why on stderr — never the URL — and exits 69 (`EX_UNAVAILABLE`, ADR-0037). At session end it says nothing and appends one `attempt` row to the memo instead, step `publish-chain`, carrying the budget and what the socket said; no chain row is written, so the next send carries the same lines again.
 
 By hand, with `curl`, sending a whole chain from the writer's machine:
 
@@ -155,7 +162,8 @@ The walk judges the receiver's file the way it judges any chain, so what it says
 - A chain header that is not a receipt file name: `400`, nothing written, nothing from the header touching the disk.
 - A body with no declared length, or declared past the cap: `411`, `413`, before a byte is read.
 - A batch with a line that is not shaped like an entry: `400`, nothing written.
-- A sender that stalls for thirty seconds, mid-body or before a TLS handshake it never starts: dropped silently, with no line on the receiver's log, so a stalling stranger cannot fill it.
+- A request that has not arrived whole, headers and body, sixty seconds after its connection opened, or a sender that goes quiet for thirty seconds, mid-body or before a TLS handshake it never starts: dropped silently, with no line on the receiver's log, so a stalling stranger cannot fill it. A slow sender holds only its own connection while it lasts; every other sender is served beside it.
+- Lines that would take a file past its cap, or the data directory past the total cap: `507`, nothing written, nothing already kept touched.
 - Every request for what it holds: there is no such request. The files are read on the box, by the operator, with the recorder.
 
 ## 8. The head-record test, restated
@@ -168,3 +176,4 @@ What none of this survives (ADR-0031):
 - **The receiver's box, reached another way.** A receiver reachable from the writer's machine by a credential other than the URL (an SSH key on the box, a shared filesystem, a login in a browser) is reachable by the writer. The tool cannot enforce this; the operator's choice of box does.
 - **The tail since the last send.** Everything after the last acknowledged entry can still be rewritten consistently on the writer's machine. Session end closes the window for sessions that reach one; before that, the keeper sends nothing until the head has sat unchanged past its cadence, which covers a session killed before its end and leaves a busy session's tail unsent until it ends.
 - **Garbage in.** The copy is of what the writer said.
+- **A flood from the URL's holder.** The caps keep a flood from filling the disk, and they cannot tell it from honest sends: once a flood has used a cap up, honest lines are refused with `507` beside it. What already landed stays, so the flood sits on disk, shape-valid and visible, until the operator moves it off the box.

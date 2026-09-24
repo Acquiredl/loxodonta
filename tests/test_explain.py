@@ -132,7 +132,7 @@ class ExplainTest(unittest.TestCase):
             "explain", "--llm", f"{sys.executable} {failing}", cwd=self.workdir
         )
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)  # EX_UNAVAILABLE (ADR-0037)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_explain_when_llm_command_missing_errors_cleanly(self):
@@ -140,7 +140,7 @@ class ExplainTest(unittest.TestCase):
             "explain", "--llm", "no-such-llm-command-xyz", cwd=self.workdir
         )
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 69)
         self.assertIn("no-such-llm-command-xyz", result.stderr)
 
     def test_explain_accepts_a_quoted_interpreter_path_with_spaces(self):
@@ -163,7 +163,7 @@ class ExplainTest(unittest.TestCase):
     def test_explain_with_an_empty_llm_command_errors_cleanly(self):
         result = run_receipts("explain", "--llm", "   ", cwd=self.workdir)
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 64)  # EX_USAGE
         self.assertNotIn("Traceback", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
@@ -173,7 +173,7 @@ class ExplainTest(unittest.TestCase):
 
         result = run_receipts("explain", "--llm", self.llm, cwd=empty)
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 66)  # EX_NOINPUT
         self.assertIn("init", result.stderr)
 
 

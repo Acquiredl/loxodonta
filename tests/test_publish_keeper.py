@@ -163,7 +163,7 @@ class PublishCommandTest(ReceiverFixture):
 
         for url in (closed, moved):
             result = self.publish(log, url)
-            self.assertEqual(result.returncode, 1, url + ": " + result.stderr)
+            self.assertEqual(result.returncode, 69, url + ": " + result.stderr)
             self.assertEqual(result.stdout, "")
             self.assertIn("not published", result.stderr)
             self.assertNotIn("127.0.0.1", result.stderr)
