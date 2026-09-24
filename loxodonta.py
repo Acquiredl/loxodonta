@@ -294,26 +294,17 @@ def shape_problem(entry):
 
 # Receipt text is written by the agent under observation, and report
 # prints it to a terminal, explain hands it to a model, and verify's
-# messages name a writer's odd field names to whoever reads the verdict,
-# recall's agents among them (#295). A newline could forge a timeline
-# row, a verdict line or a line that reads as an order, an ANSI sequence
-# can clear or recolour the screen, and a bidi override reorders what
-# the eye sees. So every such character is printed as its escape.
-# Which characters: every one whose Unicode category says it steers
-# rather than reads. Cc is the controls (C0 with tab, newline and
-# carriage return among them, DEL, C1 with NEL among them); Cf the format
-# characters (the bidi marks, embeddings, overrides and isolates, the
-# Arabic letter mark, zero-width spaces and joiners, the byte-order mark,
-# and the tag characters a model reads and a person does not see); Cs a
-# lone surrogate, which JSON allows as `\ud800` and no encoder accepts;
-# Zl and Zp the line and paragraph separators. An emoji built with a
-# zero-width joiner prints as its parts and a `\u200d`: the price of
-# naming the category rather than listing characters.
-# Display only: verify hashes the raw entry. A backslash stays as it is,
-# so the chain file is where the exact bytes are read. The twin of
-# supervisor.py's `visible`, which every recall surface uses; the files
-# never import each other (ADR-0035), and tests/test_suite_shape.py
-# holds the two copies equal. It sits above `walk`, which calls it.
+# messages quote a writer's odd field names to whoever reads the verdict.
+# A newline could forge a row or a verdict line, an ANSI sequence can
+# repaint the screen, a bidi override reorders what the eye sees. So
+# every character whose Unicode category steers rather than reads (Cc
+# controls, Cf format characters, Cs lone surrogates, Zl and Zp
+# separators) is printed as its escape; an emoji joined with a zero-width
+# joiner prints as its parts, the price of naming categories.
+# Display only: verify hashes the raw entry, and a backslash stays as it
+# is, so the chain file is where the exact bytes are read. Twin of
+# supervisor.py's `visible`; the files never import each other
+# (ADR-0035), and tests/test_suite_shape.py holds the two copies equal.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
@@ -840,19 +831,14 @@ def record_label(head, n):
 
 
 # --- Attempt records (#240, PRD #244) ----------------------------------------
-# Every session-end step that reaches off the machine is quiet on failure
-# (ADR-0024 ruling 3, ADR-0025): an exit hook that complains is noise
-# nobody can act on. Quiet at the moment and silent in the record are
-# different choices, so after each step the recorder writes down how it
-# went, in the sidecar the step already owns: the anchors sidecar for the
-# anchor, the publish memo for the head. One row of kind `attempt`,
-# carrying the step, the time, the budget it had, and the outcome, which
-# is `submitted` or `sent`, or the one line the bounded call produced.
-# Never the URL: a webhook URL is a credential. The row is testimony and
-# never a proof: every reader that judges (`verify --anchors`, the
-# keeper, `verify-package`) skips it by its kind, and the supervisor
-# reads it to say when a head last left the machine and when the last
-# attempt failed. The chain's schema is untouched.
+# Session-end steps that reach off the machine fail quietly (ADR-0024
+# ruling 3, ADR-0025), but not silently: after each one the recorder
+# writes a row of kind `attempt` into the sidecar the step already owns
+# (the anchors sidecar, the publish memo), with the step, the time, its
+# budget and the outcome. Never the URL: a webhook URL is a credential.
+# The row is testimony, never proof: every reader that judges skips it
+# by its kind, and the supervisor reads it to say when a head last left
+# the machine. The chain's schema is untouched.
 
 ATTEMPT_KIND = "attempt"
 
@@ -1421,14 +1407,11 @@ PACKAGE_WORDS = {
     "SELF-CONSISTENT": "every chain walks clean and every artifact matches "
                        "the manifest",
 }
-# The exit-3 tier holds two mechanisms now, the anchor's and the
-# authority timestamp's, and a chain's verify exit alone cannot say which
-# fired; `verify_log` hands the word back through `mechanisms`, and this
-# table is the fallback for an exit with no word beside it. A packaged
-# chain that is empty gives verify's no-input exit, 66 (ADR-0037); inside
-# a package that is a finding, not a missing input, since the manifest
-# lists a chain there and there is nothing to walk, so it is CHAIN-BROKEN,
-# as it was before 66 existed.
+# The exit-3 tier holds two mechanisms, the anchor's and the authority
+# timestamp's; `verify_log` hands back which fired through `mechanisms`,
+# and this table is the fallback for an exit with no word beside it. An
+# empty packaged chain exits 66 (ADR-0037), but the manifest lists it,
+# so inside a package it is a finding: CHAIN-BROKEN.
 CHAIN_WORDS = {1: "CHAIN-BROKEN", 3: "ANCHOR-MISMATCH",
                4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED",
                EX_NOINPUT: "CHAIN-BROKEN"}
@@ -1592,19 +1575,13 @@ def judge_chain(folder, listing, chain_file=None, headers=None, used=None):
         print(f"{named}: MISSING (named on this chain, not in the package); "
               "its commitments go unjudged")
         transcript = None
-    # The checks `verify_log` runs are named here: never the files, since
-    # a package carries no working tree, and never a head the recipient
-    # was not given. The packaged stamps sidecar is judged exactly as
-    # `verify --stamps` judges one (ADR-0032 ruling 5): through openssl
-    # against the chain file the recipient named, or as an honest note
-    # when they named none. Only when the manifest lists it, though: a
-    # sidecar the manifest does not vouch for is named `unlisted` and
-    # judged by nobody, which is the rule every other unlisted file
-    # follows, and a package from before stamps travelled verifies as it
-    # always did, with no NO-STAMPS line pointing a recipient at a
-    # temporary copy.
-    # `mechanisms` carries back which of the two exit-3 findings fired,
-    # since the package names it.
+    # verify_log runs without the files check (a package carries no
+    # working tree) and without a head the recipient was not given.
+    # Stamps are judged as `verify --stamps` judges them (ADR-0032
+    # ruling 5), but only when the manifest lists the sidecar: one it
+    # does not vouch for is `unlisted` and judged by nobody, like every
+    # unlisted file, so an older package without stamps verifies as it
+    # always did. `mechanisms` carries back which exit-3 finding fired.
     mechanisms = []
     code = verify_log(log, transcript=transcript, anchors=True,
                       stamps=bool(listing.get("stamps")),
@@ -2032,14 +2009,11 @@ def ceiling_lines(manifest, earned):
     elif not stamped:
         unsaid.append("that it existed before today")
     if stamped:
-        # With a token and no anchor, when is not unsaid: it is said by
-        # whoever holds the key that signed it, and what it rests on is
-        # that holder's word, which the residual trust states as the
-        # condition it is rather than letting the rung sound like the
-        # anchor's. The manifest names no authority, and the name in the
-        # stamps record is testimony, so the verdict says what openssl
-        # checked and no name at all, as ADR-0008 ruling 4 has it for
-        # the signature.
+        # With a token and no anchor, the time rests on the word of
+        # whoever holds the signing key, and the residual trust states
+        # that as a condition. The authority's name in the stamps record
+        # is testimony, so the verdict names only what openssl checked
+        # (as ADR-0008 ruling 4 does for the signature).
         rungs += " + STAMPED"
         given += (", and a key certified by the --authority-chain file "
                   "signed the manifest's sha256 under its own clock")
@@ -2879,15 +2853,12 @@ def cmd_run(args):
         else:
             if received:
                 pass_on(received[0])  # it came while the command started
-            # Popen.wait resumes by itself after a handler returns (PEP
-            # 475), so the wrapper outlives the command whatever it was
-            # sent, and the receipt's files are hashed after the command
-            # has finished touching them.
-            # The command's exit status is kept in every case, as the
-            # subprocess module reports it (a negative number is a POSIX
-            # death by that signal): what the wrapper was sent and what
-            # became of the command are two facts, and the receipt holds
-            # both.
+            # Popen.wait resumes after a handler returns (PEP 475), so the
+            # wrapper outlives the command and the files are hashed after
+            # it has finished touching them. The exit status is kept as
+            # subprocess reports it (negative: a POSIX death by that
+            # signal): what the wrapper was sent and what became of the
+            # command are two facts, and the receipt holds both.
             returncode = child.wait()
             outcome = f"exit {returncode}"
             if not received:
@@ -3146,18 +3117,13 @@ def upgrade_pending_proofs(folder, remaining, deadline):
 
 SESSION_END_PUBLISH = 3.0   # seconds for the one POST; the anchor gets the rest
 CODEX_ACTOR = "codex"       # the actor the Codex installer writes
-# Codex caps the whole SessionEnd hook at three seconds (its docs);
-# asking for more is asking to be killed mid-seal, so the installer
-# wires this as the block's timeout, and every quick step of a Codex
-# session end shares half of it: the head, the chain and the stamp
-# together, in that order, never half each (#262). Measured (#183 and
-# #262, the tables in docs/HOOK.md): the seal costs a fifth of a
-# second on a 2 MB transcript, so the worst failure path lands near
-# 1.8 seconds however many remotes sit silent, where one budget per
-# step put two silent remotes at 3.2 and past the cap. What the window
-# cuts off is the keeper's to finish (supervisor --publish-every).
-# Nothing bounds the seal, so a very large transcript eats the margin:
-# half a gigabyte of it leaves half a second.
+# Codex caps the whole SessionEnd hook at three seconds; asking for more
+# is asking to be killed mid-seal, so the installer wires this as the
+# block's timeout. The quick steps (the head, the chain, the stamp, in
+# that order) share one half of it, never half each (#262): one budget
+# per step put two silent remotes past the cap. Nothing bounds the seal,
+# so a very large transcript eats the margin; what the window cuts off
+# is the keeper's (supervisor --publish-every). Measured: docs/HOOK.md.
 CODEX_SESSION_END_TIMEOUT = 3
 CODEX_SESSION_END_PUBLISH = CODEX_SESSION_END_TIMEOUT / 2
 WINDOW_CLOSED = "the session-end window closed before this step"
@@ -3441,22 +3407,16 @@ def chain_session(log):
 
 
 # --- The published chain (ADR-0031 rulings 2 and 3) --------------------------
-# Where the published head says a chain of that length existed, the
-# published chain holds what it held: the chain's lines exactly as they
-# sit on disk, newline-delimited, sent to a remote that can only add,
-# never delete (the receiver, docs/RECEIVER.md). The first send starts at
-# genesis; every later one starts after the last entry the remote
-# acknowledged, which the memo beside the chain remembers as a row of
-# kind `chain` carrying the range and the remote's fingerprint. The
-# cursor is per remote (#263): a remote the chain was never sent to gets
-# it from genesis, because a receiver's file that starts mid-chain can
-# never verify, and a row that names no remote, written before rows
-# named one, counts for none. The session id, the chain's file name,
-# the n range and the head ride in request headers named for the tool,
-# so what the receiver appends is chain bytes and nothing else. One
-# batch stays under the receiver's cap; a longer tail goes in several,
-# each acknowledged on its own, and whatever a budget cuts off is the
-# keeper's on its next turn, resumed from the cursor.
+# The chain's lines exactly as they sit on disk, newline-delimited, sent
+# to a remote that can only add, never delete (docs/RECEIVER.md). The
+# cursor is per remote (#263), kept in the publish memo as rows of kind
+# `chain`: the first send to a remote starts at genesis, because a
+# receiver's file that starts mid-chain can never verify, and each later
+# send starts after the last entry that remote acknowledged. A row that
+# names no remote, from before rows named one, counts for none. Metadata
+# rides in headers, so the receiver appends chain bytes and nothing
+# else. Batches stay under the receiver's cap; whatever a budget cuts
+# off is the keeper's next turn, from the cursor.
 
 CHAIN_TYPE = "application/x-ndjson"
 CHAIN_KIND = "chain"
@@ -3812,22 +3772,14 @@ def cmd_publish(args):
 
 
 # --- The authority timestamp (ADR-0032) --------------------------------------
-# A second commitment of the chain head, made beside the anchor and never
-# instead of it, when the operator names an RFC 3161 timestamp authority:
-# `stamp --authority URL` by hand, or the hook at session end once
-# `--stamp URL` is wired. What it adds over the anchor is speed, one
-# round trip rather than hours, and standing, since a qualified
-# authority's token is recognized evidence where a block header formally
-# is not. What it costs is the difference in kind: an anchor's proof is
-# nobody's product and replays offline; a token is somebody's signed
-# word, trusted exactly as far as the authority's certificate. So the
-# sidecar, the verb, the verdict and every message say stamp, and never
-# anchor. The recorder encodes the request itself, reads only whether the
-# authority granted it, and keeps the whole reply verbatim in its own
-# sidecar, `<log>.stamps.jsonl`; it never parses the token and never
-# claims to know what is inside. Judging is `verify --stamps`, through
-# `openssl` (check_stamps, in the verifier above) or an honest note
-# that nobody judged it.
+# A second commitment of the chain head, beside the anchor and never
+# instead of it, from an RFC 3161 authority the operator names. A token
+# is somebody's signed word where an anchor's proof is nobody's product,
+# so the sidecar, the verb, the verdict and every message say stamp, and
+# never anchor. The recorder encodes the request, reads only whether it
+# was granted, and keeps the reply verbatim in `<log>.stamps.jsonl`; it
+# never parses the token. Judging is `verify --stamps`, through openssl
+# (check_stamps), or an honest note that nobody judged it.
 
 STEP_STAMP = "stamp"
 STAMP_TIMEOUT = 15.0   # seconds; an operator's turn, like `publish`
@@ -4392,15 +4344,12 @@ def cmd_explain(args):
 
 # --- Harness hook (Stage C) ---------------------------------------------------
 #
-# `loxodonta hook` turns one Claude Code PostToolUse payload (JSON on stdin)
-# into one chained entry — or a PostToolUseFailure payload, the harness's
-# event for a call that ran and failed, which carries the same tool_name
-# and tool_input and so leaves the same receipt (#239). This is the
-# completeness mechanism of SPEC §8: the harness fires the hook on every
-# tool call, so the log call sits outside the writer's volition — the
-# agent cannot skip its own receipt. One chain per session (SPEC §8: one
-# writer per log; parallel sessions are sibling chains, never a shared
-# file).
+# `loxodonta hook` turns one harness payload (JSON on stdin) into one
+# chained entry: a Claude Code PostToolUse, or a PostToolUseFailure for a
+# call that ran and failed, which leaves the same receipt (#239). This is
+# SPEC §8's completeness mechanism: the harness fires the hook on every
+# tool call, so the agent cannot skip its own receipt. One writer per
+# log, so one chain per session; parallel sessions are sibling chains.
 
 # The most descriptive scalar a tool call has, in preference order. The
 # last, `summary`, is the adapters' fallback (ADR-0020): a harness whose
@@ -4666,14 +4615,11 @@ def cmd_hook(args):
               file=sys.stderr)
         return EX_DATAERR
 
-    # Where chains live, most specific wins: an explicit --log-dir; else
-    # the store's drawer for the project named by CLAUDE_PROJECT_DIR
-    # (ADR-0011 — read here in Python, no shell expansion, so one
-    # settings command works on every platform); else the working
-    # directory. When the project is a git worktree, the drawer belongs
-    # to the repository the worktree serves (see main_repo_root), so a
-    # project's history collects in one place however many worktrees it
-    # runs.
+    # Where chains live, most specific wins: --log-dir; else the store's
+    # drawer for CLAUDE_PROJECT_DIR's project (ADR-0011; read in Python,
+    # so one settings command works on every platform); else the working
+    # directory. A git worktree's drawer is its repository's
+    # (main_repo_root), so a project's history collects in one place.
     log_dir = args.log_dir
     project = None
     if log_dir is None:
@@ -4702,31 +4648,24 @@ def cmd_hook(args):
         log_dir = drawer_of_session(log_dir, safe)
 
     if ending:
-        # The tail commitment (ADR-0017's named deferral, issue #79): a
-        # clean exit seals the transcript's final bytes, closing the
-        # window the every-25 cadence leaves open. Only a session that
-        # already left receipts owes one — SessionEnd must never
-        # manufacture a chain for a chat-only session — and every
-        # failure path is a silent skip: an exit hook that complains is
-        # noise nobody can act on, and the harness's SessionEnd budget
-        # is short by design.
+        # The tail commitment (ADR-0017): a clean exit seals the
+        # transcript's final bytes, closing the window the every-25
+        # cadence leaves open. SessionEnd never manufactures a chain for
+        # a chat-only session, and every failure is a silent skip: an
+        # exit hook that complains is noise nobody can act on.
         if not os.path.isdir(log_dir):
             return 0
         log = writable_chain(log_dir, safe)
         if not os.path.exists(log):
             return 0
         code = seal_session(log, payload.get("transcript_path"))
-        # Five steps, in this order: the commitment, the published
-        # head, the published chain, the stamp, the anchor (ADR-0024,
-        # ADR-0025, ADR-0031, ADR-0032). What leaves the machine is the
-        # sealed head and the sealed chain, each opt-in bounded by the
-        # same budget rule, and a slow calendar can never cost the
-        # commitment nor the three quick steps, so the anchor takes
-        # what is left of the budget. The quick steps share one window
+        # Five steps, in this order: the commitment, the published head,
+        # the published chain, the stamp, the anchor (ADR-0024, ADR-0025,
+        # ADR-0031, ADR-0032). The three quick steps share one window
         # (#262): each POST waits its own bound or what the steps before
         # it left, whichever is less, and a step with nothing left writes
-        # that down and does not start, so the harness's cap is never
-        # what stops a step before its row is written.
+        # that down and does not start, so the harness's cap never stops
+        # a step before its row is written. The anchor takes the rest.
         started = time.monotonic()
         deadline = started + SESSION_END_BUDGET
         window = started + quick_window(args.actor)
@@ -4826,12 +4765,10 @@ def cmd_hook(args):
 
 # --- Hook installer -----------------------------------------------------------
 # `loxodonta install-hook` wires this machine's Claude Code into the
-# recorder: a PostToolUse hook so every completed tool call leaves a
-# receipt and a PostToolUseFailure hook beside it so every call that ran
-# and failed does too (#239), a SessionEnd hook so a clean exit seals
-# the transcript's tail (issue #79), and — when supervisor.py sits
-# beside this file — a SessionStart hook so every session starts with a
-# recall digest of its repo's recent history.
+# recorder: PostToolUse and PostToolUseFailure, so every call that ran
+# leaves a receipt; SessionEnd, so a clean exit seals the transcript's
+# tail; and, when supervisor.py sits beside this file, SessionStart, so
+# every session starts with a recall digest.
 
 # The events the installer wires, and so the only ones whose shape it
 # needs to read. Any other event in the file is the user's business.
@@ -4943,17 +4880,13 @@ def backup_settings(path):
 # --- Which hook entries are the installer's ----------------------------------
 # The settings file is shared with the user's own hooks, so the installer
 # must know exactly which entries it wrote: those it may replace, heal and
-# remove. Every command it has ever written is three words and then
-# flags: an interpreter, a script, and the one verb that script is wired
-# with. Its interpreter has been a bare `python3` (the first, shell-
-# expanded install) and, since, the quoted `sys.executable`; the script
-# carries either era's recorder name (ADR-0010) or the supervisor's. An
-# entry is ours when its command reads as exactly that (a supervisor.py
-# on disk also needs a recorder beside it), and every other entry is the
-# user's (#293). The test once was a substring, which took
-# a user's `python ~/ops/supervisor.py notify` and
-# `python ~/bin/upload_receipts.py --to s3` for ours: replaced on
-# install, deleted on uninstall.
+# remove. Every command it ever wrote is an interpreter (a bare `python3`
+# in the first install, the quoted `sys.executable` since), a script
+# (either era's recorder name, ADR-0010, or the supervisor's) and the one
+# verb that script is wired with, then flags. Only that exact shape is
+# ours, and a supervisor.py also needs a recorder beside it (#293): a
+# substring test once claimed a user's `python ~/ops/supervisor.py
+# notify` and deleted it on uninstall.
 
 RECORDER_NAMES = ("loxodonta.py", "receipts.py")
 DIGEST_NAMES = ("supervisor.py",)
@@ -5397,11 +5330,9 @@ def install_codex_hooks(publish=None, profile="local",
 # --- The coverage marker ------------------------------------------------------
 # ADR-0030. The recorder is the only program that knows the moment
 # coverage begins, because it is the one that wires it. Without this the
-# supervisor can date the beginning no earlier than its own first look,
-# and `docs/START.md` asks for a week of work between those two moments:
-# install, work, then scan. Every session in that week fell outside the
-# memory watching it and was judged not at all — silently, which is worse
-# for a first reader than the wrong-and-loud deficits ADR-0029 removed.
+# supervisor could date the beginning no earlier than its own first
+# scan, and every session between install and that scan would go
+# unjudged, silently.
 
 COVERAGE_NAME = "coverage.json"
 COVERAGE_PURPOSE = (

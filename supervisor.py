@@ -3987,29 +3987,21 @@ def legacy_recall_scope(args, repo):
     return repo, logs
 
 
-# Receipt text is written by an agent and read back by agents (#295):
-# the digest lands in every new session's context, and show, search,
-# timeline and the MCP tools hand it to whoever asks. So every character
-# that would act on the reader instead of being read is printed as its
-# escape. A newline would let an action forge a digest header or a
-# `SYSTEM:` line, an ANSI sequence can clear a screen or recolour it, a
-# bidi override reorders what the eye sees.
-# Which characters: every one whose Unicode category says it steers
-# rather than reads. Cc is the controls (C0 with tab, newline and
-# carriage return among them, DEL, C1 with NEL among them); Cf the format
-# characters (the bidi marks, embeddings, overrides and isolates, the
-# Arabic letter mark, zero-width spaces and joiners, the byte-order mark,
-# and the tag characters a model reads and a person does not see); Cs a
-# lone surrogate, which JSON allows as `\ud800` and no encoder accepts;
-# Zl and Zp the line and paragraph separators. An emoji built with a
-# zero-width joiner prints as its parts and a `\u200d`: the price of
-# naming the category rather than listing characters.
+# Receipt text is written by an agent and read back by agents: the
+# digest lands in every new session's context, and show, search,
+# timeline and the MCP tools hand it to whoever asks. A newline could
+# forge a digest header or a `SYSTEM:` line, an ANSI sequence can
+# repaint the screen, a bidi override reorders what the eye sees. So
+# every character whose Unicode category steers rather than reads (Cc
+# controls, Cf format characters, Cs lone surrogates, Zl and Zp
+# separators) is printed as its escape; an emoji joined with a zero-width
+# joiner prints as its parts, the price of naming categories.
 # Display only: hashing and show's re-hash read the raw entry. A
-# backslash is left as it is, so a receipt that spelled `\n` as two
-# characters prints the same as a newline did; the chain file holds the
-# exact bytes. loxodonta.py's `visible` is the twin of this one: the
-# files never import each other (ADR-0035), and tests/test_suite_shape.py
-# holds the two copies equal.
+# backslash stays as it is, so a receipt that spelled `\n` as two
+# characters prints the same as a newline; the chain file holds the
+# exact bytes. Twin of loxodonta.py's `visible`; the files never import
+# each other (ADR-0035), and tests/test_suite_shape.py holds the two
+# copies equal.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
