@@ -110,7 +110,7 @@ For every entry `n ≥ 1`:
 entry[n].prev == entry[n-1].entry_hash
 ```
 
-The **chain head** is the `entry_hash` of the last entry. It commits to the entire history: any change to any earlier byte of any entry produces a different head.
+The **chain head** is the `entry_hash` of the last entry, and it commits to the canonical form of every entry before it: a change to what any entry says, or an entry added, removed or reordered, produces a different head. It commits to what the entries say, not to the file's bytes. A line re-spelled without changing its canonical form (its keys in another order, a character escaped another way, whitespace between tokens, a `\r\n` ending) hashes as it did, and a chain rewritten only that way verifies `VALID` with the same head. This is a property of the format, not a gap: two files with one head hold the same entries. It is why a package lists a chain by its head and never by the file's sha256 (ADR-0026 ruling 3). *(Corrected 2026-09-24: the sentence before said any changed byte moves the head, which §4 contradicts. Not a format change: v0.1 hashes are unaffected.)*
 
 ## 6. Verification algorithm
 
