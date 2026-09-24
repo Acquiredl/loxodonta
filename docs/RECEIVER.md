@@ -23,7 +23,7 @@ python receiver.py serve
 It prints where it keeps its files, where it listens and in what, and the URL:
 
 ```
-receiver 0.8.1 keeping /home/op/.loxodonta/receiver, at most 1024 MiB a file and 10240 MiB in all
+receiver 0.9.0 keeping /home/op/.loxodonta/receiver, at most 1024 MiB a file and 10240 MiB in all
 listening on 0.0.0.0:8790 (all interfaces), speaking plain HTTP (give --cert and --key for TLS)
 publish to http://shelf:8790/7qpsWUkU86ML-NOuaGjSaetfYCGgGffLyTRvOJFMYPo
   (shelf is this machine's name; use the address the sending machine reaches this one by)

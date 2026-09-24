@@ -51,7 +51,7 @@ from urllib.parse import urlsplit
 # supervisor.py — the three constants must agree (the suite says so).
 # FORMAT_VERSION is the frozen receipt format of the chain files it
 # keeps (SPEC §2.1).
-TOOL_VERSION = "0.8.1"
+TOOL_VERSION = "0.9.0"
 FORMAT_VERSION = "0.1"
 
 DEFAULT_PORT = 8790
