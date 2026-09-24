@@ -224,14 +224,11 @@ def verify(log):
 
 def scan_exit(code):
     """verify's exit as the scan counts it. 0 to 5 are verify's verdicts
-    and its refusal (SPEC §6). Anything else is no verdict at all: 66, a
-    chain verify could not read, empty or not a file; 70, the recorder
-    failing on it; or a number this supervisor has never heard of. Each
-    counts as 4, the refused rung beside UNSUPPORTED-VERSION, which is
-    where the page already draws a chain with no verdict. A chain nobody
-    could judge is not in good standing, so it still raises the exit,
-    and it is not BROKEN, which exit 1 now says and nothing else
-    (ADR-0037)."""
+    and its refusal (SPEC §6). Anything else is no verdict (66, a chain
+    verify could not read; 70, the recorder failing on it; or a number
+    this supervisor has never heard of), and counts as 4, the refused
+    rung: not in good standing, so it still raises the exit, and not
+    BROKEN, which exit 1 says and nothing else (ADR-0037)."""
     return code if 0 <= code <= 5 else 4
 
 
@@ -676,12 +673,10 @@ def marker_epoch(declared, wired):
     among each harness's newest (ADR-0031 ruling 1, #246), among the
     harnesses whose recorder is still wired, and only when none is,
     among them all, so the startup line can say why the keeper is off
-    (#249). Not simply the newest epoch of all: a flagless install for
-    a second harness would then read as the first harness's choice
-    withdrawn, and the keeper would stand down with nothing saying a
-    Codex install did it, which is the end claim ADR-0030 ruling 2
-    refuses arriving by another door. `declared` is marker_harnesses',
-    `wired` {harness: bool}."""
+    (#249). Not simply the newest epoch of all: a flagless install for a
+    second harness would then withdraw the first harness's choice with
+    nothing saying so (ADR-0030 ruling 2). `declared` is
+    marker_harnesses', `wired` {harness: bool}."""
 
     def tier(epoch):
         return (TIERS.index(epoch["profile"])
@@ -697,22 +692,13 @@ def marker_authority(declared, wired):
     """The authority the anchor keeper's turn stamps with (ADR-0032
     ruling 3), as (URL or None, the harness whose epoch named it, why it
     stamps nothing, or None when it does), or None when no epoch names
-    one. The rule has the tier's shape and its own reason: the newest
-    epoch, among each harness's newest, that names an authority at all,
-    so an install for another harness that names none never withdraws
-    it — that would stop the keeper stamping chains whose operator asked
-    for it, silently, on the word of an install that said nothing about
-    stamping. A harness that re-installs without the flag withdraws its
-    own, since its newest epoch is its operator's latest word.
-
-    It obeys the wiring rule the profile does (#249): the harnesses
-    whose recorder is still wired are the ones that speak, and only when
-    none is does the newest unwired one speak, to say why nothing is
-    stamped. And the marker is writer-reachable, so what it names is
-    held to the installer's rule, a plain http or https URL with nothing
-    a shell could act on, before `serve` prints it or hands it to the
-    recorder; one that fails stamps nothing, and the value is never
-    repeated."""
+    one: the newest epoch, among each harness's newest, that names an
+    authority at all, so an install for another harness that names none
+    never silently withdraws it, while a harness that re-installs
+    without the flag withdraws its own. Only wired harnesses speak, and
+    when none is, the newest unwired one says why nothing is stamped
+    (#249). The marker is writer-reachable, so a URL that fails the
+    installer's rule stamps nothing and is never repeated."""
     named = [epoch for epoch in declared.values()
              if isinstance(epoch.get("authority"), str)
              and epoch["authority"]]
@@ -815,21 +801,15 @@ def publish_cadences(publish_every, publish_url, publish_chain, declared):
     """The publish cadence in force, where each route sends, and where
     the choice came from (ADR-0031 ruling 1, #249): the anchor keeper's
     rule, applied to the two publish routes. A URL typed here replaces
-    the target whole — both routes — so an operator who names a remote
-    on the command line never also sends to the marker's; it needs a
-    cadence beside it, as it always has. A cadence typed alone keeps
-    the marker's remote for both routes when the marker speaks for
-    `full`, as `--anchor-every` alone keeps the profile's anchor; below
-    `full` there is no remote to keep, and a cadence with nowhere to
-    send is a command spoken wrong. With no flag, a `full` profile puts
-    the publish keeper on its six-hour default and sends both routes to
-    its remote, the head first and the chain after it, the far end
-    telling them apart by content type. Every other profile, no profile
-    at all, a harness no longer wired, and a remote that is not a plain
-    http or https URL run no publish keeper; `custom` runs none because
-    it wired its own session end and asked the keeper for nothing
-    (#246). The marker is writer-reachable (ADR-0030), so its remote is
-    held to the installer's rule before anything is sent there.
+    the target for both routes, never adding to the marker's, and needs
+    a cadence beside it. A cadence typed alone keeps the marker's remote
+    at `full`; below `full` it has nowhere to send, a command spoken
+    wrong. With no flag, `full` runs the publish keeper on its six-hour
+    default, head then chain to its remote. Anything else runs none:
+    another profile or none (`custom` wired its own session end, #246),
+    a harness no longer wired, a remote that is not a plain http or
+    https URL. The marker is writer-reachable (ADR-0030), so its remote
+    is held to the installer's rule before anything is sent there.
     Returns (seconds or None, the head's URL, the chain's URL, the
     source in words); raises ValueError for a command spoken wrong."""
     target = None   # the marker's remote, when it may be followed
@@ -869,23 +849,17 @@ def keeper_words(anchor_every, anchor_source, publish_every,
                  publish_source="no flag", authority=None):
     """The startup line's second half: each keeper's cadence and its
     source, so the operator reads back what `serve` will send and why
-    (ADR-0031 ruling 1, #246, #249). Publishing names its routes — the
-    head, the chain, or both — and its source the same way anchoring
-    does, since at `full` both routes run with no flag typed.
-
-    `authority` is marker_profile's reading of it, (URL, the harness that
-    named it, why it stamps nothing) or None. It rides the anchor
-    keeper's turn and has no cadence of its own (ADR-0032 ruling 3), so
-    it is said on the anchor's clause and only when that clause has a
-    cadence to ride: an authority with no anchor cadence sends nothing,
-    and a line claiming otherwise would be the one thing this line
-    exists to prevent. When it stamps nothing the clause says why, the
-    way the cadences do (`no recorder wired`). The harness is named
-    because it need not be the one whose profile set the cadence. The
-    URL is printed because an authority URL is not a credential — it
-    says whom the operator chose to trust (ADR-0032 ruling 4) — where a
-    webhook URL is, which is why the publish clause names routes and
-    never URLs; one that failed the installer's rule is never printed."""
+    (ADR-0031 ruling 1, #246, #249); publishing names its routes, never
+    URLs, since a webhook URL is a credential. `authority` is
+    marker_profile's reading, (URL, the harness that named it, why it
+    stamps nothing) or None. It rides the anchor keeper's turn (ADR-0032
+    ruling 3), so it is said only on an anchor clause with a cadence: an
+    authority with no anchor cadence sends nothing, and a line claiming
+    otherwise is what this line exists to prevent. Its harness is named,
+    since it need not be the one that set the cadence, and its URL
+    printed, since it is not a credential (ADR-0032 ruling 4), unless it
+    failed the installer's rule. When it stamps nothing the clause says
+    why."""
     # An anchor cadence that is off stops fresh heads going to the
     # calendars; it does not stop a turn finishing the proofs already
     # submitted, which is a request to a calendar too (`keep_anchors`).
@@ -1020,18 +994,14 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
     --upgrade` (the record's own calendar; judgment stays with verify),
-    and — only when the operator opted in with a cadence — a fresh head
+    and, only when the operator opted in with a cadence, a fresh head
     that has aged past it is anchored, and stamped by the authority the
-    marker names, on this same turn. Off by default: nothing leaves the
-    machine without the say-so. Returns (attempted, note, failed).
-
-    Two commitments of one head, one cadence (ADR-0032 ruling 3): there
-    is no second clock to tune, and a head that already holds a token is
-    not asked about again — the guard here saves the process, and the
-    recorder's own dedupe is what makes the guard safe to get wrong.
-    `failed` stays the anchor's: a query the authority refused is not an
-    anchor that failed, and it is already written down as this chain's
-    last failed attempt, in the stamps sidecar, by the verb itself."""
+    marker names, on this same turn (ADR-0032 ruling 3). A head that
+    already holds a token is not asked about again: this guard saves the
+    process, and the recorder's own dedupe makes it safe to get wrong.
+    `failed` stays the anchor's; a refused stamp is already written down
+    in the stamps sidecar by the verb itself. Returns (attempted, note,
+    failed)."""
     sidecar = Path(str(log) + ".anchors.jsonl")
     stamps = Path(str(log) + ".stamps.jsonl")
     if not upgrade_due(last_attempt, now):
@@ -1109,20 +1079,14 @@ PUBLISH_BACKSTOP = 60   # seconds; well past the recorder's own bound
 def keep_published(log, last_attempt, now, entries, cadence, url,
                    chain_url=None):
     """One chain's turn with the publish keeper, on the anchor keeper's
-    throttle: only when the operator opted in with a cadence and a URL,
-    a head that has aged past the cadence and is not yet in the chain's
-    publish memo is posted once, through `loxodonta publish`; then, when
-    the operator also named a URL for the entries, the lines after the
-    memo's last acknowledged chain row go the same way through
-    `loxodonta publish --chain` (ADR-0031 ruling 3), the head first and
-    the chain after it, at most once each per throttle window. The memo
-    is the recorder's (`<log>.published.jsonl`), writer-reachable and
-    therefore testimony: it stops a repeat and proves nothing; the
-    remote's copy is the head record. The chain's cursor is per remote
-    (#263), so a new chain remote gets each chain from its genesis; a
-    head is posted once, wherever it went (ADR-0025). Off by default:
-    nothing leaves the machine without the say-so. Returns (attempted,
-    note, failed)."""
+    throttle and only when the operator opted in with a cadence and a
+    URL: a head aged past the cadence and not yet in the publish memo is
+    posted once through `loxodonta publish`; then, when a URL was named
+    for the entries, the lines after that remote's cursor (#263) go
+    through `loxodonta publish --chain` (ADR-0031 ruling 3), at most
+    once each per throttle window. The memo is testimony: it stops a
+    repeat and proves nothing; a head is posted once, wherever it went
+    (ADR-0025). Returns (attempted, note, failed)."""
     if not (url or chain_url) or not upgrade_due(last_attempt, now):
         return False, None, False
     memo = Path(str(log) + ".published.jsonl")
@@ -1186,17 +1150,12 @@ def last_departure(log):
     """When something of this chain last left the machine, and by which
     door: the newest `ts` across the publish memo and the anchor
     sidecar, or {"ts": None, "via": None} when nothing has left. The
-    door is the route, not the file (#248): `published` is a head that
-    the remote took, `published-chain` a batch of the entries
-    themselves, `anchored` a digest a calendar took. A batch counts,
-    and counts as more than a head — the entries are off the machine,
-    not just their fingerprint — but it is not the head route's
-    departure, so a head route that has been dead for a week beside a
-    live chain route reads as what it is (which route failed is
-    `last_failed`). The reading is the panel's staleness evidence, in
-    the anchor keeper's voice: a timestamp the reader ages, never an
-    alarm, never the exit. Both files are writer-reachable, so a fresh
-    reading here proves nothing; a stale one is the reason to look."""
+    door is the route, not the file (#248): `published` a head,
+    `published-chain` a batch of the entries, `anchored` a digest. A
+    batch counts, but not as the head route's departure, so a dead head
+    route beside a live chain route reads as what it is. Staleness
+    evidence the reader ages, never an alarm or the exit: both files
+    are writer-reachable, so a fresh reading proves nothing."""
     departures = []   # (when, ts, via)
     for record in sidecar_records(Path(str(log) + ".published.jsonl")):
         when = parse_when(record.get("ts"))
@@ -1573,18 +1532,13 @@ def sessionend_chain_remote(witness):
 def published_reading(witness, logs):
     """#240 part 3: whether the wired SessionEnd command publishes,
     whether any chain here holds a row saying something was sent, and
-    the one sentence for the case that should not outlast a morning:
-    wired, and nothing ever sent. Sent is measured per route (#248): a
-    head row is the head route's, a chain row the chain route's, so a
-    chain wired beside a head that has left still reads as never sent
-    until a batch lands. The chain route is read per remote as well
-    (#263): only a batch the wired remote took counts, so a chain
-    rewired to a remote that has taken nothing reads as wired in name
-    only, whatever an earlier remote holds. A head counts wherever it
-    went, since a head is posted once (ADR-0025). A receiver that was
-    never listening looks exactly like a hook that never fired until
-    someone reads the memos; this reads them. Never the URL, and never
-    the exit."""
+    the one sentence for wired and nothing ever sent, since a receiver
+    never listening looks like a hook that never fired until someone
+    reads the memos. Sent is per route (#248): a chain wired beside a
+    head that has left reads as never sent until a batch lands. The
+    chain route is also per remote (#263): only a batch the wired
+    remote took counts. A head counts wherever it went (ADR-0025).
+    Never the URL, and never the exit."""
     routes = sessionend_publishes(witness)
     remote = sessionend_chain_remote(witness)
     memos = [Path(str(log) + ".published.jsonl") for log in logs]
@@ -1719,14 +1673,11 @@ def calibrate(remembered, witness, now):
     """Effective-dated coverage (ADR-0016): the supervisor's memory of
     which matchers were wired when, so a matcher change never re-judges
     history the old rules recorded honestly. The first observation
-    stamps the moment it is made and claims nothing earlier — what lies
-    before it is BEFORE-MEMORY rather than deficit (ADR-0029). A change
-    is dated by the settings file's mtime, clamped between the last
-    observation and now — the best estimate available, since the
-    harness does not log its own config changes. Lives in the baseline:
-    writer-reachable, trusted for nothing beyond calibration. The
-    failed-call event is observed the same way (#239), so re-running
-    install-hook to wire it is a change dated like any matcher change."""
+    claims nothing earlier (BEFORE-MEMORY, ADR-0029); a change is dated
+    by the settings file's mtime, clamped between the last observation
+    and now, since the harness does not log its own config changes. The
+    failed-call event is observed the same way (#239). Lives in the
+    baseline: writer-reachable, trusted for nothing beyond calibration."""
     current = hook_matchers(witness)
     failures = hook_matchers(witness, "PostToolUseFailure")
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2017,17 +1968,11 @@ def witness_files(transcript):
     """Every file a session's tool calls are written to (#211): the
     parent transcript, plus one per subagent under
     `<session>/subagents/`. The harness fires PostToolUse for a
-    subagent's calls under the *parent* session id, so their receipts
-    land in the parent's chain — and a witness that read only the
-    parent called the session surplus for work it did honestly. The
-    largest case in the author's store was a session with 118
-    subagents: 534 events witnessed against 3721 receipts, and the
-    3187 missing were in these files.
-
-    It is the ingest leg that goes missing without them. A delegating
-    parent spawns and writes while its subagents read and search, so
-    the reads and greps ADR-0016 widened coverage to capture are
-    exactly what a parent-only witness cannot see."""
+    subagent's calls under the parent session id, so their receipts land
+    in the parent's chain, and a witness that read only the parent
+    missed the reads and searches a delegating parent hands out, and
+    called the session surplus for work it did honestly (the numbers:
+    docs/TOUR-SUPERVISOR.md)."""
     files = [transcript]
     try:
         files.extend(sorted((transcript.with_suffix("") / "subagents")
@@ -2065,20 +2010,14 @@ def result_text(block):
 def failed_call_owes(record, block, name, epoch):
     """What one failed call owes under the coverage in force at its time
     (ADR-0034): "owed", "may_owe", "unworded", or None. Only "owed" is
-    owed; "unworded" owes nothing and is counted for the canary.
-
-    Nothing where the failed-call event was not wired for its tool, since
-    nothing could have fired; a failed call under an install from before
-    #239 is judged as before. Nothing where the transcript says the call
-    never ran: an input rejected before it ran, or a permission denial,
-    which the record marks with `toolDenialKind`. Owed where the result
-    begins `Exit code N`, whatever the tool: a command that ran. A Bash
-    or PowerShell failure without that line did not run a command: it
-    was denied or blocked, or, rarely, the shell never started, so it
-    owes nothing ("unworded"). Any other tool's failure may owe: one that
-    started and failed fires the event, while one a PreToolUse hook
-    blocked, or a denial written without its marker, fires nothing, and
-    the transcript words them alike."""
+    owed; "unworded" owes nothing and is counted for the canary. None
+    where the failed-call event was not wired for its tool (#239), or
+    where the transcript says the call never ran (`toolDenialKind`).
+    "owed" where the result begins `Exit code N`, whatever the tool; a
+    Bash or PowerShell failure without that line ran no command
+    ("unworded"); any other tool's failure may owe, since the
+    transcript words one that fired the event and one a PreToolUse hook
+    blocked alike."""
     if not owes_receipt(name, failures_of(epoch)):
         return None
     text = result_text(block)
@@ -2090,35 +2029,22 @@ def failed_call_owes(record, block, name, epoch):
 
 
 def read_witness(transcript, calibration):
-    """The witness signal: the tool events that owe a receipt, as
-    (timestamp, tool) in time order. A tool event is a tool_use block
-    paired by id with its result line; a completed result counts, and so
-    does a failed call failed_call_owes() reads as owed, and only for
-    tools covered at the event's own time (the calibration finding,
-    effective-dated by ADR-0016: an all-tools witness over an
-    Edit|Write|Bash hook manufactures deficits, and so does today's wide
-    matcher over yesterday's narrow sessions). Chatter is never counted:
-    a chat-only session can never alarm.
-
-    Returns a dict. `owed` is those events. `may_owe` holds by tool the
-    timestamps of the failed calls that may or may not owe (ADR-0034),
-    and `witnessed` is
-    every tool the transcript shows a result for, so reconcile() can
-    tell a receipt of a tool the session used from a line naming none.
-    `latest` is the newest timestamped record of any conversational
-    kind — the session's liveness clock. Chatter moves it (a chat-only
-    session is alive); the harness's timestamp-less metadata records
-    (bridge-session, custom-title, appended to ended transcripts by
-    restart and resume) never do, because an idle clock that resets on
-    metadata re-presents an old deficit as an immortal live alarm (issue
-    #85). `first` is the earliest working call: every completed one,
-    read before the coverage filter, and every owed failed one, because
-    ADR-0029 asks when the session started working and not what it
-    happened to owe — a session whose early calls all fell outside
-    coverage still began when it began. `worded` counts the failed calls
-    read as owed, and `unworded` the failed shell calls with no
-    `Exit code N` line, which owe nothing, for the canary in
-    watch_completeness()."""
+    """The witness signal, as a dict. `owed` is the tool events that owe
+    a receipt, as (timestamp, tool) in time order: a tool_use block
+    paired by id with its result line, completed or read as owed by
+    failed_call_owes(), and only for tools covered at the event's own
+    time (ADR-0016). Chatter is never counted: a chat-only session can
+    never alarm. `may_owe` holds by tool the timestamps of the failed
+    calls that may owe (ADR-0034); `witnessed` every tool the transcript
+    shows a result for, so reconcile() can tell a receipt of a used tool
+    from a line naming none. `latest` is the liveness clock, the newest
+    timestamped conversational record: chatter moves it, the harness's
+    timestamp-less metadata records never do, or an old deficit comes
+    back as an immortal live alarm (#85). `first` is the earliest
+    working call, read before the coverage filter (ADR-0029 asks when
+    the session started working). `worded` and `unworded` count the
+    failed calls read as owed and the failed shell calls with no `Exit
+    code N` line, for the canary in watch_completeness()."""
     names = {}
     owed = []
     may_owe = {}
@@ -2196,32 +2122,17 @@ def read_witness(transcript, calibration):
 
 
 def reconcile(owed, may_owe, receipts, witnessed):
-    """Pair the witness with the chain tool by tool (ADR-0034), where
-    the reading before it paired two totals. `owed` is [(timestamp,
-    tool)] in time order; `may_owe` holds by tool the timestamps of the
-    failed calls that may owe, and `receipts` counts by tool, a
-    receipt's tool being the one its action line names (tool_of).
-
-    A receipt pays only calls of its own tool. Within a tool, receipts
-    go first to the failed calls that may owe, and only what is left
-    (never less than none) pays the owed calls, earliest first: a
-    receipt that may be the one a failed call left can never cover the
-    one an owed call lost, whether the two calls share a tool (a starved
-    fetch beside a failed one) or not (a starved command beside a failed
-    fetch). The price is a false deficit when a failed call that may owe
-    did not in fact fire, in a session with owed calls of the same tool
-    (ADR-0034 ruling 2). The unpaid call is then an earlier one, so its
-    deficit is dated no earlier than the tool's newest failed call that
-    may owe: a receipt still on its way from that call gets the grace
-    window any receipt gets. That floor is held to what could be on its
-    way — at most one unpaid call per failed call that may owe, and
-    nothing at all for a tool with no receipt — so a stream of failing
-    calls cannot hold a tool's alarm open after its recording stopped.
-    A receipt whose line names no tool the
-    transcript shows (a line written by hand with `loxodonta log`, say)
-    keeps the reading from before: it pays the earliest unpaid call of
-    any tool, and is surplus only when none is left. Returns (deficit,
-    surplus, the timestamp the deficit dates from, or None)."""
+    """Pair the witness with the chain tool by tool (ADR-0034). `owed`
+    is [(timestamp, tool)] in time order; `may_owe` holds by tool the
+    timestamps of the failed calls that may owe; `receipts` counts by
+    tool, as tool_of names it. A receipt pays only calls of its own
+    tool, the calls that may owe first and then the owed ones, earliest
+    first, so a receipt that may be a failed call's never covers one an
+    owed call lost. The false deficit that costs is dated and bounded by
+    the floor of ADR-0034 ruling 2. A receipt naming no tool the
+    transcript shows (a hand-written `loxodonta log` line) pays the
+    earliest unpaid call of any tool. Returns (deficit, surplus, the
+    timestamp the deficit dates from, or None)."""
     calls = {}
     for when, tool in owed:
         calls.setdefault(tool, []).append(when)
@@ -2806,24 +2717,16 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
               store=False, tick=True, show_before_memory=False,
               authority=None, remember=True):
     """One tick without timers: census + verdicts + baseline diff +
-    completeness watch as a report dict — what `scan` prints and what
+    completeness watch as a report dict, what `scan` prints and what
     the status endpoint serves. The baseline is remembered anew after
-    diffing, so an alarm belongs to the tick that caught it.
-
-    `remember=False` reads the day book instead of writing to it, for
-    the one caller nobody asked for a reading: `serve`'s keeper clock
-    (#271). The day book answers "did anybody look?" (ADR-0014), and a
-    machine talking to itself every minute is not somebody looking —
-    a day whose only rows came from the clock would paint as watched
-    and silence the lapse line, which is the one failure the chains
-    themselves can never report. A turn that catches something
-    read-once writes its row anyway; the rule and its reason are at
-    the call below.
-
-    Two universes, one walk: the store (ADR-0011 — root is the store's
-    receipts folder, drawers name their repos, the baseline lives
-    beside the store) or a legacy folder of repos under an explicit
-    --root."""
+    diffing, so an alarm belongs to the tick that caught it. One walk,
+    two universes: the store (ADR-0011: root is its receipts folder,
+    drawers name their repos, the baseline lives beside it) or a legacy
+    folder of repos under --root. `remember=False` reads the day book
+    instead of writing it, for `serve`'s keeper clock (#271): a machine
+    talking to itself is not somebody looking (ADR-0014), and its rows
+    would silence the lapse line; the read-once exception is at the
+    call below."""
     now = datetime.now(timezone.utc)
     if store:
         os.makedirs(root.parent, exist_ok=True)
@@ -3429,24 +3332,15 @@ ACTIVITY_DAYS = 90
 
 
 def panel_tool_key(entry):
-    """What one entry reached for, named for the operator's own eyes.
-
-    Deliberately not `histogram_key`, which folds hard because its
-    answers leave the machine (ADR-0021): there, a name off the
-    allowlist becomes `other` and every MCP call collapses into one
-    `mcp` bucket. Nothing leaves the machine here — serve binds
-    localhost and offers this to nobody — so a tool is named as the
-    harness named it, and an MCP call is named by the server it
-    reached (`mcp:reddit`), which on your own machine is information
-    rather than exposure. The two must stay apart rather than become
-    one function with a switch: the export's whole value is that it
-    has no switch anybody can get wrong (ADR-0027).
-
-    Bookkeeping is not a tool call and returns None; so does the
-    genesis, which records that a chain opened, not that work
-    happened. An entry from anything but a harness actor was
-    hand-logged — `loxodonta log`, `loxodonta run` — and is counted
-    as that rather than guessed at."""
+    """What one entry reached for, named for the operator's own eyes: a
+    tool as the harness named it, an MCP call by its server
+    (`mcp:reddit`), since nothing here leaves the machine. Deliberately
+    not `histogram_key`, which folds hard because its answers do
+    (ADR-0021); the two stay apart rather than become one function with
+    a switch, since the export's value is that it has no switch anybody
+    can get wrong (ADR-0027). Bookkeeping and the genesis return None;
+    an entry from anything but a harness actor was hand-logged
+    (`loxodonta log`, `loxodonta run`) and is counted as that."""
     if entry.get("n") == 0:
         return None
     actor = entry.get("actor")
@@ -3476,17 +3370,12 @@ SHAPE_BARS = 60
 
 
 def session_shape(root, repo, session, store=False):
-    """One session's receipts bucketed across its own span.
-
-    The axis is the session as it happened, first receipt to last, gaps
-    and all. A session that went quiet for a day and woke up draws as
-    mostly empty, and that emptiness is the finding rather than a
-    rendering problem — it is ADR-0018's reawakening, seen (ADR-0027).
-    Sibling chains fold in: one session is one story (ADR-0004).
-
-    Testimony, like the rest of recall — writer-stamped timestamps,
-    counted — and it owns no verdicts. The owed tail the page draws
-    over this belongs to the completeness watch, not to here."""
+    """One session's receipts bucketed across its own span, first
+    receipt to last, gaps and all: a session that went quiet for a day
+    draws mostly empty, and that emptiness is the finding (ADR-0018's
+    reawakening, ADR-0027). Sibling chains fold in (ADR-0004).
+    Testimony, owning no verdicts; the owed tail drawn over it is the
+    completeness watch's."""
     stamps = []
     for repo_name, name, _, log in universe(root, store):
         if repo_name != repo or name != session:
@@ -3527,16 +3416,12 @@ WORKTREE_PREFIX = ".claude/worktrees/"
 
 
 def panel_file_key(path):
-    """One file reference, folded to the file it actually names.
-
-    A subagent working in `.claude/worktrees/<name>/` records its edits
-    under that prefix, so the same file arrives as several paths and
-    ranks as several files — none of them right, and most of them
-    naming a directory that was deleted when the branch merged. The
-    prefix folds away and nothing else does: a path this rule does not
-    recognise is shown exactly as the writer wrote it, because quietly
-    rewriting a path is how a reader starts lying about what happened
-    (ADR-0027)."""
+    """One file reference, folded to the file it names: the
+    `.claude/worktrees/<name>/` prefix a subagent's edits carry folds
+    away, so one file does not rank as several, most of them naming
+    deleted folders. Nothing else folds: a path this rule does not
+    recognise is shown as the writer wrote it, because quietly
+    rewriting a path is how a reader starts lying (ADR-0027)."""
     if not isinstance(path, str) or not path:
         return None
     if path.startswith(WORKTREE_PREFIX):
@@ -3549,19 +3434,12 @@ def panel_file_key(path):
 
 def activity_root(root, store=False, days=ACTIVITY_DAYS):
     """Receipts counted into UTC hour buckets, per repo, plus what the
-    writer reached for and what it touched.
-
-    Four surfaces read this: the working-hours heat map, the per-drawer
-    sparklines, the histogram, and files touched. The first two are
-    questions about the operator's local calendar, and only the browser
-    knows their zone — so the buckets stay hourly and stay UTC, and the
-    client folds them into local days and weekdays. Aggregating to days
-    here would bake a UTC midnight into an answer about somebody's
-    evenings. The other two ride the same walk rather than paying for a
-    second one, and therefore share its window.
-
-    Testimony like the rest of recall: this counts what the writer said
-    it attempted, and owns no verdicts."""
+    writer reached for and what it touched: one walk for the heat map,
+    the sparklines, the histogram and files touched, so all four share
+    its window. The buckets stay hourly and UTC because only the browser
+    knows the operator's zone, and the client folds them into local
+    days. Testimony: it counts what the writer said it attempted, and
+    owns no verdicts."""
     floor = (datetime.now(timezone.utc)
              - timedelta(days=days)).strftime("%Y-%m-%dT%H")
     counts = {}
@@ -3710,12 +3588,10 @@ def session_of(log):
 
 def main_repo_of(project):
     """A git worktree holds no chains: the hook writes them to the
-    repository the worktree belongs to (receipts.main_repo_root — this
-    is its reader-side twin, same file walk). A worktree's `.git` is a
-    file reading `gitdir: <main>/.git/worktrees/<name>`, and that
-    directory's `commondir` points back at `<main>/.git`. Anything
-    unexpected returns `project` unchanged — recall never fails over
-    path layout."""
+    repository the worktree belongs to. The reader-side twin of the
+    recorder's main_repo_root, the same file walk; anything unexpected
+    returns `project` unchanged, since recall never fails over path
+    layout."""
     dot_git = project / ".git"
     if not dot_git.is_file():
         return project  # a normal checkout (.git/ dir), or not a repo
@@ -4221,13 +4097,11 @@ def cmd_digest(args):
 
 
 def cmd_verify(args):
-    """The recorder's verdict on the chain holding one entry address:
-    the CLI twin of the MCP tool (ADR-0019, one-to-one), and the
-    answer to #155, where agents holding an address could not find the
-    chain to judge. Recall owns no verdict here either: it names the
-    chain, then prints `loxodonta verify --log` verbatim and returns
-    its exit code. `scan` is the supervisor's own tick over every chain;
-    this is one chain, by the handle the digest hands out."""
+    """The recorder's verdict on the chain holding one entry address, the
+    CLI twin of the MCP tool (ADR-0019, #155). Recall owns no verdict:
+    it names the chain, then prints `loxodonta verify --log` verbatim
+    and returns its exit code. `scan` is the tick over every chain; this
+    is one chain, by the handle the digest hands out."""
     match, code = resolve_address(args)
     if match is None:
         # The recall commands say 1 for an address they cannot resolve;
@@ -5244,15 +5118,13 @@ def package_readme(unit, packed, sessions, witness, record, notes,
                    seals=(), transcripts=None):
     """The plain-words page a recipient reads first: what is inside, how
     to verify it, what each layer shows and does not. `sessions` is
-    {session: [chain listings]} in the package's order; `notes` says, per
-    session that needs it, where it was recorded; `seals` is the set the
-    manifest declares, named here because a page saying a sealed package
-    declares none is the kind of stale sentence a recipient would read
-    as the truth; `transcripts` is None when none was requested, else
+    {session: [chain listings]} in the package's order; `notes` says,
+    per session that needs it, where it was recorded; `seals` is the set
+    the manifest declares, so the page never says a sealed package
+    declares none; `transcripts` is None when none was requested, else
     {session: the packaged transcript's name, or None when it was gone}.
-    The page may print the chain heads, which exist before it is
-    written; it never prints the manifest's hash, which does not exist
-    yet (ADR-0007 ruling 2)."""
+    It may print the chain heads, never the manifest's hash, which does
+    not exist yet (ADR-0007 ruling 2)."""
     project = unit["project"]
     count = sum(len(listings) for listings in sessions.values())
     # Tokens anywhere in the package, the manifest's own or a chain's:
@@ -5528,20 +5400,16 @@ def key_fingerprint(public_key):
 
 def sign_manifest(stage, keyfile):
     """The issuer signature (ADR-0026 ruling 4, ADR-0008): ssh-keygen
-    signs the manifest's shipped bytes with KEYFILE and writes
-    manifest.json.sig beside it. This file never opens the private key;
-    only ssh-keygen does, and its own prompts, a passphrase or a
-    hardware touch, reach the terminal because its output is not
-    captured. The public key ships as manifest.json.pub, testimony
-    (ADR-0008 ruling 4): KEYFILE.pub when it exists, else what
-    `ssh-keygen -y` derives from the key, which asks for an encrypted
-    key's passphrase a second time; its two tokens only, type and key,
-    since the comment is a name and the package carries none. Then the
-    recipient's check, twice over: the signature must verify under the
-    key that ships, or a stale KEYFILE.pub beside a regenerated key
-    would send a package that could only ever read SEAL-INVALID.
-    Returns (the shipped key's fingerprint, None), or (None, the
-    problem sentence)."""
+    signs the manifest's shipped bytes with KEYFILE into
+    manifest.json.sig. Only ssh-keygen opens the private key, and its
+    prompts (a passphrase, a hardware touch) reach the terminal because
+    its output is not captured. The public key ships as manifest.json.pub,
+    type and key only (ADR-0008 ruling 4): KEYFILE.pub when it exists,
+    else what `ssh-keygen -y` derives. Then the recipient's check: the
+    signature must verify under the key that ships, or a stale
+    KEYFILE.pub would send a package that could only read SEAL-INVALID.
+    Returns (the shipped key's fingerprint, None), or (None, the problem
+    sentence)."""
     manifest = stage / "manifest.json"
     signed = subprocess.run(
         ["ssh-keygen", "-q", "-Y", "sign", "-n", SIGNATURE_NAMESPACE,
@@ -5586,21 +5454,16 @@ def sign_manifest(stage, keyfile):
 
 def seal_package(stage, seals, calendars, keyfile, authority=None):
     """Apply the declared seals to the manifest, the last step of
-    ADR-0007's write order: the signature first, then the authority
-    timestamp, then the anchor. Signing can fail on a passphrase or a
-    touch, and the other two are the steps that leave the machine, so a
-    signing that fails costs neither; between those two the quick round
-    trip goes before the slow one, which is the order ADR-0032 ruling 3
-    put them in at session end. The signature: sign_manifest. The anchor
-    (ADR-0026 ruling 4): the recorder posts the manifest's sha256 to the
-    calendars once and writes the proof beside it as
-    manifest.json.anchors.jsonl; the supervisor never speaks OTS itself.
-    The authority timestamp: the recorder asks `authority` for a token
-    over that same sha256 and writes it as manifest.json.stamps.jsonl;
-    the supervisor never speaks RFC 3161 itself either.
-    Returns (the seal files written, in order; the signing key's
-    fingerprint, or None; and the problem when a seal could not be
-    applied, the tool's own words already on stderr)."""
+    ADR-0007's write order: the signature first, since it can fail on a
+    passphrase or a touch and should cost neither step that leaves the
+    machine; then the authority timestamp, the quick round trip before
+    the slow one (ADR-0032 ruling 3); then the anchor. The recorder
+    posts both and writes their sidecars beside the manifest
+    (manifest.json.stamps.jsonl, manifest.json.anchors.jsonl); the
+    supervisor never speaks RFC 3161 or OTS itself. Returns (the seal
+    files written, in order; the signing key's fingerprint, or None; and
+    the problem when a seal could not be applied, the tool's own words
+    already on stderr)."""
     written, fingerprint = [], None
     if SEAL_SIGNATURE in seals:
         try:
@@ -6206,23 +6069,14 @@ def trouble_words(failure):
 
 def keep_turning(server, stop):
     """The keeper's own clock: ask for a fresh scan until `stop` is set,
-    starting at once so a ripe head does not wait out a whole tick after
-    the server starts, and a tick after the last walk finished from
-    then on. It asks through `fresh_scan`, the routes' own door, so a
-    turn and a request take the scan lock one after the other and the
-    store is never walked twice at once — and it asks not to be
-    remembered, because a machine talking to itself is not somebody
-    looking at the page (ADR-0014).
-
-    A failure here never stops the clock and never takes the server
-    down, and it is said rather than swallowed: a keeper *step* that
-    fails is caught deeper and leaves an attempt row beside the chain,
-    but a scan that cannot finish at all leaves nothing anywhere, and
-    on the headless machine this clock exists for nothing else is
-    looking. One line to stderr names its kind, and a failure that
-    keeps happening is said once rather than every tick, so a store the
-    supervisor cannot read does not bury the operator's terminal; a
-    turn that works again makes the next failure news again."""
+    at once and then a tick after each walk finishes, through
+    `fresh_scan`, so a turn and a request take the scan lock in turn,
+    and asking not to be remembered, since a machine talking to itself
+    is not somebody looking (ADR-0014). A failure never stops the clock
+    or the server, and is said: a scan that cannot finish leaves no
+    attempt row anywhere, and on a headless machine nothing else is
+    looking. One line to stderr names its kind, once for a failure that
+    repeats, and again after a turn that works."""
     said = None
     while not stop.is_set():
         try:
@@ -6269,11 +6123,8 @@ class Watchtower(ThreadingHTTPServer):
     def fresh_scan(self, remember=True):
         """The newest scan no older than the tick, and its age in
         seconds, read under one hold of the lock so the age belongs to
-        the body it comes with.
-
-        `remember=False` is the keeper clock's turn (#271): it walks the
-        store like any other tick and keeps out of the day book, which
-        counts the days somebody looked (ADR-0014)."""
+        the body it comes with. `remember=False` is the keeper clock's
+        turn (#271), kept out of the day book (ADR-0014)."""
         with self.scan_lock:
             if (self.scan_body is None
                     or time.monotonic() - self.scan_at >= SCAN_TTL_SECONDS):
@@ -9027,15 +8878,12 @@ EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: `verify` found no chain to judge
 
 
 def speak_utf8():
-    """Write stdout and stderr in UTF-8, whatever encoding the console
-    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
-    which has no CJK and no emoji: one such character in a receipt killed
-    the verb mid-output with UnicodeEncodeError, and a hook reading
-    through a pipe got nothing. The text printed is unchanged; only its
-    bytes are. UTF-8 carries every character but a lone surrogate (a file
-    name that did not decode), which backslashreplace prints as its
-    escape rather than crash on. A stream without `reconfigure` (None
-    under pythonw, or one an embedder swapped in) is left as it is."""
+    """Write stdout and stderr in UTF-8, whatever the console dealt
+    (#294): Windows hands a pipe cp1252, where one CJK character or
+    emoji in a receipt killed the verb mid-output. Only the bytes change,
+    never the text; a lone surrogate prints as its backslash escape. A
+    stream without `reconfigure` (None under pythonw, or one an embedder
+    swapped in) is left as it is."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
