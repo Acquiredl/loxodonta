@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-23
+
+The recipient's verifier. `verifier.py` is the recorder's verify side on its own, copied from the same source, never edited by hand, and held to a set of conformance vectors that both files must pass. The verdicts were tightened where an outside review found them saying more than they knew: a relabeled format no longer hides an edit, an anchor no longer claims a block nobody checked, and exit 1 now means `BROKEN` and nothing else. Scripts that read exit codes should read the new ones. The receipt format is untouched, and its hashing is now frozen across versions.
+
 ### Added
 
 - `verifier.py`: the recorder's `head`, `verify` and `verify-package` on their own, with nothing that writes or sends. It is copied from `loxodonta.py`, never edited by hand; CI fails a stale copy, and releases carry it (ADR-0035, #299).
@@ -216,7 +220,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.8.1...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.9.0...dev
+[0.9.0]: https://github.com/Acquiredl/loxodonta/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Acquiredl/loxodonta/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Acquiredl/loxodonta/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Acquiredl/loxodonta/compare/v0.6.0...v0.7.0

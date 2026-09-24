@@ -140,10 +140,12 @@ not. When unsure, open an issue and ask; the answer is usually short.
 
 Every promotion of `dev` to `main` that moves the tools gets a tag and a
 GitHub release carrying
-`loxodonta.py`, `supervisor.py`, `receiver.py`, and a `SHA256SUMS` file over
-the three, so a person can check the file they downloaded against what was
-published (ADR-0022). A promotion that changes none of the three files
-carries no tag and no release (ADR-0028). The tool version is semantic and decoupled from the receipt
+`loxodonta.py`, `supervisor.py`, `receiver.py`, `verifier.py`, and a
+`SHA256SUMS` file over the four, so a person can check the file they downloaded against what was
+published (ADR-0022). A promotion that changes none of the four files
+carries no tag and no release (ADR-0028). `verifier.py` is cut from
+`loxodonta.py` by `tools/build_verifier.py` and moves whenever the
+recorder's verify side does (ADR-0035). The tool version is semantic and decoupled from the receipt
 format, which stays at `0.1`. The ritual, in order:
 
 1. Branch a throwaway `promote/<date>` from `dev` and open a pull request
@@ -151,9 +153,10 @@ format, which stays at `0.1`. The ritual, in order:
 2. In that pull request, move the entries under `## [Unreleased]` in
    `CHANGELOG.md` to a new `## [x.y.z] - YYYY-MM-DD` heading, add the
    version's compare link at the bottom, and bump `TOOL_VERSION` in
-   `loxodonta.py`, `supervisor.py` and `receiver.py` to `x.y.z`. Minor per
+   `loxodonta.py`, `supervisor.py` and `receiver.py` to `x.y.z`, then run
+   `python tools/build_verifier.py` so `verifier.py` carries it too. Minor per
    promotion; patch for a promotion that carries only fixes, and for a
-   hotfix cherry-picked to `main`. The three files
+   hotfix cherry-picked to `main`. The four files
    carry one version and the suite checks that they agree.
 3. Merge the pull request once the suite and the house checker are green.
 4. On `main`, tag the merge commit `vx.y.z` and push the tag:
@@ -163,11 +166,12 @@ format, which stays at `0.1`. The ritual, in order:
    ```
 
 5. CI takes it from there (`.github/workflows/release.yml`): it checks the
-   tag against `TOOL_VERSION` in all three files, builds `SHA256SUMS`, takes
+   tag against `TOOL_VERSION` in all four files and `verifier.py` against
+   the recorder, builds `SHA256SUMS`, takes
    the matching CHANGELOG section as the notes, and publishes the release
-   with the four files attached. A mismatched tag or a missing section stops
+   with the five files attached. A mismatched tag or a missing section stops
    the release.
-6. Check the sums once by hand. Download the four files from the release
+6. Check the sums once by hand. Download the five files from the release
    page into an empty folder and run:
 
    ```
@@ -175,7 +179,7 @@ format, which stays at `0.1`. The ritual, in order:
    ```
 
    On Windows, `certutil -hashfile loxodonta.py SHA256` (and the same for
-   `supervisor.py` and `receiver.py`) prints each sum; compare it by eye with the line in
+   `supervisor.py`, `receiver.py` and `verifier.py`) prints each sum; compare it by eye with the line in
    `SHA256SUMS`. If a sum disagrees, the release is wrong, not the file:
    delete the release and the tag, find out why, and cut it again.
 7. Close the issues the release finished. Nothing here closes itself: a
