@@ -301,26 +301,17 @@ def shape_problem(entry):
 
 # Receipt text is written by the agent under observation, and report
 # prints it to a terminal, explain hands it to a model, and verify's
-# messages name a writer's odd field names to whoever reads the verdict,
-# recall's agents among them (#295). A newline could forge a timeline
-# row, a verdict line or a line that reads as an order, an ANSI sequence
-# can clear or recolour the screen, and a bidi override reorders what
-# the eye sees. So every such character is printed as its escape.
-# Which characters: every one whose Unicode category says it steers
-# rather than reads. Cc is the controls (C0 with tab, newline and
-# carriage return among them, DEL, C1 with NEL among them); Cf the format
-# characters (the bidi marks, embeddings, overrides and isolates, the
-# Arabic letter mark, zero-width spaces and joiners, the byte-order mark,
-# and the tag characters a model reads and a person does not see); Cs a
-# lone surrogate, which JSON allows as `\ud800` and no encoder accepts;
-# Zl and Zp the line and paragraph separators. An emoji built with a
-# zero-width joiner prints as its parts and a `\u200d`: the price of
-# naming the category rather than listing characters.
-# Display only: verify hashes the raw entry. A backslash stays as it is,
-# so the chain file is where the exact bytes are read. The twin of
-# supervisor.py's `visible`, which every recall surface uses; the files
-# never import each other (ADR-0035), and tests/test_suite_shape.py
-# holds the two copies equal. It sits above `walk`, which calls it.
+# messages quote a writer's odd field names to whoever reads the verdict.
+# A newline could forge a row or a verdict line, an ANSI sequence can
+# repaint the screen, a bidi override reorders what the eye sees. So
+# every character whose Unicode category steers rather than reads (Cc
+# controls, Cf format characters, Cs lone surrogates, Zl and Zp
+# separators) is printed as its escape; an emoji joined with a zero-width
+# joiner prints as its parts, the price of naming categories.
+# Display only: verify hashes the raw entry, and a backslash stays as it
+# is, so the chain file is where the exact bytes are read. Twin of
+# supervisor.py's `visible`; the files never import each other
+# (ADR-0035), and tests/test_suite_shape.py holds the two copies equal.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
@@ -847,19 +838,14 @@ def record_label(head, n):
 
 
 # --- Attempt records (#240, PRD #244) ----------------------------------------
-# Every session-end step that reaches off the machine is quiet on failure
-# (ADR-0024 ruling 3, ADR-0025): an exit hook that complains is noise
-# nobody can act on. Quiet at the moment and silent in the record are
-# different choices, so after each step the recorder writes down how it
-# went, in the sidecar the step already owns: the anchors sidecar for the
-# anchor, the publish memo for the head. One row of kind `attempt`,
-# carrying the step, the time, the budget it had, and the outcome, which
-# is `submitted` or `sent`, or the one line the bounded call produced.
-# Never the URL: a webhook URL is a credential. The row is testimony and
-# never a proof: every reader that judges (`verify --anchors`, the
-# keeper, `verify-package`) skips it by its kind, and the supervisor
-# reads it to say when a head last left the machine and when the last
-# attempt failed. The chain's schema is untouched.
+# Session-end steps that reach off the machine fail quietly (ADR-0024
+# ruling 3, ADR-0025), but not silently: after each one the recorder
+# writes a row of kind `attempt` into the sidecar the step already owns
+# (the anchors sidecar, the publish memo), with the step, the time, its
+# budget and the outcome. Never the URL: a webhook URL is a credential.
+# The row is testimony, never proof: every reader that judges skips it
+# by its kind, and the supervisor reads it to say when a head last left
+# the machine. The chain's schema is untouched.
 
 ATTEMPT_KIND = "attempt"
 
@@ -1428,14 +1414,11 @@ PACKAGE_WORDS = {
     "SELF-CONSISTENT": "every chain walks clean and every artifact matches "
                        "the manifest",
 }
-# The exit-3 tier holds two mechanisms now, the anchor's and the
-# authority timestamp's, and a chain's verify exit alone cannot say which
-# fired; `verify_log` hands the word back through `mechanisms`, and this
-# table is the fallback for an exit with no word beside it. A packaged
-# chain that is empty gives verify's no-input exit, 66 (ADR-0037); inside
-# a package that is a finding, not a missing input, since the manifest
-# lists a chain there and there is nothing to walk, so it is CHAIN-BROKEN,
-# as it was before 66 existed.
+# The exit-3 tier holds two mechanisms, the anchor's and the authority
+# timestamp's; `verify_log` hands back which fired through `mechanisms`,
+# and this table is the fallback for an exit with no word beside it. An
+# empty packaged chain exits 66 (ADR-0037), but the manifest lists it,
+# so inside a package it is a finding: CHAIN-BROKEN.
 CHAIN_WORDS = {1: "CHAIN-BROKEN", 3: "ANCHOR-MISMATCH",
                4: "UNSUPPORTED-FORMAT", 5: "TRANSCRIPT-DIVERGED",
                EX_NOINPUT: "CHAIN-BROKEN"}
@@ -1599,19 +1582,13 @@ def judge_chain(folder, listing, chain_file=None, headers=None, used=None):
         print(f"{named}: MISSING (named on this chain, not in the package); "
               "its commitments go unjudged")
         transcript = None
-    # The checks `verify_log` runs are named here: never the files, since
-    # a package carries no working tree, and never a head the recipient
-    # was not given. The packaged stamps sidecar is judged exactly as
-    # `verify --stamps` judges one (ADR-0032 ruling 5): through openssl
-    # against the chain file the recipient named, or as an honest note
-    # when they named none. Only when the manifest lists it, though: a
-    # sidecar the manifest does not vouch for is named `unlisted` and
-    # judged by nobody, which is the rule every other unlisted file
-    # follows, and a package from before stamps travelled verifies as it
-    # always did, with no NO-STAMPS line pointing a recipient at a
-    # temporary copy.
-    # `mechanisms` carries back which of the two exit-3 findings fired,
-    # since the package names it.
+    # verify_log runs without the files check (a package carries no
+    # working tree) and without a head the recipient was not given.
+    # Stamps are judged as `verify --stamps` judges them (ADR-0032
+    # ruling 5), but only when the manifest lists the sidecar: one it
+    # does not vouch for is `unlisted` and judged by nobody, like every
+    # unlisted file, so an older package without stamps verifies as it
+    # always did. `mechanisms` carries back which exit-3 finding fired.
     mechanisms = []
     code = verify_log(log, transcript=transcript, anchors=True,
                       stamps=bool(listing.get("stamps")),
@@ -2039,14 +2016,11 @@ def ceiling_lines(manifest, earned):
     elif not stamped:
         unsaid.append("that it existed before today")
     if stamped:
-        # With a token and no anchor, when is not unsaid: it is said by
-        # whoever holds the key that signed it, and what it rests on is
-        # that holder's word, which the residual trust states as the
-        # condition it is rather than letting the rung sound like the
-        # anchor's. The manifest names no authority, and the name in the
-        # stamps record is testimony, so the verdict says what openssl
-        # checked and no name at all, as ADR-0008 ruling 4 has it for
-        # the signature.
+        # With a token and no anchor, the time rests on the word of
+        # whoever holds the signing key, and the residual trust states
+        # that as a condition. The authority's name in the stamps record
+        # is testimony, so the verdict names only what openssl checked
+        # (as ADR-0008 ruling 4 does for the signature).
         rungs += " + STAMPED"
         given += (", and a key certified by the --authority-chain file "
                   "signed the manifest's sha256 under its own clock")
