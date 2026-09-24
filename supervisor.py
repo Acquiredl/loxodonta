@@ -256,31 +256,20 @@ def superseded(log, detail):
 
 
 # --- Writing state whole ------------------------------------------------------
-# The supervisor keeps three files of its own between looks: the baseline,
-# the day book and the views. Each is rewritten whole every time, and a
-# rewrite in place — truncate, then write — has a moment where the file
-# on disk is empty or half written. A crash or a full disk in that moment
-# left a baseline the next look could not read, and an unreadable
-# baseline is replaced, so the tripwire forgot every head it was holding
-# (#300). The chains and the sidecars are not written this way: they only
-# ever grow by appended lines, and the recorder's own lock and torn-tail
-# rules govern those.
+# The baseline, the day book and the views are rewritten whole, through a
+# swap: a rewrite in place has a moment where the file is empty, and an
+# unreadable baseline is replaced, so a crash there made the tripwire
+# forget every head it held (#300). Chains and sidecars only grow by
+# appended lines and follow the recorder's lock and torn-tail rules.
 #
-# Two supervisor processes can write the same file: `serve`'s tick and a
-# hand-run `scan` both write the baseline and the day book, and
-# `calibrate` writes the baseline. Inside one `serve` its locks already
-# take turns. Across processes there is no lock, and the swap is what
-# makes that safe: each writer puts down a whole file it computed, so a
-# reader sees one writer's version and never a splice of two, and the
-# last to finish wins. What the overwritten write can lose is a day-book
-# count or a keeper attempt time (the keeper asks again a little early),
-# testimony that decides no verdict; the heads it held are seen again by
-# the next look. The one loss worth knowing: a
-# `calibrate` seed made while another process's scan is mid-walk can be
-# overwritten by that scan, which read the baseline before the seed; run
-# the seed again. A lock that closed that gap would have to be held
-# across a whole scan, and a stranded one would stop the supervisor
-# looking, which is a worse failure than a seed to restate.
+# Across processes (`serve`'s tick, a hand-run `scan`, `calibrate`) there
+# is no lock: each writer swaps in a whole file, so a reader sees one
+# version, never a splice, and the last to finish wins. What an
+# overwritten write loses is testimony (a day-book count, a keeper
+# attempt time); the heads come back on the next look. One known gap: a
+# `calibrate` seed made during another process's scan can be overwritten
+# by it; run the seed again. A lock held across a whole scan would close
+# that, but a stranded one would stop the supervisor looking.
 
 REPLACE_TRIES = 20  # Windows only; see write_whole
 REPLACE_PAUSE = 0.05  # seconds between tries, so a second at most
@@ -400,21 +389,14 @@ def diff_baseline(remembered, relpath, entries):
 
 
 # --- The day book -------------------------------------------------------------
-# The baseline above remembers heads; this remembers days. One row per
-# UTC day, so the page can answer the third question a monitoring
-# surface owes its operator — "is this a trend or a one-off?" — before
-# anyone drills into anything.
-#
-# It also counts its own looks, and that is the point. Our claim is
-# detection latency, and detection latency is a function of how often
-# the operator actually looks. A front page designed to read quiet every
-# morning teaches the operator its answer and then goes unread; the
-# chain stays silent about that, because the thing that stopped working
-# is the reading of it. A run of unwatched days is the only shape that
-# failure has, so the surface keeps it where the alarm lives.
-#
-# Testimony like everything else here: writer-reachable, trusted for
-# nothing, and it decides no verdicts (ADR-0014).
+# The baseline remembers heads; this remembers days, one row per UTC day,
+# so the page can answer "is this a trend or a one-off?" before anyone
+# drills in. It also counts its own looks, which is the point: detection
+# latency depends on how often the operator looks, and a run of
+# unwatched days is the only shape that failure has, since the chain
+# cannot record its own going unread. Testimony like everything else
+# here: writer-reachable, trusted for nothing, deciding no verdict
+# (ADR-0014).
 
 DAYBOOK_NAME = ".supervisor-daybook.json"
 DAYBOOK_SEASON = 90  # how many days the book keeps
@@ -485,19 +467,14 @@ def remember_look(path, now):
 
 
 # --- Named views --------------------------------------------------------------
-# A second operator-side file in the day book's posture exactly:
-# writer-reachable, trusted for nothing, owning no verdicts, never
-# raising an exit. It holds saved filter sets for the worktable and
-# nothing else (ADR-0027).
-#
-# The field list is closed, and that is the whole safety story. A view
-# may name a drawer, a date range, a path and a tab — every one of them
-# a control the operator can already work by hand — and any key outside
-# that list makes the whole view invalid rather than being dropped
-# quietly. That is what makes "a view can never touch the alarm" a
-# property of the format instead of a promise about the interface: the
-# rail, the status strip and the attention queue read the scan, and
-# nothing storable here reaches them.
+# Saved filter sets for the worktable and nothing else (ADR-0027), in the
+# day book's posture: writer-reachable, trusted for nothing, owning no
+# verdict, never raising an exit. The field list is closed, and that is
+# the whole safety story: a view names only a drawer, a date range, a
+# path and a tab, and any other key invalidates the whole view rather
+# than being dropped. So "a view can never touch the alarm" is a
+# property of the format: nothing storable here reaches the rail, the
+# status strip or the attention queue.
 
 VIEWS_NAME = ".supervisor-views.json"
 VIEWS_PURPOSE = ("the operator's saved worktable filters — "
@@ -655,17 +632,11 @@ def cadence_words(seconds):
 
 
 # --- The keeper follows the profile -------------------------------------------
-# ADR-0031 ruling 1 (#246). The operator chose once, at install-hook,
-# what leaves the machine, and the recorder wrote the choice into the
-# coverage marker beside the matchers (ADR-0030). `serve` reads that
-# choice so the keeper's cadences follow it without the flags being
-# typed again; a flag typed anyway still wins. A harness's choice is
-# followed only while that harness's recorder is still wired (#249):
-# `uninstall-hook` writes nothing to the marker (ADR-0030), so the
-# wired command is what says the operator has stopped. Read once,
-# when `serve` starts, because the startup line announces what is in
-# force: a re-install at another profile, or an uninstall, takes
-# effect at the next start.
+# ADR-0031 ruling 1: `serve` follows the profile install-hook wrote into
+# the coverage marker (ADR-0030), and a flag typed anyway still wins. A
+# harness's choice counts only while its recorder is still wired (#249),
+# since uninstall-hook writes nothing to the marker. Read once at start,
+# because the startup line announces what is in force.
 
 PROFILE_ANCHOR_EVERY = 6 * 3600   # seconds: the timestamped tier's default
 PROFILE_PUBLISH_EVERY = 6 * 3600  # seconds: the full tier's, the same six
@@ -1638,16 +1609,12 @@ def published_reading(witness, logs):
     return {"wired": wired, "sent": sent, "note": note}
 
 
-# The harness deletes its own transcripts (#260). Claude Code sweeps a
-# session transcript away once it is older than `cleanupPeriodDays`
-# days, 30 when the setting is absent, and the chain's transcript
-# commitments stay with nothing left to judge them against (ADR-0017).
-# The scan reads the number from the file it reads the wired matchers
-# from and says it, so the floor under the rich record is stated where
-# the operator looks. The scan copies and keeps no transcript: one
-# holds prompts, output and whatever secrets passed through them, and
-# `package --transcript` carries one only when the operator asks
-# (ADR-0026).
+# The harness deletes its own transcripts (#260): Claude Code sweeps one
+# away after `cleanupPeriodDays` days (30 when unset), leaving the chain's
+# transcript commitments nothing to judge against (ADR-0017). The scan
+# states that floor where the operator looks. It copies and keeps no
+# transcript, since one holds prompts, output and any secrets that passed
+# through; `package --transcript` carries one only on request (ADR-0026).
 RETENTION_SETTING = "cleanupPeriodDays"
 RETENTION_DEFAULT_DAYS = 30   # the harness's documented default
 
@@ -2186,14 +2153,11 @@ def read_witness(transcript, calibration):
                               if isinstance(block, dict)
                               and block.get("type") == "tool_result"), None)
                 result = record.get("toolUseResult")
-                # The completed call, in either shape the harness
-                # writes it. A parent's record carries `toolUseResult`
-                # and the block both; a subagent's carries only the
-                # block (#211), so keying on the field alone found 57
-                # of one session's 3244 sidechain calls. Measured over
-                # every transcript in the author's store, the two
-                # shapes agree wherever both are present — so the block
-                # is the signal and the field is the corroboration.
+                # The completed call, in either shape the harness writes:
+                # a parent's record carries `toolUseResult` and the block,
+                # a subagent's only the block (#211; keying on the field
+                # alone missed most sidechain calls). The block is the
+                # signal, the field the corroboration.
                 if result is None and found is None:
                     continue
                 # A failed call, as the harness really writes it: the
@@ -2529,15 +2493,12 @@ def watch_completeness(root, witness, families, everywhere=False,
          else watch["sessions"]).append(entry)
         return entry
 
-    # One session, one watch. A single session's receipts can span
-    # drawers: a worktree session logs to the main repo's drawer
-    # (ADR-0011, because worktrees get pruned) while the harness still
-    # names the transcript after the worktree it ran in. Pairing each
-    # (repo, session) family with the transcript separately charged the
-    # whole witness count to whichever drawer sorted first and left the
-    # rest UNWITNESSED, manufacturing a deficit nobody owed. The witness
-    # counts sessions, not drawers — so sum the family across drawers
-    # and judge the session once.
+    # One session, one watch. A worktree session logs to the main repo's
+    # drawer (ADR-0011) while its transcript is named for the worktree,
+    # so one session's receipts can span drawers. Pairing each drawer
+    # separately charged the whole witness count to the first and left
+    # the rest UNWITNESSED, a deficit nobody owed: the witness counts
+    # sessions, so sum the family across drawers and judge it once.
     sessions = {}
     for (repo, session), family in sorted(families.items()):
         group = sessions.setdefault(session, {"drawers": [], "last": None,
@@ -2705,24 +2666,18 @@ def watch_completeness(root, witness, families, everywhere=False,
 
 
 # --- Consumption --------------------------------------------------------------
-# The consumption watch (issue #67; OWASP GenAI LLM06 mitigation #8):
-# wide coverage (ADR-0016) makes the chains a record of tool tempo —
-# entries per session per hour — so a runaway loop or recursion without
-# a clear end state shows up as a session burning far above this
-# store's own norm. Everything read here is testimony (writer-stamped
-# timestamps and action lines), so the watch never raises the scan exit
-# and owns no verdicts. The boundary of the issue, held on purpose:
-# this tool evidences someone else's circuit breaker; it never is one
-# (.out-of-scope/001 — the hook stays outcome-blind).
+# The consumption watch (#67; OWASP GenAI LLM06 mitigation #8): wide
+# coverage (ADR-0016) makes the chains a record of tool tempo, so a
+# runaway loop shows as a session far above this store's own norm.
+# Everything read is testimony, so the watch never raises the scan exit
+# and owns no verdict. It evidences someone else's circuit breaker and
+# never is one (.out-of-scope/001).
 
 # A session runs hot when its busiest sliding hour reaches HOT_TIMES x
 # the median busiest hour of every *other* session, and at least
-# HOT_FLOOR — below one entry a minute nothing is runaway, however
-# small the norm. Peak against peaks, deliberately: an ordinary busy
-# hour towers over the median *hour* of a store full of quiet ones
-# (the first cut flagged a fifth of this machine's honest history);
-# against other sessions' peaks, that same history sat inside 3x while
-# a runaway loop still stands clear of it. The env knobs are the test
+# HOT_FLOOR (below one entry a minute nothing is runaway). Peak against
+# peaks on purpose: against the median *hour*, the first cut flagged a
+# fifth of this machine's honest history. The env knobs are the test
 # suite's threshold handle.
 HOT_TIMES = int(os.environ.get("SUPERVISOR_HOT_TIMES", 3))
 HOT_FLOOR = int(os.environ.get("SUPERVISOR_HOT_FLOOR", 60))
@@ -3118,16 +3073,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "events": len(events), "alarms": alarms,
         "reawakenings": len(awakened),
     }
-    # A turn nobody asked for stays out of the book while it has
-    # nothing to report (ADR-0014): a machine asking itself every
-    # minute is not somebody looking. It goes in the moment it catches
-    # something read-once — a baseline event or a reawakening, both
-    # consumed by the diff that found them — because a turn that
-    # swallowed a tripwire and wrote nothing would leave the day
-    # painting quiet with the event recorded nowhere at all, and the
-    # day's worst is sticky exactly so that a morning reader sees what
-    # fired while they were away. Everything else in the tally is
-    # derived afresh by the next scan somebody does ask for.
+    # An unasked turn stays out of the book while it has nothing to
+    # report (ADR-0014): a machine asking itself every minute is not
+    # somebody looking. It goes in the moment it catches something
+    # read-once (a baseline event, a reawakening, both consumed by the
+    # diff), or the event would be recorded nowhere and the day would
+    # paint quiet; the day's worst is sticky so a morning reader sees it.
     caught = bool(events or awakened)
     days = (remember_day(daybook, now, tally) if remember or caught
             else read_daybook(daybook))
@@ -3279,18 +3230,13 @@ def cmd_scan(args):
 
 
 # --- Seeding the calibration memory -------------------------------------------
-# ADR-0029 ruling 6. The supervisor's calibration memory is its diary of
-# what it observed, and it begins when it begins. An operator often knows
-# what was wired before that — they wired it — and this is how they say
-# so. Three properties make the saying safe. It only reaches time the
-# supervisor never watched: observed epochs are refused, with no --force,
-# because observed time is the one part of this memory that is not
-# testimony. What it writes is marked as the operator's word forever, so
-# no reader mistakes an assertion for an observation (git's replace
-# objects and grafts, visible by design; DFIR's rule that analyst
-# annotation never merges into collected artifact). And a seeded epoch
-# can be restated at the same date, which is the fix for a wrong one that
-# does not require hand-editing a writer-reachable file.
+# ADR-0029 ruling 6: the operator can say what was wired before the
+# supervisor began watching. Three properties keep that safe: it only
+# reaches time the supervisor never watched (observed epochs are
+# refused, no --force, since observation is the one part of this memory
+# that is not testimony); what it writes stays marked as the operator's
+# word; and a seeded epoch can be restated at the same date, so a wrong
+# one never needs a hand edit.
 
 def epoch_stamp(value):
     """An argparse type for a seeded epoch: any timestamp `parse_when`
@@ -3730,15 +3676,12 @@ def search_root(root, query, store=False):
 
 
 # --- Recall CLI (Stage E, ADR-0009) -------------------------------------------
-# The agent-facing mouths on the recall organ: `digest` renders the
-# session-start injection, `show` fetches one entry by entry address,
-# `search` and `timeline` are the ladder past the digest window. All of
-# it is recall — testimony rendered from chains, verdicts owned by
-# nobody here (GLOSSARY: Digest, Entry address, Unlisted). The text
-# around the receipts is plain ASCII on purpose: it lands in
-# hook-injected context. What the receipts say need not be, and
-# reaches the console as UTF-8, CJK and emoji included, whatever
-# encoding the operator's shell dealt (speak_utf8, #294).
+# `digest` renders the session-start injection, `show` fetches one entry
+# by address, `search` and `timeline` reach past the digest window. All
+# of it is recall: testimony rendered from chains, verdicts owned by
+# nobody here. The text around the receipts is plain ASCII because it
+# lands in hook-injected context; the receipts themselves reach the
+# console as UTF-8 whatever the shell's encoding (speak_utf8, #294).
 
 UNLISTED_NAME = ".unlisted"
 
@@ -4463,21 +4406,17 @@ def cmd_timeline(args):
 
 
 # --- MCP: recall on the wire (ADR-0019) ---------------------------------------
-# `supervisor mcp` speaks the Model Context Protocol over stdin/stdout so
-# any harness that speaks MCP — not only the one that runs our hooks —
-# can read this machine's agent memory. Five tools, one-to-one with the
-# recall commands above, in the CLI's own words: the model reads exactly
-# what a shell user reads. There is no write path on this surface. The
-# recorder stays in the harness hook, outside the writer's volition
-# (ADR-0002); an agent may read its history here but never append to it
-# through a tool it controls.
+# `supervisor mcp` serves recall over stdin/stdout to any MCP harness:
+# five tools, one per recall command, in the CLI's own words. No write
+# path: the recorder stays in the harness hook, outside the writer's
+# volition (ADR-0002), so an agent may read its history here but never
+# append to it.
 #
-# Two protocol eras are served, decided per request and never from
-# session state: a request whose `_meta` carries `io.modelcontextprotocol/`
-# keys is modern (revision 2026-07-28, stateless, `resultType` on every
-# result); anything else is the legacy `initialize` handshake (2025-11-25
-# and earlier). One wire rule above all: nothing but MCP messages ever
-# reaches stdout, so every tool call runs under a redirect.
+# Two protocol eras, decided per request and never from session state: a
+# request whose `_meta` carries `io.modelcontextprotocol/` keys is modern
+# (2026-07-28, stateless, `resultType` on every result); anything else is
+# the legacy `initialize` handshake. Nothing but MCP messages may reach
+# stdout, so every tool call runs under a redirect.
 
 MCP_MODERN_VERSIONS = ("2026-07-28",)
 MCP_LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26",
@@ -4738,16 +4677,13 @@ def cmd_mcp(args):
 
 
 # --- Export: field data (ADR-0021) -------------------------------------------
-# `supervisor export` is how a stranger sends back what the recorder saw
-# on their machine without publishing their username, their project
-# names, or their shell history. Everything in the file is named below,
-# by allowlist: nothing from the scan passes through unnamed, so a new
-# scan field can never leak by default. The sender reads the file
-# before it goes (it is printed), and it goes under their own GitHub
-# login (`--send` runs `gh`: a secret gist, then a field-data issue on
-# this repo from the template). Raw chains are a separate opt-in that
-# shows a sample line and asks first, because chains carry command
-# lines and that is the sender's call.
+# `supervisor export` lets a stranger send back what the recorder saw
+# without their username, project names or shell history. Every field is
+# named below by allowlist, so a new scan field can never leak by
+# default. The file is printed before it goes, under the sender's own
+# GitHub login (`--send`: a secret gist, then a field-data issue). Raw
+# chains are a separate opt-in that shows a sample line and asks first,
+# since chains carry command lines.
 
 EXPORT_VERSION = 1
 FIELD_DATA_REPO = "Acquiredl/loxodonta"
@@ -6036,27 +5972,18 @@ def cmd_drill(args):
 
 
 # --- Metrics ------------------------------------------------------------------
-# The metrics route (ADR-0033; GLOSSARY: Metrics route): the scan's
-# counts rendered in the Prometheus text format for whatever the
-# operator already runs — Prometheus, Grafana, Elastic through its
-# Prometheus module, a pager — none of which is named here. One pure
-# function over the report the status endpoint already serves, so no
-# number below can disagree with `scan --json`. Gauges only: the counts
-# are the reading, and the trend is the operator's time-series store's
-# job. Names say the mechanism (`loxodonta_chains{verdict="BROKEN"}`,
-# never "tampering detected"), and every help line ends with the grade
-# of evidence behind its number, so a reader of the scrape knows which
-# came from `loxodonta verify` (verdict), which the supervisor decided
-# from its own watching — the transcript paired with the chain, its own
-# diary of when heads moved (witness verdict) — and which count what
-# writer-stamped lines and writer-reachable files say (testimony).
+# The scan's counts in the Prometheus text format (ADR-0033), one pure
+# function over the report the status endpoint serves, so no number here
+# can disagree with `scan --json`. Gauges only; the trend is the
+# operator's time-series store's job. Names say the mechanism
+# (`loxodonta_chains{verdict="BROKEN"}`, never "tampering detected"), and
+# every help line ends with its grade of evidence: verdict, witness
+# verdict, or testimony.
 #
-# The names and their label sets are a public interface from the release
-# that first carries them: a metric scraped into someone's dashboard is
-# renamed by nobody. New metrics may be added; a state the scan grows
-# later is a new label value and a line in docs/METRICS.md, never a
-# renamed metric. Pull only: nothing is pushed anywhere, and the route
-# inherits serve's loopback bind and Host check.
+# Names and label sets are a public interface from the release that
+# first carries them: add metrics, add label values (and a line in
+# docs/METRICS.md), never rename. Pull only, behind serve's loopback bind
+# and Host check.
 
 METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
@@ -6189,17 +6116,12 @@ def metrics_text(report, age_seconds):
           by_label("state", tallied((row.get("state") for row in hot),
                                     KNOWN_CONSUMPTION)))
 
-    # The heads, and what has ever been done about them. Whether an
-    # anchor covers a head is verify's own word, read from the verdict
-    # lines it prints (ADR-0005), and a chain verify called BROKEN never
-    # reaches its anchor check, so a broken chain reads unanchored here
-    # too: the direction is toward the alarm, which is the right way for
-    # a reading to be wrong. Whether the head was published is the memo
-    # beside the chain, which the writer can reach — so a fresh reading
-    # there is worth nothing and a stale one is the reason to look.
-    # Both skip a chain with no entries, which has no head to judge.
-    # Beside them, the store-wide case #240 part 3 gave the scan a
-    # sentence for: the door is wired and has never taken a head.
+    # The heads. Anchor coverage is verify's own word (ADR-0005), and a
+    # BROKEN chain never reaches its anchor check, so it reads unanchored
+    # here too: wrong toward the alarm, the right way to be wrong. The
+    # publish memo is writer-reachable, so a fresh reading there is worth
+    # nothing and a stale one is the reason to look. Both skip empty
+    # chains. Beside them: the door wired that never took a head (#240).
     gauge("loxodonta_heads_unanchored",
           "Chains whose head no anchor covers yet, from the spans verify "
           "replayed on the last scan", "verdict",
@@ -6268,19 +6190,13 @@ def metrics_text(report, age_seconds):
 # tripwire event between them. The env knob is the test suite's handle.
 SCAN_TTL_SECONDS = float(os.environ.get("SUPERVISOR_SCAN_TTL_SECONDS", 3))
 
-# How often `serve` asks for a scan of its own when a keeper cadence is
-# in force (#271). Both keepers run inside the scan, and a scan used to
-# happen only when a request asked for one, so a `serve` run as a
-# background service with no page open and no scrape pointed at it
-# anchored and published nothing, however long it ran. The session
-# killed before its end is the one the keeper covers (ADR-0025), and it
-# was the one a headless `serve` left uncovered. A minute is short
-# enough that a ripe head does not wait long past its cadence and long
-# enough that an idle machine is not walked constantly; the env knob is
-# the test suite's handle, as it is above. A tenth of a second is the
-# floor under it: `SUPERVISOR_SCAN_TTL_SECONDS=0` is an idiom in this
-# suite, and the same 0 typed here would spin a core, since a cached
-# scan returns at once and the turn would do nothing but take the lock.
+# How often `serve` scans on its own while a keeper cadence is in force
+# (#271): the keepers run inside the scan, so a headless `serve` with no
+# page or scrape asking used to anchor and publish nothing, leaving
+# uncovered exactly the killed session the keeper exists for (ADR-0025).
+# A minute keeps ripe heads prompt without walking an idle machine
+# constantly. The 0.1 s floor matters: the suite's idiom
+# SUPERVISOR_SCAN_TTL_SECONDS=0, typed here, would spin a core.
 KEEPER_TICK_SECONDS = max(
     float(os.environ.get("SUPERVISOR_KEEPER_TICK_SECONDS", 60)), 0.1)
 
