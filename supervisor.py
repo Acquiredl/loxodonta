@@ -979,6 +979,8 @@ def sidecar_heads(sidecar):
             and not is_attempt(record) and not is_chain_row(record)}
 
 
+# Computed here only to compare with the memo's chain rows: the
+# fingerprint is never printed, served or written down by the supervisor.
 def remote_id(url):
     """Which remote a chain row went to, without the URL (#263): the
     first 16 hex characters of the SHA-256 of the URL exactly as it was
@@ -1095,8 +1097,9 @@ SHELL_HAZARDS = "\"'`$\\"   # a quote, a backtick, a dollar sign, a backslash
 
 
 def publish_url(value):
-    """argparse validator for a URL a head, a chain or a digest is sent
-    to: a plain http or https URL. The installer writes such a URL onto
+    """argparse validator for a URL the tools send to: where a head or
+    the chain is published, or the authority asked to stamp a head. A
+    plain http or https URL. The installer writes such a URL onto
     the wired SessionEnd command, which the harness runs through a shell
     at every session end, and the supervisor's keeper hands one to
     `publish`, so anything a shell could expand or unquote is refused
@@ -9014,19 +9017,36 @@ setInterval(loadActivity, 30000);
 """
 
 
+def checkout_commit(home):
+    """The short commit of the git checkout `home` sits in, or "unknown"
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
+    try:
+        asked = subprocess.run(
+            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
+            capture_output=True, encoding="utf-8")
+    except (OSError, ValueError):
+        return "unknown"
+    return asked.stdout.strip() if asked.returncode == 0 else "unknown"
+
+
+def version_line(prog, home):
+    """Three identities on one line: tool, format, commit (ADR-0022)."""
+    return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
+            f"commit {checkout_commit(home)})")
+
+
 class VersionAction(argparse.Action):
-    """`--version`: tool, format, and the commit of the checkout this
-    file sits in — the recorder notice's fact, read the recorder notice's
-    way (local git only, never fetched: ADR-0015, ADR-0022). Answered
-    only when asked, so no other command pays for the git question."""
+    """`--version`, answered only when asked: the commit is one git
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None):
-        commit = git_say(HERE, "rev-parse", "--short", "HEAD") or "unknown"
-        print(f"{parser.prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
-              f"commit {commit})")
+        home = os.path.dirname(os.path.abspath(__file__))
+        print(version_line(parser.prog, home))
         parser.exit()
 
 

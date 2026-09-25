@@ -223,17 +223,21 @@ class TwinCheckTest(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
         (self.root / "docs").mkdir()
+        # Bytes, with LF endings: write_text takes no newline before 3.10.
         for name in SCRIPTS + ("docs/TWINS.md",):
-            (self.root / name).write_text(
-                (REPO_ROOT / name).read_text(encoding="utf-8"),
-                encoding="utf-8", newline="\n")
+            (self.root / name).write_bytes(
+                (REPO_ROOT / name).read_text(encoding="utf-8").encode())
 
     def edit(self, name, old, new):
         path = self.root / name
         text = path.read_text(encoding="utf-8")
         self.assertEqual(text.count(old), 1, f"{old!r} in {name}")
-        path.write_text(text.replace(old, new), encoding="utf-8",
-                        newline="\n")
+        path.write_bytes(text.replace(old, new).encode())
+
+    def append(self, name, text):
+        with (self.root / name).open("a", encoding="utf-8",
+                                     newline="\n") as script:
+            script.write(text)
 
     def check(self):
         return twin_check("--check", "--root", str(self.root))
@@ -263,20 +267,38 @@ class TwinCheckTest(unittest.TestCase):
         self.assertIn("receiver.py no longer defines checkout_commit",
                       done.stderr)
 
+    def test_a_decorator_added_to_a_copy_fails_by_name(self):
+        self.edit("supervisor.py", "\ndef visible(",
+                  "\n@functools.lru_cache(maxsize=None)\ndef visible(")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("visible in supervisor.py differs from loxodonta.py",
+                      done.stderr)
+
+    def test_a_copy_changed_by_an_augmented_assignment_fails(self):
+        self.append("receiver.py", "\nEX_USAGE += 1\n")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("EX_USAGE in receiver.py differs from loxodonta.py",
+                      done.stderr)
+
+    def test_an_import_that_shadows_a_twin_fails(self):
+        self.append("supervisor.py", "\nfrom json import dumps as visible\n")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("visible is bound by an import in supervisor.py",
+                      done.stderr)
+
     def test_an_undeclared_name_in_two_scripts_fails(self):
         for name in ("supervisor.py", "receiver.py"):
-            with (self.root / name).open("a", encoding="utf-8",
-                                         newline="\n") as script:
-                script.write("\n\ndef twin_probe():\n    return 1\n")
+            self.append(name, "\n\ndef twin_probe():\n    return 1\n")
         done = self.check()
         self.assertEqual(done.returncode, 1, done.stdout)
         self.assertIn("twin_probe is defined in supervisor.py and "
                       "receiver.py and declared neither", done.stderr)
 
     def test_a_stale_page_fails_and_page_rewrites_it(self):
-        with (self.root / "docs" / "TWINS.md").open(
-                "a", encoding="utf-8", newline="\n") as page:
-            page.write("\nA line the list does not hold.\n")
+        self.append("docs/TWINS.md", "\nA line the list does not hold.\n")
         done = self.check()
         self.assertEqual(done.returncode, 1, done.stdout)
         self.assertIn("docs/TWINS.md is stale", done.stderr)

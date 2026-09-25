@@ -2222,8 +2222,9 @@ def block_header(value):
 
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
-    when it sits in none. Local git only: a version is a label on the
-    file, never a channel to fetch a newer one."""
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
@@ -2241,7 +2242,7 @@ def version_line(prog, home):
 
 class VersionAction(argparse.Action):
     """`--version`, answered only when asked: the commit is one git
-    question, and the hook path must not pay for it on every call."""
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
@@ -3195,8 +3196,9 @@ SHELL_HAZARDS = "\"'`$\\"   # a quote, a backtick, a dollar sign, a backslash
 
 
 def publish_url(value):
-    """argparse validator for a URL a head, a chain or a digest is sent
-    to: a plain http or https URL. The installer writes such a URL onto
+    """argparse validator for a URL the tools send to: where a head or
+    the chain is published, or the authority asked to stamp a head. A
+    plain http or https URL. The installer writes such a URL onto
     the wired SessionEnd command, which the harness runs through a shell
     at every session end, and the supervisor's keeper hands one to
     `publish`, so anything a shell could expand or unquote is refused

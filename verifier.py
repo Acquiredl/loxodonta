@@ -2229,8 +2229,9 @@ def block_header(value):
 
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
-    when it sits in none. Local git only: a version is a label on the
-    file, never a channel to fetch a newer one."""
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
@@ -2248,7 +2249,7 @@ def version_line(prog, home):
 
 class VersionAction(argparse.Action):
     """`--version`, answered only when asked: the commit is one git
-    question, and the hook path must not pay for it on every call."""
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)

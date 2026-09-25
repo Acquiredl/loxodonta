@@ -625,8 +625,9 @@ def cmd_serve(args):
 
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
-    when it sits in none. Local git only: a version is a label on the
-    file, never a channel to fetch a newer one."""
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
@@ -636,16 +637,22 @@ def checkout_commit(home):
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 
 
+def version_line(prog, home):
+    """Three identities on one line: tool, format, commit (ADR-0022)."""
+    return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
+            f"commit {checkout_commit(home)})")
+
+
 class VersionAction(argparse.Action):
-    """`--version`, answered only when asked: tool, format, commit."""
+    """`--version`, answered only when asked: the commit is one git
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None):
         home = os.path.dirname(os.path.abspath(__file__))
-        print(f"{parser.prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
-              f"commit {checkout_commit(home)})")
+        print(version_line(parser.prog, home))
         parser.exit()
 
 
