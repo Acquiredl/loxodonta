@@ -80,17 +80,10 @@ def entry_hash(entry_without_hash):
 def receipt_text(text):
     """`text` as a receipt can hold it: each lone surrogate written as
     its six ASCII characters of escape text (`\\ud800`), everything
-    else exactly as it stands (#292).
-
-    A lone surrogate is half of a UTF-16 pair with no other half. JSON
-    lets a model type one into any tool argument, and POSIX hands Python
-    one for every byte of argv or a file name that is not UTF-8. It has
-    no UTF-8 form, so the canonical form above cannot hold it: the
-    append used to die in a traceback, leaving no receipt while the
-    chain went on verifying VALID. Written as escape text, the receipt
-    says what was sent and the format does not change. The codec's
-    backslashreplace is exactly that rule, since a lone surrogate is the
-    only thing UTF-8 cannot encode. Every string an entry takes from
+    else exactly as it stands (#292). A lone surrogate has no UTF-8
+    form, so the canonical form cannot hold it, yet JSON and POSIX argv
+    both hand Python one; escaped, the receipt still says what was sent
+    and the format does not change. Every string an entry takes from
     outside passes through here: actor, action, file paths."""
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
@@ -111,7 +104,7 @@ def split_lines(data):
     after the last `\\n`, when there are any, are a line too: the torn
     tail a crash leaves, which the walk names. Written the same way in
     loxodonta.py, supervisor.py and receiver.py, which never import one
-    another; tests/test_suite_shape.py holds the copies equal."""
+    another; tools/twin_check.py holds the copies equal."""
     lines = data.split(b"\n")
     if lines[-1] == b"":
         lines.pop()
@@ -146,18 +139,13 @@ def unreadable_log(path, error):
 
 
 def tail_entry(lines):
-    """The chain's final entry, or None if the tail is damaged. Two shapes
-    of damage, both innocent (ADR-0004): a torn tail, the line left
-    partial by a crash or an overlapping append; and a forked tail, a
-    well-formed entry whose `n` is not its line number, which is what a
-    lock taken from a paused holder leaves behind: two entries claiming
-    one `n`. Neither can be built on. A new entry laid over a fork would
-    bury an innocent race under later receipts until it read as
-    tampering in the middle of the file, so the fork ends the chain the
-    way a tear does, and damage stays at the tail, where the readers
-    that name it honestly expect it (SPEC §6, §8). A tail holding a byte
-    that is not UTF-8 is torn in the same sense, since a crash in the
-    middle of a character leaves one (#299)."""
+    """The chain's final entry, or None if the tail is damaged: torn (a
+    line left partial by a crash or an overlapping append, or holding a
+    byte that is not UTF-8) or forked (a well-formed entry whose `n` is
+    not its line number, left by a lock taken from a paused holder).
+    Neither can be built on: a new entry laid over a fork would bury an
+    innocent race under later receipts until it read as tampering in
+    the middle of the file, so damage stays at the tail (SPEC §6, §8)."""
     if not lines:
         return None
     try:
@@ -304,7 +292,7 @@ def shape_problem(entry):
 # Display only: verify hashes the raw entry, and a backslash stays as it
 # is, so the chain file is where the exact bytes are read. Twin of
 # supervisor.py's `visible`; the files never import each other
-# (ADR-0035), and tests/test_suite_shape.py holds the two copies equal.
+# (ADR-0035), and tools/twin_check.py holds the two copies equal.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
@@ -334,17 +322,11 @@ def walk(lines, field_rules=True):
     report (which narrates). Returns (entries, breaks, warns): entries[n] is
     the parsed entry or None where the line is unparseable or is not the
     shape of an entry; breaks and warns are (n, message) lists in walk
-    order.
-
-    Two kinds of rule are walked here, and ADR-0036 keeps them apart. The
-    hash chain is the same in every format version: each line one JSON
-    object, each key once, its `entry_hash` the hash of its canonical
-    form (SPEC §4), its `prev` the entry before it's (§5). The field rules
-    are v0.1's own: which fields, of which types, and `n` counting up.
-    With `field_rules` False only the hash chain is walked, which is how
-    a chain whose genesis claims a version this verifier does not speak
-    is judged: its hashes are checked, and its fields are not ours to
-    judge."""
+    order. With `field_rules` False only the hash chain is walked (each
+    line one JSON object, each key once, each hash and `prev` link) and
+    not v0.1's field rules: that is how a chain whose genesis claims a
+    version this verifier does not speak is judged, since the hashing is
+    the same in every version and its fields are not ours to judge."""
     entries = []
     breaks = []
     warns = []
@@ -1073,18 +1055,12 @@ def token_time(token):
     """The moment a token states, in epoch seconds, from the one `Time
     stamp:` line `openssl ts -reply -token_out -text` prints; None when
     there is not exactly one such line this can read. openssl reads the
-    token and this reads one line of what openssl printed, the way
-    openssl_reason reads its errors, so the recorder still never parses
-    a token (ADR-0032 ruling 4).
-
-    `-token_out` is what keeps the writer from choosing the moment. The
-    reply around the token carries a status text nobody signed, kept in
-    a sidecar the writer can edit, and without the flag openssl prints
-    it first and verbatim, so a line break in it could set a `Time
-    stamp:` line of the writer's own ahead of the authority's (#264).
-    With it openssl prints the signed token alone, and a second such
-    line can only be one the authority signed or one that breaks the
-    signature, so two of them is a time nobody can read."""
+    token, never this file (ADR-0032 ruling 4). `-token_out` is the
+    trap: without it openssl first prints the reply's status text, which
+    nobody signed and the writer can edit, so a line break in it could
+    set a `Time stamp:` line of the writer's own ahead of the
+    authority's (#264). With it, a second such line is signed or breaks
+    the signature, so two of them is a time nobody can read."""
     shown = subprocess.run(["openssl", "ts", "-reply", "-in", token,
                             "-token_out", "-text"],
                            capture_output=True, encoding="utf-8",
@@ -1119,25 +1095,16 @@ def takes_attime():
 
 def judge_outlived(head, token, chain_file, refused):
     """A token openssl refused because a certificate in the authority's
-    chain has expired (#264). openssl checks the chain as of the moment
-    it verifies, so a genuine token fails this way on the calendar alone;
-    and it checks the certificate before the signature, so a token
-    tampered with fails this way too. The same check as of the time the
-    token states tells them apart. Passing, the certificate was in date
-    when the token was issued and the calendar is the only reason: that
-    is a note and never a verdict, and never STAMPED either, since a key
-    whose certificate has run out is vouched for by nobody now, and
-    whoever holds it could sign any past time they liked (long-term
-    validation is not built, ADR-0032). Failing, the token has a reason
-    of its own, and that is the verdict.
-
-    An openssl that can be asked about no moment but now gets ADR-0026's
-    posture for an ssh-keygen that predates `-Y verify`, before anything
-    else is read: nothing could be judged, so it is not judged, and why.
-    A token whose time cannot be read keeps openssl's first refusal:
-    openssl decoded it to check its chain, and every token carries
-    exactly one time, so a time printed as `Bad time value`, or missing,
-    or twice over, is the token's fault and not this machine's."""
+    chain has expired (#264), judged again as of the time the token
+    states. openssl checks the certificate before the signature, so past
+    that date a tampered token fails exactly as a genuine one does; only
+    the second check tells them apart. Passing, it is a note, never a
+    verdict and never STAMPED: a key whose certificate has run out is
+    vouched for by nobody now, and could sign any past time (long-term
+    validation is not built). Failing, that reason is the verdict. An
+    openssl that cannot be asked about a past moment judges nothing, and
+    says why; a token whose time cannot be read (missing, twice, or `Bad
+    time value`) keeps openssl's first refusal, as the token's fault."""
     if not takes_attime():
         return "not judged", STAMP_NO_ATTIME
     stated = token_time(token)
@@ -1253,16 +1220,13 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
                block_headers=None, headers_used=None, mechanisms=None):
     """The walk of one chain, then whatever the checks add, then the
     verdict as the exit code: `verify PATH` and the package judge both
-    call this, each with the checks it asked for. `block_headers` are the
-    headers `--block-header` gave, by root, for the anchors to be checked
-    against. `headers_used` and `mechanisms` are the package judge's
-    out-parameters and nobody else's. The first collects the roots a
-    header matched, because a package has more anchors than one chain
-    holds, and a header is noted as matching nothing only once every one
-    of them was judged; without it, this chain's walk notes its own. The
-    second collects the exit-3 findings' words, because a package names
-    the mechanism in its own verdict line and "anchor" is never the word
-    for an authority timestamp (ADR-0032 ruling 1)."""
+    call this, each with the checks it asked for. `block_headers` are
+    `--block-header`'s, by root. `headers_used` and `mechanisms` are the
+    package judge's out-parameters: the roots a header matched (so a
+    header matching nothing is noted once, across every chain; without
+    it this walk notes its own), and the exit-3 findings' words (so the
+    package verdict names the mechanism: "anchor" is never the word for
+    an authority timestamp)."""
     try:
         lines = read_log(log)
     except FileNotFoundError:
@@ -1801,17 +1765,15 @@ def judge_manifest_anchor(folder, headers, used):
 
 
 def judge_manifest_stamp(folder, chain_file):
-    """The stamp seal (ADR-0032 rulings 4 and 5, in ADR-0026 ruling 6's
-    shape): every record of manifest.json.stamps.jsonl must be a token
-    over this manifest's sha256, and openssl must accept it against the
-    certificate chain the recipient saved. Returns (findings, stamped,
-    why): whether the rung is earned, and why nobody judged the seal
-    when nobody did. A token this machine cannot judge, or one whose
-    certificate has expired since it was issued (#264), is a note and
-    never a verdict, the issuer signature's exact posture — the rung is
-    neither earned nor failed. Only the manifest's own token can earn
-    the package rung; the chains' tokens printed above are detail, since
-    they stamp a different object."""
+    """The stamp seal (ADR-0032 rulings 4 and 5): every record of
+    manifest.json.stamps.jsonl must be a token over this manifest's
+    sha256 that openssl accepts against the certificate chain the
+    recipient saved. Returns (findings, stamped, why): whether the rung
+    is earned, and why nobody judged the seal when nobody did. A token
+    this machine cannot judge, or whose certificate expired after it was
+    issued (#264), is a note and never a verdict: the rung is neither
+    earned nor failed. Only the manifest's own token can earn the
+    package rung; the chains' tokens stamp a different object."""
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
     records = read_stamp_records(manifest)
@@ -2055,20 +2017,15 @@ def series(items):
 
 def ceiling_lines(manifest, earned):
     """The two closing lines of a package with no finding, the residual
-    trust and then the verdict, built from what the declared seals
-    earned: `height`, the block the manifest anchor names, and `block`,
-    that block's header hash when a header checked it; `stamped`,
-    whether openssl accepted the authority's token over the manifest;
-    `key`, the fingerprint the signature verified under; `unjudged`, the
-    seals this machine could not judge. Each rung adds its words in
-    ADR-0007's order, the two *when* seals before the signature (which
-    key), and the anchor before the authority timestamp, because an
-    anchor's proof is nobody's product where a token is somebody's
-    signed word (ADR-0032 ruling 1); the signature's words are
-    ADR-0008's caged sentence and no other. What no seal earned is named
-    as resting on the issuer's word (ADR-0026 ruling 6). The ceiling
-    verdict carries its limit: what a regeneration would also produce,
-    and why the rung is unearned."""
+    trust and then the verdict, from what the declared seals earned:
+    `height` and `block` (the anchor's block, and its header hash when a
+    header checked it), `stamped`, `key` (the signature's fingerprint)
+    and `unjudged`. Rungs add their words in a fixed order: the anchor,
+    then the authority timestamp (a proof is nobody's product, a token
+    somebody's signed word), then the signature, whose words are
+    ADR-0008's caged sentence and no other. What no seal earned rests on
+    the issuer's word; the verdict names what a regeneration would also
+    produce, and why the rung is unearned."""
     height, key, seals = earned["height"], earned["key"], manifest["seals"]
     block = earned["block"]
     stamped = earned["stamped"]
@@ -2309,10 +2266,10 @@ def block_header(value):
 
 
 def checkout_commit(home):
-    """The short commit of the checkout `home` sits in, or "unknown" —
-    the same fact the recorder notice reports (ADR-0015). Local git only:
-    a version is a label on the file, never a channel to fetch a newer
-    one."""
+    """The short commit of the git checkout `home` sits in, or "unknown"
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
@@ -2330,7 +2287,7 @@ def version_line(prog, home):
 
 class VersionAction(argparse.Action):
     """`--version`, answered only when asked: the commit is one git
-    question, and the hook path must not pay for it on every call."""
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
@@ -2342,15 +2299,12 @@ class VersionAction(argparse.Action):
 
 
 def speak_utf8():
-    """Write stdout and stderr in UTF-8, whatever encoding the console
-    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
-    which has no CJK and no emoji: one such character in a receipt killed
-    the verb mid-output with UnicodeEncodeError, and a hook reading
-    through a pipe got nothing. The text printed is unchanged; only its
-    bytes are. UTF-8 carries every character but a lone surrogate (a file
-    name that did not decode), which backslashreplace prints as its
-    escape rather than crash on. A stream without `reconfigure` (None
-    under pythonw, or one an embedder swapped in) is left as it is."""
+    """Write stdout and stderr in UTF-8, whatever the console dealt
+    (#294): Windows hands a pipe cp1252, where one CJK character or
+    emoji in a receipt killed the verb mid-output. Only the bytes change,
+    never the text; a lone surrogate prints as its backslash escape. A
+    stream without `reconfigure` (None under pythonw, or one an embedder
+    swapped in) is left as it is."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
@@ -2360,9 +2314,10 @@ def speak_utf8():
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's
-    stock 2, so no verdict exit is ever an argparse error (ADR-0026
-    ruling 7). The message is argparse's, unchanged, on stderr. Subparsers
-    inherit this class, so every command speaks the same number."""
+    stock 2, so no exit a script reads as an answer is ever an argparse
+    error (ADR-0026 ruling 7). The message is argparse's, unchanged, on
+    stderr. Subparsers inherit this class, so every command speaks the
+    same number."""
 
     def error(self, message):
         self.print_usage(sys.stderr)
@@ -2497,16 +2452,12 @@ def reader_gone(error):
 
 def run_main(main):
     """Run a command line to its exit code, as both files' entry point.
-    Two endings are not the command's own (ADR-0037). The reader hung
-    up: no verdict was asked of the lines that went unread, so it dies
-    quietly with 141, what a shell reports for a writer its pipe's
-    reader left. Never 0, which a script reads as VALID, though a BROKEN
-    line may be among the unread ones, and never 1, which is BROKEN and
-    nothing else. Or the tool itself failed: the traceback goes to
-    stderr, as Python would print it, and the exit is 70, sysexits'
-    internal error, so a crash is never read as a verdict. SystemExit
-    (argparse's 64, `--version`'s 0) and Ctrl-C are not failures of the
-    tool, and pass through as Python ends them."""
+    Two endings are not the command's own (ADR-0037). A reader that hung
+    up gets a quiet 141, what a shell reports for that: never 0 (VALID)
+    or 1 (BROKEN), since the unread lines were never judged. A crash
+    prints its traceback to stderr and exits 70, sysexits' internal
+    error, so it is never read as a verdict. SystemExit (argparse's 64,
+    `--version`'s 0) and Ctrl-C pass through as Python ends them."""
     try:
         speak_utf8()  # before anything prints
         code = main()
@@ -2569,26 +2520,20 @@ def now_ts():
 
 
 def entry_line(entry):
-    """One complete log line for a finished entry (hash included).
-
-    Stored with ASCII escapes (json.dumps's default) — deliberately unlike
-    the raw-UTF-8 canonical form the hash is computed over. The canonical
-    form is the entry's identity (SPEC §4, frozen); the stored line is its
-    travel armor, pure-ASCII bytes that survive any editor or codepage.
-    The two never conflict: verification re-parses the JSON and re-derives
-    the canonical form fresh, never comparing file bytes."""
+    """One complete log line for a finished entry (hash included), with
+    ASCII escapes, unlike the raw-UTF-8 canonical form the hash is over
+    (SPEC §4): pure-ASCII bytes survive any editor or code page, and
+    verification re-derives the canonical form from the parsed JSON,
+    never comparing file bytes."""
     return json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
 
 
 def write_line_to_disk(path, mode, line):
-    """One line, written and pushed through the operating system's cache
-    to the disk before this returns, so that "logged entry N" means the
-    entry is there (SPEC §1). A crash that loses a written receipt reads
-    at the witness exactly as a killed hook does, and an innocent loss
-    should not wear that face. The sync costs about 2 ms where the store
-    lives, against ~135 ms for a hook call. If the sync itself fails the
-    line is still written and the failure is said, never hidden, since
-    the entry is on its way to the disk either way."""
+    """One line, written and synced to the disk before this returns, so
+    "logged entry N" means the entry is there (SPEC §1): a lost receipt
+    reads at the witness as a killed hook does, and an innocent loss
+    should not wear that face (the cost: docs/DIRECTION.md). A failed
+    sync is said, never hidden; the line is still written."""
     with open(path, mode, encoding="utf-8", newline="\n") as f:
         f.write(line)
         f.flush()
@@ -2624,16 +2569,11 @@ def lock_timeout():
 
 
 class ChainLock:
-    """Exclusive lock over one log's read-tail-then-append.
-
-    `O_EXCL` on a sidecar file is the most portable mechanism available;
-    `fcntl` and `msvcrt` would fork this file in two (ADR-0004). It is not
-    *entirely* uniform — see the Windows case in `__enter__` — but the
-    difference is three lines rather than two implementations.
-
-    The lock is reachable by the writer, so it prevents accidents, not
-    adversaries; an adversarial writer was never going to be stopped by a
-    lock file (ADR-0002).
+    """Exclusive lock over one log's read-tail-then-append: `O_EXCL` on a
+    sidecar file, since `fcntl` and `msvcrt` would fork this file in two
+    (ADR-0004; the one Windows difference is in `__enter__`). The writer
+    can reach the lock, so it prevents accidents, not adversaries
+    (ADR-0002).
     """
 
     def __init__(self, log):
@@ -2872,13 +2812,11 @@ def cmd_log(args):
 
 
 def run_signals():
-    """The signals `run` catches while its command runs (#296).
-
-    Every one of them would otherwise end the wrapper before it wrote the
-    receipt. What is missing from this list cannot be caught, and is the
-    limit of the guarantee: SIGKILL anywhere, and on Windows a SIGTERM,
-    which `os.kill` there turns into TerminateProcess, as it does a Task
-    Manager "End task". Windows has no SIGHUP; Ctrl-Break is its SIGBREAK.
+    """The signals `run` catches while its command runs (#296), each of
+    which would otherwise end the wrapper before it wrote the receipt.
+    What is missing cannot be caught, the limit of the guarantee: SIGKILL,
+    and on Windows a SIGTERM, which `os.kill` there makes
+    TerminateProcess. Windows has no SIGHUP; Ctrl-Break is its SIGBREAK.
     """
     names = ["SIGINT"]
     names += ["SIGBREAK"] if os.name == "nt" else ["SIGTERM", "SIGHUP"]
@@ -3235,23 +3173,11 @@ def publish_budget(actor):
 
 
 def quick_window(actor):
-    """The seconds the quick session-end steps share, all of them
-    together (#262): the head, the chain, the stamp, in that order.
-    One window and not one budget per step, because the harness caps
-    the hook and not the step, and a step it kills never writes the
-    attempt row that says how it went (#240).
-
-    On Codex that is half the cap, the rule #183 set for one POST now
-    applied to every POST of the session end. On Claude Code it is the
-    twelve-second window the anchor has always shared with them, and
-    Claude Code's budgets are unchanged, because its worst case already
-    fits: three silent quick steps at three seconds each spend nine of
-    the twelve, the anchor takes what they leave (three seconds at
-    worst, as it always has, since it never had twelve of its own), and
-    the whole run after the seal ends inside twelve seconds, well inside
-    the twenty the installer writes on the SessionEnd hook. The window's
-    one new effect there is that a batch of the chain can no longer run
-    past its step's three seconds."""
+    """The seconds the quick session-end steps (head, chain, stamp, in
+    that order) share: one window, not one budget each, because the
+    harness caps the hook and not the step, and a step it kills never
+    writes its attempt row (#262). Half the cap on Codex; on Claude Code
+    the anchor's twelve-second budget (the arithmetic: docs/HOOK.md)."""
     return CODEX_SESSION_END_PUBLISH if is_codex(actor) \
         else SESSION_END_BUDGET
 
@@ -3285,12 +3211,14 @@ SHELL_HAZARDS = "\"'`$\\"   # a quote, a backtick, a dollar sign, a backslash
 
 
 def publish_url(value):
-    """argparse validator for `install-hook --publish-head`: a plain http
-    or https URL. The installer writes it onto the wired SessionEnd
-    command, which the harness runs through a shell at every session end,
-    so anything a shell could expand or unquote is refused here rather
-    than escaped: a quote, a backtick, a dollar sign, a backslash, or
-    whitespace."""
+    """argparse validator for a URL the tools send to: where a head or
+    the chain is published, or the authority asked to stamp a head. A
+    plain http or https URL. The installer writes such a URL onto
+    the wired SessionEnd command, which the harness runs through a shell
+    at every session end, and the supervisor's keeper hands one to
+    `publish`, so anything a shell could expand or unquote is refused
+    when the URL is given rather than escaped later: a quote, a
+    backtick, a dollar sign, a backslash, or whitespace."""
     parts = urllib.parse.urlsplit(value)
     if parts.scheme not in PUBLISH_SCHEMES or not parts.netloc:
         raise argparse.ArgumentTypeError(
@@ -3328,28 +3256,17 @@ def post_for_reply(url, body, timeout, content_type, want_reply=False,
                    headers=None):
     """One POST, and what came back. Returns (the reply's bytes, None)
     when the remote took it, else (None, one line naming what went
-    wrong); never raises. The line never carries the URL: a webhook URL
-    is a credential, and this line reaches stderr and the publish memo,
-    which rides in every package. A URLError's reason is socket-level
-    text (refused, a certificate that does not match the public
-    hostname); a timeout is `no_answer`'s line however it surfaced; any
-    other exception is named by its type alone, because http.client
-    quotes the request path in its own messages and the path is where a
-    token lives.
-
-    `headers` is what a chain batch adds (ADR-0031): the four headers
-    named for the tool, beside a content type of its own.
-
-    `want_reply` is the difference between the callers, and it has
-    to be a choice rather than a default. The head publish is done the
-    moment the status line arrives: the body is a chat service's
-    bookkeeping that nobody here reads, and waiting for it would let a
-    remote that answers and then dawdles over its body spend the whole
-    timeout and be written down as a head that never left. The chain send is the head
-    publish again: the receiver's `{"appended": k}` is bookkeeping this
-    end does not read, and the memo advances on the status line. The
-    stamp is the opposite: the body *is* the token, so it waits. Only
-    `ask_authority` passes True."""
+    wrong); never raises. The line never carries the URL, since a
+    webhook URL is a credential and the line reaches stderr and the
+    publish memo, which rides in every package: a URLError gives its
+    socket-level reason, a timeout `no_answer`'s line, and any other
+    exception its type alone, because http.client quotes the request
+    path, where a token lives. `headers` is what a chain batch adds
+    (ADR-0031). `want_reply` must be a choice, not a default: the head
+    and the chain are done at the status line, so a remote that dawdles
+    over its body cannot spend the timeout and be written down as never
+    reached; the stamp's body is the token, so only `ask_authority`
+    passes True."""
     try:
         request = urllib.request.Request(
             url, data=body,
@@ -3567,24 +3484,21 @@ def remote_id(url):
     first 16 hex characters of the SHA-256 of the URL exactly as it was
     sent to. The receiver's URL carries its token, so the memo never
     holds it (ADR-0025); a fingerprint of it names the remote and
-    reveals nothing usable. The supervisor computes the same thing from
-    the same URL, the rule written twice, since the two files never
-    import each other."""
+    reveals nothing usable. The recorder writes it into the memo and the
+    supervisor's keeper compares against it, so both compute it alike
+    (docs/TWINS.md)."""
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
 def chain_cursor(log, url):
     """The last entry number the remote at `url` acknowledged, from the
     memo's chain rows that name it (#263); -1 when none does, so the
-    send starts at genesis (entry 0). A row that names no remote was
-    written before rows named one, and counts for none: after the
-    upgrade each chain goes once more from genesis, and a receiver that
-    already holds it drops every line as an exact duplicate, its file
-    unchanged. Read tolerantly: the memo is bookkeeping, and a torn line
-    in it means a resend the receiver drops, never a stuck keeper. A
-    memo that exists and cannot be read at all is the caller's to
-    handle: raised, not guessed at, because guessing -1 would send the
-    whole chain again on every session end."""
+    send starts at genesis. A row that names no remote predates remote
+    ids and counts for none: that chain goes once more from genesis, and
+    the receiver drops each line as an exact duplicate. A torn memo line
+    is read past (a resend the receiver drops, never a stuck keeper); a
+    memo that cannot be read at all is raised, not guessed at, since -1
+    would send the whole chain again at every session end."""
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
@@ -3642,12 +3556,10 @@ def chain_headers(log, session, first, last, head):
 
 def oversized_entry(entries, cursor, cap):
     """The first entry after `cursor` whose own line is longer than the
-    cap, or None. It can never be sent: the receiver refuses a body past
-    its cap on the Content-Length and closes, which reaches the sender
-    as a bare connection error, and since the cursor cannot advance past
-    a line that never landed, every later send would retry that same
-    line forever. Named here instead, so the operator reads which entry
-    it is rather than an opaque socket word."""
+    cap, or None. Such a line can never land: the receiver refuses it on
+    the Content-Length with a bare connection error, and the cursor
+    would retry it forever. Named here, so the operator reads which
+    entry it is rather than an opaque socket word."""
     for n, _, line in entries:
         if n > cursor:
             return n if len(line) > cap else None
@@ -3668,17 +3580,13 @@ def append_chain_record(log, first, last, head, event, url):
 
 def publish_chain(log, url, session, timeout, event):
     """Send the chain's entries after `url`'s cursor in the memo to
-    `url`, one bounded POST per batch, `timeout` seconds in all: a
-    remote that has acknowledged nothing gets them from genesis (#263),
-    and each batch waits
-    at most what is left of them, and none begins once they are spent
-    (#262), so a batch that starts late can never carry the call past
-    its total. Returns
-    (sent, failure): `sent` is the (first, last) range the remote
-    acknowledged in this call, or None when nothing was; `failure` is
-    the one line the bounded POST produced for the batch that did not
-    land, or None. Both None means there was nothing after the cursor.
-    Never raises, never prints: the callers say what they will."""
+    `url` (from genesis to a remote that has acknowledged nothing,
+    #263), one bounded POST per batch, `timeout` seconds in all: no
+    batch begins once they are spent or waits past them (#262).
+    Returns (sent, failure): the (first, last) range the remote
+    acknowledged in this call, or None; the line the bounded POST gave
+    for the batch that did not land, or None. Both None: nothing was
+    after the cursor. Never raises, never prints."""
     try:
         entries = entries_on_disk(log)
     except OSError:
@@ -3972,16 +3880,12 @@ def append_stamp_record(log, head, n, authority, reply):
 
 
 def stamped_heads(log):
-    """The heads this log's sidecar already holds a token for. An
-    attempt row is a note on how a query went and never a token, so it
-    says nothing about whether a head was stamped.
-
-    A sidecar this machine cannot open at all answers "none known": the
-    dedupe then asks the authority again rather than skipping a head on
-    the word of a file nobody could read, which is the safe direction,
-    and the write that follows is what reports the real trouble, in the
-    outcome and on stderr. It matters that this never raises, because
-    the session-end step promises the same."""
+    """The heads this log's sidecar already holds a token for; an
+    attempt row is never a token. A sidecar that cannot be opened at all
+    answers "none known", so the dedupe asks the authority again rather
+    than skip a head on an unreadable file, and the write that follows
+    reports the real trouble. Never raises: the session-end step
+    promises the same."""
     try:
         records = read_stamp_records(log) or []
     except OSError:
@@ -4365,12 +4269,10 @@ timeline:
 
 def split_command(text):
     """Split a command line into argv the way the running platform means it.
-
-    shlex's POSIX mode treats a backslash as an escape character, so it eats
-    the separators out of a native Windows path: an unquoted
-    `C:\\Users\\me\\python.exe` arrives as `C:Usersmepython.exe` and the
-    command appears not to exist. Windows quotes rather than escapes, so
-    parse in non-POSIX mode there and drop the quotes shlex leaves attached.
+    shlex's POSIX mode reads a backslash as an escape, so an unquoted
+    `C:\\Users\\me\\python.exe` arrives as `C:Usersmepython.exe`; Windows
+    quotes rather than escapes, so it is parsed in non-POSIX mode there
+    and the quotes shlex leaves attached are dropped.
     """
     if os.name == "nt":
         return [token.strip('"') for token in shlex.split(text, posix=False)]
@@ -4494,15 +4396,12 @@ def commit_transcript_due(log, transcript_path):
 
 
 def one_line(text, limit=160):
-    """Whitespace collapsed to single spaces, truncated with an ellipsis —
-    action is one line (SPEC §2), and receipts are not transcripts.
-
-    The cut lands between words when a space sits within the last forty
-    characters before the limit, so a receipt reads "…noreply@anthropic.com"
-    rather than "…noreply@ant" (#157); a run with no space there (one long
-    URL) is cut at the limit itself. It never orphans a combining mark or
-    a joiner at the edge either, so an accented letter or an emoji
-    sequence is dropped whole rather than split."""
+    """Whitespace collapsed to single spaces, truncated with an ellipsis:
+    action is one line (SPEC §2), and receipts are not transcripts. The
+    cut lands between words when a space sits within the last forty
+    characters before the limit (#157), else at the limit itself, and
+    never orphans a combining mark or a joiner, so an accented letter or
+    an emoji sequence is dropped whole rather than split."""
     line = " ".join(str(text).split())
     if len(line) <= limit:
         return line
@@ -4523,23 +4422,13 @@ JOINERS = frozenset({"\u200d", "\ufe0e", "\ufe0f"}
 
 
 def main_repo_root(project):
-    """The durable home of a project's chains.
-
-    A git worktree is a working copy that routine hygiene deletes once its
-    branch merges. Chains written inside one are deleted with it — the
-    sessions most worth keeping are exactly the ones whose worktree gets
-    pruned. So a session running in a worktree logs to the repository the
-    worktree belongs to, and every worktree's history collects in one place.
-
-    Read from the files git itself writes, not by shelling out: this runs on
-    every tool call, and a hook that spawns a process per call is a hook the
-    operator eventually turns off. A worktree's `.git` is a file reading
-    `gitdir: <main>/.git/worktrees/<name>`, and that directory holds a
-    `commondir` pointing back at `<main>/.git`, whose parent is the root.
-
-    Anything unexpected — no `.git`, an unreadable one, a link that leads
-    nowhere — returns `project` unchanged. Never fail a session over path
-    layout (SPEC §8).
+    """The durable home of a project's chains: for a git worktree, the
+    repository it belongs to, since routine hygiene deletes a worktree
+    once its branch merges and its chains would go with it. Read from
+    the files git writes (a worktree's `.git` file names its gitdir,
+    whose `commondir` leads back to the main `.git`), never by shelling
+    out: this runs on every tool call. Anything unexpected returns
+    `project` unchanged; never fail a session over path layout (SPEC §8).
     """
     dot_git = os.path.join(project, ".git")
     if not os.path.isfile(dot_git):
@@ -4612,9 +4501,9 @@ def store_home():
 def project_slug(project):
     """The store drawer name for a project: its basename plus 8 hex of
     the normalized full path's SHA256 — readable at a glance, and two
-    same-named projects can never share a drawer (ADR-0011). The math
-    must match supervisor.py's copy exactly; the recall tests hold the
-    two together behaviorally (hook in, digest out)."""
+    same-named projects can never share a drawer (ADR-0011). A hook
+    files its chain under it and the supervisor finds the drawer by it,
+    so both compute it alike (docs/TWINS.md)."""
     p = os.path.abspath(str(project))
     key = os.path.normcase(p).replace(os.sep, "/")
     # A lone surrogate (a folder name that is not UTF-8, on POSIX) is
@@ -4657,12 +4546,9 @@ def chain_is_damaged(log):
 
 def writable_chain(log_dir, session):
     """The chain this session writes to: its own, unless that chain's tail
-    is damaged — then the next sibling (ADR-0004).
-
-    Damage ends a chain, never the recording. The damaged chain is left
-    exactly as it lies: it is evidence, and there is no repair path
-    (ADR-0002). Each sibling is a complete chain with its own genesis and
-    head, linked to the session by name alone.
+    is damaged, then the next sibling (ADR-0004). Damage ends a chain,
+    never the recording; the damaged chain is left exactly as it lies,
+    evidence with no repair path (ADR-0002).
     """
     log = os.path.join(log_dir, f"receipts-{session}.jsonl")
     n = 1
@@ -5105,25 +4991,17 @@ AUTHORITY_TIERS = ("timestamped", "full")
 def resolve_profile(profile, anchor, publish, publish_chain=None,
                     authority=None, remote=None):
     """The profile an install asks for, and the session-end opt-ins it
-    resolves to (ADR-0031 ruling 1). A profile is a named set of the raw
-    flags and nothing else: `local` wires none, `timestamped` is the
-    session-end anchor under the beginner's word, `custom` is the raw
-    flags exactly as given. With no profile named, the raw flags speak
-    for themselves — an install scripted before profiles existed still
-    works and is written down as `custom` — and none at all is `local`.
-    `full` is the anchor and both publishes to the one URL `--remote`
-    names: the head record and the entries themselves, told apart at
-    the far end by content type, so one remote serves both and the
-    operator names it once. A raw flag beside `local`, `timestamped`
-    or `full` is a command spoken wrong, because the profile already
-    says what leaves the machine: refused with the way out, `custom`;
-    so is `--remote` beside any profile but `full`, which would
-    otherwise name a remote nothing sends to. `full` with no remote is
-    refused with the two ways to get one. The one raw flag a tier does
-    take is `--authority`, beside `timestamped` or `full`, the tiers
-    that commit the head (ADR-0032 ruling 2); beside `local`, where
-    nothing leaves at all, it is refused with the rest. Returns
-    (profile, anchor, publish, publish_chain, authority)."""
+    resolves to (ADR-0031 ruling 1): `local` wires none, `timestamped`
+    the session-end anchor, `full` the anchor and both publishes to the
+    one URL `--remote` names (told apart at the far end by content
+    type), `custom` the raw flags exactly as given. With no profile the
+    raw flags speak for themselves as `custom`, and none at all is
+    `local`. Refused, with the way out: a raw flag beside `local`,
+    `timestamped` or `full` (the profile already says what leaves),
+    `--remote` beside any profile but `full`, and `full` with no remote.
+    The one raw flag a tier takes is `--authority`, beside `timestamped`
+    or `full` (ADR-0032 ruling 2). Returns (profile, anchor, publish,
+    publish_chain, authority)."""
     raw = bool(anchor or publish or publish_chain or authority)
     if remote and profile != "full":
         raise ValueError(
@@ -5192,12 +5070,10 @@ def session_end_notice(old, new, choices):
 def chain_notice(url, profile):
     """What leaves at every session end once the chain is wired, said
     before anything is written (ADR-0031): every entry, and action lines
-    are command lines. The export's `--raw` stance (ADR-0021), told to
-    the operator in the same breath as the choice. And what leaves
-    besides the sessions still to come: the keeper walks every chain
-    in the store and sends each from genesis, so last month's command
-    lines go too, once `serve` publishes — at `full` with no flag
-    typed, under `custom` when it is given `--publish-chain`."""
+    are command lines, the export's `--raw` stance (ADR-0021). Past
+    sessions too: the keeper sends every chain in the store from genesis
+    once `serve` publishes, at `full` with no flag typed, under `custom`
+    when it is given `--publish-chain`."""
     past = ("`supervisor serve`, when it runs, then also sends every "
             "chain already in the store, from its first entry."
             if profile == "full" else
@@ -5211,21 +5087,14 @@ def chain_notice(url, profile):
 
 
 def profile_notice(profile, matchers, codex=False):
-    """What the installer prints last, on first install and on every
-    re-run: one line reading the choice back (the harness, the coverage,
-    the profile) and, at `local`, the ladder — one row per tier, each
-    saying what leaves the machine, the row above naming the flag that
-    reaches it (ADR-0031 ruling 1). `local` is the lower tier of
-    ADR-0002: an edit, a deletion, or a reorder is caught unconditionally,
-    a regenerated chain only against a head kept off the machine (#221's
-    sentence, kept). `timestamped` is the anchor at each session end, and
-    `full` the head and the entries themselves to a remote the operator
-    names, which is what makes a wiped log survive somewhere as of the
-    last send. On Codex the session-end anchor stays refused (ADR-0024),
-    so its row, and its line at either tier above `local`, say the
-    supervisor anchors on its cadence instead; the two publishes are
-    wired there all the same, on Codex's shorter clock. Never a prompt:
-    the installer reads no stdin."""
+    """What the installer prints last, on every run: one line reading the
+    choice back (the harness, the coverage, the profile) and, at `local`,
+    the ladder, one row per tier, each saying what leaves the machine and
+    the flag that reaches it (ADR-0031 ruling 1; `local`'s row keeps
+    #221's sentence). On Codex the session-end anchor stays refused
+    (ADR-0024), so its rows say the supervisor anchors on its cadence
+    instead; the two publishes are wired there all the same. Never a
+    prompt: the installer reads no stdin."""
     harness = "Codex" if codex else "Claude Code"
     coverage = ("every tool call" if all(m in ("*", ".*") for m in matchers)
                 else "matcher " + ", ".join(f'"{m}"' for m in matchers))
@@ -5310,25 +5179,16 @@ def codex_hooks_path():
 def install_codex_hooks(publish=None, profile="local",
                         publish_chain=None, authority=None):
     """The Codex half of install-hook (ADR-0020): the same PostToolUse,
-    SessionEnd, and SessionStart blocks, in Codex's hooks.json, with the
-    actor named so recall rows say which harness acted. Codex's matcher
-    is a regex, so `.*` is its every-tool-call. Codex adds a hook's
-    plain-text stdout to the model's context, so the digest ships
-    unchanged — told to take the repo from the payload, since Codex
-    sets no CLAUDE_PROJECT_DIR. `publish` is the published-head opt-in
-    (ADR-0025) and `publish_chain` the published-chain one (ADR-0031),
-    both riding on the SessionEnd command as they do for Claude Code
-    and sharing half Codex's cap between them (#183, #262): the chain
-    send stops where the window closes and leaves the rest at the
-    cursor, which is what the window and the cursor are for.
-    `authority` is the session-end stamp (ADR-0032), last of the quick
-    steps in that same window, taking what the two publishes leave; its
-    one POST was measured inside the cap before the flag was granted
-    here (#251; the numbers are in docs/HOOK.md). `profile` is written
-    to the coverage marker (ADR-0031 ruling 1); the session-end anchor
-    it would wire stays refused here (ADR-0024), since a calendar round
-    trip has no cursor to resume from, so the supervisor's keeper
-    anchors on its cadence instead."""
+    SessionEnd and SessionStart blocks in Codex's hooks.json, the actor
+    named. Codex's matcher is a regex, so `.*` is every tool call; its
+    hooks add plain-text stdout to the model's context, so the digest
+    ships unchanged, told to take the repo from the payload (Codex sets
+    no CLAUDE_PROJECT_DIR). `publish`, `publish_chain` and `authority`
+    ride on the SessionEnd command as for Claude Code, sharing half
+    Codex's cap in that order (#262; the numbers: docs/HOOK.md). The
+    session-end anchor stays refused (ADR-0024): a calendar round trip
+    has no cursor to resume from, so the supervisor anchors instead.
+    `profile` is written to the coverage marker (ADR-0031 ruling 1)."""
     path = codex_hooks_path()
     settings = load_settings(path)
     if settings is None:
@@ -5443,31 +5303,22 @@ def coverage_path():
 
 def record_coverage(harness, matchers, profile, remote=None,
                     authority=None, failures=None):
-    """Append what this install just wired, unless it wired what the
-    last one did — the `heal()` rule, applied to matchers, to the
-    profile and to both remotes, so re-running the installer never
-    grows the file (ADR-0030 ruling 1). Scoped by harness because
-    `--codex` wires `.*` into a different settings file and must never
-    speak for the Claude Code witness. The profile is written beside the
-    matchers (ADR-0031 ruling 1) so a profile that changes is as visible
-    to the supervisor as a matcher change, and so `serve` can follow its
-    cadences; `remote` is where publishing goes — at `full` the one URL
-    both routes were wired to, and under `custom` the chain's URL when
-    one was given, else the head's — and `authority` who stamps the head
-    when one is named (ADR-0032), each written only then. `failures` is
-    the matchers the failed-call event was wired on (#239), written only
-    when it was, so the witness owes a failed command a receipt from the
-    install that wired the event and never before it; an epoch without
-    it, Codex's and every one from before #239, wired none. `serve`
-    follows the remote only at `full`, since that is the tier that asked
-    the keeper for a cadence (#246). The marker never travels (the
-    export allowlists it out, the package does not carry it), so unlike
-    the publish memo it may hold a URL.
-
-    Every failure is a silent skip. An installer that refused to finish
-    over a bookkeeping file would be a worse trade than a memory that
-    starts late, and the operator has louder ways to learn the store is
-    unwritable. Returns whether an entry was appended."""
+    """Append what this install just wired, unless it wired what the last
+    one did (the `heal()` rule, so re-running never grows the file,
+    ADR-0030 ruling 1). Scoped by harness: `--codex` wires `.*` into
+    another settings file and must never speak for the Claude Code
+    witness. Written beside the matchers, each only when set: the
+    profile (ADR-0031 ruling 1), so its change is as visible as a
+    matcher's; `remote`, where publishing goes (at `full` the one URL,
+    under `custom` the chain's URL, else the head's), which `serve`
+    follows only at `full` (#246); `authority` (ADR-0032); and
+    `failures`, the matchers the failed-call event was wired on (#239),
+    so the witness owes a failed command a receipt only from an install
+    that wired it (an epoch without it wired none). The marker never
+    travels (the export and the package leave it out), so unlike the
+    publish memo it may hold a URL. Every failure is a silent skip: a
+    bookkeeping file is no reason to refuse an install. Returns whether
+    an entry was appended."""
     entry = {"since": now_ts(), "matchers": list(matchers)}
     if failures:
         entry["failures"] = list(failures)
