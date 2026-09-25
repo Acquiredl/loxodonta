@@ -1165,9 +1165,10 @@ def check_stamps(log, entries, chain_file):
         return False
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
     bad = False
-    for record in records:
-        if is_attempt(record):
-            continue  # a note on how a step went, not evidence (#240)
+    # A row of an unknown kind is named here, before any verdict line, so
+    # the last line printed is the one it would be without the row.
+    for record in rows_to_judge("stamps", records, "STAMP-UNKNOWN-KIND",
+                                os.path.basename(stamps_path(log))):
         head = record.get("head") if record else None
         if not isinstance(head, str) or \
                 not isinstance(record.get("response"), str):
@@ -1778,8 +1779,12 @@ def judge_manifest_stamp(folder, chain_file):
     digest = sha256_file(manifest)
     records = read_stamp_records(manifest)
     if records:
-        # Attempt rows are notes, never tokens (#240).
-        records = [r for r in records if not is_attempt(r)]
+        # Only tokens and unreadable lines are judged (ADR-0038): a
+        # sidecar holding only notes, or rows of kinds this verifier
+        # does not know, holds no record, the same as an empty one.
+        records = rows_to_judge("stamps", records,
+                                "seal stamp: STAMP-UNKNOWN-KIND",
+                                stamps_path("manifest.json"))
     if not records:
         what = "is not in this package" if records is None else "holds no record"
         print(f"seal stamp: SEAL-MISSING: {stamps_path('manifest.json')} "
@@ -3872,7 +3877,8 @@ def append_stamp_record(log, head, n, authority, reply):
     number; a package manifest's stamp has none (ADR-0026 ruling 4), and
     its record then carries no `n` at all rather than a null, exactly as
     the manifest's anchor record does."""
-    record = {"head": head, "ts": now_ts(), "authority": authority,
+    record = {"kind": STAMP_KIND,   # ADR-0038
+              "head": head, "ts": now_ts(), "authority": authority,
               "response": base64.b64encode(reply).decode("ascii")}
     if n is not None:
         record["n"] = n
@@ -3881,17 +3887,18 @@ def append_stamp_record(log, head, n, authority, reply):
 
 def stamped_heads(log):
     """The heads this log's sidecar already holds a token for; an
-    attempt row is never a token. A sidecar that cannot be opened at all
-    answers "none known", so the dedupe asks the authority again rather
-    than skip a head on an unreadable file, and the write that follows
-    reports the real trouble. Never raises: the session-end step
+    attempt row, or a row of a kind unknown here, is never a token. A
+    sidecar that cannot be opened at all answers "none known", so the
+    dedupe asks the authority again rather than skip a head on an
+    unreadable file, and the write that follows reports the real
+    trouble. Never raises: the session-end step
     promises the same."""
     try:
         records = read_stamp_records(log) or []
     except OSError:
         return set()
     return {record.get("head") for record in records
-            if isinstance(record, dict) and not is_attempt(record)}
+            if row_kind("stamps", record) == STAMP_KIND}
 
 
 def ask_authority(url, head, timeout):
