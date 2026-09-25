@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/SPEC.md` §8.1 is now the one list of what the design cannot claim, and states whole-chain regeneration as closed only for what a commitment held off the machine covers. The header names each part's own version (#336).
+
 ### Fixed
 
 - `supervisor scan` no longer stops with a traceback on a sidecar or transcript line holding an integer past 4,300 digits or nesting past the recursion limit. The writer can reach those files, so one line could stop the audit (#331).
