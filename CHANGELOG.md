@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `docs/CONTROLS.md`: each mechanism mapped to the NIST SP 800-53, PCI DSS, OWASP T8, AIUC-1 and WIMSE controls it bears on, in NIST IR 8477's vocabulary, as a mapping and never an attestation; `house_check` refuses attestation words there (#338).
+
 ## [0.9.0] - 2026-09-23
 
 The recipient's verifier. `verifier.py` is the recorder's verify side on its own, copied from the same source, never edited by hand, and held to a set of conformance vectors that both files must pass. The verdicts were tightened where an outside review found them saying more than they knew: a relabeled format no longer hides an edit, an anchor no longer claims a block nobody checked, and exit 1 now means `BROKEN` and nothing else. Scripts that read exit codes should read the new ones. The receipt format is untouched, and its hashing is now frozen across versions.
