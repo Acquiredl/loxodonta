@@ -888,8 +888,16 @@ def row_kind(sidecar, record):
 
 
 JSON_TYPE_WORDS = ((bool, "true or false"), (int, "a number"),
-                   (float, "a number"), (list, "an array"),
-                   (dict, "an object"), (type(None), "null"))
+                   (float, "a number"), (str, "a string"),
+                   (list, "an array"), (dict, "an object"),
+                   (type(None), "null"))
+
+
+def json_type(value):
+    """What JSON type `value` is, in words: how a message names a field
+    the writer filled with the wrong type, without printing the value."""
+    return next((words for types, words in JSON_TYPE_WORDS
+                 if isinstance(value, types)), "a value")
 
 
 def rows_to_judge(sidecar, records, prefix, name):
@@ -914,13 +922,42 @@ def rows_to_judge(sidecar, records, prefix, name):
         if isinstance(written, str):
             shown = f'of kind "{visible(written)}"'
         else:
-            words = next((words for types, words in JSON_TYPE_WORDS
-                          if isinstance(written, types)), "a value")
-            shown = f"of a kind that is {words}, not a string"
+            shown = f"of a kind that is {json_type(written)}, not a string"
         print(f"{prefix}: line {number} of {visible(name)} is {shown} — this "
               "verifier does not know the kind in this sidecar, and does "
               "not judge it")
     return judged
+
+
+def anchor_row_problem(record):
+    """The first way an anchor row is not the shape of one, named by its
+    field and the JSON type the field holds, never its value; None for a
+    row every reader can act on. A proof needs its head and its proof,
+    each a string, the proof base64. The calendar and the time may be
+    left out, and the entry number is left out of a package manifest's
+    row, but each is of its type when present: a judge prints them and
+    keys on them. The sidecar is in the writer's reach, so this is asked
+    of every row before anything reads it: a judge calls a row that
+    fails it invalid evidence, and the recorder skips it, since it is no
+    proof it can act on."""
+    for field in ("head", "proof"):
+        if field not in record:
+            return f"record has no {field}"
+        if not isinstance(record[field], str):
+            return (f"record's {field} is {json_type(record[field])}, "
+                    "not a string")
+    try:
+        base64.b64decode(record["proof"], validate=True)
+    except ValueError:
+        return "record's proof is not base64"
+    for field in ("calendar", "ts"):
+        if field in record and not isinstance(record[field], str):
+            return (f"record's {field} is {json_type(record[field])}, "
+                    "not a string")
+    n = record.get("n")
+    if "n" in record and (isinstance(n, bool) or not isinstance(n, int)):
+        return f"record's n is {json_type(n)}, not an integer"
+    return None
 
 
 # --- Judging anchors (docs/ANCHORING.md §3) -----------------------------------
@@ -947,18 +984,19 @@ def check_anchors(log, entries, headers, used):
         if record is None:
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
-        head = record.get("head")
-        if head is None:
-            # No head at all is malformed evidence, not a mismatch
-            # against a head called "None".
-            judged.append((record, "invalid", "record has no head"))
+        # A row missing its head, or holding the wrong type anywhere, is
+        # malformed evidence, not a mismatch against a head called "None".
+        problem = anchor_row_problem(record)
+        if problem is not None:
+            judged.append((record, "invalid", problem))
             continue
+        head = record["head"]
         if head not in hash_to_n:
             judged.append((record, "mismatch", None))
             continue
         try:
             verdict = judge_proof(head, base64.b64decode(record["proof"]))
-        except (ProofError, KeyError, ValueError) as e:
+        except (ProofError, ValueError) as e:
             judged.append((record, "invalid", str(e)))
             continue
         judged.append((record, *verdict))
@@ -1724,16 +1762,18 @@ def judge_manifest_anchor(folder, headers, used):
     completed = set()
     pending = []
     for record in records:
-        head = record.get("head") if record else None
-        if not isinstance(head, str) or not isinstance(record.get("proof"), str):
-            reason = "sidecar line is not an anchor record"
-        elif head != digest:
-            reason = (f"the proof is for digest {head[:12]}…, and this "
-                      f"manifest's sha256 is {digest[:12]}…")
+        problem = ("sidecar line is not an anchor record" if record is None
+                   else anchor_row_problem(record))
+        if problem is not None:
+            reason = problem
+        elif record["head"] != digest:
+            reason = (f"the proof is for digest {record['head'][:12]}…, and "
+                      f"this manifest's sha256 is {digest[:12]}…")
         else:
             try:
-                verdict = judge_proof(head, base64.b64decode(record["proof"]))
-            except (ProofError, KeyError, ValueError) as e:
+                verdict = judge_proof(record["head"],
+                                      base64.b64decode(record["proof"]))
+            except (ProofError, ValueError) as e:
                 reason = str(e)
             else:
                 if verdict[0] == "pending":

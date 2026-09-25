@@ -1187,7 +1187,10 @@ def last_departure(log):
     for record in sidecar_records(Path(str(log) + ".anchors.jsonl")):
         when = parse_when(record.get("ts"))
         head = record.get("head")
-        if when is not None and head is not None and not is_attempt(record) \
+        # A head that is not a string is no departure, and verify names
+        # the row (#348).
+        if when is not None and isinstance(head, str) \
+                and not is_attempt(record) \
                 and (head not in first or when < first[head][0]):
             first[head] = (when, record["ts"])
     departures += [(when, ts, "anchored") for when, ts in first.values()]

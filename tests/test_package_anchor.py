@@ -26,8 +26,8 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package_anchor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import (GENESIS_HASH, GENESIS_HEADER, FakeCalendar,
-                         FakeCalendarHandler, block_header,
+from test_anchor import (DROP, GENESIS_HASH, GENESIS_HEADER, MALFORMED_ROWS,
+                         FakeCalendar, FakeCalendarHandler, block_header,
                          expected_merkle_root, header_hash, replayed_root,
                          start_calendar)
 from test_package import (LOXODONTA, SUPERVISOR, PackageCase, completed_anchor,
@@ -544,6 +544,69 @@ class PackageRowKindTest(AnchoredStoreCase):
         self.assertNotIn("INVALID", judged.stdout)
         self.assertEqual(judged.stdout.splitlines()[-1],
                          before.stdout.splitlines()[-1])
+
+
+def changed(row, change):
+    """`row` with `change` applied: a field replaced, or left out for
+    DROP, as one compact sidecar line."""
+    row = dict(row)
+    for field, value in change.items():
+        if value is DROP:
+            row.pop(field, None)
+        else:
+            row[field] = value
+    return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+
+class MalformedPackageRowTest(AnchoredStoreCase):
+    """#348 in a package: a row of either anchors sidecar that is a JSON
+    object but not the shape of an anchor row is evidence that does not
+    verify, exit 3, with a reason naming the field and never its value,
+    and never a traceback in the recipient's hands."""
+
+    def test_a_malformed_row_beside_the_manifest_proof_is_seal_invalid(self):
+        folder = self.anchored_folder()
+        sidecar = folder / SIDECAR
+        good = sidecar.read_text("utf-8")
+        (record,) = self.sidecar_records(folder)
+        for change, reason in MALFORMED_ROWS:
+            with self.subTest(change=change):
+                sidecar.write_text(good + changed(record, change) + "\n",
+                                   encoding="utf-8")
+
+                judged = self.verify_package(folder)
+
+                self.assertEqual(judged.returncode, 3,
+                                 judged.stdout + judged.stderr)
+                self.assertIn(f"seal anchor: SEAL-INVALID: {reason} — "
+                              "evidence that does not verify is not evidence",
+                              judged.stdout)
+                self.assertIn("seal anchor: ANCHOR-PENDING", judged.stdout)
+                self.assertNotIn("Traceback", judged.stderr)
+                self.assertNotIn("sneaky", judged.stdout)
+
+    def test_a_malformed_row_in_a_chain_sidecar_is_anchor_invalid(self):
+        chain_sidecar = self.chain.with_name(self.chain.name + ".anchors.jsonl")
+        good = chain_sidecar.read_text("utf-8")
+        (record,) = [json.loads(line) for line in good.splitlines()]
+        cases = [c for c in MALFORMED_ROWS if "head" in c[0] or "proof" in c[0]]
+        for number, (change, reason) in enumerate(cases):
+            with self.subTest(change=change):
+                chain_sidecar.write_text(good + changed(record, change) + "\n",
+                                         encoding="utf-8")
+                folder = self.work / f"malformed-{number}"
+                packed = self.package(SESSION, "--folder", "--out", str(folder))
+                self.assertEqual(packed.returncode, 0,
+                                 packed.stdout + packed.stderr)
+
+                judged = self.verify_package(folder)
+
+                self.assertEqual(judged.returncode, 3,
+                                 judged.stdout + judged.stderr)
+                self.assertIn(f"ANCHOR-INVALID: {reason} — evidence that "
+                              "does not verify is not evidence", judged.stdout)
+                self.assertIn(SealedPackageTest.CHAIN_DETAIL, judged.stdout)
+                self.assertNotIn("Traceback", judged.stderr)
 
 
 class ReleasedVerifierTest(AnchoredStoreCase):
