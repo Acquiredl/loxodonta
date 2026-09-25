@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Added
 
 - `docs/TWINS.md` lists every rule written in more than one script, and `tools/twin_check.py --check` fails the suite when a copy drifts from the recorder's or a shared name goes undeclared (#337).
+- SPEC section 10 states every rule `verify-package` applies, and `docs/PACKAGE.md` points at it. Six package vectors join `tests/vectors/`: unsealed, an altered artifact, a name twice in a zip, a missing seal, an unknown format, an anchored manifest (#341).
 
 ### Changed
 
