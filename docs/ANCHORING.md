@@ -15,9 +15,10 @@ That proof has two halves, and the proof file holds only one. The attestation at
 Anchors for `<log>` live in `<log>.anchors.jsonl` (e.g. `receipts.jsonl.anchors.jsonl`), one JSON object per line, append-only by convention:
 
 ```json
-{"head": "<64-hex entry_hash>", "n": 12, "ts": "2026-08-13T14:00:00Z", "calendar": "https://a.pool.opentimestamps.org", "proof": "<base64 OTS timestamp>"}
+{"calendar": "https://a.pool.opentimestamps.org", "head": "<64-hex entry_hash>", "kind": "anchor", "n": 12, "proof": "<base64 OTS timestamp>", "ts": "2026-08-13T14:00:00Z"}
 ```
 
+- `kind` — `anchor`: what the row is (ADR-0038). The first rows ever written name no kind, and a row with no `kind` reads as an anchor, whenever it was written.
 - `head` — the chain head that was anchored (entry `n`'s `entry_hash`).
 - `n` — that entry's sequence number at anchor time.
 - `ts` — submission time, writer-supplied testimony like any timestamp.
@@ -27,6 +28,8 @@ Anchors for `<log>` live in `<log>.anchors.jsonl` (e.g. `receipts.jsonl.anchors.
 The sidecar is *evidence, not a chain*: a forged proof fails replay; a deleted proof destroys evidence but forges nothing. Copy the sidecar somewhere the writer can't reach — proofs are self-authenticating, so an out-of-reach copy is strictly stronger than a head record.
 
 Beside the proofs, the session-end anchor leaves one more kind of row (#240). After each attempt the hook appends `{"budget":12.0,"kind":"attempt","outcome":"submitted","step":"anchor","ts":"2026-09-16T05:35:42Z"}`, keys sorted and compact as every sidecar line is written, or the same row with the outcome `no calendar answered within 12 seconds` when nothing answered inside the budget. It is the recorder's note on how the step went, written so the store can tell a hook that never fired from one that fired and got no answer; it is testimony and never a proof. `verify --anchors`, `anchor --upgrade`, the supervisor's keeper and `verify-package` skip attempt rows by their kind, so a sidecar holding only notes reads exactly as an empty one. The supervisor reads them: `scan --json` says per chain when a head last left the machine and which session-end step last failed, with the outcome line as the reason. The publish memo carries the same row for the published head (docs/HOOK.md), and there it names no URL at all. A verifier or supervisor from before this change reads an attempt row as an invalid anchor record (`ANCHOR-INVALID`, exit 3) or as a departure, so a package recipient needs this release or later.
+
+A row of any other kind, or of a kind that belongs in another sidecar (the memo's `chain`), is named by its line and never judged: `ANCHOR-UNKNOWN-KIND: line 3 of receipts.jsonl.anchors.jsonl is of kind "witness-note"`, earning nothing and leaving the exit code as it was. A line that is not a JSON object is still `ANCHOR-INVALID`.
 
 ## 3. Commands
 
