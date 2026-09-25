@@ -10,6 +10,7 @@ import errno
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -774,17 +775,50 @@ def anchors_path(log):
     return sidecar_path(log, ".anchors.jsonl")
 
 
+def file_problem(path):
+    """Why something is at `path` and cannot be read as a file, in
+    words: a folder, a pipe or a device, or a file this user may not
+    open. None when nothing is there, or a file that opens. A sidecar
+    is in the writer's reach, and `mkdir` puts a folder where one
+    belongs in one command (#364). The type is asked before anything is
+    opened, since opening a pipe waits for a writer that may never
+    come."""
+    try:
+        mode = os.stat(path).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return error.strerror or str(error)
+    if stat.S_ISDIR(mode):
+        return "it is a folder, not a file"
+    if not stat.S_ISREG(mode):
+        return "it is not a regular file"
+    try:
+        with open(path, "rb"):
+            return None
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return error.strerror or str(error)
+
+
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
     surrogate from `read_log`), an integer too long to read, nesting too
-    deep (#299)."""
+    deep (#299). A sidecar that is there and cannot be read as a file
+    (`file_problem`) reads as one unreadable line, so no reader stops
+    on it and a judge names it (#364)."""
+    if file_problem(path) is not None:
+        return [None]
     try:
         lines = read_log(path)
     except FileNotFoundError:
         return None
+    except OSError:
+        return [None]
     records = []
     for line in lines:
         try:
@@ -801,6 +835,21 @@ def read_sidecar_records(path):
 def read_anchor_records(log):
     """The anchor sidecar's records, or None when there is no sidecar."""
     return read_sidecar_records(anchors_path(log))
+
+
+def unreadable_sidecar(path):
+    """What a judge prints after its verdict word for a sidecar that is
+    there and cannot be read as a file, a folder in its place say; None
+    when it can be read, or is not there (SPEC §9.1). Named by its bare
+    name, never a path of this machine, and by why: it holds no
+    evidence, and it is not absent either, so it is judged as one line
+    that cannot be read."""
+    problem = file_problem(path)
+    if problem is None:
+        return None
+    return (f"{visible(os.path.basename(path))} cannot be read as a "
+            f"sidecar: {problem} — evidence that does not verify is not "
+            "evidence")
 
 
 def record_label(head, n):
@@ -967,6 +1016,10 @@ def check_anchors(log, entries, headers, used):
         print(f"NO-ANCHORS: {anchors_path(log)} not found — anchoring is "
               "optional; run `loxodonta anchor` to add one")
         return False
+    unreadable = unreadable_sidecar(anchors_path(log))
+    if unreadable is not None:
+        print(f"ANCHOR-INVALID: {unreadable}")
+        return True
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
 
     # A row of an unknown kind is named here, before any verdict line, so
@@ -1201,6 +1254,10 @@ def check_stamps(log, entries, chain_file):
               "timestamp is optional; run `loxodonta stamp --authority URL` "
               "to add one")
         return False
+    unreadable = unreadable_sidecar(stamps_path(log))
+    if unreadable is not None:
+        print(f"STAMP-INVALID: {unreadable}")
+        return True
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
     bad = False
     # A row of an unknown kind is named here, before any verdict line, so
@@ -1703,6 +1760,13 @@ def judge_artifact(folder, listing):
     where the file is judged: its bytes are checked, its words never are."""
     name = listing["path"]
     path = os.path.join(folder, name)
+    # A listed chain sidecar is an artifact too, so a folder in its place
+    # diverges here as well as failing its chain's judge (SPEC §9.1). A
+    # pipe is named, never opened: reading one waits for its writer.
+    problem = file_problem(path)
+    if problem is not None:
+        print(f"{name}: DIVERGED from the manifest: {problem}")
+        return True
     try:
         digest = sha256_file(path)
         size = os.path.getsize(path)
@@ -1739,6 +1803,10 @@ def judge_manifest_anchor(folder, headers, used):
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
     records = read_anchor_records(manifest)
+    unreadable = unreadable_sidecar(anchors_path(manifest))
+    if unreadable is not None:
+        print(f"seal anchor: SEAL-INVALID: {unreadable}")
+        return [(3, "SEAL-INVALID")], None, None
     if records:
         # Only proofs and unreadable lines are judged (ADR-0038): a
         # sidecar holding only notes, or rows of kinds this verifier
@@ -1818,6 +1886,10 @@ def judge_manifest_stamp(folder, chain_file):
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
     records = read_stamp_records(manifest)
+    unreadable = unreadable_sidecar(stamps_path(manifest))
+    if unreadable is not None:
+        print(f"seal stamp: SEAL-INVALID: {unreadable}")
+        return [(3, "SEAL-INVALID")], False, None
     if records:
         # Only tokens and unreadable lines are judged (ADR-0038): a
         # sidecar holding only notes, or rows of kinds this verifier
@@ -3003,6 +3075,14 @@ def append_sidecar_record(path, record):
         f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 
 
+def unwritable_why(path, error):
+    """Why an append to the sidecar at `path` failed, in words: what
+    `file_problem` says of the path, a folder in its place say, which
+    Windows reports as a denied permission (#364); else the system's
+    reason."""
+    return file_problem(path) or error.strerror or str(error)
+
+
 def append_anchor_record(log, head, n, calendar, proof_bytes):
     """One anchor record beside `log`. `n` is the anchored entry's
     number; a package manifest's anchor has none (ADR-0026 ruling 4),
@@ -3569,6 +3649,11 @@ def chain_cursor(log, url):
     memo's format, one line this parser declines, while a byte that is
     not UTF-8 means the file is not text in that format at all, so the
     memo holding it is the unreadable one, as it was before #299."""
+    problem = file_problem(published_path(log))
+    if problem is not None:
+        # A folder or a pipe where the memo belongs (#364): a memo that
+        # cannot be read, raised as such, and a pipe is never opened.
+        raise OSError(problem)
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
@@ -3836,8 +3921,16 @@ def cmd_publish(args):
         return EX_UNAVAILABLE
     # The memo is written only for a head the remote took: a memo line
     # for a POST that never landed would stand the keeper down for good.
-    append_published_record(args.log, head, n, body["ts"], body["event"])
     print(f"published head {head[:12]}… (entry {n})")
+    try:
+        append_published_record(args.log, head, n, body["ts"], body["event"])
+    except OSError as e:
+        # The head left, and nothing here says so: the keeper posts it
+        # again on its next turn, which costs the remote a duplicate.
+        print(f"error: the memo could not be written: "
+              f"{unwritable_why(published_path(args.log), e)}; the keeper "
+              "will post this head again", file=sys.stderr)
+        return EX_CANTCREAT
     return 0
 
 
@@ -4110,7 +4203,8 @@ def stamp_digest(target, head, n, url):
         append_attempt_record(stamps_path(target), STEP_STAMP,
                               STAMP_TIMEOUT, "the token could not be written")
         print(f"error: the authority granted a token and it could not be "
-              f"written: {e.strerror or e}", file=sys.stderr)
+              f"written: {unwritable_why(stamps_path(target), e)}",
+              file=sys.stderr)
         return EX_CANTCREAT
     print(f"stamped {record_label(head, n)} via {url}")
     return 0
@@ -4169,7 +4263,16 @@ def submit_digest(target, head, n, calendars, upgrade_flags):
         except (OSError, ProofError) as e:
             print(f"warning: calendar {url}: {e}", file=sys.stderr)
             continue
-        append_anchor_record(target, head, n, url, proof_bytes)
+        try:
+            append_anchor_record(target, head, n, url, proof_bytes)
+        except OSError as e:
+            # A proof the calendar gave and this machine could not keep
+            # anchors nothing, and no other calendar's would land either.
+            print(f"error: calendar {url} answered, and the proof could not "
+                  f"be written to {anchors_path(target)}: "
+                  f"{unwritable_why(anchors_path(target), e)}",
+                  file=sys.stderr)
+            return EX_CANTCREAT
         written += 1
         print(f"anchored {record_label(head, n)} via {url}")
     if not written:
@@ -4185,6 +4288,11 @@ def upgrade_anchors(args):
     # The upgrade reads only the sidecar, so a manifest's anchor goes
     # the same way as a chain's: `--manifest PATH` names it.
     target = args.manifest or args.log
+    problem = file_problem(anchors_path(target))
+    if problem is not None:
+        print(f"error: {anchors_path(target)} cannot be read as a sidecar: "
+              f"{problem}", file=sys.stderr)
+        return EX_NOINPUT
     records = read_anchor_records(target)
     if not records:
         print(f"error: no anchors found at {anchors_path(target)} — "
@@ -4255,8 +4363,15 @@ def upgrade_anchors(args):
                   file=sys.stderr)
             failures += 1
             continue
-        append_anchor_record(target, record["head"], record.get("n"), url,
-                             upgraded)
+        try:
+            append_anchor_record(target, record["head"], record.get("n"),
+                                 url, upgraded)
+        except OSError as e:
+            print(f"error: the completion from {url} could not be written "
+                  f"to {anchors_path(target)}: "
+                  f"{unwritable_why(anchors_path(target), e)}",
+                  file=sys.stderr)
+            return EX_CANTCREAT
         completed.add(key)
         settled_heads.add(record["head"])
         print(f"upgraded: {label} now has a Bitcoin attestation")

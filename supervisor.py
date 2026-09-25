@@ -52,6 +52,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -935,17 +936,51 @@ def published_path(log):
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def file_problem(path):
+    """Why something is at `path` and cannot be read as a file, in
+    words: a folder, a pipe or a device, or a file this user may not
+    open. None when nothing is there, or a file that opens. A sidecar
+    is in the writer's reach, and `mkdir` puts a folder where one
+    belongs in one command (#364). The type is asked before anything is
+    opened, since opening a pipe waits for a writer that may never
+    come."""
+    try:
+        mode = os.stat(path).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return error.strerror or str(error)
+    if stat.S_ISDIR(mode):
+        return "it is a folder, not a file"
+    if not stat.S_ISREG(mode):
+        return "it is not a regular file"
+    try:
+        with open(path, "rb"):
+            return None
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return error.strerror or str(error)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
     surrogate from `read_log`), an integer too long to read, nesting too
-    deep (#299)."""
+    deep (#299). A sidecar that is there and cannot be read as a file
+    (`file_problem`) reads as one unreadable line, so no reader stops
+    on it and a judge names it (#364)."""
+    if file_problem(path) is not None:
+        return [None]
     try:
         lines = read_log(path)
     except FileNotFoundError:
         return None
+    except OSError:
+        return [None]
     records = []
     for line in lines:
         try:
@@ -1083,6 +1118,11 @@ def chain_cursor(log, url):
     memo's format, one line this parser declines, while a byte that is
     not UTF-8 means the file is not text in that format at all, so the
     memo holding it is the unreadable one, as it was before #299."""
+    problem = file_problem(published_path(log))
+    if problem is not None:
+        # A folder or a pipe where the memo belongs (#364): a memo that
+        # cannot be read, raised as such, and a pipe is never opened.
+        raise OSError(problem)
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
@@ -1142,7 +1182,9 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    if sidecar.exists():
+    # A folder or a pipe where the sidecar belongs holds no proof to
+    # upgrade (#364); the scan's verify names it.
+    if sidecar.is_file():
         finished = subprocess.run(
             [sys.executable, str(LOXODONTA), "anchor", "--upgrade",
              f"--log={log}"],
@@ -1161,7 +1203,15 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
             finished = subprocess.run(command, capture_output=True,
                                       encoding="utf-8", env=env)
             attempted = True
-            if finished.returncode != 0:
+            if finished.returncode == 73:
+                # EX_CANTCREAT: a calendar answered and the proof could
+                # not be kept, a folder where the sidecar belongs say.
+                failed = True
+                notes.append("anchoring failed — a calendar answered and "
+                             "the proof could not be written beside the "
+                             "chain; it stays unanchored until the sidecar "
+                             "can be written")
+            elif finished.returncode != 0:
                 failed = True
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
@@ -1290,6 +1340,11 @@ def publish_through_recorder(log, url, what):
         return (f"publishing the {what} refused: the recorder would not "
                 f"take {flag} as given; fix the URL (see "
                 "`loxodonta publish --help`)")
+    if finished.returncode == 73:
+        # EX_CANTCREAT: the head left, and the memo that would say so
+        # could not be written (#364), so the next turn posts it again.
+        return (f"published the {what}, and the memo could not be written; "
+                "the keeper will post it again until it can be")
     if finished.returncode != 0:
         return (f"publishing failed — the remote did not take this {what}; "
                 f"{stays} and the keeper will try again")
@@ -4969,7 +5024,7 @@ def write_raw_archive(report, ordinal, path):
                     log = Path(chain["log"])
                     archive.write(log, f"{label}/{log.name}")
                     sidecar = log.with_name(log.name + ".anchors.jsonl")
-                    if sidecar.exists():
+                    if sidecar.is_file():
                         archive.write(sidecar, f"{label}/{sidecar.name}")
 
 
@@ -5778,7 +5833,17 @@ def cmd_package(args):
         # split session may sit in a drawer no selector reaches.
         if split_refusal(session, everywhere.get(session, sessions[session])):
             return 1
-    packed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for log in (log for logs in sessions.values() for log in logs):
+        for suffix in (".anchors.jsonl", ".stamps.jsonl"):
+            # A package carries a chain's sidecars as they stand, and a
+            # folder or a pipe in one's place cannot be carried (#364).
+            problem = file_problem(str(log) + suffix)
+            if problem is not None:
+                print(f"error: {log.name}{suffix} cannot be packed: "
+                      f"{problem}; nothing written (`verify --anchors` "
+                      "names it too)", file=sys.stderr)
+                return 1
+    packed =datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     default = Path.cwd() / f"loxodonta-package-{stem}"
     out = Path(args.out) if args.out else (
         default if args.folder else default.with_name(default.name + ".zip"))

@@ -17,6 +17,7 @@ import errno
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -781,17 +782,50 @@ def anchors_path(log):
     return sidecar_path(log, ".anchors.jsonl")
 
 
+def file_problem(path):
+    """Why something is at `path` and cannot be read as a file, in
+    words: a folder, a pipe or a device, or a file this user may not
+    open. None when nothing is there, or a file that opens. A sidecar
+    is in the writer's reach, and `mkdir` puts a folder where one
+    belongs in one command (#364). The type is asked before anything is
+    opened, since opening a pipe waits for a writer that may never
+    come."""
+    try:
+        mode = os.stat(path).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return error.strerror or str(error)
+    if stat.S_ISDIR(mode):
+        return "it is a folder, not a file"
+    if not stat.S_ISREG(mode):
+        return "it is not a regular file"
+    try:
+        with open(path, "rb"):
+            return None
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return error.strerror or str(error)
+
+
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
     surrogate from `read_log`), an integer too long to read, nesting too
-    deep (#299)."""
+    deep (#299). A sidecar that is there and cannot be read as a file
+    (`file_problem`) reads as one unreadable line, so no reader stops
+    on it and a judge names it (#364)."""
+    if file_problem(path) is not None:
+        return [None]
     try:
         lines = read_log(path)
     except FileNotFoundError:
         return None
+    except OSError:
+        return [None]
     records = []
     for line in lines:
         try:
@@ -808,6 +842,21 @@ def read_sidecar_records(path):
 def read_anchor_records(log):
     """The anchor sidecar's records, or None when there is no sidecar."""
     return read_sidecar_records(anchors_path(log))
+
+
+def unreadable_sidecar(path):
+    """What a judge prints after its verdict word for a sidecar that is
+    there and cannot be read as a file, a folder in its place say; None
+    when it can be read, or is not there (SPEC §9.1). Named by its bare
+    name, never a path of this machine, and by why: it holds no
+    evidence, and it is not absent either, so it is judged as one line
+    that cannot be read."""
+    problem = file_problem(path)
+    if problem is None:
+        return None
+    return (f"{visible(os.path.basename(path))} cannot be read as a "
+            f"sidecar: {problem} — evidence that does not verify is not "
+            "evidence")
 
 
 def record_label(head, n):
@@ -974,6 +1023,10 @@ def check_anchors(log, entries, headers, used):
         print(f"NO-ANCHORS: {anchors_path(log)} not found — anchoring is "
               "optional; run `loxodonta anchor` to add one")
         return False
+    unreadable = unreadable_sidecar(anchors_path(log))
+    if unreadable is not None:
+        print(f"ANCHOR-INVALID: {unreadable}")
+        return True
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
 
     # A row of an unknown kind is named here, before any verdict line, so
@@ -1208,6 +1261,10 @@ def check_stamps(log, entries, chain_file):
               "timestamp is optional; run `loxodonta stamp --authority URL` "
               "to add one")
         return False
+    unreadable = unreadable_sidecar(stamps_path(log))
+    if unreadable is not None:
+        print(f"STAMP-INVALID: {unreadable}")
+        return True
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
     bad = False
     # A row of an unknown kind is named here, before any verdict line, so
@@ -1710,6 +1767,13 @@ def judge_artifact(folder, listing):
     where the file is judged: its bytes are checked, its words never are."""
     name = listing["path"]
     path = os.path.join(folder, name)
+    # A listed chain sidecar is an artifact too, so a folder in its place
+    # diverges here as well as failing its chain's judge (SPEC §9.1). A
+    # pipe is named, never opened: reading one waits for its writer.
+    problem = file_problem(path)
+    if problem is not None:
+        print(f"{name}: DIVERGED from the manifest: {problem}")
+        return True
     try:
         digest = sha256_file(path)
         size = os.path.getsize(path)
@@ -1746,6 +1810,10 @@ def judge_manifest_anchor(folder, headers, used):
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
     records = read_anchor_records(manifest)
+    unreadable = unreadable_sidecar(anchors_path(manifest))
+    if unreadable is not None:
+        print(f"seal anchor: SEAL-INVALID: {unreadable}")
+        return [(3, "SEAL-INVALID")], None, None
     if records:
         # Only proofs and unreadable lines are judged (ADR-0038): a
         # sidecar holding only notes, or rows of kinds this verifier
@@ -1825,6 +1893,10 @@ def judge_manifest_stamp(folder, chain_file):
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
     records = read_stamp_records(manifest)
+    unreadable = unreadable_sidecar(stamps_path(manifest))
+    if unreadable is not None:
+        print(f"seal stamp: SEAL-INVALID: {unreadable}")
+        return [(3, "SEAL-INVALID")], False, None
     if records:
         # Only tokens and unreadable lines are judged (ADR-0038): a
         # sidecar holding only notes, or rows of kinds this verifier

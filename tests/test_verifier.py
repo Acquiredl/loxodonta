@@ -119,6 +119,7 @@ TWINNED = {
     "test_package_stamp": ["StampedPackageTest", "JudgedPackageStampTest",
                            "OutlivedPackageStampTest",
                            "PackageStampRowKindTest"],
+    "test_sidecar_not_a_file": ["JudgedNotAFileTest", "PackagedNotAFileTest"],
 }
 
 
