@@ -3897,8 +3897,11 @@ def stamped_heads(log):
         records = read_stamp_records(log) or []
     except OSError:
         return set()
-    return {record.get("head") for record in records
-            if row_kind("stamps", record) == STAMP_KIND}
+    # A head that is not a string names no head, and a list would not
+    # even hash: the row is skipped, and the head is asked about.
+    return {record["head"] for record in records
+            if row_kind("stamps", record) == STAMP_KIND
+            and isinstance(record.get("head"), str)}
 
 
 def ask_authority(url, head, timeout):

@@ -38,8 +38,8 @@ from types import SimpleNamespace
 # when the module runs alone (`python -m unittest tests.test_package_stamp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import test_package_anchor
 from test_anchor import start_calendar
+from test_package_anchor import released_verifier
 from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run
 from test_stamp import (GRANTED, MISSING_AUTHORITY_TOOLING,
                         MISSING_EXPIRY_TOOLING, REQ_CONFIG, TSA_CONFIG,
@@ -990,9 +990,6 @@ class ReleasedVerifierTest(StampedStoreCase):
     That verifier skips only `attempt` rows, so it judges a `stamp` row
     as it judged a kind-less one."""
 
-    RELEASE = test_package_anchor.ReleasedVerifierTest.RELEASE
-    released_verifier = test_package_anchor.ReleasedVerifierTest.released_verifier
-
     def stamped_by_this_recorder(self):
         """A package whose chain sidecar and manifest sidecar each hold
         a `stamp` row this recorder wrote."""
@@ -1007,7 +1004,7 @@ class ReleasedVerifierTest(StampedStoreCase):
         return folder
 
     def assert_the_same_under_both(self, folder, *extra):
-        released = self.released_verifier()
+        released = released_verifier(self, self.root)
         now = self.verify_package(folder, *extra)
         then = subprocess.run(
             [sys.executable, "-I", str(released), "verify-package",

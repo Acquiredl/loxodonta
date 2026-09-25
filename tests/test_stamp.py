@@ -805,6 +805,22 @@ class StampRowKindTest(unittest.TestCase):
                 self.assertEqual(self.authority.received, [])
                 self.assertEqual(self.sidecar.read_text("utf-8"), row + "\n")
 
+    def test_a_token_row_whose_head_is_not_a_string_does_not_stop_the_verb(self):
+        # A writer-reachable row, so it must not crash the dedupe: it
+        # names no head, holds no token, and the head is asked about.
+        malformed = json.dumps({"head": ["x"], "response": "AA=="})
+        self.write_sidecar(malformed)
+
+        result = self.stamp()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(self.authority.received), 1)
+        rows = rows_of(self.sidecar)
+        self.assertEqual(rows[0], json.loads(malformed))
+        self.assertEqual((rows[1]["head"], rows[1]["kind"]),
+                         (self.head, "stamp"))
+
     def test_a_row_of_an_unknown_kind_naming_the_head_is_not_its_token(self):
         # Only a token stamps a head. A row of a kind the recorder does
         # not know is not one, whatever head it names, so the verb still
@@ -1014,6 +1030,30 @@ class SessionEndStampTest(PublishBase):
         self.assertEqual(note["step"], "stamp")
         self.assertEqual(note["outcome"],
                          "the authority answered status 2 (rejection)")
+
+    def test_a_malformed_stamps_row_leaves_the_stamp_and_the_anchor_working(self):
+        # A row whose head is not a string sits in a file the writer can
+        # reach. The dedupe skips it, so the session end still stamps the
+        # sealed head and still reaches the anchor after it.
+        calendar = self.watched_calendar()
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        malformed = {"head": ["x"], "response": "AA=="}
+        self.stamps().write_text(json.dumps(malformed) + "\n", "utf-8")
+
+        result = self.session_end("--stamp", self.authority.url,
+                                  "--anchor", "--calendar", calendar.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(len(self.authority.received), 1)
+        self.assertEqual([d.hex() for d in calendar.submitted], [self.head()])
+        rows = rows_of(self.stamps())
+        self.assertEqual(rows[0], malformed)
+        (token,) = [r for r in rows if r.get("kind") == "stamp"]
+        self.assertEqual(token["head"], self.head())
+        (note,) = attempt_rows(self.stamps())
+        self.assertEqual(note["outcome"], "granted")
 
     def test_an_authority_that_never_answers_is_abandoned_on_the_hooks_clock(self):
         # The one query has a bounded timeout well inside the budget, and

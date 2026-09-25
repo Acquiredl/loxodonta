@@ -546,6 +546,29 @@ class PackageRowKindTest(AnchoredStoreCase):
                          before.stdout.splitlines()[-1])
 
 
+RELEASE = "v0.9.0"
+
+
+def released_verifier(case, folder):
+    """The v0.9.0 `verifier.py`, from its tag's bytes, written into
+    `folder`; `case` skips when git or the tag is not there. The stamps
+    suite's compatibility test uses it too."""
+    try:
+        shown = subprocess.run(
+            ["git", "-C", str(LOXODONTA.parent), "show",
+             f"{RELEASE}:verifier.py"], capture_output=True)
+    except OSError:
+        case.skipTest("git is not on PATH, so the released verifier's "
+                      "bytes cannot be read")
+    if shown.returncode != 0:
+        case.skipTest(f"the {RELEASE} tag is not in this checkout "
+                      "(a shallow clone fetches no tags), so the released "
+                      "verifier's bytes cannot be read")
+    path = folder / f"verifier-{RELEASE}.py"
+    path.write_bytes(shown.stdout)
+    return path
+
+
 class ReleasedVerifierTest(AnchoredStoreCase):
     """ADR-0038's compatibility promise, held against the bytes a
     recipient already has: a package this recorder makes, its chain and
@@ -554,26 +577,8 @@ class ReleasedVerifierTest(AnchoredStoreCase):
     skips only `attempt` rows, so it judges an `anchor` row as it judged
     a kind-less one."""
 
-    RELEASE = "v0.9.0"
-
-    def released_verifier(self):
-        try:
-            shown = subprocess.run(
-                ["git", "-C", str(LOXODONTA.parent), "show",
-                 f"{self.RELEASE}:verifier.py"], capture_output=True)
-        except OSError:
-            self.skipTest("git is not on PATH, so the released verifier's "
-                          "bytes cannot be read")
-        if shown.returncode != 0:
-            self.skipTest(f"the {self.RELEASE} tag is not in this checkout "
-                          "(a shallow clone fetches no tags), so the released "
-                          "verifier's bytes cannot be read")
-        path = self.root / f"verifier-{self.RELEASE}.py"
-        path.write_bytes(shown.stdout)
-        return path
-
     def test_a_package_anchored_by_this_recorder_verifies_the_same_under_it(self):
-        released = self.released_verifier()
+        released = released_verifier(self, self.root)
         # The chain anchored by the recorder, so its sidecar holds an
         # `anchor` row beside the fixture's kind-less one.
         anchored = run(LOXODONTA, "anchor", "--log", str(self.chain),
