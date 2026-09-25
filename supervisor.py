@@ -1326,6 +1326,8 @@ def last_departure(log):
         if row_kind("anchors", record) != ANCHOR_KIND:
             continue
         when, head = row_when(record), record.get("head")
+        # A head that is not a string is no departure, and verify names
+        # the row (#348).
         if when is not None and isinstance(head, str) \
                 and (head not in first or when < first[head][0]):
             first[head] = (when, record["ts"])
