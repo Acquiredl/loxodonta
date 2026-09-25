@@ -1478,11 +1478,13 @@ SIGNATURE_PRINCIPAL = "issuer"
 
 def bare_name(value):
     """A manifest path is accepted only as a bare file name: the layout is
-    flat, and a path that could leave the package (a folder, `..`, an
-    absolute path, a backslash) is refused, never followed."""
+    flat, and a name that could leave the package is refused, never
+    followed. Judged by its characters alone, the same on every system:
+    not empty, not `.` or `..`, and no `/`, `\\` or `:` (a folder, a
+    drive such as `C:x`, a Windows stream) and no control character,
+    below U+0020, so one package gets one verdict wherever it is read."""
     return (isinstance(value, str) and value not in ("", ".", "..")
-            and "/" not in value and "\\" not in value
-            and value == os.path.basename(value))
+            and not any(c in "/\\:" or c < " " for c in value))
 
 
 def manifest_refusal(manifest):

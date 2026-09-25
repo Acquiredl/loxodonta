@@ -399,6 +399,32 @@ class DemoStorePackageTest(PackageCase):
             self.assertNotIn("outside-secret", result.stdout)
             self.assertNotIn("Traceback", result.stderr)
 
+    def test_a_bare_name_is_judged_by_its_characters_on_every_system(self):
+        # #358: `C:x` read as a drive only on Windows, so one manifest
+        # was refused there and judged elsewhere. A name is refused by
+        # its characters, a `:` or a control character too, wherever the
+        # recipient runs this, on a chain row and on an artifact row.
+        folder = self.folder_package()
+        written = (folder / "manifest.json").read_bytes()
+        for bad in ("C:x", "C:", "project.json:stream", "a\x00b", "a\tb",
+                    "line\nbreak", "\x1f"):
+            for row in ("chains", "artifacts"):
+                with self.subTest(name=bad, row=row):
+                    (folder / "manifest.json").write_bytes(written)
+                    self.rewrite_manifest(
+                        folder, lambda m, bad=bad, row=row: m[row].__setitem__(
+                            0, {**m[row][0], "path": bad}))
+
+                    result = self.verify_package(folder)
+
+                    self.assertEqual(result.returncode, 4, result.stdout)
+                    lines = result.stdout.strip().splitlines()
+                    self.assertEqual(len(lines), 1, "refused unread")
+                    self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"),
+                                    lines[0])
+                    self.assertIn("bare file name", lines[0])
+                    self.assertNotIn("Traceback", result.stderr)
+
     def crafted_zip(self, members):
         """A zip of `members`, (name, bytes) pairs in the order given.
         Python's zipfile warns at a repeated name and writes it anyway,
@@ -806,6 +832,22 @@ class HookStorePackageTest(PackageCase):
         self.assertEqual([c["path"] for c in manifest["chains"]],
                          [self.chain.name, self.sibling.name])
         self.assertNotIn(SUB_SESSION, (folder / "README.md").read_text("utf-8"))
+
+    @unittest.skipIf(os.name == "nt", "a `:` in a file name is a stream "
+                     "on Windows, so no such chain can sit in its store")
+    def test_a_chain_whose_name_is_not_bare_everywhere_is_not_packaged(self):
+        # #358: the verifier refuses a manifest listing `a:b`, so the
+        # packer refuses to write one. The hook never names a chain so;
+        # a chain copied into the drawer by hand, on a system that takes
+        # a `:` in a file name, can be.
+        stray = self.chain.with_name("receipts-a:b.jsonl")
+        stray.write_bytes(self.chain.read_bytes())
+
+        result = self.package("--repo", str(self.project))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("'receipts-a:b.jsonl' cannot be packaged", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
 
     def test_the_drawer_package_is_named_for_the_drawer_folder(self):
         # The slug is safe on every filesystem and hash-suffixed; the

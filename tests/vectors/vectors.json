@@ -462,6 +462,26 @@
       "last_line": "UNSUPPORTED-FORMAT: package is format \"loxodonta-package/2\"; this verifier speaks \"loxodonta-package/1\""
     },
     {
+      "name": "package-name-drive",
+      "about": "The manifest lists its artifact as C:x, a drive only on Windows: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-drive"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
+      "name": "package-name-backslash",
+      "about": "The manifest lists its artifact as a\\b, a folder only on Windows: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-backslash"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
       "name": "package-anchored",
       "about": "The manifest's sha256 anchored by a completed proof, and the header of the block its attestation claims given: the rung, the block named by the header's hash.",
       "args": [

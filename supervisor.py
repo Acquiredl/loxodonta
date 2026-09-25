@@ -5065,12 +5065,16 @@ def artifact_listing(path):
 PACKAGE_MAX_BYTES = 1 << 30   # the verifier's cap, twice over
 
 
-def bare_file_name(value):
-    """The verifier's rule for a packaged name, twice over: a bare file
-    name, nothing a path could be, since the layout is flat."""
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def bare_name(value):
+    """A manifest path is accepted only as a bare file name: the layout is
+    flat, and a name that could leave the package is refused, never
+    followed. Judged by its characters alone, the same on every system:
+    not empty, not `.` or `..`, and no `/`, `\\` or `:` (a folder, a
+    drive such as `C:x`, a Windows stream) and no control character,
+    below U+0020, so one package gets one verdict wherever it is read."""
     return (isinstance(value, str) and value not in ("", ".", "..")
-            and "/" not in value and "\\" not in value
-            and value == os.path.basename(value))
+            and not any(c in "/\\:" or c < " " for c in value))
 
 
 def package_too_large(stage, written):
@@ -5664,11 +5668,20 @@ def cmd_package(args):
             row["session"]: Path(row["transcript"])
             for row in report.get("completeness", {}).get("sessions", [])
             if row.get("session") in sessions and row.get("transcript")}
+    # The verifier refuses a manifest naming anything but a bare name,
+    # so a package listing one would never verify. The hook writes none
+    # (it keeps a session id's safe characters only); a chain put in the
+    # store by hand, on a system that allows a `:` in a file name, can.
+    for chains in sessions.values():
+        for log in chains:
+            if not bare_name(log.name):
+                print(f"error: chain {log.name!r} cannot be packaged: its "
+                      "name is not a bare file name on every system, and "
+                      "the package layout is flat", file=sys.stderr)
+                return 1
     if transcripts is not None:
         for session in sessions:
-            if not bare_file_name(f"transcript-{session}.jsonl"):
-                # The verifier refuses a manifest naming anything but a
-                # bare file name, so such a package would never verify.
+            if not bare_name(f"transcript-{session}.jsonl"):
                 print(f"error: session {session!r} cannot carry a transcript: "
                       "its name is not a bare file name, and the package "
                       "layout is flat", file=sys.stderr)
