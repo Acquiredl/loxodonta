@@ -5068,13 +5068,24 @@ PACKAGE_MAX_BYTES = 1 << 30   # the verifier's cap, twice over
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def bare_name(value):
     """A manifest path is accepted only as a bare file name: the layout is
-    flat, and a name that could leave the package is refused, never
-    followed. Judged by its characters alone, the same on every system:
-    not empty, not `.` or `..`, and no `/`, `\\` or `:` (a folder, a
-    drive such as `C:x`, a Windows stream) and no control character,
-    below U+0020, so one package gets one verdict wherever it is read."""
-    return (isinstance(value, str) and value not in ("", ".", "..")
-            and not any(c in "/\\:" or c < " " for c in value))
+    flat, and a name that could leave the package, or that one system
+    opens as another file than the rest do, is refused, never followed.
+    Judged by its characters alone, the same on every system, so one
+    package gets one verdict wherever it is read: not empty, not `.` or
+    `..`; no `/`, `\\` or `:` (a folder, a drive such as `C:x`, a
+    Windows stream) and no control character, below U+0020; no trailing
+    dot or space, which Windows strips, so `project.json.` would open
+    `project.json` there and nothing elsewhere; and not a Windows device
+    name, in any case and whatever follows its first dot (`NUL`,
+    `con.txt`, `COM1` to `COM9`, `LPT1` to `LPT9`)."""
+    if not isinstance(value, str) or value in ("", ".", ".."):
+        return False
+    if any(c in "/\\:" or c < " " for c in value) or value[-1] in ". ":
+        return False
+    device = value.split(".")[0].upper()
+    return not (device in ("CON", "PRN", "AUX", "NUL")
+                or (len(device) == 4 and device[:3] in ("COM", "LPT")
+                    and device[3] in "123456789¹²³"))
 
 
 def package_too_large(stage, written):
@@ -5669,9 +5680,10 @@ def cmd_package(args):
             for row in report.get("completeness", {}).get("sessions", [])
             if row.get("session") in sessions and row.get("transcript")}
     # The verifier refuses a manifest naming anything but a bare name,
-    # so a package listing one would never verify. The hook writes none
-    # (it keeps a session id's safe characters only); a chain put in the
-    # store by hand, on a system that allows a `:` in a file name, can.
+    # so a package listing one would never verify. The hook writes none:
+    # it keeps a session id's letters, digits, `-`, `_` and `.`, between
+    # `receipts-` and `.jsonl`, so no device name and no trailing dot. A
+    # chain put in the store by hand, where a `:` is allowed, can be one.
     for chains in sessions.values():
         for log in chains:
             if not bare_name(log.name):

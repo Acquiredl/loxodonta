@@ -482,6 +482,26 @@
       "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
     },
     {
+      "name": "package-name-trailing-dot",
+      "about": "The manifest lists its artifact as project.json., which Windows opens as project.json, stripping the dot, and no other system does: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-trailing-dot"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
+      "name": "package-name-device",
+      "about": "The manifest lists its artifact as NUL, a device on Windows: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-device"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
       "name": "package-anchored",
       "about": "The manifest's sha256 anchored by a completed proof, and the header of the block its attestation claims given: the rung, the block named by the header's hash.",
       "args": [

@@ -402,12 +402,15 @@ class DemoStorePackageTest(PackageCase):
     def test_a_bare_name_is_judged_by_its_characters_on_every_system(self):
         # #358: `C:x` read as a drive only on Windows, so one manifest
         # was refused there and judged elsewhere. A name is refused by
-        # its characters, a `:` or a control character too, wherever the
-        # recipient runs this, on a chain row and on an artifact row.
+        # its characters wherever the recipient runs this, on a chain
+        # row and on an artifact row: a `:`, a control character, a
+        # trailing dot or space (Windows strips them), a device name.
         folder = self.folder_package()
         written = (folder / "manifest.json").read_bytes()
         for bad in ("C:x", "C:", "project.json:stream", "a\x00b", "a\tb",
-                    "line\nbreak", "\x1f"):
+                    "line\nbreak", "\x1f", "project.json.", "project.json ",
+                    "NUL", "nul.txt", "Con", "prn.tar.gz", "com1.log",
+                    "LPT9", "COM¹"):
             for row in ("chains", "artifacts"):
                 with self.subTest(name=bad, row=row):
                     (folder / "manifest.json").write_bytes(written)
@@ -424,6 +427,21 @@ class DemoStorePackageTest(PackageCase):
                                     lines[0])
                     self.assertIn("bare file name", lines[0])
                     self.assertNotIn("Traceback", result.stderr)
+        # A name that only looks like one of them is bare: judged, and
+        # missing, since no such file is in the package.
+        for fine in ("CONSOLE.txt", "com10", "nul-ish.txt", "LPT0"):
+            with self.subTest(name=fine):
+                (folder / "manifest.json").write_bytes(written)
+                self.rewrite_manifest(
+                    folder, lambda m, fine=fine: m["artifacts"].__setitem__(
+                        0, {**m["artifacts"][0], "path": fine}))
+
+                result = self.verify_package(folder)
+
+                self.assertEqual(result.returncode, 2, result.stdout)
+                lines = result.stdout.strip().splitlines()
+                self.assertTrue(lines[-1].startswith("ARTIFACT-DIVERGED"),
+                                lines[-1])
 
     def crafted_zip(self, members):
         """A zip of `members`, (name, bytes) pairs in the order given.

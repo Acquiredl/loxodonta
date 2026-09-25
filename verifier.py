@@ -1485,13 +1485,24 @@ SIGNATURE_PRINCIPAL = "issuer"
 
 def bare_name(value):
     """A manifest path is accepted only as a bare file name: the layout is
-    flat, and a name that could leave the package is refused, never
-    followed. Judged by its characters alone, the same on every system:
-    not empty, not `.` or `..`, and no `/`, `\\` or `:` (a folder, a
-    drive such as `C:x`, a Windows stream) and no control character,
-    below U+0020, so one package gets one verdict wherever it is read."""
-    return (isinstance(value, str) and value not in ("", ".", "..")
-            and not any(c in "/\\:" or c < " " for c in value))
+    flat, and a name that could leave the package, or that one system
+    opens as another file than the rest do, is refused, never followed.
+    Judged by its characters alone, the same on every system, so one
+    package gets one verdict wherever it is read: not empty, not `.` or
+    `..`; no `/`, `\\` or `:` (a folder, a drive such as `C:x`, a
+    Windows stream) and no control character, below U+0020; no trailing
+    dot or space, which Windows strips, so `project.json.` would open
+    `project.json` there and nothing elsewhere; and not a Windows device
+    name, in any case and whatever follows its first dot (`NUL`,
+    `con.txt`, `COM1` to `COM9`, `LPT1` to `LPT9`)."""
+    if not isinstance(value, str) or value in ("", ".", ".."):
+        return False
+    if any(c in "/\\:" or c < " " for c in value) or value[-1] in ". ":
+        return False
+    device = value.split(".")[0].upper()
+    return not (device in ("CON", "PRN", "AUX", "NUL")
+                or (len(device) == 4 and device[:3] in ("COM", "LPT")
+                    and device[3] in "123456789¹²³"))
 
 
 def manifest_refusal(manifest):

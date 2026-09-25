@@ -579,11 +579,16 @@ def build(workdir):
                 '"loxodonta-package/1"')
 
     # A bare name is judged by its characters, the same on every system
-    # (#358): `C:x` is a drive and `a\b` a folder only on Windows, and
-    # the manifest naming either is refused wherever it is verified.
+    # (#358): Windows alone reads `C:x` as a drive, `a\b` as a folder,
+    # `project.json.` as `project.json` and `NUL` as a device, and the
+    # manifest naming any of them is refused wherever it is verified.
     for name, listed, reads in (
             ("package-name-drive", "C:x", "a drive only on Windows"),
-            ("package-name-backslash", "a\\b", "a folder only on Windows")):
+            ("package-name-backslash", "a\\b", "a folder only on Windows"),
+            ("package-name-trailing-dot", "project.json.",
+             "which Windows opens as project.json, stripping the dot, and "
+             "no other system does"),
+            ("package-name-device", "NUL", "a device on Windows")):
         package(name, package_files(
             base, change=lambda m, listed=listed:
             m["artifacts"][0].update(path=listed)))
