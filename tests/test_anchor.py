@@ -362,6 +362,25 @@ class SessionEndAnchorTest(unittest.TestCase):
         # is already anchored is not a step.
         self.assertEqual(len(self.attempts()), 1)
 
+    def test_a_row_of_an_unknown_kind_naming_the_head_is_not_its_anchor(self):
+        # ADR-0038: only a proof anchors a head. A row of a kind the
+        # recorder does not know is not one, whatever head it names, so
+        # the session end still submits the head, and the new row says
+        # it is an anchor.
+        self.tool_call()
+        head = run_receipts("head", "--log", str(self.chain),
+                            cwd=self.workdir).stdout.strip()
+        self.sidecar.write_text(json.dumps({"kind": "witness-note",
+                                            "head": head}) + "\n",
+                                encoding="utf-8")
+
+        result = self.session_end("--anchor", "--calendar", self.server.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.server.submitted, [bytes.fromhex(head)])
+        (proof,) = self.proofs()
+        self.assertEqual((proof["head"], proof["kind"]), (head, "anchor"))
+
     def test_a_later_session_end_upgrades_the_pending_proof(self):
         self.tool_call()
         self.session_end("--anchor", "--calendar", self.server.url)
@@ -878,6 +897,214 @@ class CalendarsDisagreeTest(unittest.TestCase):
         self.assertIn("ANCHOR-PENDING", result.stdout)
         self.assertIn("`loxodonta anchor --upgrade`", result.stdout)
         self.assertIn("ANCHOR-UNANSWERED", result.stdout)
+
+
+class AnchorRowKindTest(unittest.TestCase):
+    """ADR-0038: every row of the anchors sidecar names its kind. A new
+    proof is written `"kind": "anchor"`; a row with no kind reads as a
+    proof, whenever it was written, so every sidecar already shipped
+    verifies as it did; and a row of a kind this verifier does not know,
+    or a kind that belongs in another sidecar, is named by its line and
+    never judged, so a newer recorder's row is never evidence against an
+    honest log."""
+
+    UNKNOWN = "ANCHOR-UNKNOWN-KIND"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+        self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
+        self.server = start_calendar(self, b"fake-nonce")
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+
+    def pending_row(self, **extra):
+        """A pending proof of the head, as the recorder writes one, keys
+        sorted and compact; `extra` adds fields (a kind) or replaces them."""
+        row = {"head": self.head, "n": 1, "ts": "2026-09-24T10:00:00Z",
+               "calendar": self.server.url,
+               "proof": base64.b64encode(pending_proof(
+                   self.server.nonce, self.server.url)).decode()}
+        row.update(extra)
+        return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+    def write_sidecar(self, *lines):
+        self.sidecar.write_text("".join(line + "\n" for line in lines),
+                                encoding="utf-8")
+
+    def verify(self):
+        return run_receipts("verify", "--anchors", cwd=self.workdir)
+
+    def without_notes(self, stdout):
+        return [line for line in stdout.splitlines()
+                if not line.startswith(self.UNKNOWN)]
+
+    def test_a_new_anchor_row_names_its_kind_and_nothing_else_changes(self):
+        submitted = run_receipts("anchor", "--calendar", self.server.url,
+                                 cwd=self.workdir)
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        self.server.mode = "complete"
+        upgraded = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+
+        lines = self.sidecar.read_text("utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            row = json.loads(line)
+            self.assertEqual(row["kind"], "anchor")
+            self.assertEqual(set(row),
+                             {"kind", "head", "n", "ts", "calendar", "proof"})
+            # Written compact and key-sorted, as every sidecar row is.
+            self.assertEqual(line, json.dumps(row, sort_keys=True,
+                                              separators=(",", ":")))
+
+    def test_a_row_with_no_kind_reads_as_an_anchor(self):
+        self.write_sidecar(self.pending_row())
+        kindless = self.verify()
+        self.write_sidecar(self.pending_row(kind="anchor"))
+        named = self.verify()
+
+        self.assertEqual(kindless.returncode, 0,
+                         kindless.stdout + kindless.stderr)
+        self.assertIn("ANCHOR-PENDING", kindless.stdout)
+        self.assertRegex(kindless.stdout, r"(?m)^VALID$")
+        self.assertEqual((named.returncode, named.stdout, named.stderr),
+                         (kindless.returncode, kindless.stdout,
+                          kindless.stderr))
+
+    def test_a_kindless_row_for_another_head_is_still_a_mismatch(self):
+        self.write_sidecar(self.pending_row(head="ab" * 32))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("ANCHOR-MISMATCH", result.stdout)
+
+    def test_an_unknown_kind_is_named_by_its_line_and_not_judged(self):
+        self.write_sidecar(self.pending_row())
+        before = self.verify()
+        self.write_sidecar(self.pending_row(),
+                           json.dumps({"kind": "witness-note",
+                                       "ts": "2026-09-24T10:00:00Z"}))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, before.returncode,
+                         result.stdout + result.stderr)
+        self.assertIn(f'{self.UNKNOWN}: line 2 of {self.sidecar.name} is of kind '
+                      '"witness-note" — this verifier does not know the kind '
+                      'in this sidecar, and does not judge it', result.stdout)
+        self.assertEqual(result.stdout.count(self.UNKNOWN), 1)
+        self.assertNotIn("ANCHOR-INVALID", result.stdout)
+        self.assertEqual(self.without_notes(result.stdout),
+                         before.stdout.splitlines())
+
+    def test_a_chain_row_in_the_anchors_sidecar_is_named_not_judged(self):
+        # A known kind, but the memo's (ADR-0031), not this sidecar's.
+        chain_row = json.dumps({"kind": "chain", "first": 0, "last": 1,
+                                "head": self.head,
+                                "ts": "2026-09-24T10:00:00Z"})
+        self.write_sidecar(chain_row, self.pending_row())
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'{self.UNKNOWN}: line 1 of {self.sidecar.name} is of kind '
+                      '"chain"', result.stdout)
+        self.assertIn("ANCHOR-PENDING", result.stdout)
+        self.assertRegex(result.stdout, r"(?m)^VALID$")
+
+    def test_an_unknown_kind_leaves_an_exit_3_as_it_was(self):
+        # Beside evidence against the log, the note moves nothing: the
+        # exit is 3, and the last line is still the finding's, which is
+        # where the supervisor's scan reads a verdict.
+        mismatch = self.pending_row(head="ab" * 32)
+        self.write_sidecar(mismatch)
+        before = self.verify()
+        self.write_sidecar(mismatch, json.dumps({"kind": "later-kind"}))
+
+        result = self.verify()
+
+        self.assertEqual(before.returncode, 3, before.stdout + before.stderr)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1],
+                         before.stdout.splitlines()[-1])
+        self.assertIn(f"{self.UNKNOWN}: line 2 of", result.stdout)
+
+    def test_a_kind_that_is_not_a_string_is_named_by_its_type(self):
+        for kind, word in ((5, "a number"), (None, "null"), (True, "true or false"),
+                           (["anchor"], "an array"), ({"k": "anchor"}, "an object")):
+            with self.subTest(kind=kind):
+                self.write_sidecar(self.pending_row(),
+                                   json.dumps({"kind": kind}))
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn(f"{self.UNKNOWN}: line 2 of {self.sidecar.name} is "
+                              f"of a kind that is {word}, not a string — this "
+                              "verifier does not know the kind in this "
+                              "sidecar, and does not judge it", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_kind_is_printed_escaped_never_raw(self):
+        # The kind is the writer's text, printed to a terminal: a newline
+        # in it could forge a verdict line, an escape repaint the screen.
+        self.write_sidecar(self.pending_row(),
+                           json.dumps({"kind": "x\x1b[2J\nVALID‮"}))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('is of kind "x\\x1b[2J\\nVALID\\u202e"', result.stdout)
+        self.assertNotIn("\x1b", result.stdout)
+        self.assertNotIn("‮", result.stdout)
+        self.assertEqual(result.stdout.splitlines().count("VALID"), 1)
+
+    def test_an_unreadable_line_is_still_anchor_invalid(self):
+        too_long = '{"kind": ' + "9" * 5000 + "}"
+        too_deep = '{"kind": ' + "[" * 100000 + "]" * 100000 + "}"
+        for line in ("not a record", "[1, 2]", too_long, too_deep):
+            with self.subTest(line=line[:20]):
+                self.write_sidecar(self.pending_row(), line)
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 3,
+                                 result.stdout + result.stderr)
+                self.assertIn("ANCHOR-INVALID: sidecar line is not a record",
+                              result.stdout)
+                self.assertNotIn(self.UNKNOWN, result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_line_that_is_not_utf8_is_still_anchor_invalid(self):
+        self.sidecar.write_bytes(self.pending_row().encode() + b"\n"
+                                 + b'{"kind": "\xff"}\n')
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("ANCHOR-INVALID: sidecar line is not a record",
+                      result.stdout)
+
+    def test_upgrade_asks_about_no_row_of_an_unknown_kind(self):
+        # A row of a kind the recorder does not know is not a proof, so
+        # `anchor --upgrade` asks no calendar about it, whatever it holds.
+        other = start_calendar(self, b"other-nonce")
+        other.mode = "complete"
+        foreign = self.pending_row(kind="witness-note", calendar=other.url)
+        self.write_sidecar(foreign)
+
+        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(other.polled, [])
+        self.assertEqual(self.sidecar.read_text("utf-8").splitlines(),
+                         [foreign])
 
 
 if __name__ == "__main__":
