@@ -110,13 +110,15 @@ TWINNED = {
     "test_concurrency": ["ForkedTailTest"],
     "test_anchor": ["AnchorTest", "BlockHeaderTest", "AnchorRowKindTest",
                     "MalformedAnchorRowTest"],
-    "test_stamp": ["JudgedStampTest", "OutlivedCertificateTest"],
+    "test_stamp": ["JudgedStampTest", "OutlivedCertificateTest",
+                   "StampRowKindTest"],
     "test_package": ["DemoStorePackageTest"],
     "test_package_anchor": ["SealedPackageTest", "PackageRowKindTest",
                             "MalformedPackageRowTest"],
     "test_package_sign": ["SignedPackageTest"],
     "test_package_stamp": ["StampedPackageTest", "JudgedPackageStampTest",
-                           "OutlivedPackageStampTest"],
+                           "OutlivedPackageStampTest",
+                           "PackageStampRowKindTest"],
 }
 
 

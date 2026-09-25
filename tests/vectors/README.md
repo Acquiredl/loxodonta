@@ -1,6 +1,6 @@
 # Conformance vectors
 
-These are small receipt chains, each with the verdict a verifier must reach on it. They are here so that a second implementation of the format, in any language, can check itself against the same cases `loxodonta.py` and `verifier.py` are held to: an honest chain, each kind of tamper, the tail damage a crash leaves, the lines the walk refuses by name, text that needs escaping, and the head record. The format they test is [docs/SPEC.md](../../docs/SPEC.md), format `0.1`.
+These are small receipt chains and packages, each with the verdict a verifier must reach on it. They are here so that a second implementation of the format, in any language, can check itself against the same cases `loxodonta.py` and `verifier.py` are held to: an honest chain, each kind of tamper, the tail damage a crash leaves, the lines the walk refuses by name, text that needs escaping, the head record, and the package's own rules. The formats they test are [docs/SPEC.md](../../docs/SPEC.md)'s: the chain format `0.1`, and the package format `loxodonta-package/1` (section 10).
 
 ## The manifest
 
@@ -8,7 +8,7 @@ These are small receipt chains, each with the verdict a verifier must reach on i
 
 - `name`: the row's name.
 - `about`: what the chain holds and why the verdict is what it is.
-- `args`: the command line, run from inside this folder, so every path in it is relative to here. The chain is named by `--log`.
+- `args`: the command line, run from inside this folder, so every path in it is relative to here. A chain row names its chain by `--log`; a package row's verb is `verify-package`, followed by the package, a folder or a zip here, and it has no `--log`.
 - `exit`: the exit code expected.
 - `last_line` or `last_line_prefix`: the last line of stdout expected, exactly or as its start. An empty `last_line` means nothing is printed on stdout.
 - `canonical` (on some rows): `{"entry": N, "text": ...}`, entry N's canonical form (SPEC section 4) written out in full. Its SHA256 is that entry's `entry_hash`, so the bytes to reproduce are stated, not only their hash.
@@ -16,7 +16,9 @@ These are small receipt chains, each with the verdict a verifier must reach on i
 
 Rows that share a chain name it by `--log`: `valid-chain.jsonl` is run as `verify`, `verify --files`, `head` and with `--expect-head`. `notes.txt` is the file `valid-chain.jsonl` references, and `transcript.txt` is the transcript its commitments cover.
 
-For another implementation, the exit code and the verdict word that starts the line (`VALID`, `BROKEN`, `HEAD-MISMATCH`, `UNSUPPORTED-VERSION`, `TRANSCRIPT-DIVERGED`) are the contract; the rest of the wording is loxodonta's. A `head` row's line is the chain head itself. Exit 1 is `BROKEN` and nothing else (ADR-0037): a log that is missing or empty is no input, exit 66, with nothing on stdout.
+The packages are laid out as `supervisor package` lays one out, flat: one chain, `receipts-vector.jsonl` (the entries of `valid-chain.jsonl`), the project record `project.json`, and `manifest.json` last, listing the chain by its head and line count and the record by its sha256 and byte count. `package-unsealed` declares no seal. `package-artifact-altered` has its `project.json` rewritten after the manifest listed it. `package-named-twice.zip` is `package-unsealed` zipped behind a first member of the chain's name, with entry 2 edited. `package-seal-missing` declares an anchor and carries no `manifest.json.anchors.jsonl`. `package-unknown-format` declares the format `loxodonta-package/2`. `package-anchored` carries, in `manifest.json.anchors.jsonl`, a completed proof over its manifest's sha256; the proof and the block header its row gives are made up by the build, the header holding the root the proof replays to, so no calendar and no block source is needed. A package's manifest is sealed as bytes, so none of these files may be rewritten either.
+
+For another implementation, the exit code and the verdict word that starts the line (`VALID`, `BROKEN`, `HEAD-MISMATCH`, `UNSUPPORTED-VERSION`, `TRANSCRIPT-DIVERGED`; for a package `SELF-CONSISTENT`, with its rungs, `ARTIFACT-DIVERGED`, `SEAL-MISSING` and `UNSUPPORTED-FORMAT`) are the contract; the rest of the wording is loxodonta's. A `head` row's line is the chain head itself. Exit 1 is `BROKEN` and nothing else (ADR-0037): a log that is missing or empty is no input, exit 66, with nothing on stdout.
 
 A chain whose genesis claims a version the verifier does not speak is walked for its hashes all the same, since the hashing is frozen across versions (ADR-0036): a hash or link that fails is `BROKEN`, exit 1, and only a chain whose hashes all hold is `UNSUPPORTED-VERSION`, exit 4. The `unsupported-version` rows hold both sides of that line.
 
@@ -24,4 +26,4 @@ A chain whose genesis claims a version the verifier does not speak is walked for
 
 [`tests/test_vectors.py`](../test_vectors.py) runs every row against `loxodonta.py` and against `verifier.py`, and checks that the two give the same exit and the same output.
 
-The chains are written by [`tools/build_vectors.py`](../../tools/build_vectors.py): the honest ones by the recorder itself, with `SOURCE_DATE_EPOCH` pinning the timestamps, and the lines no recorder writes by the script. `python tools/build_vectors.py --check` rebuilds them and fails if any byte differs, and the suite runs that check. Git keeps every file here byte for byte (`.gitattributes`), since a line ending changed on checkout would change a hash.
+The chains are written by [`tools/build_vectors.py`](../../tools/build_vectors.py): the honest ones by the recorder itself, with `SOURCE_DATE_EPOCH` pinning the timestamps, and the lines no recorder writes by the script. The script assembles the packages too, the zip with its members stored and every date and attribute pinned. `python tools/build_vectors.py --check` rebuilds them and fails if any byte differs, and the suite runs that check. Git keeps every file here byte for byte (`.gitattributes`), since a line ending changed on checkout would change a hash.

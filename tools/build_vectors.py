@@ -4,11 +4,12 @@
     python tools/build_vectors.py           write the vectors and vectors.json
     python tools/build_vectors.py --check   exit 1 if a committed vector differs
 
-A vector is a small chain file and one row of tests/vectors/vectors.json
-saying what running a verb on it must give: the exit code and the last
-line of stdout. tests/test_vectors.py runs every row against loxodonta.py
-and against verifier.py, and a second implementation of the format checks
-itself against the same rows (tests/vectors/README.md).
+A vector is a small chain file, or a package (SPEC section 10), and one
+row of tests/vectors/vectors.json saying what running a verb on it must
+give: the exit code and the last line of stdout. tests/test_vectors.py
+runs every row against loxodonta.py and against verifier.py, and a second
+implementation checks itself against the same rows
+(tests/vectors/README.md).
 
 The honest chains are written by the recorder itself, through its public
 command line, with SOURCE_DATE_EPOCH pinning every timestamp, so two runs
@@ -16,16 +17,25 @@ give the same bytes. The lines no recorder writes (a key given twice, a
 wrong type, a lone surrogate, another spelling of the same entry) are
 built here, and hashed here by SPEC section 4's rules written out again,
 never imported: every line the recorder wrote is hashed that way too, and
-the build stops if the two disagree. The expected verdicts are written
-out below, one row at a time, and never read back from a run.
+the build stops if the two disagree. The packages are assembled here as
+`supervisor package` lays one out, from those chains, with every date
+pinned; the anchored one carries a proof and a block header made up here,
+as tests/test_anchor.py makes them, so no calendar is asked. The expected
+verdicts are written out below, one row at a time, and never read back
+from a run.
 """
 
+import base64
 import hashlib
+import io
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
+import warnings
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +60,27 @@ ESCAPES = ('say "hi" \\ then\nnext\ttab\rcr\bbs\fff \x00\x01\x1f'
 # The six ASCII characters the recorder writes for a lone surrogate
 # (#292), which a verifier reads as plain text.
 SURROGATE_TEXT = "read the file name caf\\udce9.txt"
+
+# The packages (SPEC section 10). Every field the verifier does not judge
+# is pinned too, so the manifest's bytes, and so its sha256, never move.
+PACKAGE_FORMAT = "loxodonta-package/1"
+PACKAGE_CHAIN = "receipts-vector.jsonl"
+PACKED = "2026-09-23T12:10:00Z"
+PACKER = "loxodonta supervisor 0.9.0"
+PROJECT_RECORD = b'{"path": "/home/operator/vector-project"}\n'
+PACKAGE_UNIT = {"kind": "session", "session": "vector", "project":
+                "vector-project"}
+ZIP_TIME = (2026, 9, 23, 12, 10, 0)
+
+# The anchored package's made-up proof: the ops of a completed
+# OpenTimestamps proof (docs/ANCHORING.md section 4), append a nonce,
+# sha256, prepend and append, then the double sha256 that ends at a
+# Bitcoin attestation. Its root goes into a made-up block header.
+OTS_APPEND, OTS_PREPEND, OTS_SHA256 = b"\xf0", b"\xf1", b"\x08"
+OTS_BITCOIN = bytes.fromhex("0588960d73d71901")
+PROOF_NONCE, PROOF_PREFIX, PROOF_SUFFIX = (b"vector-nonce", b"vector-prefix",
+                                           b"vector-suffix")
+PROOF_HEIGHT = 850123
 
 
 # --- SPEC section 4, written out again ----------------------------------------
@@ -161,10 +192,95 @@ def entries_of(lines):
     return [json.loads(line) for line in lines]
 
 
+# --- Packages (SPEC section 10), assembled as the supervisor lays one out ------
+
+def package_files(chain_lines, seals=(), format_tag=PACKAGE_FORMAT):
+    """A package of one chain and the project record, as {name: bytes},
+    with the manifest written last listing them: the chain by its head
+    and line count, the record by its sha256 and byte count."""
+    chain = "".join(line + "\n" for line in chain_lines).encode("utf-8")
+    manifest = {
+        "format": format_tag,
+        "packed": PACKED,
+        "tool": PACKER,
+        "unit": PACKAGE_UNIT,
+        "chains": [{"path": PACKAGE_CHAIN,
+                    "head": json.loads(chain_lines[-1])["entry_hash"],
+                    "entries": len(chain_lines),
+                    "anchors": None, "stamps": None}],
+        "artifacts": [{"path": "project.json",
+                       "sha256": hashlib.sha256(PROJECT_RECORD).hexdigest(),
+                       "bytes": len(PROJECT_RECORD)}],
+        "seals": list(seals),
+    }
+    return {PACKAGE_CHAIN: chain, "project.json": PROJECT_RECORD,
+            "manifest.json": (json.dumps(manifest, indent=2) + "\n").encode()}
+
+
+def ots_varint(n):
+    out = bytearray()
+    while True:
+        byte, n = n & 0x7F, n >> 7
+        out.append(byte | 0x80 if n else byte)
+        if not n:
+            return bytes(out)
+
+
+def ots_varbytes(data):
+    return ots_varint(len(data)) + data
+
+
+def completed_proof():
+    """A completed proof from any digest: each op is followed by the node
+    it leads to, and the last node is the Bitcoin attestation."""
+    return (OTS_APPEND + ots_varbytes(PROOF_NONCE) + OTS_SHA256
+            + OTS_PREPEND + ots_varbytes(PROOF_PREFIX)
+            + OTS_APPEND + ots_varbytes(PROOF_SUFFIX) + OTS_SHA256 + OTS_SHA256
+            + b"\x00" + OTS_BITCOIN + ots_varbytes(ots_varint(PROOF_HEIGHT)))
+
+
+def replayed_root(digest_hex):
+    """completed_proof replayed by hand from `digest_hex`: the merkle root
+    its attestation claims, in the order a block header stores it."""
+    step = hashlib.sha256(bytes.fromhex(digest_hex) + PROOF_NONCE).digest()
+    return hashlib.sha256(hashlib.sha256(
+        PROOF_PREFIX + step + PROOF_SUFFIX).digest()).digest()
+
+
+def block_header(root):
+    """An 80-byte header in Bitcoin's layout holding `root` at bytes 36
+    to 68. Made up: nothing checks that it was ever mined, and the
+    verifier does not claim to."""
+    return (struct.pack("<I", 0x20000000) + b"\x11" * 32 + root
+            + struct.pack("<III", 1790165400, 0x17034219, 7))
+
+
+def header_hash(header):
+    """A header's hash as explorers print it: double sha256, reversed."""
+    return hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1].hex()
+
+
+def zipped(members):
+    """A zip of (name, bytes) members in the order given, stored, with
+    every date and attribute pinned, so it is the same bytes on every
+    system. A name given twice is written twice: that is a vector."""
+    out = io.BytesIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")   # zipfile warns on a name twice
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as package:
+            for name, data in members:
+                info = zipfile.ZipInfo(name, date_time=ZIP_TIME)
+                info.create_system = 3            # the same on every system
+                info.external_attr = 0o644 << 16
+                package.writestr(info, data)
+    return out.getvalue()
+
+
 # --- The vectors ----------------------------------------------------------------
 
 def build(workdir):
-    """Every vector file, as {name: bytes}, and the manifest's rows."""
+    """Every vector file, as {path from tests/vectors/: bytes}, the
+    manifest of rows among them."""
     (workdir / "notes.txt").write_bytes(NOTES)
     files = {"notes.txt": NOTES, "transcript.txt": TRANSCRIPT}
     rows = []
@@ -399,11 +515,96 @@ def build(workdir):
     row("log-empty-head", "head", "An empty file has no head.", 66, "",
         log="log-empty")
 
+    # The packages (SPEC section 10). A package row names a folder or a
+    # zip in this folder, after the verb, and no --log.
+    def package(name, members):
+        for member, data in members.items():
+            files[f"{name}/{member}"] = data
+
+    def package_row(name, about, exit, line, target=None, more=()):
+        rows.append({"name": name, "about": about,
+                     "args": ["verify-package", target or name, *more],
+                     "exit": exit, "last_line": line})
+
+    unsealed = package_files(base)
+    package("package-unsealed", unsealed)
+    package_row("package-unsealed", "One chain and the project record, "
+                "listed by a manifest declaring no seal: the ceiling, with "
+                "its limit.", 0, "SELF-CONSISTENT: every chain walks clean "
+                "and every artifact matches the manifest; indistinguishable "
+                "from a wholesale regeneration, since no seal is declared")
+
+    package("package-artifact-altered", {
+        **unsealed,
+        "project.json": b'{"path": "/home/operator/another-project"}\n'})
+    package_row("package-artifact-altered", "The same package with "
+                "project.json rewritten after the manifest listed it: its "
+                "sha256 is not the listed one.", 2, "ARTIFACT-DIVERGED: "
+                "something in this package is not what the manifest lists "
+                "(the lines above say what)")
+
+    # The tampered chain goes first: unpacking keeps the last member of a
+    # name, while a reader that stops at the first sees this one (#299).
+    tampered = "".join(line + "\n" for line in
+                       base[:2] + [stored(edited)] + base[3:]).encode()
+    files["package-named-twice.zip"] = zipped(
+        [(PACKAGE_CHAIN, tampered)] + list(unsealed.items()))
+    package_row("package-named-twice", "A zip of the unsealed package with "
+                "a second member of the chain's name ahead of it, entry 2 "
+                "edited: which one is read depends on the unzip, so it is "
+                "refused unopened.", 4, "UNSUPPORTED-FORMAT: "
+                f"package-named-twice.zip holds two members that unpack to "
+                f"one file, '{PACKAGE_CHAIN}' twice; which one is read "
+                "depends on the tool that unpacks it, so this verifier "
+                "refuses it unopened", target="package-named-twice.zip")
+
+    package("package-seal-missing", package_files(base, seals=["anchor"]))
+    package_row("package-seal-missing", "The manifest declares an anchor "
+                "and no manifest.json.anchors.jsonl is in the package: a "
+                "stripped seal fails, never reads as unsealed.", 3,
+                "SEAL-MISSING: a seal the manifest declares is not in this "
+                "package (the seal line above says which)")
+
+    package("package-unknown-format",
+            package_files(base, format_tag="loxodonta-package/2"))
+    package_row("package-unknown-format", "The manifest's format is a tag "
+                "this verifier does not speak: a refusal, and nothing is "
+                "judged.", 4, 'UNSUPPORTED-FORMAT: package is format '
+                '"loxodonta-package/2"; this verifier speaks '
+                '"loxodonta-package/1"')
+
+    anchored = package_files(base, seals=["anchor"])
+    digest = hashlib.sha256(anchored["manifest.json"]).hexdigest()
+    proof = {"calendar": "https://calendar.example/", "head": digest,
+             "kind": "anchor", "proof":
+             base64.b64encode(completed_proof()).decode("ascii"),
+             "ts": "2026-09-23T12:11:00Z"}
+    anchored["manifest.json.anchors.jsonl"] = (
+        stored(proof) + "\n").encode()
+    package("package-anchored", anchored)
+    header = block_header(replayed_root(digest))
+    package_row("package-anchored", "The manifest's sha256 anchored by a "
+                "completed proof, and the header of the block its "
+                "attestation claims given: the rung, the block named by the "
+                "header's hash.", 0, "SELF-CONSISTENT + ANCHORED: every chain "
+                "walks clean and every artifact matches the manifest, and "
+                "the manifest existed by the block whose header hashes to "
+                f"{header_hash(header)}, which its anchor calls Bitcoin block "
+                f"{PROOF_HEIGHT}", more=["--block-header", header.hex()])
+    package_row("package-anchored-unchecked", "The same package with no "
+                "header given: the rung is earned, and the block is the "
+                "attestation's claim.", 0, "SELF-CONSISTENT + ANCHORED: every "
+                "chain walks clean and every artifact matches the manifest, "
+                "and the manifest's anchor claims Bitcoin block "
+                f"{PROOF_HEIGHT}, a block not checked here",
+                target="package-anchored")
+
     manifest = {
         "format": "0.1",
-        "about": "Conformance vectors for the receipt format (docs/SPEC.md). "
-                 "Run each row's args from inside this folder; the exit and "
-                 "the last line of stdout must be as given. See README.md.",
+        "about": "Conformance vectors for the receipt format and the "
+                 "package (docs/SPEC.md). Run each row's args from inside "
+                 "this folder; the exit and the last line of stdout must be "
+                 "as given. See README.md.",
         "vectors": rows,
     }
     files["vectors.json"] = (json.dumps(manifest, indent=2) + "\n").encode()
@@ -417,7 +618,10 @@ def main(argv):
     with tempfile.TemporaryDirectory() as scratch:
         files = build(Path(scratch))
     if argv == ["--check"]:
-        on_disk = {p.name for p in VECTORS.iterdir()} - KEPT
+        # A package is a folder of files, so every file below is counted,
+        # named by its path from here with forward slashes.
+        on_disk = {p.relative_to(VECTORS).as_posix()
+                   for p in VECTORS.rglob("*") if p.is_file()} - KEPT
         stale = sorted(name for name in set(files) | on_disk
                        if not (VECTORS / name).is_file()
                        or name not in files
@@ -431,6 +635,7 @@ def main(argv):
         return 0
     VECTORS.mkdir(exist_ok=True)
     for name, data in files.items():
+        (VECTORS / name).parent.mkdir(exist_ok=True)
         (VECTORS / name).write_bytes(data)
     print(f"wrote {len(files)} files to {VECTORS}")
     return 0
