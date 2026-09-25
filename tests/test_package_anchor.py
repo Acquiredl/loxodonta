@@ -536,9 +536,11 @@ class PackageRowKindTest(AnchoredStoreCase):
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertEqual(judged.returncode, before.returncode)
         self.assertIn(SealedPackageTest.CHAIN_DETAIL, judged.stdout)
-        self.assertIn(f"ANCHOR-UNKNOWN-KIND: line 2 of "
-                      f"{folder / sidecar.name} is of kind \"witness-note\"",
-                      judged.stdout)
+        # The sidecar by its bare name, never the unpack folder's path.
+        self.assertIn(f"ANCHOR-UNKNOWN-KIND: line 2 of {sidecar.name} is of "
+                      "kind \"witness-note\"", judged.stdout)
+        self.assertNotIn(str(folder), "\n".join(
+            l for l in judged.stdout.splitlines() if "UNKNOWN-KIND" in l))
         self.assertNotIn("INVALID", judged.stdout)
         self.assertEqual(judged.stdout.splitlines()[-1],
                          before.stdout.splitlines()[-1])

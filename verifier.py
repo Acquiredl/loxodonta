@@ -848,6 +848,9 @@ def record_label(head, n):
 # the machine. The chain's schema is untouched.
 
 ATTEMPT_KIND = "attempt"
+# The publish memo's other note: a batch of entries sent to a receiver
+# (ADR-0031). Named here because the row reader below knows it.
+CHAIN_KIND = "chain"
 
 
 def is_attempt(record):
@@ -876,7 +879,7 @@ HEAD_KIND = "head"
 SIDECAR_KINDS = {
     "anchors": (ANCHOR_KIND, ATTEMPT_KIND),
     "stamps": (STAMP_KIND, ATTEMPT_KIND),
-    "memo": (HEAD_KIND, "chain", ATTEMPT_KIND),
+    "memo": (HEAD_KIND, CHAIN_KIND, ATTEMPT_KIND),
 }
 # What `row_kind` answers when a row has no kind of its sidecar's. No
 # sidecar holds either word as a kind, so a writer who writes one is
@@ -907,13 +910,13 @@ JSON_TYPE_WORDS = ((bool, "true or false"), (int, "a number"),
                    (dict, "an object"), (type(None), "null"))
 
 
-def rows_to_judge(sidecar, records, word, name):
+def rows_to_judge(sidecar, records, prefix, name):
     """The rows of `records` a judge of `sidecar` weighs, in file order:
     each evidence row, and None for each unreadable line, which the
     judge names. Attempt rows and the memo's chain rows are left out
     silently. A row of a kind unknown here is left out after one line
-    that names it, headed `word`, with its line number in the sidecar
-    `name`. The kind is the writer's text, so it is printed escaped, and
+    that names it, headed `prefix`, with its line number in the sidecar
+    file `name`: a bare file name, never a path of this machine. The kind is the writer's text, so it is printed escaped, and
     a kind that is not a string is named by its JSON type, never its
     value."""
     judged = []
@@ -932,7 +935,7 @@ def rows_to_judge(sidecar, records, word, name):
             words = next((words for types, words in JSON_TYPE_WORDS
                           if isinstance(written, types)), "a value")
             shown = f"of a kind that is {words}, not a string"
-        print(f"{word}: line {number} of {visible(name)} is {shown} — this "
+        print(f"{prefix}: line {number} of {visible(name)} is {shown} — this "
               "verifier does not know the kind in this sidecar, and does "
               "not judge it")
     return judged
@@ -958,7 +961,7 @@ def check_anchors(log, entries, headers, used):
     # the last line printed is the one it would be without the row.
     judged = []
     for record in rows_to_judge("anchors", records, "ANCHOR-UNKNOWN-KIND",
-                                anchors_path(log)):
+                                os.path.basename(anchors_path(log))):
         if record is None:
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue

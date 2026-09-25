@@ -57,6 +57,7 @@ loxodonta verify --anchors --block-header HEX [...] # ... and check their blocks
    - `ANCHORED: entries 0..n existed by the block whose header hashes to <X>, whose merkle root <R> is the one the proof replays to; the attestation calls it Bitcoin block H, which is your header source's word, and the hash is what a second source can confirm`: a header given with `--block-header` holds the root the proof replays to.
    - `ANCHOR-PENDING: head <h>… submitted <ts> via <calendar> — run loxodonta anchor --upgrade` — not a failure; exit unchanged.
    - `ANCHOR-UNANSWERED: head <h>… submitted <ts> via <calendar> never came back, and another calendar settled this head — no upgrade is owed` — the record stays in the sidecar as evidence of where the submission went, and the line stops advising a command that cannot help. Calendars disagreeing is ordinary, and four of them is the default (#199).
+4. A row that is not an anchor is not judged by any of the above. An attempt row is skipped silently (§2). A row of a kind this verifier does not know, or of another sidecar's kind, is named first, as `ANCHOR-UNKNOWN-KIND: line N of <sidecar> is of kind "<kind>"`: it earns nothing and leaves the exit code as it was.
 
 A header that matched no attestation prints `HEADER-UNMATCHED: the block header with hash <X> holds merkle root <R>, which no Bitcoin attestation judged here replays to; ...` after the anchor lines and before the verdict. It checked nothing, and it is a note, never a verdict (below).
 
