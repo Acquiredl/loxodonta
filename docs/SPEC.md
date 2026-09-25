@@ -3,7 +3,7 @@
 This document specifies three parts, and each has its own version:
 
 - **The chain format:** `0.1`, sections 1 to 8, amended through 0.1.4.
-- **The sidecars:** every row names its kind (ADR-0038). Section 9, to come; until then docs/ANCHORING.md and docs/PACKAGE.md describe them.
+- **The sidecars:** every row names its kind (ADR-0038), section 9.
 - **The package format:** `loxodonta-package/1`, section 10.
 
 A revision of this document is not a format version: each part changes only under its own tag.
@@ -414,7 +414,7 @@ The findings are ranked, and the gravest sets the verdict and the exit; within o
 | 5 | `ARTIFACT-DIVERGED` | 2 | A listed file is missing or differs from its listing, or a chain walks to another head or length. |
 | — | `SELF-CONSISTENT` | 0 | No finding. |
 
-`SELF-CONSISTENT` is the ceiling of a package with no seal, and it is printed with its limit: a wholesale regeneration, packed afresh, verifies the same. Each seal that holds adds its rung, in this order whatever the order declared: `+ ANCHORED` (the manifest's anchor completed), `+ STAMPED` (a token over the manifest was accepted), `+ SIGNED (key: <fingerprint>)` (the signature verified). The rungs are the manifest's seals alone: a chain's own anchor or token is printed under that chain and earns the package nothing, since it seals another object (ADR-0026 ruling 6). The verdict words name the mechanism, never a conclusion (ADR-0007 ruling 5). The line of residual trust before it states what rests on the issuer's word alone: that the record inside is true and complete, in every case, and whatever no seal earned. A seal of a known kind that no tool could judge (§10.8) is said so in both lines, and changes the exit in nothing; a seal of a kind the verifier does not know (§10.6) is named on its seal line only.
+`SELF-CONSISTENT` is the ceiling of a package with no seal, and it is printed with its limit: a wholesale regeneration, packed afresh, verifies the same (§8.1). Each seal that holds adds its rung, in this order whatever the order declared: `+ ANCHORED` (the manifest's anchor completed), `+ STAMPED` (a token over the manifest was accepted), `+ SIGNED (key: <fingerprint>)` (the signature verified). The rungs are the manifest's seals alone: a chain's own anchor or token is printed under that chain and earns the package nothing, since it seals another object (ADR-0026 ruling 6). The verdict words name the mechanism, never a conclusion (ADR-0007 ruling 5). The line of residual trust before it states what rests on the issuer's word alone: that the record inside is true and complete, in every case (§8.1), and whatever no seal earned. A seal of a known kind that no tool could judge (§10.8) is said so in both lines, and changes the exit in nothing; a seal of a kind the verifier does not know (§10.6) is named on its seal line only.
 
 Outside the ladder, as for `verify` (ADR-0037): 64 for a usage error, 66 when the package path is not there, 70 when the verifier itself fails. Exit 1 is `CHAIN-BROKEN` and nothing else.
 
