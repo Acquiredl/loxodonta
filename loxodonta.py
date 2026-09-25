@@ -3561,9 +3561,14 @@ def chain_cursor(log, url):
     the receiver drops each line as an exact duplicate. A row of any
     other kind, a head, a note or a kind unknown here, counts for none
     either (ADR-0038). A torn memo line is read past (a resend the
-    receiver drops, never a stuck keeper); a memo that cannot be read
-    at all is raised, not guessed at, since -1 would send the whole
-    chain again at every session end."""
+    receiver drops, never a stuck keeper), and so is a line past the
+    digit or recursion limit, which no reader here takes apart either;
+    a memo that cannot be read at all is raised, not guessed at, since
+    -1 would send the whole chain again at every session end. The two
+    differ on purpose (#344): a line past a limit is still text in the
+    memo's format, one line this parser declines, while a byte that is
+    not UTF-8 means the file is not text in that format at all, so the
+    memo holding it is the unreadable one, as it was before #299."""
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
@@ -3578,7 +3583,10 @@ def chain_cursor(log, url):
         line.encode("utf-8")
         try:
             record = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # One appended line must not stop the chain route at every
+            # session end and keeper turn (#331, #344): at worst a chain
+            # row is missed and a batch the receiver drops goes again.
             continue
         if is_chain_record(record) and isinstance(record.get("last"), int) \
                 and record.get("remote_id") == mine:
