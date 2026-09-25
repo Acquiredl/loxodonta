@@ -724,6 +724,29 @@ class ScanAnchorTest(unittest.TestCase):
         self.assertEqual(regenerated["exit"], 3)
         self.assertFalse(regenerated["anchored"])
 
+    def test_a_line_json_cannot_hold_in_a_sidecar_never_stops_the_scan(self):
+        # #331: the sidecars are writer-reachable, so one appended line
+        # must not stop the audit. An integer past Python's digit limit
+        # and nesting past the recursion limit are the two lines a JSON
+        # parser refuses with something other than a decode error.
+        lines = {"an overlong integer": '{"n":' + "1" * 5000 + "}",
+                 "deep nesting": "[" * 100000 + "]" * 100000}
+        for suffix in (".anchors.jsonl", ".stamps.jsonl",
+                       ".published.jsonl"):
+            for what, line in lines.items():
+                with self.subTest(sidecar=suffix, line=what):
+                    root = self.root / f"{suffix[1:-6]}-{what[:4]}"
+                    log = make_chain(root / "alpha" / "receipts", "sess-aaaa")
+                    Path(str(log) + suffix).write_text(line + "\n",
+                                                       encoding="utf-8")
+
+                    result = run_scan(root, env=self.env)
+
+                    self.assertNotIn("Traceback", result.stderr)
+                    sessions = chains_by_session(json.loads(result.stdout))
+                    (chain,) = sessions[("alpha", "sess-aaaa")]
+                    self.assertFalse(chain["anchored"])
+
 
 class BaselineTest(unittest.TestCase):
     """The tripwire's memory (GLOSSARY: Baseline): heads remembered
@@ -1382,6 +1405,30 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
         self.assertEqual(self.states(result)["sess-nowhere"]["state"],
                          "ALARM-SILENT")
+
+    def test_a_line_json_cannot_hold_in_a_transcript_never_silences_it(self):
+        # #331: the transcript is writer-reachable too. A line holding an
+        # integer past Python's digit limit, or nesting past the
+        # recursion limit, is skipped like any other unreadable line,
+        # and the silent fork beside it still alarms.
+        for what, bad in (("integer", '{"n":' + "1" * 5000 + "}"),
+                          ("nesting", "[" * 100000 + "]" * 100000)):
+            with self.subTest(line=what):
+                session = f"sess-{what}"
+                make_chain(self.root / "alpha" / "receipts", session,
+                           entries=6)
+                transcript = write_transcript(
+                    self.witness, self.root / "alpha", session,
+                    event_times=[ago(180 - 10 * i) for i in range(8)])
+                with transcript.open("a", encoding="utf-8") as out:
+                    out.write(bad + "\n")
+
+                result = self.scan()
+
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.returncode, 6,
+                                 result.stdout + result.stderr)
+                self.assertEqual(self.states(result)[session]["deficit"], 2)
 
     def test_the_silent_fork_alarms_while_the_chain_verifies_valid(self):
         # The flagship case, from the field (2026-08-14): witness saw 8

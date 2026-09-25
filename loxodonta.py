@@ -4603,7 +4603,9 @@ def cmd_hook(args):
     # mojibake into the chain — a receipt that misquotes the command.
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (ValueError, RecursionError):
+        # Not JSON, not UTF-8, an integer past the digit limit, or
+        # nesting past the recursion limit: not a payload (#331).
         payload = None
     if not isinstance(payload, dict):
         print("error: stdin is not a JSON hook payload", file=sys.stderr)

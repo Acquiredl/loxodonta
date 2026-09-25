@@ -23,9 +23,12 @@ Reading three files first saves everyone a round trip:
 1. **Stdlib only, no dependencies, ever.** Anything that needs the network or
    another program shells out to it (`explain` runs `claude -p`, anchoring
    speaks HTTP by hand, `export --send` runs `gh`).
-2. **Readable top to bottom by a non-expert.** `loxodonta.py` and
-   `supervisor.py` are single files on purpose. Readability outranks
-   cleverness; a comment that says why beats a trick that saves a line.
+2. **Readable by a non-expert, function by function.** `loxodonta.py` and
+   `supervisor.py` are single files on purpose. The cleverness goes into
+   the design and the tools, so the code a reader meets stays plain. An
+   abstraction that saves the reader places to look is welcome; one that
+   adds places names what it buys, in one line with its ADR. A comment
+   that says why beats a trick that saves a line.
 3. **Tests first, through the public CLI.** Every behavior is tested by
    running the command a user would run and reading what it printed or wrote.
    No mocking of internals. Run the suite with:
@@ -44,7 +47,8 @@ Reading three files first saves everyone a round trip:
 The three scripts never import each other (ADR-0035), so a rule two of them
 need is written in each. Every such rule is listed in `docs/TWINS.md` and
 held by `python tools/twin_check.py --check`, which the suite runs: change
-the recorder's copy, then make the others the same text.
+the original, in `loxodonta.py`, then make each copy in the other files the
+same text.
 
 ## The one local check
 
