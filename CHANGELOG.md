@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Added
 
 - `docs/TWINS.md` lists every rule written in more than one script, and `tools/twin_check.py --check` fails the suite when a copy drifts from the recorder's or a shared name goes undeclared (#337).
+- `tools/twin_check.py --write` copies each twin's original from `loxodonta.py` over its copies in place, and each copy now carries a line naming its original. `--check` fails on a copy without one (#342).
 
 ### Changed
 
