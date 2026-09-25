@@ -270,6 +270,26 @@ class PublishKeeperTest(ReceiverFixture):
         self.assertEqual(self.receiver.received, [],
                          "a head already in the memo is never re-posted")
 
+    def test_a_row_of_an_unknown_kind_naming_the_head_is_no_sent_head(self):
+        # ADR-0038, #344: a kind the memo does not hold is named by the
+        # recorder and counts for nothing, so the keeper reads it as the
+        # recorder does. The head it names was never sent: posted once.
+        # An unreadable line beside it moves nothing either.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-unknown")
+        head = chain_head(log)
+        with open(str(log) + ".published.jsonl", "a",
+                  encoding="utf-8") as out:
+            out.write(json.dumps({"kind": "witness-note", "head": head,
+                                  "n": 2, "ts": ago(600)}) + "\n")
+            out.write("[" * 100000 + "]" * 100000 + "\n")
+
+        result = self.publishing()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(self.receiver.received), 1)
+        self.assertEqual(self.body()["head"], head)
+
     def test_default_is_off_and_nothing_is_posted_without_the_flags(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-off")
 
@@ -384,6 +404,92 @@ class LeftReadingTest(ReceiverFixture):
                     if row.get("kind", "head") == "head"]
         self.assertEqual(chain["left"],
                          {"ts": head_row[0]["ts"], "via": "published"})
+
+    def test_every_sidecar_row_is_read_by_its_kind_as_the_recorder_reads_it(self):
+        # ADR-0038, #344: a row with no kind reads as its sidecar's
+        # evidence, a named kind as itself, and a kind the sidecar does
+        # not hold, or a line that is not a JSON object, as no departure
+        # and no published head. A kind-less proof whose head is not a
+        # string names no head, and never stops the scan.
+        def append(log, suffix, *rows):
+            with open(str(log) + suffix, "a", encoding="utf-8") as out:
+                for row in rows:
+                    out.write((row if isinstance(row, str)
+                               else json.dumps(row)) + "\n")
+
+        unreadable = ("not json", "[" * 100000 + "]" * 100000)
+        when = ago(600)
+        kindless = make_chain(self.root / "alpha" / "receipts", "sess-bare")
+        append(kindless, ".published.jsonl",
+               {"head": chain_head(kindless), "n": 2, "ts": when}, *unreadable)
+        kinded = make_chain(self.root / "alpha" / "receipts", "sess-typed")
+        append(kinded, ".published.jsonl",
+               {"kind": "head", "head": chain_head(kinded), "n": 2,
+                "ts": when})
+        stamped = make_chain(self.root / "alpha" / "receipts", "sess-stamped")
+        append(stamped, ".stamps.jsonl",
+               {"head": chain_head(stamped), "n": 2, "ts": when}, *unreadable)
+        unknown = make_chain(self.root / "alpha" / "receipts", "sess-unknown")
+        for suffix in (".published.jsonl", ".stamps.jsonl",
+                       ".anchors.jsonl"):
+            append(unknown, suffix,
+                   {"kind": "witness-note", "head": chain_head(unknown),
+                    "n": 2, "ts": when},
+                   {"kind": ["head"], "head": chain_head(unknown), "n": 2,
+                    "ts": when}, *unreadable)
+        append(unknown, ".anchors.jsonl",
+               {"head": ["not", "a", "head"], "n": 2, "ts": when})
+
+        result = self.scan()
+
+        self.assertNotIn("Traceback", result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        for session in ("sess-bare", "sess-typed"):
+            (chain,) = sessions[("alpha", session)]
+            self.assertEqual(chain["left"], {"ts": when, "via": "published"},
+                             session)
+            self.assertTrue(chain["head_published"], session)
+        (chain,) = sessions[("alpha", "sess-stamped")]
+        self.assertEqual(chain["left"], {"ts": when, "via": "stamped"})
+        (chain,) = sessions[("alpha", "sess-unknown")]
+        self.assertEqual(chain["left"], {"ts": None, "via": None})
+        self.assertFalse(chain["head_published"])
+        self.assertIsNone(chain["last_failed"])
+
+    def test_a_time_with_no_zone_counts_for_nothing_and_never_stops_the_scan(self):
+        # #363 review: a `ts` with no time zone beside one ending in Z
+        # cannot be compared with it, and the sidecars are
+        # writer-reachable. Such a row, in any sidecar, is no departure
+        # and no failure; the rows beside it are read as ever.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-zoneless")
+        head = chain_head(log)
+        zoned, bare = ago(600), "2026-09-25T10:00:00"
+        rows = {
+            ".anchors.jsonl": [{"head": head, "ts": bare, "proof": "AAAA"},
+                               {"head": "ab" * 32, "ts": zoned,
+                                "proof": "AAAA"}],
+            ".stamps.jsonl": [{"head": head, "ts": bare}],
+            ".published.jsonl": [{"head": head, "n": 2, "ts": bare},
+                                 {"kind": "attempt", "step": "publish-head",
+                                  "ts": bare, "outcome": "refused"},
+                                 {"kind": "attempt", "step": "publish-head",
+                                  "ts": zoned, "outcome": "the remote "
+                                  "answered 404"}],
+        }
+        for suffix, lines in rows.items():
+            Path(str(log) + suffix).write_text(
+                "".join(json.dumps(row) + "\n" for row in lines),
+                encoding="utf-8")
+
+        result = self.scan()
+
+        self.assertNotIn("Traceback", result.stderr)
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-zoneless")]
+        self.assertEqual(chain["left"], {"ts": zoned, "via": "anchored"})
+        self.assertEqual(chain["last_failed"],
+                         {"step": "publish-head", "ts": zoned,
+                          "outcome": "the remote answered 404"})
 
     def test_an_anchored_heads_departure_is_its_first_record(self):
         # An upgrade appends a second record for the same head, stamped
@@ -566,6 +672,27 @@ class NeverPublishedTest(ReceiverFixture):
 
         published = json.loads(self.scan().stdout)["published"]
 
+        self.assertEqual(published, {"wired": True, "sent": True,
+                                     "note": None})
+
+    def test_a_line_that_is_not_utf8_never_hides_a_chain_that_was_sent(self):
+        # #344 review: the reading is row by row, so one appended byte
+        # that is not UTF-8 is a line counting for nothing, and the batch
+        # the wired remote took still reads as sent.
+        self.wire(f'python loxodonta.py hook --publish-chain '
+                  f'"{self.receiver.url}"')
+        log = make_chain(self.root / "alpha" / "receipts", "sess-byte")
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", "--chain", "--log",
+             str(log), self.receiver.url],
+            capture_output=True, check=True, env=clean_env())
+        with open(str(log) + ".published.jsonl", "ab") as out:
+            out.write(b'{"kind":"attempt","note":"\xff"}\n')
+
+        result = self.scan()
+
+        self.assertNotIn("Traceback", result.stderr)
+        published = json.loads(result.stdout)["published"]
         self.assertEqual(published, {"wired": True, "sent": True,
                                      "note": None})
 
@@ -1160,6 +1287,55 @@ class ProfileKeeperTest(unittest.TestCase):
         self.assertEqual(len(authority.received), 1,
                          "the keeper asked about a head that had a token")
         self.assertEqual(len(self.tokens_of(log)), 1)
+
+    def test_a_token_with_or_without_its_kind_stands_the_keeper_down(self):
+        # ADR-0038: a stamps row with no kind, as every token before
+        # rows named one was written, still reads as a token. Two chains,
+        # one token each from the verb, one of them stripped of its kind:
+        # the keeper asks about neither head again.
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        logs = [self.aged_chain(session, age=7 * 3600)
+                for session in ("sess-kinded", "sess-kindless")]
+        for log in logs:
+            stamped = subprocess.run(
+                [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
+                 "--authority", authority.url],
+                capture_output=True, encoding="utf-8",
+                env=keeper_env(PYTHONIOENCODING="utf-8"))
+            self.assertEqual(stamped.returncode, 0, stamped.stderr)
+        sidecar = Path(str(logs[1]) + ".stamps.jsonl")
+        (token,) = [json.loads(line) for line in
+                    sidecar.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(token.pop("kind"), "stamp")
+        sidecar.write_text(json.dumps(token) + "\n", encoding="utf-8")
+
+        self.serve()
+        self.tick()
+        self.said_at_startup()
+
+        self.assertEqual(len(authority.received), 2,
+                         "the keeper asked about a head that had a token")
+
+    def test_a_stamps_row_of_an_unknown_kind_is_no_token_so_the_head_is_asked(self):
+        # ADR-0038, #344: a kind the stamps sidecar does not hold holds
+        # no token, so a head it names is still asked about, by the
+        # keeper as by `stamp` and the session end (ANCHORING.md §6).
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        log = self.aged_chain("sess-unknown", age=7 * 3600)
+        head = chain_head(log)
+        Path(str(log) + ".stamps.jsonl").write_text(
+            json.dumps({"kind": "witness-note", "head": head, "n": 1,
+                        "ts": ago(600)}) + "\n", encoding="utf-8")
+
+        self.serve()
+        self.tick()
+        self.said_at_startup()
+
+        self.assertEqual(len(authority.received), 1,
+                         "a head only an unknown kind names went unasked")
+        self.assertEqual([row["head"] for row in self.tokens_of(log)], [head])
 
     def test_a_marker_without_an_authority_stamps_nothing(self):
         # The tier commits the head to the calendars and to nobody else

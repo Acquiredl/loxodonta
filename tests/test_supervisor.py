@@ -3200,6 +3200,23 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertNotIn("note", chain["anchors"],
                          "a sidecar of notes alone owes no upgrade")
 
+    def test_a_row_of_an_unknown_kind_is_not_a_proof_so_the_keeper_anchors(self):
+        # ADR-0038, #344: a kind the anchors sidecar does not hold is
+        # named by verify and never judged, so the keeper, reading rows
+        # as the recorder does, does not take it for the head's proof.
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-unknown")
+        head = chain_head(log)
+        Path(str(log) + ".anchors.jsonl").write_text(
+            json.dumps({"kind": "witness-note", "head": head, "n": 2,
+                        "ts": ago(600)}) + "\n", encoding="utf-8")
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [bytes.fromhex(head)])
+
     def test_default_is_off_and_nothing_is_submitted_without_opt_in(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
