@@ -984,8 +984,8 @@ def check_anchors(log, entries, headers, used):
         if record is None:
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
-        # A row missing its head, or holding the wrong type anywhere, is
-        # malformed evidence, not a mismatch against a head called "None".
+        # A row missing a field, or holding the wrong type in one, is
+        # malformed evidence: judged invalid before any head is compared.
         problem = anchor_row_problem(record)
         if problem is not None:
             judged.append((record, "invalid", problem))

@@ -589,8 +589,7 @@ class MalformedPackageRowTest(AnchoredStoreCase):
         chain_sidecar = self.chain.with_name(self.chain.name + ".anchors.jsonl")
         good = chain_sidecar.read_text("utf-8")
         (record,) = [json.loads(line) for line in good.splitlines()]
-        cases = [c for c in MALFORMED_ROWS if "head" in c[0] or "proof" in c[0]]
-        for number, (change, reason) in enumerate(cases):
+        for number, (change, reason) in enumerate(MALFORMED_ROWS):
             with self.subTest(change=change):
                 chain_sidecar.write_text(good + changed(record, change) + "\n",
                                          encoding="utf-8")
@@ -607,6 +606,7 @@ class MalformedPackageRowTest(AnchoredStoreCase):
                               "does not verify is not evidence", judged.stdout)
                 self.assertIn(SealedPackageTest.CHAIN_DETAIL, judged.stdout)
                 self.assertNotIn("Traceback", judged.stderr)
+                self.assertNotIn("sneaky", judged.stdout)
 
 
 RELEASE = "v0.9.0"

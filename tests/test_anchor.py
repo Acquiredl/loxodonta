@@ -404,6 +404,28 @@ class SessionEndAnchorTest(unittest.TestCase):
         anchors = [r for r in self.records() if r.get("kind") == "anchor"]
         self.assertEqual([r["head"] for r in anchors], [head])
 
+    def test_a_proof_that_does_not_replay_is_not_the_heads_anchor(self):
+        # A string, and base64, so the row has its shape; but verify calls
+        # it ANCHOR-INVALID, so it anchors nothing, and the session end
+        # still submits the head and writes down how it went.
+        self.tool_call()
+        head = run_receipts("head", "--log", str(self.chain),
+                            cwd=self.workdir).stdout.strip()
+        for proof in ("", "AAAA"):
+            with self.subTest(proof=proof):
+                self.server.submitted.clear()
+                self.sidecar.write_text(
+                    json.dumps({"kind": "anchor", "head": head, "n": 1,
+                                "proof": proof}) + "\n", encoding="utf-8")
+
+                result = self.session_end("--anchor", "--calendar",
+                                          self.server.url)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.server.submitted, [bytes.fromhex(head)])
+                (row,) = self.attempts()
+                self.assertEqual(row["outcome"], "submitted")
+
     def test_a_malformed_row_leaves_the_session_end_upgrade_working(self):
         # The upgrade half reads every sidecar in the folder: rows it
         # cannot act on ahead of a pending proof are skipped, and the
@@ -1266,6 +1288,38 @@ class MalformedAnchorRowTest(unittest.TestCase):
         upgraded = json.loads(lines[-1])
         self.assertEqual((upgraded["kind"], upgraded["head"], upgraded["n"]),
                          ("anchor", self.head, 1))
+
+    def test_upgrade_skips_a_calendar_that_is_not_a_url(self):
+        # A string, so the row has its shape, but no URL urllib can open:
+        # the row is skipped with a line naming the field, and the good
+        # pending proof behind it is still asked about and upgraded.
+        other = start_calendar(self, b"other-nonce")
+        other.mode = "complete"
+        good = json.dumps({
+            "kind": "anchor", "head": self.head, "n": 1,
+            "ts": "2026-09-25T10:00:00Z", "calendar": other.url,
+            "proof": base64.b64encode(pending_proof(
+                other.nonce, other.url)).decode()},
+            sort_keys=True, separators=(",", ":"))
+        for calendar in ("not a sneaky url", "http://[sneaky"):
+            with self.subTest(calendar=calendar):
+                other.polled.clear()
+                bad = self.row({"calendar": calendar})
+                self.write_sidecar(bad, good)
+
+                result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn("the record's calendar is not a URL this "
+                              "recorder can ask", result.stderr)
+                self.assertNotIn("sneaky", result.stdout + result.stderr)
+                self.assertEqual(len(other.polled), 1)
+                self.assertIn("upgraded:", result.stdout)
+                lines = self.sidecar.read_text("utf-8").splitlines()
+                self.assertEqual(lines[:2], [bad, good])
+                self.assertEqual(len(lines), 3)
 
 
 if __name__ == "__main__":

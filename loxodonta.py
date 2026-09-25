@@ -977,8 +977,8 @@ def check_anchors(log, entries, headers, used):
         if record is None:
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
-        # A row missing its head, or holding the wrong type anywhere, is
-        # malformed evidence, not a mismatch against a head called "None".
+        # A row missing a field, or holding the wrong type in one, is
+        # malformed evidence: judged invalid before any head is compared.
         problem = anchor_row_problem(record)
         if problem is not None:
             judged.append((record, "invalid", problem))
@@ -3100,6 +3100,19 @@ def session_end_anchor(log, calendars, budget=SESSION_END_BUDGET):
         return
 
 
+def proof_replays(record):
+    """True for an anchor row whose proof replays from its head, pending
+    or complete: offline, and the same test verify --anchors applies."""
+    if row_kind("anchors", record) != ANCHOR_KIND \
+            or anchor_row_problem(record) is not None:
+        return False
+    try:
+        judge_proof(record["head"], base64.b64decode(record["proof"]))
+    except (ProofError, ValueError):
+        return False
+    return True
+
+
 def anchor_and_upgrade(log, calendars, budget):
     deadline = time.monotonic() + budget
 
@@ -3113,11 +3126,11 @@ def anchor_and_upgrade(log, calendars, budget):
     if last is None:
         return  # a damaged tail cannot be anchored
     head, n = last["entry_hash"], last["n"]
-    # A row the writer shaped wrong is no proof of anything, so it never
-    # stops the head being submitted (#348).
+    # Only a proof that replays anchors a head: a row the writer shaped
+    # wrong, or whose proof verify would call invalid, never stops the
+    # head being submitted (#348).
     anchored = {r["head"] for r in (read_anchor_records(log) or [])
-                if row_kind("anchors", r) == ANCHOR_KIND
-                and anchor_row_problem(r) is None}
+                if proof_replays(r)}
     if head not in anchored:
         submitted = False
         for calendar in calendars:
@@ -4217,6 +4230,13 @@ def upgrade_anchors(args):
         except OSError as e:
             print(f"warning: calendar {url}: {e}", file=sys.stderr)
             failures += 1
+            continue
+        except ValueError:
+            # A calendar that is not a URL urllib can open was written by
+            # hand, not by a calendar that answered (#348). Named by its
+            # field, never its value, and no calendar failed to answer.
+            print(f"warning: skipped {label}: the record's calendar is not "
+                  "a URL this recorder can ask", file=sys.stderr)
             continue
         try:
             upgraded = splice_continuation(

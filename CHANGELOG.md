@@ -26,7 +26,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `supervisor scan` no longer stops with a traceback on a sidecar or transcript line holding an integer past 4,300 digits or nesting past the recursion limit. The writer can reach those files, so one line could stop the audit (#331).
 - `loxodonta hook` answers a payload holding the same lines with exit 65, as for any payload it cannot read, not a traceback and exit 70 (#331).
-- Malformed anchor and stamp rows (a field missing or of the wrong type) no longer crash `verify`, `verify-package`, `anchor`, `stamp`, `supervisor scan` or the session end. An anchor row reads `ANCHOR-INVALID`, naming the field (#348).
+- Malformed anchor and stamp rows (a field missing or of the wrong type) no longer crash `verify`, `verify-package`, `anchor`, `stamp`, `supervisor scan` or the session end. An anchor row reads `ANCHOR-INVALID`, a package manifest's `SEAL-INVALID`, naming the field (#348).
 
 ## [0.9.0] - 2026-09-23
 
