@@ -13,7 +13,7 @@ A revision of this document is not a format version: each part changes only unde
 - **0.1.1** (2026-08-29, ADR-0012) changes only what a file-reference path resolves *against* (§3).
 - **0.1.2** (2026-08-31, ADR-0017) names the bookkeeping-entry class and pins the transcript-commitment grammar (§2.2) — additive vocabulary over ordinary entries.
 - **0.1.3** (2026-09-23, ADR-0036, ADR-0037) freezes the hash chain across format versions (§4), so a verifier walks the hashes before it refuses a version (§2.1), and gives exit 1 to `BROKEN` alone (§6): verifier behavior, and a promise about later versions.
-- **0.1.4** (2026-09-24, #336) changes words only: §5 says the head commits to canonical form, not to the file's bytes, and §8 splits into what the design cannot claim (§8.1) and the format's non-goals (§8.2), stating whole-chain regeneration as closed only for what a commitment held off the machine covers.
+- **0.1.4** (2026-09-24, #332, #336) changes words only: §5 says the head commits to canonical form, not to the file's bytes, and §8 splits into what the design cannot claim (§8.1) and the format's non-goals (§8.2), stating whole-chain regeneration as closed only for what a commitment held off the machine covers.
 
 This document defines the receipt log format precisely enough that an independent implementation, in any language, produces byte-identical hashes. That reproducibility is the whole game: a hash chain is only as trustworthy as the serialization rules underneath it.
 
