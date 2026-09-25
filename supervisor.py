@@ -959,13 +959,48 @@ def published_path(log):
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+class KeyGivenTwice(ValueError):
+    """A JSON object that names one key twice. A last-wins reader (this
+    one) and a first-wins reader see two different lines, and a hash that
+    holds under one reading says nothing under the other; no reading of
+    such a line is an entry (SPEC §6 step 1)."""
+
+    def __init__(self, key):
+        super().__init__(key)
+        self.key = key
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def object_with_each_key_once(pairs):
+    """The dict of a JSON object's pairs, refusing a key given twice at
+    any depth (json's object_pairs_hook is called for every object)."""
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise KeyGivenTwice(key)
+        seen[key] = value
+    return seen
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def not_json(word):
+    """Refuse `NaN`, `Infinity` or `-Infinity` (json's parse_constant
+    hook): words Python's JSON reader takes as numbers and JSON does not
+    have, so a strict parser cannot read a line holding one, and a line
+    one reader judges and another cannot read says two things (#365)."""
+    raise ValueError(f"{word} is not JSON")
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
     surrogate from `read_log`), an integer too long to read, nesting too
-    deep (#299)."""
+    deep (#299). A line a strict JSON parser refuses is unreadable too,
+    before its kind is read: a key given twice, as the walk refuses one
+    in an entry, and `NaN`, `Infinity` or `-Infinity` (#365)."""
     try:
         lines = read_log(path)
     except FileNotFoundError:
@@ -974,7 +1009,9 @@ def read_sidecar_records(path):
     for line in lines:
         try:
             line.encode("utf-8")
-            record = json.loads(line)
+            record = json.loads(line,
+                                object_pairs_hook=object_with_each_key_once,
+                                parse_constant=not_json)
             if not isinstance(record, dict):
                 record = None
         except (ValueError, RecursionError):
@@ -1120,7 +1157,11 @@ def chain_cursor(log, url):
         # `read_log` read such bytes at all (#299).
         line.encode("utf-8")
         try:
-            record = json.loads(line)
+            # Read as every sidecar row is read (#365): a row a strict
+            # parser refuses is no chain row.
+            record = json.loads(line,
+                                object_pairs_hook=object_with_each_key_once,
+                                parse_constant=not_json)
         except (ValueError, RecursionError):
             # One appended line must not stop the chain route at every
             # session end and keeper turn (#331, #344): at worst a chain

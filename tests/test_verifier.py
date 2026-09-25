@@ -120,6 +120,7 @@ TWINNED = {
     "test_package_stamp": ["StampedPackageTest", "JudgedPackageStampTest",
                            "OutlivedPackageStampTest",
                            "PackageStampRowKindTest"],
+    "test_sidecar_strictness": ["StrictRowTest"],
 }
 
 

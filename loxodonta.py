@@ -210,6 +210,14 @@ def object_with_each_key_once(pairs):
     return seen
 
 
+def not_json(word):
+    """Refuse `NaN`, `Infinity` or `-Infinity` (json's parse_constant
+    hook): words Python's JSON reader takes as numbers and JSON does not
+    have, so a strict parser cannot read a line holding one, and a line
+    one reader judges and another cannot read says two things (#365)."""
+    raise ValueError(f"{word} is not JSON")
+
+
 def path_leaving_base(path):
     """How a reference path's spelling could lead outside the reference
     base, named; None when it cannot (SPEC §3). A leading slash of
@@ -673,8 +681,14 @@ def bitcoin_height(payload):
 
 def judge_proof(head_hex, proof_bytes):
     """Replay a proof from a chain head. Returns ("bitcoin", height, root),
-    ("pending", digest_hex), or raises ProofError."""
-    node = parse_timestamp(ProofReader(proof_bytes))
+    ("pending", digest_hex), or raises ProofError. A proof is its tree
+    and nothing after it: bytes past the tree's end are refused, as the
+    OpenTimestamps library refuses them, since two readers could each
+    take them for something else (#365)."""
+    reader = ProofReader(proof_bytes)
+    node = parse_timestamp(reader)
+    if reader.pos != len(proof_bytes):
+        raise ProofError("proof holds bytes after its timestamp tree")
     results = replay_proof(bytes.fromhex(head_hex), node)
     for r in results:
         if r["tag"] == TAG_BITCOIN:
@@ -769,7 +783,9 @@ def read_sidecar_records(path):
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
     surrogate from `read_log`), an integer too long to read, nesting too
-    deep (#299)."""
+    deep (#299). A line a strict JSON parser refuses is unreadable too,
+    before its kind is read: a key given twice, as the walk refuses one
+    in an entry, and `NaN`, `Infinity` or `-Infinity` (#365)."""
     try:
         lines = read_log(path)
     except FileNotFoundError:
@@ -778,7 +794,9 @@ def read_sidecar_records(path):
     for line in lines:
         try:
             line.encode("utf-8")
-            record = json.loads(line)
+            record = json.loads(line,
+                                object_pairs_hook=object_with_each_key_once,
+                                parse_constant=not_json)
             if not isinstance(record, dict):
                 record = None
         except (ValueError, RecursionError):
@@ -3715,7 +3733,11 @@ def chain_cursor(log, url):
         # `read_log` read such bytes at all (#299).
         line.encode("utf-8")
         try:
-            record = json.loads(line)
+            # Read as every sidecar row is read (#365): a row a strict
+            # parser refuses is no chain row.
+            record = json.loads(line,
+                                object_pairs_hook=object_with_each_key_once,
+                                parse_constant=not_json)
         except (ValueError, RecursionError):
             # One appended line must not stop the chain route at every
             # session end and keeper turn (#331, #344): at worst a chain
