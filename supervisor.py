@@ -936,7 +936,10 @@ def sidecar_records(sidecar):
     for line in lines:
         try:
             record = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # A writer-reachable line: an integer past the digit limit
+            # or nesting past the recursion limit is skipped like any
+            # other, never a stopped scan (#331).
             continue
         if isinstance(record, dict):
             yield record
@@ -2131,8 +2134,8 @@ def read_witness(transcript, calibration):
             for line in lines:
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+                except (ValueError, RecursionError):
+                    continue  # the transcript is writer-reachable (#331)
                 if not isinstance(record, dict):
                     continue
                 stamped = parse_when(record.get("timestamp"))
