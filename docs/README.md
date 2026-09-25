@@ -30,4 +30,5 @@ Every page in this folder, sorted by what you came for: running loxodonta, check
 - [EXPERIMENTS.md](EXPERIMENTS.md): what was actually tested behind the README's claims about agents using the chain, with protocol and numbers.
 - [TOUR.md](TOUR.md): a guided reading of `loxodonta.py`, top to bottom, explaining what the code does and why.
 - [TOUR-SUPERVISOR.md](TOUR-SUPERVISOR.md): the same guided reading for `supervisor.py`, the tool that watches and reads the receipts.
+- [TWINS.md](TWINS.md): every rule written in more than one of the three scripts, which never import each other, with where each copy lives and why.
 - [The ADRs](../adrs/README.md): every decision that is hard to reverse, with its status.

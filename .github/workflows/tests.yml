@@ -25,6 +25,10 @@ jobs:
           - {os: macos-latest, python: "3.13"}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history and its tags: a test runs the released
+          # verifier.py from its tag's bytes (ADR-0038's compatibility).
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}

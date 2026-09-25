@@ -87,17 +87,10 @@ def entry_hash(entry_without_hash):
 def receipt_text(text):
     """`text` as a receipt can hold it: each lone surrogate written as
     its six ASCII characters of escape text (`\\ud800`), everything
-    else exactly as it stands (#292).
-
-    A lone surrogate is half of a UTF-16 pair with no other half. JSON
-    lets a model type one into any tool argument, and POSIX hands Python
-    one for every byte of argv or a file name that is not UTF-8. It has
-    no UTF-8 form, so the canonical form above cannot hold it: the
-    append used to die in a traceback, leaving no receipt while the
-    chain went on verifying VALID. Written as escape text, the receipt
-    says what was sent and the format does not change. The codec's
-    backslashreplace is exactly that rule, since a lone surrogate is the
-    only thing UTF-8 cannot encode. Every string an entry takes from
+    else exactly as it stands (#292). A lone surrogate has no UTF-8
+    form, so the canonical form cannot hold it, yet JSON and POSIX argv
+    both hand Python one; escaped, the receipt still says what was sent
+    and the format does not change. Every string an entry takes from
     outside passes through here: actor, action, file paths."""
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
@@ -118,7 +111,7 @@ def split_lines(data):
     after the last `\\n`, when there are any, are a line too: the torn
     tail a crash leaves, which the walk names. Written the same way in
     loxodonta.py, supervisor.py and receiver.py, which never import one
-    another; tests/test_suite_shape.py holds the copies equal."""
+    another; tools/twin_check.py holds the copies equal."""
     lines = data.split(b"\n")
     if lines[-1] == b"":
         lines.pop()
@@ -153,18 +146,13 @@ def unreadable_log(path, error):
 
 
 def tail_entry(lines):
-    """The chain's final entry, or None if the tail is damaged. Two shapes
-    of damage, both innocent (ADR-0004): a torn tail, the line left
-    partial by a crash or an overlapping append; and a forked tail, a
-    well-formed entry whose `n` is not its line number, which is what a
-    lock taken from a paused holder leaves behind: two entries claiming
-    one `n`. Neither can be built on. A new entry laid over a fork would
-    bury an innocent race under later receipts until it read as
-    tampering in the middle of the file, so the fork ends the chain the
-    way a tear does, and damage stays at the tail, where the readers
-    that name it honestly expect it (SPEC §6, §8). A tail holding a byte
-    that is not UTF-8 is torn in the same sense, since a crash in the
-    middle of a character leaves one (#299)."""
+    """The chain's final entry, or None if the tail is damaged: torn (a
+    line left partial by a crash or an overlapping append, or holding a
+    byte that is not UTF-8) or forked (a well-formed entry whose `n` is
+    not its line number, left by a lock taken from a paused holder).
+    Neither can be built on: a new entry laid over a fork would bury an
+    innocent race under later receipts until it read as tampering in
+    the middle of the file, so damage stays at the tail (SPEC §6, §8)."""
     if not lines:
         return None
     try:
@@ -311,7 +299,7 @@ def shape_problem(entry):
 # Display only: verify hashes the raw entry, and a backslash stays as it
 # is, so the chain file is where the exact bytes are read. Twin of
 # supervisor.py's `visible`; the files never import each other
-# (ADR-0035), and tests/test_suite_shape.py holds the two copies equal.
+# (ADR-0035), and tools/twin_check.py holds the two copies equal.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
@@ -341,17 +329,11 @@ def walk(lines, field_rules=True):
     report (which narrates). Returns (entries, breaks, warns): entries[n] is
     the parsed entry or None where the line is unparseable or is not the
     shape of an entry; breaks and warns are (n, message) lists in walk
-    order.
-
-    Two kinds of rule are walked here, and ADR-0036 keeps them apart. The
-    hash chain is the same in every format version: each line one JSON
-    object, each key once, its `entry_hash` the hash of its canonical
-    form (SPEC §4), its `prev` the entry before it's (§5). The field rules
-    are v0.1's own: which fields, of which types, and `n` counting up.
-    With `field_rules` False only the hash chain is walked, which is how
-    a chain whose genesis claims a version this verifier does not speak
-    is judged: its hashes are checked, and its fields are not ours to
-    judge."""
+    order. With `field_rules` False only the hash chain is walked (each
+    line one JSON object, each key once, each hash and `prev` link) and
+    not v0.1's field rules: that is how a chain whose genesis claims a
+    version this verifier does not speak is judged, since the hashing is
+    the same in every version and its fields are not ours to judge."""
     entries = []
     breaks = []
     warns = []
@@ -848,6 +830,9 @@ def record_label(head, n):
 # the machine. The chain's schema is untouched.
 
 ATTEMPT_KIND = "attempt"
+# The publish memo's other note: a batch of entries sent to a receiver
+# (ADR-0031). Named here because the row reader below knows it.
+CHAIN_KIND = "chain"
 
 
 def is_attempt(record):
@@ -855,6 +840,87 @@ def is_attempt(record):
     step went, never a proof and never a sent head. Readers that judge
     skip these rows; readers that report use them."""
     return isinstance(record, dict) and record.get("kind") == ATTEMPT_KIND
+
+
+# --- What a sidecar row is (ADR-0038) -----------------------------------------
+# Every sidecar row names its kind. The first rows of each sidecar were
+# written before rows named one, so a row with no `kind` reads as its
+# sidecar's evidence row: a proof, a token, a sent head. That holds
+# whenever the row was written, since a sidecar is not chained and
+# nothing in it dates a row. A kind this verifier does not know, or one
+# that belongs in another sidecar, is named and never judged, so a row a
+# newer recorder writes is never evidence against an honest log. The
+# rule is written here and nowhere else: every reader asks `row_kind`.
+
+ANCHOR_KIND = "anchor"
+STAMP_KIND = "stamp"
+HEAD_KIND = "head"
+
+# The kinds each sidecar holds, its evidence kind first: the anchors
+# sidecar, the stamps sidecar, and the publish memo.
+SIDECAR_KINDS = {
+    "anchors": (ANCHOR_KIND, ATTEMPT_KIND),
+    "stamps": (STAMP_KIND, ATTEMPT_KIND),
+    "memo": (HEAD_KIND, CHAIN_KIND, ATTEMPT_KIND),
+}
+# What `row_kind` answers when a row has no kind of its sidecar's. No
+# sidecar holds either word as a kind, so a writer who writes one is
+# read as unknown, never as these.
+UNREADABLE_ROW = "unreadable"
+UNKNOWN_ROW = "unknown"
+
+
+def row_kind(sidecar, record):
+    """What one row of `sidecar` ("anchors", "stamps" or "memo") is, for
+    a row as `read_sidecar_records` gives it: the row's kind; the
+    sidecar's evidence kind for a row with no `kind`; UNREADABLE_ROW for
+    a line that is not a JSON object; UNKNOWN_ROW for a kind this
+    sidecar does not hold, a kind that is not a string among them."""
+    if record is None:
+        return UNREADABLE_ROW
+    kinds = SIDECAR_KINDS[sidecar]
+    if "kind" not in record:
+        return kinds[0]
+    kind = record["kind"]
+    if isinstance(kind, str) and kind in kinds:
+        return kind
+    return UNKNOWN_ROW
+
+
+JSON_TYPE_WORDS = ((bool, "true or false"), (int, "a number"),
+                   (float, "a number"), (list, "an array"),
+                   (dict, "an object"), (type(None), "null"))
+
+
+def rows_to_judge(sidecar, records, prefix, name):
+    """The rows of `records` a judge of `sidecar` weighs, in file order:
+    each evidence row, and None for each unreadable line, which the
+    judge names. Attempt rows and the memo's chain rows are left out
+    silently. A row of a kind unknown here is left out after one line
+    that names it, headed `prefix`, with its line number in the sidecar
+    file `name`: a bare file name, never a path of this machine. The kind is the writer's text, so it is printed escaped, and
+    a kind that is not a string is named by its JSON type, never its
+    value."""
+    judged = []
+    evidence = SIDECAR_KINDS[sidecar][0]
+    for number, record in enumerate(records, 1):
+        kind = row_kind(sidecar, record)
+        if kind in (evidence, UNREADABLE_ROW):
+            judged.append(record)
+            continue
+        if kind != UNKNOWN_ROW:
+            continue
+        written = record["kind"]
+        if isinstance(written, str):
+            shown = f'of kind "{visible(written)}"'
+        else:
+            words = next((words for types, words in JSON_TYPE_WORDS
+                          if isinstance(written, types)), "a value")
+            shown = f"of a kind that is {words}, not a string"
+        print(f"{prefix}: line {number} of {visible(name)} is {shown} — this "
+              "verifier does not know the kind in this sidecar, and does "
+              "not judge it")
+    return judged
 
 
 # --- Judging anchors (docs/ANCHORING.md §3) -----------------------------------
@@ -873,10 +939,11 @@ def check_anchors(log, entries, headers, used):
         return False
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
 
+    # A row of an unknown kind is named here, before any verdict line, so
+    # the last line printed is the one it would be without the row.
     judged = []
-    for record in records:
-        if is_attempt(record):
-            continue  # a note on how a step went, not evidence (#240)
+    for record in rows_to_judge("anchors", records, "ANCHOR-UNKNOWN-KIND",
+                                os.path.basename(anchors_path(log))):
         if record is None:
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
@@ -995,18 +1062,12 @@ def token_time(token):
     """The moment a token states, in epoch seconds, from the one `Time
     stamp:` line `openssl ts -reply -token_out -text` prints; None when
     there is not exactly one such line this can read. openssl reads the
-    token and this reads one line of what openssl printed, the way
-    openssl_reason reads its errors, so the recorder still never parses
-    a token (ADR-0032 ruling 4).
-
-    `-token_out` is what keeps the writer from choosing the moment. The
-    reply around the token carries a status text nobody signed, kept in
-    a sidecar the writer can edit, and without the flag openssl prints
-    it first and verbatim, so a line break in it could set a `Time
-    stamp:` line of the writer's own ahead of the authority's (#264).
-    With it openssl prints the signed token alone, and a second such
-    line can only be one the authority signed or one that breaks the
-    signature, so two of them is a time nobody can read."""
+    token, never this file (ADR-0032 ruling 4). `-token_out` is the
+    trap: without it openssl first prints the reply's status text, which
+    nobody signed and the writer can edit, so a line break in it could
+    set a `Time stamp:` line of the writer's own ahead of the
+    authority's (#264). With it, a second such line is signed or breaks
+    the signature, so two of them is a time nobody can read."""
     shown = subprocess.run(["openssl", "ts", "-reply", "-in", token,
                             "-token_out", "-text"],
                            capture_output=True, encoding="utf-8",
@@ -1041,25 +1102,16 @@ def takes_attime():
 
 def judge_outlived(head, token, chain_file, refused):
     """A token openssl refused because a certificate in the authority's
-    chain has expired (#264). openssl checks the chain as of the moment
-    it verifies, so a genuine token fails this way on the calendar alone;
-    and it checks the certificate before the signature, so a token
-    tampered with fails this way too. The same check as of the time the
-    token states tells them apart. Passing, the certificate was in date
-    when the token was issued and the calendar is the only reason: that
-    is a note and never a verdict, and never STAMPED either, since a key
-    whose certificate has run out is vouched for by nobody now, and
-    whoever holds it could sign any past time they liked (long-term
-    validation is not built, ADR-0032). Failing, the token has a reason
-    of its own, and that is the verdict.
-
-    An openssl that can be asked about no moment but now gets ADR-0026's
-    posture for an ssh-keygen that predates `-Y verify`, before anything
-    else is read: nothing could be judged, so it is not judged, and why.
-    A token whose time cannot be read keeps openssl's first refusal:
-    openssl decoded it to check its chain, and every token carries
-    exactly one time, so a time printed as `Bad time value`, or missing,
-    or twice over, is the token's fault and not this machine's."""
+    chain has expired (#264), judged again as of the time the token
+    states. openssl checks the certificate before the signature, so past
+    that date a tampered token fails exactly as a genuine one does; only
+    the second check tells them apart. Passing, it is a note, never a
+    verdict and never STAMPED: a key whose certificate has run out is
+    vouched for by nobody now, and could sign any past time (long-term
+    validation is not built). Failing, that reason is the verdict. An
+    openssl that cannot be asked about a past moment judges nothing, and
+    says why; a token whose time cannot be read (missing, twice, or `Bad
+    time value`) keeps openssl's first refusal, as the token's fault."""
     if not takes_attime():
         return "not judged", STAMP_NO_ATTIME
     stated = token_time(token)
@@ -1175,16 +1227,13 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
                block_headers=None, headers_used=None, mechanisms=None):
     """The walk of one chain, then whatever the checks add, then the
     verdict as the exit code: `verify PATH` and the package judge both
-    call this, each with the checks it asked for. `block_headers` are the
-    headers `--block-header` gave, by root, for the anchors to be checked
-    against. `headers_used` and `mechanisms` are the package judge's
-    out-parameters and nobody else's. The first collects the roots a
-    header matched, because a package has more anchors than one chain
-    holds, and a header is noted as matching nothing only once every one
-    of them was judged; without it, this chain's walk notes its own. The
-    second collects the exit-3 findings' words, because a package names
-    the mechanism in its own verdict line and "anchor" is never the word
-    for an authority timestamp (ADR-0032 ruling 1)."""
+    call this, each with the checks it asked for. `block_headers` are
+    `--block-header`'s, by root. `headers_used` and `mechanisms` are the
+    package judge's out-parameters: the roots a header matched (so a
+    header matching nothing is noted once, across every chain; without
+    it this walk notes its own), and the exit-3 findings' words (so the
+    package verdict names the mechanism: "anchor" is never the word for
+    an authority timestamp)."""
     try:
         lines = read_log(log)
     except FileNotFoundError:
@@ -1659,9 +1708,12 @@ def judge_manifest_anchor(folder, headers, used):
     digest = sha256_file(manifest)
     records = read_anchor_records(manifest)
     if records:
-        # Attempt rows are notes, never proofs (#240): a sidecar holding
-        # only notes holds no record, the same as an empty one.
-        records = [r for r in records if not is_attempt(r)]
+        # Only proofs and unreadable lines are judged (ADR-0038): a
+        # sidecar holding only notes, or rows of kinds this verifier
+        # does not know, holds no record, the same as an empty one.
+        records = rows_to_judge("anchors", records,
+                                "seal anchor: ANCHOR-UNKNOWN-KIND",
+                                anchors_path("manifest.json"))
     if not records:
         what = "is not in this package" if records is None else "holds no record"
         print(f"seal anchor: SEAL-MISSING: {anchors_path('manifest.json')} "
@@ -1720,17 +1772,15 @@ def judge_manifest_anchor(folder, headers, used):
 
 
 def judge_manifest_stamp(folder, chain_file):
-    """The stamp seal (ADR-0032 rulings 4 and 5, in ADR-0026 ruling 6's
-    shape): every record of manifest.json.stamps.jsonl must be a token
-    over this manifest's sha256, and openssl must accept it against the
-    certificate chain the recipient saved. Returns (findings, stamped,
-    why): whether the rung is earned, and why nobody judged the seal
-    when nobody did. A token this machine cannot judge, or one whose
-    certificate has expired since it was issued (#264), is a note and
-    never a verdict, the issuer signature's exact posture — the rung is
-    neither earned nor failed. Only the manifest's own token can earn
-    the package rung; the chains' tokens printed above are detail, since
-    they stamp a different object."""
+    """The stamp seal (ADR-0032 rulings 4 and 5): every record of
+    manifest.json.stamps.jsonl must be a token over this manifest's
+    sha256 that openssl accepts against the certificate chain the
+    recipient saved. Returns (findings, stamped, why): whether the rung
+    is earned, and why nobody judged the seal when nobody did. A token
+    this machine cannot judge, or whose certificate expired after it was
+    issued (#264), is a note and never a verdict: the rung is neither
+    earned nor failed. Only the manifest's own token can earn the
+    package rung; the chains' tokens stamp a different object."""
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
     records = read_stamp_records(manifest)
@@ -1974,20 +2024,15 @@ def series(items):
 
 def ceiling_lines(manifest, earned):
     """The two closing lines of a package with no finding, the residual
-    trust and then the verdict, built from what the declared seals
-    earned: `height`, the block the manifest anchor names, and `block`,
-    that block's header hash when a header checked it; `stamped`,
-    whether openssl accepted the authority's token over the manifest;
-    `key`, the fingerprint the signature verified under; `unjudged`, the
-    seals this machine could not judge. Each rung adds its words in
-    ADR-0007's order, the two *when* seals before the signature (which
-    key), and the anchor before the authority timestamp, because an
-    anchor's proof is nobody's product where a token is somebody's
-    signed word (ADR-0032 ruling 1); the signature's words are
-    ADR-0008's caged sentence and no other. What no seal earned is named
-    as resting on the issuer's word (ADR-0026 ruling 6). The ceiling
-    verdict carries its limit: what a regeneration would also produce,
-    and why the rung is unearned."""
+    trust and then the verdict, from what the declared seals earned:
+    `height` and `block` (the anchor's block, and its header hash when a
+    header checked it), `stamped`, `key` (the signature's fingerprint)
+    and `unjudged`. Rungs add their words in a fixed order: the anchor,
+    then the authority timestamp (a proof is nobody's product, a token
+    somebody's signed word), then the signature, whose words are
+    ADR-0008's caged sentence and no other. What no seal earned rests on
+    the issuer's word; the verdict names what a regeneration would also
+    produce, and why the rung is unearned."""
     height, key, seals = earned["height"], earned["key"], manifest["seals"]
     block = earned["block"]
     stamped = earned["stamped"]
@@ -2228,10 +2273,10 @@ def block_header(value):
 
 
 def checkout_commit(home):
-    """The short commit of the checkout `home` sits in, or "unknown" —
-    the same fact the recorder notice reports (ADR-0015). Local git only:
-    a version is a label on the file, never a channel to fetch a newer
-    one."""
+    """The short commit of the git checkout `home` sits in, or "unknown"
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
@@ -2249,7 +2294,7 @@ def version_line(prog, home):
 
 class VersionAction(argparse.Action):
     """`--version`, answered only when asked: the commit is one git
-    question, and the hook path must not pay for it on every call."""
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
@@ -2261,15 +2306,12 @@ class VersionAction(argparse.Action):
 
 
 def speak_utf8():
-    """Write stdout and stderr in UTF-8, whatever encoding the console
-    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
-    which has no CJK and no emoji: one such character in a receipt killed
-    the verb mid-output with UnicodeEncodeError, and a hook reading
-    through a pipe got nothing. The text printed is unchanged; only its
-    bytes are. UTF-8 carries every character but a lone surrogate (a file
-    name that did not decode), which backslashreplace prints as its
-    escape rather than crash on. A stream without `reconfigure` (None
-    under pythonw, or one an embedder swapped in) is left as it is."""
+    """Write stdout and stderr in UTF-8, whatever the console dealt
+    (#294): Windows hands a pipe cp1252, where one CJK character or
+    emoji in a receipt killed the verb mid-output. Only the bytes change,
+    never the text; a lone surrogate prints as its backslash escape. A
+    stream without `reconfigure` (None under pythonw, or one an embedder
+    swapped in) is left as it is."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
@@ -2279,9 +2321,10 @@ def speak_utf8():
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's
-    stock 2, so no verdict exit is ever an argparse error (ADR-0026
-    ruling 7). The message is argparse's, unchanged, on stderr. Subparsers
-    inherit this class, so every command speaks the same number."""
+    stock 2, so no exit a script reads as an answer is ever an argparse
+    error (ADR-0026 ruling 7). The message is argparse's, unchanged, on
+    stderr. Subparsers inherit this class, so every command speaks the
+    same number."""
 
     def error(self, message):
         self.print_usage(sys.stderr)
@@ -2416,16 +2459,12 @@ def reader_gone(error):
 
 def run_main(main):
     """Run a command line to its exit code, as both files' entry point.
-    Two endings are not the command's own (ADR-0037). The reader hung
-    up: no verdict was asked of the lines that went unread, so it dies
-    quietly with 141, what a shell reports for a writer its pipe's
-    reader left. Never 0, which a script reads as VALID, though a BROKEN
-    line may be among the unread ones, and never 1, which is BROKEN and
-    nothing else. Or the tool itself failed: the traceback goes to
-    stderr, as Python would print it, and the exit is 70, sysexits'
-    internal error, so a crash is never read as a verdict. SystemExit
-    (argparse's 64, `--version`'s 0) and Ctrl-C are not failures of the
-    tool, and pass through as Python ends them."""
+    Two endings are not the command's own (ADR-0037). A reader that hung
+    up gets a quiet 141, what a shell reports for that: never 0 (VALID)
+    or 1 (BROKEN), since the unread lines were never judged. A crash
+    prints its traceback to stderr and exits 70, sysexits' internal
+    error, so it is never read as a verdict. SystemExit (argparse's 64,
+    `--version`'s 0) and Ctrl-C pass through as Python ends them."""
     try:
         speak_utf8()  # before anything prints
         code = main()
