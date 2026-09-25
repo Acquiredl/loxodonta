@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `docs/TWINS.md` lists every rule written in more than one script, and `tools/twin_check.py --check` fails the suite when a copy drifts from the recorder's or a shared name goes undeclared (#337).
+
 ## [0.9.0] - 2026-09-23
 
 The recipient's verifier. `verifier.py` is the recorder's verify side on its own, copied from the same source, never edited by hand, and held to a set of conformance vectors that both files must pass. The verdicts were tightened where an outside review found them saying more than they knew: a relabeled format no longer hides an edit, an anchor no longer claims a block nobody checked, and exit 1 now means `BROKEN` and nothing else. Scripts that read exit codes should read the new ones. The receipt format is untouched, and its hashing is now frozen across versions.

@@ -58,6 +58,7 @@ import tempfile
 import threading
 import unicodedata
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socketserver
@@ -147,7 +148,7 @@ def split_lines(data):
     after the last `\\n`, when there are any, are a line too: the torn
     tail a crash leaves, which the walk names. Written the same way in
     loxodonta.py, supervisor.py and receiver.py, which never import one
-    another; tests/test_suite_shape.py holds the copies equal."""
+    another; tools/twin_check.py holds the copies equal."""
     lines = data.split(b"\n")
     if lines[-1] == b"":
         lines.pop()
@@ -942,14 +943,14 @@ def sidecar_records(sidecar):
             yield record
 
 
+ATTEMPT_KIND = "attempt"
+
+
 def is_attempt(record):
-    """True for a row of kind `attempt` (#240): the recorder's note on how
-    a session-end step went, written in the sidecar the step owns. The
-    recorder's rule, twice over, since the two files never import each
-    other: a note is never a proof and never a sent head, so every
-    reader that judges or schedules skips it by its kind, and only the
-    readers that report (`left`, `last_failed`, the page) use it."""
-    return isinstance(record, dict) and record.get("kind") == "attempt"
+    """True for a row of kind `attempt`: a note on how a session-end
+    step went, never a proof and never a sent head. Readers that judge
+    skip these rows; readers that report use them."""
+    return isinstance(record, dict) and record.get("kind") == ATTEMPT_KIND
 
 
 # The outcomes that mean the step landed (the head sent, the digest
@@ -977,10 +978,12 @@ def sidecar_heads(sidecar):
 
 def remote_id(url):
     """Which remote a chain row went to, without the URL (#263): the
-    first 16 hex characters of the SHA-256 of the URL exactly as the
-    recorder sends to it. The recorder's rule, twice over, since the two
-    files never import each other; computed here only to compare, and
-    never printed, served or written down."""
+    first 16 hex characters of the SHA-256 of the URL exactly as it was
+    sent to. The receiver's URL carries its token, so the memo never
+    holds it (ADR-0025); a fingerprint of it names the remote and
+    reveals nothing usable. The recorder writes it into the memo and the
+    supervisor's keeper compares against it, so both compute it alike
+    (docs/TWINS.md)."""
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
@@ -1084,19 +1087,23 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
 # was published or anchored. Same throttle, same ripeness test, same
 # posture as the anchor keeper: off by default, staleness quiet.
 
+PUBLISH_SCHEMES = ("http", "https")
+SHELL_HAZARDS = "\"'`$\\"   # a quote, a backtick, a dollar sign, a backslash
+
+
 def publish_url(value):
-    """argparse validator for --publish-url: the recorder's rule, twice
-    over, since the two files never import each other. A plain http or
-    https URL with nothing a shell could act on (a quote, a backtick, a
-    dollar sign, a backslash, whitespace): the recorder's `publish`
-    refuses anything else, so refusing here too makes a bad URL a usage
-    error (exit 64) before the first tick, never a failure note on
-    every tick."""
-    parts = urlparse(value)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
+    """argparse validator for a URL a head, a chain or a digest is sent
+    to: a plain http or https URL. The installer writes such a URL onto
+    the wired SessionEnd command, which the harness runs through a shell
+    at every session end, and the supervisor's keeper hands one to
+    `publish`, so anything a shell could expand or unquote is refused
+    when the URL is given rather than escaped later: a quote, a
+    backtick, a dollar sign, a backslash, or whitespace."""
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme not in PUBLISH_SCHEMES or not parts.netloc:
         raise argparse.ArgumentTypeError(
             f"{value!r} is not an http or https URL")
-    if any(c in "\"'`$\\" or c.isspace() for c in value):
+    if any(c in SHELL_HAZARDS or c.isspace() for c in value):
         raise argparse.ArgumentTypeError(
             f"{value!r} holds a character a shell could act on (a quote, "
             "a backtick, a dollar sign, a backslash, or whitespace)")
@@ -1397,8 +1404,8 @@ def read_settings(settings_file):
 # know which entries the installer wrote before it reads anything off
 # them: which tools owe a receipt, whether SessionEnd is wired, which file
 # runs. The rule is the installer's (#293), copied here word for word
-# because the two files never import each other (ADR-0035); a test in
-# tests/test_suite_shape.py holds the copies equal. The readers once took
+# because the two files never import each other (ADR-0035);
+# tools/twin_check.py holds the copies equal. The readers once took
 # any command holding `receipts` or `loxodonta`, so a user's own
 # `python ~/bin/upload_receipts.py --to s3` left after uninstall-hook read
 # as the recorder's SessionEnd (#303). Only the recorder's `hook` entries
@@ -3756,17 +3763,17 @@ def invoking_repo(args):
 
 def store_home():
     """The machine-wide home of hook-written chains (ADR-0011):
-    ~/.loxodonta, or wherever LOXODONTA_HOME points. Duplicated from
-    loxodonta.py — like project_slug below, the two copies must agree,
-    and the recall tests hold them together behaviorally (hook in,
-    digest out)."""
+    ~/.loxodonta, or wherever LOXODONTA_HOME points."""
     return (os.environ.get("LOXODONTA_HOME")
             or os.path.join(os.path.expanduser("~"), ".loxodonta"))
 
 
 def project_slug(project):
-    """The store drawer name for a project: basename plus 8 hex of the
-    normalized full path's SHA256 (ADR-0011)."""
+    """The store drawer name for a project: its basename plus 8 hex of
+    the normalized full path's SHA256 — readable at a glance, and two
+    same-named projects can never share a drawer (ADR-0011). A hook
+    files its chain under it and the supervisor finds the drawer by it,
+    so both compute it alike (docs/TWINS.md)."""
     p = os.path.abspath(str(project))
     key = os.path.normcase(p).replace(os.sep, "/")
     # A lone surrogate (a folder name that is not UTF-8, on POSIX) is
@@ -3943,8 +3950,8 @@ def legacy_recall_scope(args, repo):
 # backslash stays as it is, so a receipt that spelled `\n` as two
 # characters prints the same as a newline; the chain file holds the
 # exact bytes. Twin of loxodonta.py's `visible`; the files never import
-# each other (ADR-0035), and tests/test_suite_shape.py holds the two
-# copies equal.
+# each other (ADR-0035), and tools/twin_check.py holds the two copies
+# equal.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
@@ -5512,12 +5519,10 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
 
 def key_fingerprint(public_key):
     """The SHA256 fingerprint of a public key file, as ssh-keygen prints
-    it (`ssh-keygen -lf`), or None when the file is not a key it reads:
-    the recorder's, twice over, so the fingerprint printed at packaging
-    is the one the verifier prints. The fingerprint is the key's
-    identity (ADR-0008 ruling 6); the comment ssh-keygen prints beside
-    it is a name, and stays unread."""
-    listed = subprocess.run(["ssh-keygen", "-lf", str(public_key)],
+    it (`ssh-keygen -lf`), or None when the file is not a key it reads.
+    The fingerprint is the key's identity (ADR-0008 ruling 6); the
+    comment ssh-keygen prints beside it is a name, and stays unread."""
+    listed = subprocess.run(["ssh-keygen", "-lf", public_key],
                             capture_output=True, encoding="utf-8",
                             errors="replace")
     words = listed.stdout.split()
@@ -9043,12 +9048,12 @@ def speak_utf8():
 
 
 class UsageParser(argparse.ArgumentParser):
-    """argparse, with usage errors on an exit of their own, the recorder's
-    class twice over. A wrong flag, a missing argument, or a malformed
-    value exits 64 instead of argparse's stock 2, so scan's 5, 6, 7 and
-    verify's 0..5 are never an argparse error (ADR-0026 ruling 7). The
-    message is argparse's, unchanged, on stderr. Subparsers inherit this
-    class, so every command speaks the same number."""
+    """argparse, with usage errors on an exit of their own. A wrong flag, a
+    missing argument, or a malformed value exits 64 instead of argparse's
+    stock 2, so no exit a script reads as an answer is ever an argparse
+    error (ADR-0026 ruling 7). The message is argparse's, unchanged, on
+    stderr. Subparsers inherit this class, so every command speaks the
+    same number."""
 
     def error(self, message):
         self.print_usage(sys.stderr)
