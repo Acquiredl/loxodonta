@@ -72,6 +72,7 @@ The kinds:
 ## Consequences
 
 **What gets easier:**
+
 - The SPEC defines each row by what it is, not by what it lacks.
 - A later kind is not a breaking change for any verifier already handed
   to a recipient.
@@ -79,6 +80,7 @@ The kinds:
   function.
 
 **What gets harder or more constrained:**
+
 - The kind-less rule is permanent. It stops growing; it never goes
   away.
 - A writer can relabel a forged proof with an unknown kind and turn
@@ -86,6 +88,7 @@ The kinds:
   sidecar is in its reach, and it could delete the row instead.
 
 **Compatibility:**
+
 - The v0.9.0 `verifier.py` skips only `attempt`, so it judges an
   `anchor` or `stamp` row as it judged a kind-less one. A package made
   after this change verifies the same under it.
