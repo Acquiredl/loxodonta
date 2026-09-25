@@ -4,7 +4,7 @@ This document specifies three parts, and each has its own version:
 
 - **The chain format:** `0.1`, sections 1 to 8, amended through 0.1.4.
 - **The sidecars:** every row names its kind (ADR-0038). Section 9, to come; until then docs/ANCHORING.md and docs/PACKAGE.md describe them.
-- **The package format:** `loxodonta-package/1`. Section 10, to come; until then docs/PACKAGE.md specifies it.
+- **The package format:** `loxodonta-package/1`, section 10.
 
 A revision of this document is not a format version: each part changes only under its own tag.
 
