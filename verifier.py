@@ -1536,7 +1536,9 @@ def bare_name(value):
     macOS take); no `/` or `\\` (a folder), none of `:<>|"?*`, which
     Windows refuses in a name (`C:x` is a drive there, `a?b` lands as
     `a_b`), no control character, below U+0020, and no lone surrogate;
-    no trailing dot or space, which Windows strips, so `project.json.`
+    no `~`, since Windows also opens a file by its 8.3 short name
+    (`LONGFI~1.TXT` for `longfilename.txt`), which no listing shows and
+    no other system has; no trailing dot or space, which Windows strips, so `project.json.`
     would open `project.json` there and nothing elsewhere; and not a
     Windows device name, in any case, alone or before a dot and with
     any spaces before that dot (`NUL`, `con.txt`, `nul .txt`, `CONIN$`,
@@ -1544,7 +1546,7 @@ def bare_name(value):
     `COM¹`, `COM²`, `COM³`, `LPT¹`, `LPT²`, `LPT³`)."""
     if not isinstance(value, str) or value in ("", ".", ".."):
         return False
-    if any(c in "/\\" + WINDOWS_REFUSED_CHARACTERS or c < " "
+    if any(c in "/\\~" + WINDOWS_REFUSED_CHARACTERS or c < " "
            or "\ud800" <= c <= "\udfff" for c in value):
         return False
     if len(value.encode("utf-8")) > 255 or value[-1] in ". ":

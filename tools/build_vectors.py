@@ -771,7 +771,9 @@ def build(workdir):
              "no other system does"),
             ("package-name-device", "NUL", "a device on Windows"),
             ("package-name-refused-character", "a?b",
-             "which a Windows unzip lands as a_b")):
+             "which a Windows unzip lands as a_b"),
+            ("package-name-short", "LONGFI~1.TXT",
+             "an 8.3 short name Windows opens for a long one")):
         package(name, package_files(
             base, change=lambda m, listed=listed:
             m["artifacts"][0].update(path=listed)))

@@ -733,6 +733,16 @@
       "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
     },
     {
+      "name": "package-name-short",
+      "about": "The manifest lists its artifact as LONGFI~1.TXT, an 8.3 short name Windows opens for a long one: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-short"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
       "name": "package-name-case",
       "about": "The manifest lists project.json and the package holds PROJECT.JSON: some systems open it for the name and others do not, so it is refused on every system.",
       "args": [

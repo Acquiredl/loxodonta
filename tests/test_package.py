@@ -415,7 +415,8 @@ class DemoStorePackageTest(PackageCase):
                     "\x1f", "a\udce9b", "é" * 130, "project.json.",
                     "project.json ", "NUL", "nul.txt", "Con", "prn.tar.gz",
                     "com1.log", "LPT9", "COM¹", "lpt³.txt", "nul .txt",
-                    "con .log", "CONIN$", "conout$.txt"):
+                    "con .log", "CONIN$", "conout$.txt", "LONGFI~1.TXT",
+                    "RECEIP~1.JSO", "a~b"):
             for row in ("chains", "artifacts"):
                 with self.subTest(name=bad, row=row):
                     (folder / "manifest.json").write_bytes(written)
@@ -515,7 +516,8 @@ class DemoStorePackageTest(PackageCase):
         self.assertEqual(self.package(BAD_DAY_SESSION).returncode, 0)
         with zipfile.ZipFile(next(self.work.glob("*.zip"))) as package:
             members = [(n, package.read(n)) for n in package.namelist()]
-        for name in ("a?b", "notes.txt.", "sub/a.txt", "NUL"):
+        for name in ("a?b", "notes.txt.", "sub/a.txt", "NUL",
+                     "LONGFI~1.TXT"):
             with self.subTest(name=name):
                 self.refused(self.crafted_zip(members + [(name, b"x")]),
                              "not a bare file name")
@@ -949,8 +951,7 @@ class HookStorePackageTest(PackageCase):
         # names differ only in case, so the packer refuses to write one.
         # Two session ids differing in case can reach one drawer where
         # the file system tells the names apart.
-        twin = self.chain.with_name(self.chain.name.upper().replace(
-            ".JSONL", ".jsonl"))
+        twin = self.chain.with_name("receipts-" + SESSION.upper() + ".jsonl")
         twin.write_bytes(self.chain.read_bytes())
         if len({p.name for p in self.chain.parent.iterdir()
                 if p.name.lower() == self.chain.name.lower()}) < 2:
