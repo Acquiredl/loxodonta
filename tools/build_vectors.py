@@ -588,7 +588,9 @@ def build(workdir):
             ("package-name-trailing-dot", "project.json.",
              "which Windows opens as project.json, stripping the dot, and "
              "no other system does"),
-            ("package-name-device", "NUL", "a device on Windows")):
+            ("package-name-device", "NUL", "a device on Windows"),
+            ("package-name-refused-character", "a?b",
+             "which a Windows unzip lands as a_b")):
         package(name, package_files(
             base, change=lambda m, listed=listed:
             m["artifacts"][0].update(path=listed)))
@@ -597,6 +599,37 @@ def build(workdir):
                     "refused on every system, unread.", 4,
                     "UNSUPPORTED-FORMAT: manifest.json lists an artifact "
                     "without a bare file name, a sha256, and a byte count")
+
+    # A name is read only when a file holds exactly it (#358): Windows
+    # and macOS open PROJECT.JSON for project.json, and Linux does not.
+    spelled = package_files(base)
+    spelled["PROJECT.JSON"] = spelled.pop("project.json")
+    package("package-name-case", spelled)
+    package_row("package-name-case", "The manifest lists project.json and "
+                "the package holds PROJECT.JSON: some systems open it for "
+                "the name and others do not, so it is refused on every "
+                "system.", 4, "UNSUPPORTED-FORMAT: this package holds "
+                "'PROJECT.JSON', which some systems open as 'project.json', "
+                "a name the verifier reads, and others do not; which file is "
+                "judged would depend on where it is verified, so this "
+                "verifier refuses it")
+
+    # Two listed names some systems open as one file (#358): with one
+    # hash and only a.txt present, Windows judged both as matching and
+    # Linux found A.txt missing.
+    one = {"sha256": hashlib.sha256(PROJECT_RECORD).hexdigest(),
+           "bytes": len(PROJECT_RECORD)}
+    package("package-names-one-file", {
+        **package_files(base, change=lambda m: m["artifacts"].extend(
+            [{"path": "A.txt", **one}, {"path": "a.txt", **one}])),
+        "a.txt": PROJECT_RECORD})
+    package_row("package-names-one-file", "The manifest lists A.txt and "
+                "a.txt with one hash, and only a.txt is in the package: one "
+                "file on Windows and macOS, two names elsewhere, so it is "
+                "refused on every system.", 4, "UNSUPPORTED-FORMAT: "
+                "manifest.json names 'A.txt' and 'a.txt', which some systems "
+                "open as one file; which one is read would depend on where "
+                "the package is verified")
 
     anchored = package_files(base, seals=["anchor"])
     digest = hashlib.sha256(anchored["manifest.json"]).hexdigest()

@@ -86,11 +86,11 @@ Every file can print text a Windows console's code page cannot hold, and none of
 
 ### The package
 
-Names: `PACKAGE_FORMAT`, `PACKAGE_MAX_BYTES`, `SIGNATURE_NAMESPACE`, `SIGNATURE_PRINCIPAL`, `key_fingerprint`, `bare_name`.
+Names: `PACKAGE_FORMAT`, `PACKAGE_MAX_BYTES`, `SIGNATURE_NAMESPACE`, `SIGNATURE_PRINCIPAL`, `key_fingerprint`, `bare_name`, `WINDOWS_REFUSED_CHARACTERS`, `WINDOWS_UNZIP_UNDERSCORES`, `landing_name`, `one_file_twice`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-The supervisor writes a package and the recorder, and the verifier cut from it, judge one: the format it names, the size it may unpack to, the namespace and principal its issuer signature is made and checked under, the key fingerprint both print, and the bare names its manifest may list (ADR-0026, #358).
+The supervisor writes a package and the recorder, and the verifier cut from it, judge one: the format it names, the size it may unpack to, the namespace and principal its issuer signature is made and checked under, the key fingerprint both print, the bare names its manifest may list, and which two names some system opens as one file (ADR-0026, #358).
 
 ### Attempt rows
 

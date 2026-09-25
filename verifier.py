@@ -1483,26 +1483,51 @@ SIGNATURE_NAMESPACE = "loxodonta-package"
 SIGNATURE_PRINCIPAL = "issuer"
 
 
+# The characters Windows refuses in a file name: its unzip lands each one
+# as `_` (landing_name), and a bare name holds none of them (bare_name).
+WINDOWS_REFUSED_CHARACTERS = ':<>|"?*'
+
+
 def bare_name(value):
     """A manifest path is accepted only as a bare file name: the layout is
     flat, and a name that could leave the package, or that one system
     opens as another file than the rest do, is refused, never followed.
     Judged by its characters alone, the same on every system, so one
     package gets one verdict wherever it is read: not empty, not `.` or
-    `..`; no `/`, `\\` or `:` (a folder, a drive such as `C:x`, a
-    Windows stream) and no control character, below U+0020; no trailing
-    dot or space, which Windows strips, so `project.json.` would open
-    `project.json` there and nothing elsewhere; and not a Windows device
-    name, in any case and whatever follows its first dot (`NUL`,
-    `con.txt`, `COM1` to `COM9`, `LPT1` to `LPT9`)."""
+    `..`, at most 255 bytes in UTF-8 (the longest file name Linux and
+    macOS take); no `/` or `\\` (a folder), none of `:<>|"?*`, which
+    Windows refuses in a name (`C:x` is a drive there, `a?b` lands as
+    `a_b`), no control character, below U+0020, and no lone surrogate;
+    no trailing dot or space, which Windows strips, so `project.json.`
+    would open `project.json` there and nothing elsewhere; and not a
+    Windows device name, in any case, alone or before a dot and with
+    any spaces before that dot (`NUL`, `con.txt`, `nul .txt`, `CONIN$`,
+    `CONOUT$`, `PRN`, `AUX`, `COM1` to `COM9` and `LPT1` to `LPT9`, and
+    `COM¹`, `COM²`, `COM³`, `LPT¹`, `LPT²`, `LPT³`)."""
     if not isinstance(value, str) or value in ("", ".", ".."):
         return False
-    if any(c in "/\\:" or c < " " for c in value) or value[-1] in ". ":
+    if any(c in "/\\" + WINDOWS_REFUSED_CHARACTERS or c < " "
+           or "\ud800" <= c <= "\udfff" for c in value):
         return False
-    device = value.split(".")[0].upper()
-    return not (device in ("CON", "PRN", "AUX", "NUL")
+    if len(value.encode("utf-8")) > 255 or value[-1] in ". ":
+        return False
+    device = value.split(".")[0].rstrip(" ").upper()
+    return not (device in ("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$")
                 or (len(device) == 4 and device[:3] in ("COM", "LPT")
                     and device[3] in "123456789¹²³"))
+
+
+def package_names(manifest):
+    """Every name the verifier opens in a package with this manifest, in
+    the manifest's order and each once: the manifest and its declared
+    seals' files, each chain and the two sidecars found beside it by
+    name, and each artifact (a transcript is one)."""
+    names = ["manifest.json", *sorted(seal_files(manifest))]
+    for listing in manifest["chains"]:
+        names += [listing["path"], anchors_path(listing["path"]),
+                  stamps_path(listing["path"])]
+    names += [listing["path"] for listing in manifest["artifacts"]]
+    return list(dict.fromkeys(names))
 
 
 def manifest_refusal(manifest):
@@ -1526,6 +1551,11 @@ def manifest_refusal(manifest):
                 and isinstance(listing.get("entries"), int)):
             return ("manifest.json lists a chain without a bare file name, "
                     "a head, and an entry count")
+        # Its sidecars are found by its name plus a suffix, the longer
+        # one `.anchors.jsonl`, so the name must leave room for both.
+        if not bare_name(anchors_path(listing["path"])):
+            return ("manifest.json lists a chain whose name leaves its "
+                    "sidecars' names past 255 bytes")
         # A transcript named on a chain (--transcript, ADR-0026 ruling 2)
         # is a file of this package like any other: a bare name only.
         if listing.get("transcript") is not None \
@@ -1554,6 +1584,15 @@ def manifest_refusal(manifest):
     if not isinstance(seals, list) or not all(isinstance(k, str) for k in seals):
         return ("manifest.json declares no seal set; a stripped seal is "
                 "judged against the declared set (ADR-0007)")
+    # Two names one system opens as one file (`A.txt` and `a.txt` on
+    # Windows and macOS) would be judged as one there and as two
+    # elsewhere, so a manifest naming both is refused everywhere.
+    twice = one_file_twice(package_names(manifest))
+    if twice is not None:
+        first, second = (visible(repr(name)) for name in twice)
+        return (f"manifest.json names {first} and {second}, which some "
+                "systems open as one file; which one is read would depend "
+                "on where the package is verified")
     return None
 
 
@@ -1562,6 +1601,11 @@ def read_manifest(folder):
     at the top of the folder; a missing or unreadable one, an unknown
     format tag, and a shape this verifier cannot judge are refusals, the
     way UNSUPPORTED-VERSION is."""
+    # Only a file named exactly manifest.json is the manifest: Windows and
+    # macOS would open `MANIFEST.JSON` for it, and Linux would not.
+    if "manifest.json" not in os.listdir(folder):
+        return None, ("UNSUPPORTED-FORMAT: no readable manifest.json at the "
+                      "top of this package; not a loxodonta package")
     try:
         # Read with the walk's guard (SPEC §6 step 1): a manifest giving
         # one key twice says two things, one to a reader keeping the
@@ -2141,6 +2185,14 @@ def judge_package(shown, folder, chain_file=None, block_headers=None):
     if refusal:
         print(refusal)
         return 4
+    spelled = another_spelling(folder, manifest)
+    if spelled is not None:
+        held, name = (visible(repr(n)) for n in spelled)
+        print(f"UNSUPPORTED-FORMAT: this package holds {held}, which some "
+              f"systems open as {name}, a name the verifier reads, and "
+              "others do not; which file is judged would depend on where "
+              "it is verified, so this verifier refuses it")
+        return 4
     print_manifest_summary(shown, manifest)
     findings = []
     references = 0
@@ -2176,7 +2228,8 @@ def judge_package(shown, folder, chain_file=None, block_headers=None):
 
 
 # The characters a Windows unzip turns into `_` in a member's name.
-WINDOWS_UNZIP_UNDERSCORES = str.maketrans(':<>|"?*', "_" * 7)
+WINDOWS_UNZIP_UNDERSCORES = str.maketrans(
+    WINDOWS_REFUSED_CHARACTERS, "_" * len(WINDOWS_REFUSED_CHARACTERS))
 
 
 def landing_name(name):
@@ -2197,6 +2250,21 @@ def landing_name(name):
     landed = "/".join(segment for segment in segments if segment)
     landed = landed.translate(WINDOWS_UNZIP_UNDERSCORES)
     return unicodedata.normalize("NFC", landed).casefold()
+
+
+def another_spelling(folder, manifest):
+    """(the file, the name), when a file at the top of the package is not
+    a name the verifier reads (package_names) but lands on one, another
+    case or Unicode form of it; else None. Windows and macOS would open
+    that file for the name and Linux would not, so the verifier reads a
+    name only when a file holds exactly it, judged from the folder's
+    listing, which is the same on every system."""
+    names = {landing_name(name): name for name in package_names(manifest)}
+    for held in sorted(os.listdir(folder)):
+        name = names.get(landing_name(held))
+        if name is not None and name != held:
+            return held, name
+    return None
 
 
 def one_file_twice(names):
@@ -2250,6 +2318,17 @@ def cmd_verify_package(args):
                           f"that unpack to one file, {which}; which one is "
                           "read depends on the tool that unpacks it, so "
                           "this verifier refuses it unopened")
+                    return 4
+                # The layout is flat, and a member's name is kept only as
+                # it stands: a Windows unzip lands `project.json.` as
+                # `project.json` and `a?b` as `a_b`, which no other does.
+                crooked = next((name for name in package.namelist()
+                                if not bare_name(name)), None)
+                if crooked is not None:
+                    print(f"UNSUPPORTED-FORMAT: {path} holds a member named "
+                          f"{visible(repr(crooked))}, not a bare file name; "
+                          "some systems would unpack it under another name, "
+                          "so this verifier refuses it unopened")
                     return 4
                 package.extractall(unpacked)
         # ValueError: a member whose name leaves nothing to unpack to,

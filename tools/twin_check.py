@@ -116,14 +116,16 @@ TWINS = (
          "hold, and none of them may die on it (#294)."),
     Twin("The package",
          ("PACKAGE_FORMAT", "PACKAGE_MAX_BYTES", "SIGNATURE_NAMESPACE",
-          "SIGNATURE_PRINCIPAL", "key_fingerprint", "bare_name"),
+          "SIGNATURE_PRINCIPAL", "key_fingerprint", "bare_name",
+          "WINDOWS_REFUSED_CHARACTERS", "WINDOWS_UNZIP_UNDERSCORES",
+          "landing_name", "one_file_twice"),
          ORIGINAL, SUPERVISOR,
          "The supervisor writes a package and the recorder, and the "
          "verifier cut from it, judge one: the format it names, the size "
          "it may unpack to, the namespace and principal its issuer "
          "signature is made and checked under, the key fingerprint "
-         "both print, and the bare names its manifest may list "
-         "(ADR-0026, #358)."),
+         "both print, the bare names its manifest may list, and which "
+         "two names some system opens as one file (ADR-0026, #358)."),
     Twin("Attempt rows", ("ATTEMPT_KIND", "is_attempt"),
          ORIGINAL, SUPERVISOR,
          "The recorder notes how a session-end step went in a row of kind "

@@ -502,6 +502,36 @@
       "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
     },
     {
+      "name": "package-name-refused-character",
+      "about": "The manifest lists its artifact as a?b, which a Windows unzip lands as a_b: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-refused-character"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
+      "name": "package-name-case",
+      "about": "The manifest lists project.json and the package holds PROJECT.JSON: some systems open it for the name and others do not, so it is refused on every system.",
+      "args": [
+        "verify-package",
+        "package-name-case"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: this package holds 'PROJECT.JSON', which some systems open as 'project.json', a name the verifier reads, and others do not; which file is judged would depend on where it is verified, so this verifier refuses it"
+    },
+    {
+      "name": "package-names-one-file",
+      "about": "The manifest lists A.txt and a.txt with one hash, and only a.txt is in the package: one file on Windows and macOS, two names elsewhere, so it is refused on every system.",
+      "args": [
+        "verify-package",
+        "package-names-one-file"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json names 'A.txt' and 'a.txt', which some systems open as one file; which one is read would depend on where the package is verified"
+    },
+    {
       "name": "package-anchored",
       "about": "The manifest's sha256 anchored by a completed proof, and the header of the block its attestation claims given: the rung, the block named by the header's hash.",
       "args": [

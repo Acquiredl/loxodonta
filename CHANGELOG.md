@@ -26,7 +26,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `supervisor scan` no longer stops with a traceback on a sidecar or transcript line holding an integer past 4,300 digits or nesting past the recursion limit. The writer can reach those files, so one line could stop the audit (#331).
 - `loxodonta hook` answers a payload holding the same lines with exit 65, as for any payload it cannot read, not a traceback and exit 70 (#331).
-- `verify-package` judges a manifest's bare names by their characters, the same on every system: a `:`, a control character, a trailing dot or space, and a Windows device name (`NUL`, `COM1`) are refused. `supervisor package` never lists one (#358).
+- `verify-package` no longer gives a verdict that depends on the recipient's system: it refuses a name Windows reads otherwise (`C:x`, `a?b`, `NUL`, a trailing dot), one past 255 bytes, and two names differing only in case or Unicode form (#358).
 
 ## [0.9.0] - 2026-09-23
 
