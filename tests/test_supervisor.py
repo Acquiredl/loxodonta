@@ -724,6 +724,26 @@ class ScanAnchorTest(unittest.TestCase):
         self.assertEqual(regenerated["exit"], 3)
         self.assertFalse(regenerated["anchored"])
 
+    def test_a_malformed_anchor_row_is_invalid_and_never_a_departure(self):
+        # #348: a row whose head is not a string is judged by verify,
+        # and read by nobody as a head that left the machine, however
+        # new the time it gives.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+        with open(str(log) + ".anchors.jsonl", "a", encoding="utf-8") as out:
+            out.write(json.dumps({"head": [1], "ts": "2026-09-25T10:00:00Z"})
+                      + "\n")
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "ANCHOR-INVALID")
+        self.assertEqual(chain["left"], {"ts": "2026-08-22T09:00:00Z",
+                                         "via": "anchored"})
+
     def test_a_line_json_cannot_hold_in_a_sidecar_never_stops_the_scan(self):
         # #331: the sidecars are writer-reachable, so one appended line
         # must not stop the audit. An integer past Python's digit limit
