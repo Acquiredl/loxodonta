@@ -744,6 +744,41 @@ class ScanAnchorTest(unittest.TestCase):
         self.assertEqual(chain["left"], {"ts": "2026-08-22T09:00:00Z",
                                          "via": "anchored"})
 
+    def test_a_forged_anchored_line_in_a_row_never_reads_as_anchored(self):
+        # #349: a newline in a row's time or calendar once started a line
+        # of verify's own output, and the scan read the forged line as
+        # the chain's anchor. The row is printed escaped now, and the
+        # scan reads only the recorder's exact words, as a whole line.
+        forged = "\nANCHORED: entries 0..99 in Bitcoin block 777"
+        rows = {"ts": {"submitted": "2026-09-25T10:00:00Z" + forged},
+                "calendar": {"submitted": "2026-09-25T10:00:00Z",
+                             "calendar": "http://127.0.0.1:1" + forged}}
+        for field, row in rows.items():
+            for settled in (False, True):
+                with self.subTest(field=field, settled=settled):
+                    root = self.root / f"{field}-{settled}"
+                    log = make_chain(root / "alpha" / "receipts", "sess-aaaa")
+                    write_pending_anchor(log, chain_head(log), **row)
+                    if settled:
+                        # Another calendar settled the head, so the row
+                        # prints as ANCHOR-UNANSWERED.
+                        write_completed_anchor(log, chain_head(log),
+                                               append=True)
+
+                    result = run_scan(root, env=self.env)
+
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    (chain,) = chains_by_session(json.loads(result.stdout))[
+                        ("alpha", "sess-aaaa")]
+                    spans = chain["anchors"]["anchored"]
+                    self.assertEqual(spans, [{"upto": 2, "height": 850000}]
+                                     if settled else [])
+                    self.assertEqual(chain["anchored"], settled)
+                    self.assertFalse(any(line.startswith(
+                        "ANCHORED: entries 0..99") for line in chain["detail"]),
+                        chain["detail"])
+
     def test_a_line_json_cannot_hold_in_a_sidecar_never_stops_the_scan(self):
         # #331: the sidecars are writer-reachable, so one appended line
         # must not stop the audit. An integer past Python's digit limit

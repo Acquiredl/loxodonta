@@ -41,7 +41,9 @@ from types import SimpleNamespace
 # when the module runs alone (`python -m unittest tests.test_stamp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
+from test_anchor import (HOSTILE, HOSTILE_HEAD, SHOWN, SHOWN_HEAD,
+                         FakeCalendar, FakeCalendarHandler,
+                         assert_printed_escaped, clean_env)
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
 from test_supervisor import (ago, chain_head, chains_by_session,
                              home_outside, isolated_env, make_chain,
@@ -838,6 +840,39 @@ class StampRowKindTest(unittest.TestCase):
                          (self.head, "stamp"))
 
 
+class StampFieldEscapeTest(unittest.TestCase):
+    """#349: a field of a stamp row that `verify --stamps` prints is the
+    writer's text, and is printed escaped (#295). The row's authority is
+    printed only beside a token openssl accepted, so that one is
+    JudgedStampTest's. The fixture is StampRowKindTest's."""
+
+    setUp = StampRowKindTest.setUp
+    token_row = StampRowKindTest.token_row
+    write_sidecar = StampRowKindTest.write_sidecar
+    verify = StampRowKindTest.verify
+
+    def test_a_head_that_appears_nowhere_prints_escaped(self):
+        self.write_sidecar(self.token_row(head=HOSTILE_HEAD))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        assert_printed_escaped(self, result.stdout,
+                               f"STAMP-INVALID: stamped head {SHOWN_HEAD} "
+                               "appears nowhere in this log")
+
+    def test_no_sidecar_is_named_by_its_bare_name(self):
+        log = self.workdir / "receipts.jsonl"
+
+        result = run_receipts("verify", "--stamps", "--log", str(log),
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NO-STAMPS: receipts.jsonl.stamps.jsonl not found — ",
+                      result.stdout)
+        self.assertNotIn(str(self.workdir), result.stdout)
+
+
 # --- Who waits for the reply's body ------------------------------------------
 
 class SlowBodyHandler(BaseHTTPRequestHandler):
@@ -1467,6 +1502,19 @@ class JudgedStampTest(unittest.TestCase):
         self.assertIn("stamp not judged: no --authority-chain FILE given",
                       result.stdout)
         self.assertRegex(result.stdout, r"(?m)^VALID$")
+
+    def test_the_authority_a_row_names_prints_escaped(self):
+        # #349: the name is the writer's note, printed as testimony, and
+        # escaped like every other field of the row.
+        self.stamp()
+        self.rewrite_row(authority=HOSTILE)
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        assert_printed_escaped(self, result.stdout,
+                               f"(the record names {SHOWN}, testimony)")
+        self.assertEqual(result.stdout.splitlines()[-1], "VALID")
 
     def test_the_stored_reply_is_what_the_authority_sent(self):
         # Verbatim: the bytes in the sidecar are the bytes openssl wrote,

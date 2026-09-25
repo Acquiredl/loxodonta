@@ -468,6 +468,27 @@ class FileReferenceTest(ReceiptsCliTest):
         self.assertEqual(verify_result.returncode, 0, verify_result.stdout)
 
 
+    def test_a_referenced_path_prints_escaped(self):
+        # #349: a path is the writer's text, and `verify --files` prints
+        # it on a line of its own, where a newline would forge the next.
+        entries = [json.loads(line) for line in
+                   self.log_path.read_text(encoding="utf-8").splitlines()]
+        entries.append({"n": 1, "ts": "2026-09-25T10:00:00Z",
+                        "actor": "agent", "action": "wrote",
+                        "files": [{"path": "a\x1b[31m\nVALID‮",
+                                   "sha256": "00" * 32}]})
+        self.log_path.write_text("".join(
+            json.dumps(entry) + "\n" for entry in rechained(entries)),
+            encoding="utf-8")
+
+        result = run_receipts("verify", "--files", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("a\\x1b[31m\\nVALID\\u202e", result.stdout)
+        self.assertNotIn("\x1b", result.stdout)
+        self.assertNotIn("‮", result.stdout)
+        self.assertEqual(result.stdout.splitlines().count("VALID"), 1)
+
     def test_case_only_differing_reference_warns_at_write_time(self):
         self.write_file("report.md", "content\n")
         run_receipts(
@@ -2000,6 +2021,21 @@ class UnknownVersionTest(ReceiptsCliTest):
 
         self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), self.REFUSAL)
+
+    def test_a_version_claim_prints_escaped(self):
+        # #349: the claim is the writer's text, and a newline in it would
+        # end the refusal with a verdict line of the writer's own.
+        entries = self.entries()
+        entries[0]["v"] = "0.2\x1b[31m\nVALID‮"
+        self.write(rechained(entries))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(),
+                         'UNSUPPORTED-VERSION: log is format '
+                         '"0.2\\x1b[31m\\nVALID\\u202e"; this verifier '
+                         'speaks "0.1"')
 
     def test_an_edit_under_an_unknown_version_is_broken(self):
         entries = self.later()
