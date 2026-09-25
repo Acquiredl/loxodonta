@@ -165,7 +165,7 @@ What a verdict does not mean (§8.1), and what the format leaves out on purpose 
 
 ### 8.1 What the design cannot claim
 
-No verdict, `VALID` and `ANCHORED` included, claims any of the following. A *commitment held off the machine* is a chain head kept where the writer cannot change it: an anchor, a published head, or a head record.
+No verdict, `VALID` and `ANCHORED` included, claims any of the following. A *commitment held off the machine* is a chain head kept where the writer cannot change it: an anchor, an authority timestamp (trusted as far as its authority, ADR-0032), a published head, or a head record.
 
 - **Forward integrity for entries after the last commitment.** Nothing in the chain is secret, so whoever can write the log can rewrite every entry after the last commitment held off the machine and recompute their hashes, and the result verifies `VALID`.
 - **Resistance to a cut tail where no published head exists.** A chain with its last entries cut off is still a whole chain, and verifies `VALID`. Only a commitment held off the machine, made after those entries were written, shows that the chain was once longer.
