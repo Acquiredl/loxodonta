@@ -26,7 +26,7 @@ Beside the proofs, the session-end anchor leaves one more kind of row (#240). Af
 
 A row of any other kind, or of a kind that belongs in another sidecar (the memo's `chain`), is named by its line and never judged (SPEC §9.2): `ANCHOR-UNKNOWN-KIND: line 3 of receipts.jsonl.anchors.jsonl is of kind "witness-note"`.
 
-So is an anchor row missing its `head` or `proof`, or holding a field of the wrong type: a `head`, `proof`, `calendar` or `ts` that is not a string, a `proof` that is not base64, an `n` that is not an integer. The line names the field and its JSON type, never the value: `ANCHOR-INVALID: record's head is an array, not a string`. `anchor --upgrade` and the session-end anchor skip such a row, since it is no proof they can act on, and a pending proof that names no calendar is left alone, since there is no one to ask (#348).
+An anchor row missing its `head` or `proof`, or holding a field of the wrong type, is `ANCHOR-INVALID`, and which fields and types count is SPEC §9.4 step 2. The line names the field and its JSON type, never the value: `ANCHOR-INVALID: record's head is an array, not a string`. `anchor --upgrade` and the session-end anchor skip such a row, since it is no proof they can act on, and a pending proof that names no calendar is left alone, since there is no one to ask (#348).
 
 ## 3. Commands
 
