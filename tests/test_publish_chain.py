@@ -109,7 +109,9 @@ def chain_rows(log):
 
 
 def head_rows(log):
-    return [row for row in memo_of(log) if "kind" not in row]
+    """The memo's head rows: kind `head`, or no kind at all, as every
+    head row was written before rows named their kind (ADR-0038)."""
+    return [row for row in memo_of(log) if row.get("kind", "head") == "head"]
 
 
 def attempt_rows(log):
@@ -327,6 +329,39 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertEqual(judged.stdout.strip(), "VALID")
         self.assertEqual([(r["first"], r["last"]) for r in chain_rows(self.log)],
                          [(0, 2)])
+
+    def test_only_a_chain_row_naming_this_remote_moves_its_cursor(self):
+        # ADR-0038: the cursor is read from rows of kind `chain` alone.
+        # A head row, with its kind or without one, an unknown kind, a
+        # kind that is not a string, a line that is not an object, and a
+        # chain row naming another remote all count for nothing, each
+        # claiming entry 9 of this remote so that any of them counting
+        # would read as a chain fully sent.
+        fake = serve_fake(self)
+        make_chain(self.log, ["step 1"], epoch=1700000000)
+        self.assertEqual(self.publish_chain(fake.url).returncode, 0)
+        mine = remote_id(fake.url)
+        claim = {"first": 0, "last": 9, "head": "ab" * 32,
+                 "ts": "2026-09-25T00:00:00Z", "event": "cadence",
+                 "remote_id": mine}
+        rows = [claim, {**claim, "kind": "head"},
+                {**claim, "kind": "witness-note"},
+                {**claim, "kind": ["chain"]},
+                {**claim, "kind": "chain", "remote_id": "0" * 16},
+                "chain", [{**claim, "kind": "chain"}]]
+        with open(str(self.log) + ".published.jsonl", "a",
+                  encoding="utf-8") as out:
+            for row in rows:
+                out.write(json.dumps(row, sort_keys=True) + "\n")
+        run_recorder("log", "--log", self.log, "--actor", "claude-code",
+                     "--action", "step 2", epoch=1700000000)
+
+        result = self.publish_chain(fake.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("published chain entries 2-2", result.stdout)
+        self.assertEqual(fake.received[-1]["headers"]["x-loxodonta-range"],
+                         "2-2")
 
     def test_a_refused_batch_leaves_no_chain_row_and_the_next_send_resumes(self):
         # The memo advances on a 2xx and on nothing else: a refused batch
@@ -1139,7 +1174,7 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.assertEqual(batch["headers"]["x-loxodonta-range"], "0-2")
         self.assertEqual(batch["headers"]["x-loxodonta-session"], "sess-turn")
         self.assertEqual([row.get("kind") for row in memo_of(log)],
-                         [None, "chain"])
+                         ["head", "chain"])
         self.assertEqual(chain_rows(log)[0]["event"], "cadence")
 
         # The same tick again, inside the throttle window: nothing moves.
@@ -1290,7 +1325,7 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.assertIn(chain["left"]["via"], ("published", "published-chain"))
         self.assertEqual(status["exit"], 0)
         self.assertEqual([row.get("kind") for row in memo_of(log)],
-                         [None, "chain"])
+                         ["head", "chain"])
 
 
 class InstallProfileFullTest(unittest.TestCase):
@@ -1704,7 +1739,7 @@ class FullProfileKeeperTest(unittest.TestCase):
                          chain_head(log))
         self.assertEqual(self.receiver.received[1]["raw"], log.read_bytes())
         self.assertEqual([row.get("kind") for row in memo_of(log)],
-                         [None, "chain"])
+                         ["head", "chain"])
         # The anchor keeper ran beside it, on the same default, with no
         # flag typed for either.
         self.assertEqual(self.calendar.submitted,
@@ -2163,7 +2198,7 @@ class ChangedRemoteKeeperTest(unittest.TestCase):
         self.assertEqual(self.heads("second"), [],
                          "a head is posted once, wherever it went")
         (row,) = head_rows(log)
-        self.assertEqual(set(row), {"head", "n", "ts", "event"})
+        self.assertEqual(set(row), {"kind", "head", "n", "ts", "event"})
 
         self.keep(self.second, SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
 
