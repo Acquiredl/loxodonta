@@ -257,7 +257,9 @@ class StampCommandTest(unittest.TestCase):
         (query,) = self.authority.received
         self.assertEqual(query["content_type"], QUERY_TYPE)
         (row,) = rows_of(self.sidecar)
-        self.assertEqual(set(row), {"head", "n", "ts", "authority", "response"})
+        self.assertEqual(set(row), {"kind", "head", "n", "ts", "authority",
+                                    "response"})
+        self.assertEqual(row["kind"], "stamp")
         self.assertEqual(row["head"], self.head)
         self.assertEqual(row["n"], 2)
         self.assertEqual(row["authority"], self.authority.url)
@@ -582,6 +584,260 @@ class StampCommandTest(unittest.TestCase):
         self.assertNotIn("anchor", self.sidecar.name)
 
 
+class StampRowKindTest(unittest.TestCase):
+    """ADR-0038: every row of the stamps sidecar names its kind. A new
+    token row is written `"kind": "stamp"`; a row with no kind reads as a
+    token, whenever it was written, so every sidecar already shipped
+    verifies as it did; and a row of a kind this verifier does not know,
+    or a kind that belongs in another sidecar, is named by its line and
+    never judged, so a newer recorder's row is never evidence against an
+    honest log. None of it needs openssl: with no chain file given, a
+    token is present and not judged, which is the same line for a
+    kind-less row as for a named one."""
+
+    UNKNOWN = "STAMP-UNKNOWN-KIND"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.sidecar = self.workdir / "receipts.jsonl.stamps.jsonl"
+        self.authority = start_authority(self)
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+
+    def token_row(self, **extra):
+        """A token row over the head, as the recorder writes one, keys
+        sorted and compact; `extra` adds fields (a kind) or replaces them."""
+        row = {"head": self.head, "n": 1, "ts": "2026-09-24T10:00:00Z",
+               "authority": self.authority.url,
+               "response": base64.b64encode(GRANTED).decode()}
+        row.update(extra)
+        return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+    def write_sidecar(self, *lines):
+        self.sidecar.write_text("".join(line + "\n" for line in lines),
+                                encoding="utf-8")
+
+    def stamp(self):
+        return run_receipts("stamp", "--authority", self.authority.url,
+                            cwd=self.workdir)
+
+    def verify(self):
+        return run_receipts("verify", "--stamps", cwd=self.workdir)
+
+    def without_notes(self, stdout):
+        return [line for line in stdout.splitlines()
+                if not line.startswith(self.UNKNOWN)]
+
+    def test_a_new_stamp_row_names_its_kind_and_nothing_else_changes(self):
+        result = self.stamp()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        lines = self.sidecar.read_text("utf-8").splitlines()
+        (line,) = [l for l in lines if '"kind":"attempt"' not in l]
+        row = json.loads(line)
+        self.assertEqual(row["kind"], "stamp")
+        self.assertEqual(set(row),
+                         {"kind", "head", "n", "ts", "authority", "response"})
+        # Written compact and key-sorted, as every sidecar row is.
+        self.assertEqual(line, json.dumps(row, sort_keys=True,
+                                          separators=(",", ":")))
+
+    def test_a_row_with_no_kind_reads_as_a_stamp(self):
+        self.write_sidecar(self.token_row())
+        kindless = self.verify()
+        self.write_sidecar(self.token_row(kind="stamp"))
+        named = self.verify()
+
+        self.assertEqual(kindless.returncode, 0,
+                         kindless.stdout + kindless.stderr)
+        self.assertIn("stamp not judged: no --authority-chain FILE given",
+                      kindless.stdout)
+        self.assertRegex(kindless.stdout, r"(?m)^VALID$")
+        self.assertEqual((named.returncode, named.stdout, named.stderr),
+                         (kindless.returncode, kindless.stdout,
+                          kindless.stderr))
+
+    def test_a_kindless_row_for_another_head_is_still_stamp_invalid(self):
+        self.write_sidecar(self.token_row(head="ab" * 32))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("STAMP-INVALID: stamped head", result.stdout)
+        self.assertIn("appears nowhere in this log", result.stdout)
+
+    def test_an_unknown_kind_is_named_by_its_line_and_not_judged(self):
+        self.write_sidecar(self.token_row())
+        before = self.verify()
+        # Shaped like a token over another head: judged, it would be
+        # STAMP-INVALID, exit 3.
+        self.write_sidecar(self.token_row(),
+                           self.token_row(kind="witness-note",
+                                          head="ab" * 32))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, before.returncode,
+                         result.stdout + result.stderr)
+        self.assertIn(f'{self.UNKNOWN}: line 2 of {self.sidecar.name} is of '
+                      'kind "witness-note" — this verifier does not know the '
+                      'kind in this sidecar, and does not judge it',
+                      result.stdout)
+        self.assertEqual(result.stdout.count(self.UNKNOWN), 1)
+        self.assertNotIn("STAMP-INVALID", result.stdout)
+        self.assertEqual(self.without_notes(result.stdout),
+                         before.stdout.splitlines())
+
+    def test_a_head_or_anchor_row_in_the_stamps_sidecar_is_named_not_judged(self):
+        # Known kinds, but the memo's and the anchors sidecar's
+        # (ADR-0038), not this sidecar's.
+        for line, kind in ((1, "head"), (2, "anchor")):
+            with self.subTest(kind=kind):
+                misplaced = self.token_row(kind=kind, head="ab" * 32)
+                rows = [self.token_row()]
+                rows.insert(line - 1, misplaced)
+                self.write_sidecar(*rows)
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn(f'{self.UNKNOWN}: line {line} of '
+                              f'{self.sidecar.name} is of kind "{kind}"',
+                              result.stdout)
+                self.assertIn("stamp not judged", result.stdout)
+                self.assertNotIn("STAMP-INVALID", result.stdout)
+                self.assertRegex(result.stdout, r"(?m)^VALID$")
+
+    def test_an_unknown_kind_leaves_an_exit_3_as_it_was(self):
+        # Beside evidence against the log, the note moves nothing: the
+        # exit is 3, and the last line is still the finding's, which is
+        # where the supervisor's scan reads a verdict.
+        mismatch = self.token_row(head="ab" * 32)
+        self.write_sidecar(mismatch)
+        before = self.verify()
+        self.write_sidecar(mismatch, json.dumps({"kind": "later-kind"}))
+
+        result = self.verify()
+
+        self.assertEqual(before.returncode, 3, before.stdout + before.stderr)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1],
+                         before.stdout.splitlines()[-1])
+        self.assertIn(f"{self.UNKNOWN}: line 2 of", result.stdout)
+
+    def test_a_kind_that_is_not_a_string_is_named_by_its_type(self):
+        for kind, word in ((5, "a number"), (None, "null"),
+                           (True, "true or false"), (["stamp"], "an array"),
+                           ({"k": "stamp"}, "an object")):
+            with self.subTest(kind=kind):
+                self.write_sidecar(self.token_row(),
+                                   json.dumps({"kind": kind}))
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn(f"{self.UNKNOWN}: line 2 of {self.sidecar.name} "
+                              f"is of a kind that is {word}, not a string — "
+                              "this verifier does not know the kind in this "
+                              "sidecar, and does not judge it", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_kind_is_printed_escaped_never_raw(self):
+        # The kind is the writer's text, printed to a terminal: a newline
+        # in it could forge a verdict line, an escape repaint the screen.
+        self.write_sidecar(self.token_row(),
+                           json.dumps({"kind": "x\x1b[2J\nVALID‮"}))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('is of kind "x\\x1b[2J\\nVALID\\u202e"', result.stdout)
+        self.assertNotIn("\x1b", result.stdout)
+        self.assertNotIn("‮", result.stdout)
+        self.assertEqual(result.stdout.splitlines().count("VALID"), 1)
+
+    def test_an_unreadable_line_is_still_stamp_invalid(self):
+        too_long = '{"kind": ' + "9" * 5000 + "}"
+        too_deep = '{"kind": ' + "[" * 100000 + "]" * 100000 + "}"
+        for line in ("not a record", "[1, 2]", too_long, too_deep):
+            with self.subTest(line=line[:20]):
+                self.write_sidecar(self.token_row(), line)
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 3,
+                                 result.stdout + result.stderr)
+                self.assertIn("STAMP-INVALID: sidecar line is not a stamp "
+                              "record", result.stdout)
+                self.assertNotIn(self.UNKNOWN, result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_line_that_is_not_utf8_is_still_stamp_invalid(self):
+        self.sidecar.write_bytes(self.token_row().encode() + b"\n"
+                                 + b'{"kind": "\xff"}\n')
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("STAMP-INVALID: sidecar line is not a stamp record",
+                      result.stdout)
+
+    def test_a_kindless_or_a_named_token_row_is_already_stamped(self):
+        # The dedupe asks the reader too: a token row from before rows
+        # named their kind holds the head exactly as a named one does, so
+        # neither sends a second query.
+        for row in (self.token_row(), self.token_row(kind="stamp")):
+            with self.subTest(row=row[:30]):
+                self.write_sidecar(row)
+
+                result = self.stamp()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(),
+                                 f"already stamped head {self.head[:12]}… "
+                                 "(entry 1)")
+                self.assertEqual(self.authority.received, [])
+                self.assertEqual(self.sidecar.read_text("utf-8"), row + "\n")
+
+    def test_a_token_row_whose_head_is_not_a_string_does_not_stop_the_verb(self):
+        # A writer-reachable row, so it must not crash the dedupe: it
+        # names no head, holds no token, and the head is asked about.
+        malformed = json.dumps({"head": ["x"], "response": "AA=="})
+        self.write_sidecar(malformed)
+
+        result = self.stamp()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(self.authority.received), 1)
+        rows = rows_of(self.sidecar)
+        self.assertEqual(rows[0], json.loads(malformed))
+        self.assertEqual((rows[1]["head"], rows[1]["kind"]),
+                         (self.head, "stamp"))
+
+    def test_a_row_of_an_unknown_kind_naming_the_head_is_not_its_token(self):
+        # Only a token stamps a head. A row of a kind the recorder does
+        # not know is not one, whatever head it names, so the verb still
+        # asks, and the new row says it is a stamp.
+        foreign = self.token_row(kind="witness-note")
+        self.write_sidecar(foreign)
+
+        result = self.stamp()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.authority.received), 1)
+        rows = rows_of(self.sidecar)
+        self.assertEqual(rows[0], json.loads(foreign))
+        self.assertEqual((rows[1]["head"], rows[1]["kind"]),
+                         (self.head, "stamp"))
+
+
 # --- Who waits for the reply's body ------------------------------------------
 
 class SlowBodyHandler(BaseHTTPRequestHandler):
@@ -774,6 +1030,30 @@ class SessionEndStampTest(PublishBase):
         self.assertEqual(note["step"], "stamp")
         self.assertEqual(note["outcome"],
                          "the authority answered status 2 (rejection)")
+
+    def test_a_malformed_stamps_row_leaves_the_stamp_and_the_anchor_working(self):
+        # A row whose head is not a string sits in a file the writer can
+        # reach. The dedupe skips it, so the session end still stamps the
+        # sealed head and still reaches the anchor after it.
+        calendar = self.watched_calendar()
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        malformed = {"head": ["x"], "response": "AA=="}
+        self.stamps().write_text(json.dumps(malformed) + "\n", "utf-8")
+
+        result = self.session_end("--stamp", self.authority.url,
+                                  "--anchor", "--calendar", calendar.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(len(self.authority.received), 1)
+        self.assertEqual([d.hex() for d in calendar.submitted], [self.head()])
+        rows = rows_of(self.stamps())
+        self.assertEqual(rows[0], malformed)
+        (token,) = [r for r in rows if r.get("kind") == "stamp"]
+        self.assertEqual(token["head"], self.head())
+        (note,) = attempt_rows(self.stamps())
+        self.assertEqual(note["outcome"], "granted")
 
     def test_an_authority_that_never_answers_is_abandoned_on_the_hooks_clock(self):
         # The one query has a bounded timeout well inside the budget, and
