@@ -412,6 +412,227 @@
       "last_line": ""
     },
     {
+      "name": "anchor-pending",
+      "about": "A pending proof of the head, as a calendar first answers: not a failure, and it earns nothing yet.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-pending.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHOR-PENDING: head fab3462eec00\u2026 submitted 2026-09-23T12:05:00Z via https://calendar.example/ \u2014 run `loxodonta anchor --upgrade`",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-complete",
+      "about": "A completed proof of the head and no block header given: the block is the attestation's claim, and the line says it was not checked.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-complete.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHORED: entries 0..3: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read a0592f67027757ad17f4b44d3ea1e19395807e8bf7be07fa8de69b5c347a72f1, which --block-header with its header checks",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-complete-checked",
+      "about": "The same proof with the header of the block it claims: its merkle root is the one the proof replays to, so the block is checked and named by the header's hash.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--block-header",
+        "000000201111111111111111111111111111111111111111111111111111111111111111f1727a345c9be68dfa07bef78b7e809593e1a13e4db4f417ad577702672f59a098c1b36a1942031707000000",
+        "--log",
+        "anchor-complete.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHORED: entries 0..3 existed by the block whose header hashes to aa11334a81018ef6a6e5425937b1d1101d0c7f498f06a928293febd510d8c411, whose merkle root a0592f67027757ad17f4b44d3ea1e19395807e8bf7be07fa8de69b5c347a72f1 is the one the proof replays to; the attestation calls it Bitcoin block 850123, which is your header source's word, and the hash is what a second source can confirm",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-mismatch",
+      "about": "A completed proof of a head that is no entry's hash in this chain: this log is not the anchored history.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-mismatch.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-MISMATCH: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history",
+      "stdout": [
+        "ANCHOR-MISMATCH: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history"
+      ]
+    },
+    {
+      "name": "anchor-invalid-proof",
+      "about": "A proof of the head cut two bytes short, so it does not replay: evidence that does not verify.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-invalid-proof.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: truncated proof \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: truncated proof \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "anchor-unreadable-line",
+      "about": "A line that is JSON but not an object: no row at all, so invalid evidence, never skipped.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-unreadable-line.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "anchor-attempt-only",
+      "about": "The note a session-end anchor leaves when no calendar answered, and no proof: testimony, skipped, so the sidecar reads as an empty one.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-attempt-only.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-kindless",
+      "about": "A completed proof of entry 2's head written with no kind member, as the first rows were: it reads as an anchor, whenever it was written.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-kindless.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHORED: entries 0..2: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read b8d161dd366ecbf694607e39b08d90d9365f6c76eb7aad941b933196c7621f83, which --block-header with its header checks",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-kind-null",
+      "about": "A proof of another chain's head with the kind null: a kind that is not a string is unknown, not kind-less, so the row is named and not judged (a reader taking it for an anchor would say ANCHOR-MISMATCH).",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-kind-null.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHOR-UNKNOWN-KIND: line 1 of anchor-kind-null.jsonl.anchors.jsonl is of a kind that is null, not a string \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-unknown-kind",
+      "about": "A row of a kind this verifier does not know, with no head and no proof: named and not judged, and the exit is the chain's (a reader taking it for an anchor would say ANCHOR-INVALID).",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-unknown-kind.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHOR-UNKNOWN-KIND: line 1 of anchor-unknown-kind.jsonl.anchors.jsonl is of kind \"witness-note\" \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-misplaced-chain",
+      "about": "The publish memo's chain row, in the anchors sidecar: a kind of another sidecar is named and not judged, as an unknown one is.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-misplaced-chain.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHOR-UNKNOWN-KIND: line 1 of anchor-misplaced-chain.jsonl.anchors.jsonl is of kind \"chain\" \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
+        "VALID"
+      ]
+    },
+    {
+      "name": "stamp-kindless",
+      "about": "A stamp row of the head written with no kind member: it reads as a stamp, and with no --authority-chain its token is present and not judged, a note that moves no exit.",
+      "args": [
+        "verify",
+        "--stamps",
+        "--log",
+        "stamp-kindless.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "stamp not judged: no --authority-chain FILE given \u2014 head fab3462eec00\u2026 (entry 3) holds a token, present and not judged here (ADR-0032)",
+        "VALID"
+      ]
+    },
+    {
+      "name": "stamp-attempt-only",
+      "about": "The note a session-end stamp leaves when the authority did not answer, and no token: skipped, so the sidecar reads as an empty one.",
+      "args": [
+        "verify",
+        "--stamps",
+        "--log",
+        "stamp-attempt-only.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "VALID"
+      ]
+    },
+    {
+      "name": "stamp-unknown-kind",
+      "about": "A row of a kind this verifier does not know, with no head and no response: named and not judged (a reader taking it for a stamp would say STAMP-INVALID).",
+      "args": [
+        "verify",
+        "--stamps",
+        "--log",
+        "stamp-unknown-kind.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "STAMP-UNKNOWN-KIND: line 1 of stamp-unknown-kind.jsonl.stamps.jsonl is of kind \"witness-note\" \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
+        "VALID"
+      ]
+    },
+    {
       "name": "package-unsealed",
       "about": "One chain and the project record, listed by a manifest declaring no seal: the ceiling, with its limit.",
       "args": [
