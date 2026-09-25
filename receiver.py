@@ -46,12 +46,12 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 # Two versions, moving independently (ADR-0022): TOOL_VERSION says which
 # receiver is running and is tagged together with loxodonta.py and
 # supervisor.py — the three constants must agree (the suite says so).
 # FORMAT_VERSION is the frozen receipt format of the chain files it
 # keeps (SPEC §2.1).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 TOOL_VERSION = "0.9.0"
 FORMAT_VERSION = "0.1"
 

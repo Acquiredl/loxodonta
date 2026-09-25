@@ -25,8 +25,16 @@ suite runs the check.
 text and adds a missing pointer, leaving every other byte of the file as
 it was, line endings included. It never writes the original, and never
 adds a copy a file lacks: it names it and exits 1, since that is the
-list's problem, for a person. A copy directly below another copy, with
-no line between them, shares that copy's pointer.
+list's problem, for a person. It also refuses, and leaves that file as
+it was, any copy whose text in place would take other code with it: a
+definition sharing its first line with other code, in the copy or the
+original; two copies on one line; one statement binding other names
+than its original's; an indent that differs from the original's.
+
+The pointer is the line directly above a copy, below any comment there.
+A run of adjacent copies with nothing else in its block (between blank
+lines, comments aside) shares one, over its first; any other copy has
+its own, so a statement without one is never a copy.
 
 What counts as a top-level definition: a function or
 class, from its first decorator; an assignment, an annotated one or an
@@ -38,8 +46,10 @@ around it, and a name bound as a loop variable, a `with ... as` or an
 """
 
 import ast
+import io
 import re
 import sys
+import tokenize
 from collections import namedtuple
 from pathlib import Path
 
@@ -195,11 +205,18 @@ def target_names(target):
 
 
 # A top-level definition: its first and last line (counted from 1), the
-# UTF-8 byte its text ends at on the last line, and its text.
-Definition = namedtuple("Definition", "first last end source")
+# UTF-8 byte its text ends at on the last line, its text, whether its
+# first line holds nothing before it but its indent, and the names the
+# statement binds or changes.
+Definition = namedtuple("Definition", "first last end source alone names")
 
 
-def definition(lines, node):
+class Unreadable(Exception):
+    """A file the tool cannot read as Python source; the message says
+    which and why."""
+
+
+def definition(lines, node, names):
     """`node`'s Definition: its text from the start of its first line
     (its first decorator's, for a decorated function or class) to its
     end, cut from lines split once, since ast.get_source_segment splits
@@ -209,13 +226,28 @@ def definition(lines, node):
     last = lines[node.end_lineno - 1].encode("utf-8")
     source = "\n".join(lines[first - 1:node.end_lineno - 1]
                        + [last[:node.end_col_offset].decode("utf-8")])
-    return Definition(first, node.end_lineno, node.end_col_offset, source)
+    # `X = 1; Y = 2` or `if c: Y = 2` puts code before Y on its line. A
+    # decorator always opens its line, so only an undecorated node can.
+    before = lines[first - 1].encode("utf-8")[:node.col_offset]
+    alone = first != node.lineno or not before.strip()
+    return Definition(first, node.end_lineno, node.end_col_offset, source,
+                      alone, tuple(names))
 
 
 def read_lines(path):
     """`path`'s text split into lines, as text mode reads it, and the
     line ending each line had on disk ("" after the last)."""
-    raw = path.read_bytes().decode("utf-8")
+    if not path.is_file():
+        raise Unreadable(f"{path.name} is missing")
+    data = path.read_bytes()
+    if data.startswith(b"\xef\xbb\xbf"):
+        raise Unreadable(f"{path.name} starts with a byte order mark, and "
+                         "the scripts are plain UTF-8: take it off")
+    try:
+        raw = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise Unreadable(f"{path.name} is not UTF-8 ({error.reason} at "
+                         f"byte {error.start})")
     # Text mode ends a line at \r\n, \r or \n; split where it does.
     pieces = re.split(r"(\r\n|\r|\n)", raw)
     return pieces[0::2], pieces[1::2] + [""]
@@ -226,8 +258,13 @@ def top_level(lines, filename):
     `lines`: every top-level definition by the names it binds or
     changes, in file order, and the names its imports bind."""
     text = "\n".join(lines)
+    try:
+        tree = ast.parse(text, filename=filename)
+    except SyntaxError as error:
+        raise Unreadable(f"{filename} is not readable as Python "
+                         f"({error.msg}, line {error.lineno})")
     found, imported = {}, set()
-    for node in statements(ast.parse(text, filename=filename).body):
+    for node in statements(tree.body):
         if isinstance(node, DEFS):
             names = [node.name]
         elif isinstance(node, ast.Assign):
@@ -241,7 +278,7 @@ def top_level(lines, filename):
             continue
         else:
             continue
-        found_here = definition(lines, node)
+        found_here = definition(lines, node, names)
         for name in names:
             found.setdefault(name, []).append(found_here)
     return found, imported
@@ -267,26 +304,68 @@ def copies_in(file):
             for name in twin.names}
 
 
-def unpointed(lines, defined, file):
-    """[(twin, name, Definition)] for each copy in `file` with no
-    pointer: none in the comment lines directly above its first
-    definition, and no copy of the same original ending on the line
-    just before it."""
+def comment_lines(lines):
+    """The numbers (from 1) of the lines holding only a comment. The
+    tokenizer finds them, so a line of a string that starts with `#` is
+    not one."""
+    tokens = tokenize.generate_tokens(io.StringIO("\n".join(lines)).readline)
+    return {token.start[0] for token in tokens
+            if token.type == tokenize.COMMENT
+            and not token.line[:token.start[1]].strip()}
+
+
+def runs(defined, file):
+    """The copies in `file` as [[(Definition, name)]], in file order,
+    one list per run: copies of one original, each starting on the line
+    after the one before it ends (or bound by the same statement)."""
     copies = copies_in(file)
-    firsts = {name: defined[name][0] for name in copies if name in defined}
-    ends = {(d.last, copies[name].original) for name, d in firsts.items()}
+    found = sorted((defined[name][0], name) for name in copies
+                   if name in defined)
+    grouped = []
+    for here, name in found:
+        if grouped:
+            before, before_name = grouped[-1][-1]
+            if ((before.last == here.first - 1 or before == here)
+                    and copies[before_name].original
+                    == copies[name].original):
+                grouped[-1].append((here, name))
+                continue
+        grouped.append([(here, name)])
+    return grouped
+
+
+def alone_in_its_block(run, lines, comments):
+    """Whether nothing but comment lines stands between `run` and the
+    blank lines (or file edges) around it, so one pointer over its first
+    copy can only be read as covering the run."""
+    above = run[0][0].first - 1
+    while above in comments:
+        above -= 1
+    below = run[-1][0].last + 1
+    while below in comments:
+        below += 1
+    return all(n < 1 or n > len(lines) or not lines[n - 1].strip()
+               for n in (above, below))
+
+
+def unpointed(lines, defined, file):
+    """[(twin, name, Definition)] for each copy in `file` whose line
+    directly above is not its pointer. A run of copies alone in its
+    block needs one pointer, over its first; any other copy its own."""
+    copies = copies_in(file)
+    comments = comment_lines(lines)
     missing = []
-    for name, found in sorted(firsts.items(), key=lambda kv: kv[1].first):
-        twin = copies[name]
-        if (found.first - 1, twin.original) in ends:
-            continue
-        above = found.first - 1          # the line above, counted from 1
-        comments = []
-        while above >= 1 and lines[above - 1].lstrip().startswith("#"):
-            comments.append(lines[above - 1].strip())
-            above -= 1
-        if pointer(twin) not in comments:
-            missing.append((twin, name, found))
+    for run in runs(defined, file):
+        needing = (run[:1] if alone_in_its_block(run, lines, comments)
+                   else run)
+        seen = set()
+        for found, name in needing:
+            if found in seen:            # one statement binding two
+                continue
+            seen.add(found)
+            above = lines[found.first - 2] if found.first > 1 else ""
+            if above.strip() != pointer(copies[name]):
+                missing.append((copies[name], name, found))
     return missing
 
 
@@ -297,7 +376,7 @@ INTRO = """\
 
 `loxodonta.py`, `supervisor.py` and `receiver.py` never import each other (ADR-0035): each is one file a reader can check alone, run from its own source. So a rule two of them need is written in each. This page lists every such rule, a twin: the names it covers, the files it lives in, and why it is written more than once.
 
-The original of every twin is the recorder, `loxodonta.py`, and each copy carries one comment line above it that says so (a copy directly below another copy shares its line). To change a twin, edit the original in `loxodonta.py`, run `python tools/twin_check.py --write`, which copies it over each copy in place, then `python tools/twin_check.py --check`. When the original lies inside the verifier region, `--write` says so, and `python tools/build_verifier.py` carries it into `verifier.py`. `--write` never adds a copy a file lacks: it names it and exits 1.
+The original of every twin is the recorder, `loxodonta.py`, and each copy carries one comment line directly above it that says so. A run of adjacent copies with nothing else in its block shares one line, over its first; any other copy has its own, so a statement without one is not a copy. To change a twin, edit the original in `loxodonta.py`, run `python tools/twin_check.py --write`, which copies it over each copy in place, then `python tools/twin_check.py --check`. When the original lies inside the verifier region, `--write` says so, and `python tools/build_verifier.py` carries it into `verifier.py`. `--write` never adds a copy a file lacks, and never rewrites a copy whose place holds other code (a second statement on its first line, say): it names each and exits 1, leaving that file as it was.
 
 `python tools/twin_check.py --check` fails when a copy differs from its original, when a copy has no line naming its original, when a file no longer defines a name listed here, when this page is stale, when a top-level name is defined in two of the files without being listed here, and when an import binds a name one of the files defines. The suite runs it.
 
@@ -337,8 +416,11 @@ def problems(root):
     """Every way the files under `root` and the page there disagree with
     the lists, one sentence each."""
     found = []
-    lines = {name: read_lines(root / name)[0] for name in FILES}
-    read = {name: top_level(lines[name], name) for name in FILES}
+    try:
+        lines = {name: read_lines(root / name)[0] for name in FILES}
+        read = {name: top_level(lines[name], name) for name in FILES}
+    except Unreadable as error:
+        return [str(error)]
     defined = {name: read[name][0] for name in FILES}
     imported = {name: read[name][1] for name in FILES}
 
@@ -414,19 +496,34 @@ def problems(root):
 
 # --- the copier -----------------------------------------------------------
 
-# tools/build_verifier.py's fence lines: an original between them is also
-# copied into verifier.py, by that tool and not by this one.
-OPEN = "# === The verifier (ADR-0035) "
-CLOSE = "# === End of the verifier (ADR-0035) "
+def fence():
+    """The two fence lines of tools/build_verifier.py, read from its
+    source, never imported: an original between them is also copied
+    into verifier.py, by that tool and not by this one."""
+    tool = Path(__file__).resolve().parent / "build_verifier.py"
+    values = {}
+    for node in ast.parse(tool.read_text(encoding="utf-8")).body:
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)):
+            values.update((target.id, node.value.value)
+                          for target in node.targets
+                          if isinstance(target, ast.Name))
+    return values["OPEN"], values["CLOSE"]
 
 
-def in_the_fence(lines, found):
+def in_the_fence(lines, found, opening, closing):
     """Whether the Definition `found`, in the recorder's `lines`, lies
-    inside the verifier region."""
-    opens = [n for n, line in enumerate(lines, 1) if line.startswith(OPEN)]
-    closes = [n for n, line in enumerate(lines, 1) if line.startswith(CLOSE)]
+    between the fence lines `opening` and `closing`."""
+    opens = [n for n, line in enumerate(lines, 1) if line.startswith(opening)]
+    closes = [n for n, line in enumerate(lines, 1)
+              if line.startswith(closing)]
     return any(o < found.first and found.last < c
                for o in opens for c in closes)
+
+
+def indent(found):
+    first = found.source.split("\n")[0]
+    return first[:len(first) - len(first.lstrip())]
 
 
 def ending(endings, at):
@@ -448,79 +545,107 @@ def replace(lines, endings, found, text):
 
 
 def add_pointer(lines, endings, twin, found):
-    """Put `twin`'s pointer above the Definition `found`, first among
-    the comment lines already there, at the definition's indent."""
-    top = found.first - 1                # the line above, counted from 0
-    while top >= 1 and lines[top - 1].lstrip().startswith("#"):
-        top -= 1
-    first = lines[found.first - 1]
-    indent = first[:len(first) - len(first.lstrip())]
-    lines.insert(top, indent + pointer(twin))
-    endings.insert(top, ending(endings, found.first))
+    """Put `twin`'s pointer on the line directly above the Definition
+    `found`, below any comment already there, at its indent."""
+    lines.insert(found.first - 1, indent(found) + pointer(twin))
+    endings.insert(found.first - 1, ending(endings, found.first))
+
+
+def refusal(twin, name, copy, text, original):
+    """Why --write will not copy `original` over `text`, the copy of
+    `name` in `copy`, or None when it will. Each is a layout where text
+    replaced in place would take other code with it."""
+    if len(text) != 1 or len(original) != 1:
+        return (f"{twin.rule}: {name} is defined {len(original)} time(s) "
+                f"in {twin.original} and {len(text)} in {copy}, and "
+                "--write copies one definition over one")
+    text, original = text[0], original[0]
+    for where, found in ((copy, text), (twin.original, original)):
+        if not found.alone:
+            return (f"{twin.rule}: {name} in {where} shares its first line "
+                    "with other code, which --write would lose or copy: "
+                    "give it a line of its own")
+    if set(text.names) != set(original.names):
+        return (f"{twin.rule}: {name} in {copy} is bound by a statement "
+                f"binding {', '.join(text.names)}, and in {twin.original} "
+                f"by one binding {', '.join(original.names)}")
+    if indent(text) != indent(original):
+        return (f"{twin.rule}: {name} is indented differently in {copy} "
+                f"and in {twin.original}")
+    return None
+
+
+def plan(copy, here, defined):
+    """({Definition in `copy`: the original's text}, [the names to
+    write], [the refusals]) for one copy file."""
+    edits, names, refused = {}, [], []
+    for name, twin in copies_in(copy).items():
+        original = defined[twin.original].get(name)
+        text = here.get(name)
+        if original is None:
+            refused.append(f"{twin.rule}: {twin.original} no longer "
+                           f"defines {name}, the original")
+        elif text is None:
+            refused.append(f"{twin.rule}: {copy} no longer defines {name}, "
+                           "and --write never adds a copy: add it by hand, "
+                           "or take it off the list")
+        elif source(text) != source(original):
+            why = refusal(twin, name, copy, text, original)
+            if why:
+                refused.append(why)
+            else:
+                edits[text[0]] = original[0].source
+                names.append(name)
+    ordered = sorted(edits, key=lambda found: found.first)
+    for above, below in zip(ordered, ordered[1:]):
+        if below.first <= above.last:
+            refused.append(f"{copy}: two copies share line {below.first}, "
+                           "and --write rewrites whole lines: give each a "
+                           "line of its own")
+    return edits, names, refused
 
 
 def write_copies(root):
     """Copy each original's text over its copies under `root`, and add
-    each missing pointer. Returns (what was done, the problems it left,
-    the names whose original lies inside the verifier region), a
-    sentence each for the first two."""
+    each missing pointer. A copy file with any refusal is left exactly
+    as it was. Returns (what was done, the problems left, the names
+    whose original lies inside the verifier region)."""
     done, found, fenced = [], [], []
-    recorder = read_lines(root / ORIGINAL)[0]
-    defined = {name: top_level(read_lines(root / name)[0], name)[0]
-               for name in FILES}
+    walls = fence()
+    try:
+        read = {name: read_lines(root / name) for name in FILES}
+        defined = {name: top_level(read[name][0], name)[0] for name in FILES}
+    except Unreadable as error:
+        return [], [f"{error}; --write wrote nothing"], []
     for copy in FILES:
-        copies = copies_in(copy)
-        if not copies:
+        if not copies_in(copy):
             continue
-        path = root / copy
-        lines, endings = read_lines(path)
-        here = top_level(lines, copy)[0]
-        edits = {}   # Definition in the copy: the text to put there
-        wrote = []   # the names rewritten, and whether they are fenced
-        for name, twin in copies.items():
-            original = defined[twin.original].get(name)
-            text = here.get(name)
-            if original is None:
-                found.append(f"{twin.rule}: {twin.original} no longer "
-                             f"defines {name}, the original")
-            elif text is None:
-                found.append(f"{twin.rule}: {copy} no longer defines "
-                             f"{name}, and --write never adds a copy: add "
-                             "it by hand, or take it off the list")
-            elif source(text) == source(original):
-                continue
-            elif len(text) != 1 or len(original) != 1:
-                found.append(f"{twin.rule}: {name} is defined "
-                             f"{len(original)} time(s) in {twin.original} "
-                             f"and {len(text)} in {copy}, and --write "
-                             "copies one definition over one: fix it by "
-                             "hand")
-            elif edits.get(text[0], original[0].source) != original[0].source:
-                found.append(f"{twin.rule}: {name} in {copy} shares its "
-                             "statement with a name whose original "
-                             "differs: fix it by hand")
-            else:
-                edits[text[0]] = original[0].source
-                wrote.append((name, twin.original == ORIGINAL
-                              and in_the_fence(recorder, original[0])))
+        lines, endings = list(read[copy][0]), list(read[copy][1])
+        edits, names, refused = plan(copy, defined[copy], defined)
         # From the bottom up, so each edit leaves the lines above in place.
         for at in sorted(edits, key=lambda d: d.first, reverse=True):
             replace(lines, endings, at, edits[at])
-        try:
-            here = top_level(lines, copy)[0]
-        except SyntaxError as error:
-            found.append(f"--write would leave {copy} unreadable as "
-                         f"Python ({error.msg}, line {error.lineno}), so "
-                         "it wrote nothing there: fix it by hand")
+        if not refused:
+            try:
+                here = top_level(lines, copy)[0]
+            except Unreadable as error:
+                refused.append(f"{error} after --write")
+        if refused:
+            found += refused + [f"{copy} is left as it was"]
             continue
-        done += [f"wrote {name} in {copy}" for name, _ in wrote]
-        fenced += [name for name, inside in wrote if inside]
         missing = unpointed(lines, here, copy)
         for twin, name, at in reversed(missing):
             add_pointer(lines, endings, twin, at)
+        done += [f"wrote {name} in {copy}" for name in names]
         done += [f"added the pointer above {name} in {copy}"
                  for _, name, _ in missing]
+        for name in names:
+            twin = copies_in(copy)[name]
+            if twin.original == ORIGINAL and in_the_fence(
+                    read[ORIGINAL][0], defined[ORIGINAL][name][0], *walls):
+                fenced.append(name)
         written = "".join(line + end for line, end in zip(lines, endings))
+        path = root / copy
         if written.encode("utf-8") != path.read_bytes():
             path.write_bytes(written.encode("utf-8"))
     return done, found, fenced

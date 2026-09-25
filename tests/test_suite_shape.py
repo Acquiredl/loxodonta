@@ -408,6 +408,107 @@ class TwinCheckTest(unittest.TestCase):
                       "--write never adds a copy", done.stderr)
         self.assertEqual(self.snapshot(), before)
 
+    def assert_refused(self, done, *said):
+        """`--write` exited 1, named each of `said`, and raised nothing."""
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        for words in said:
+            self.assertIn(words, done.stderr)
+
+    def test_a_copy_sharing_its_first_line_is_refused(self):
+        self.edit("supervisor.py", '\nATTEMPT_KIND = "attempt"\n',
+                  '\n_Z = 1; ATTEMPT_KIND = "attempt"\n')
+        before = self.snapshot()
+        self.assert_refused(self.write(),
+                            "ATTEMPT_KIND in supervisor.py shares its first "
+                            "line with other code",
+                            "supervisor.py is left as it was")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_an_original_sharing_its_first_line_is_refused(self):
+        self.edit("loxodonta.py", '\nATTEMPT_KIND = "attempt"\n',
+                  '\nif True: ATTEMPT_KIND = "attempt"\n')
+        before = self.snapshot()
+        self.assert_refused(self.write(),
+                            "ATTEMPT_KIND in loxodonta.py shares its first "
+                            "line with other code")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_two_copies_on_one_line_are_refused_and_that_file_kept(self):
+        self.edit("loxodonta.py", "EX_USAGE = 64     #", "EX_USAGE = 65     #")
+        self.edit("loxodonta.py", "EX_NOINPUT = 66   #", "EX_NOINPUT = 67   #")
+        self.edit("supervisor.py",
+                  "EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was "
+                  "spoken wrong\nEX_NOINPUT = 66  #",
+                  "EX_USAGE = 64; EX_NOINPUT = 66  #")
+        supervisor = self.text("supervisor.py")
+        self.assert_refused(self.write(), "supervisor.py is left as it was")
+        self.assertEqual(self.text("supervisor.py"), supervisor)
+        # The receiver's copy has a line of its own, and is written.
+        self.assertIn("\nEX_USAGE = 65  #", self.text("receiver.py"))
+
+    def test_a_statement_binding_other_names_is_refused_whole(self):
+        self.edit("supervisor.py",
+                  "EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was "
+                  "spoken wrong\nEX_NOINPUT = 66  #",
+                  "EX_USAGE, EX_NOINPUT = 64, 66  #")
+        before = self.snapshot()
+        self.assert_refused(self.write(),
+                            "is bound by a statement binding EX_USAGE, "
+                            "EX_NOINPUT",
+                            "supervisor.py is left as it was")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_pointer_never_lands_inside_a_string(self):
+        self.edit("supervisor.py", POINTER + "\ndef is_attempt(",
+                  '_NOTE = """\n# not a comment"""\ndef is_attempt(')
+        expected = self.text("supervisor.py").replace(
+            '"""\ndef is_attempt(', '"""\n' + POINTER + "\ndef is_attempt(")
+        done = self.write()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.text("supervisor.py"), expected)
+
+    def test_a_string_line_is_not_a_comment_that_leaves_a_run_alone(self):
+        # A string whose last line starts with # sits between the run
+        # and the blank line above it: the run is not alone in its block.
+        self.edit("supervisor.py", POINTER + "\nRECORDER_NAMES = ",
+                  '_NOTE = """\n\n# x"""\n' + POINTER + "\nRECORDER_NAMES = ")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("DIGEST_NAMES in supervisor.py has no pointer",
+                      done.stderr)
+
+    def test_a_copy_beside_other_code_has_a_pointer_of_its_own(self):
+        hazards = "# a quote, a backtick, a dollar sign, a backslash\n"
+        self.edit("supervisor.py", hazards, hazards + "_OTHER = 1\n")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("SHELL_HAZARDS in supervisor.py has no pointer",
+                      done.stderr)
+        written = self.write()
+        self.assertEqual(written.returncode, 0, written.stderr)
+        self.assertIn(POINTER + "\nSHELL_HAZARDS = ",
+                      self.text("supervisor.py"))
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_byte_order_mark_is_named_and_nothing_written(self):
+        path = self.root / "supervisor.py"
+        path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+        before = self.snapshot()
+        for done in (self.check(), self.write()):
+            self.assert_refused(done, "supervisor.py starts with a byte "
+                                      "order mark")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_an_original_that_does_not_parse_is_named_and_nothing_written(self):
+        self.append("loxodonta.py", "\ndef (\n")
+        before = self.snapshot()
+        for done in (self.check(), self.write()):
+            self.assert_refused(done, "loxodonta.py is not readable as "
+                                      "Python")
+        self.assertEqual(self.snapshot(), before)
+
     def test_write_keeps_crlf_line_endings(self):
         old, new = "reader keeps (SPEC §1, #299)", "reader keeps (SPEC 1)"
         self.edit("supervisor.py", POINTER + "\ndef is_attempt(",

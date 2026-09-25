@@ -68,11 +68,11 @@ from urllib.parse import parse_qs, urlparse
 HERE = Path(__file__).resolve().parent
 LOXODONTA = HERE / "loxodonta.py"
 
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 # Two versions, moving independently (ADR-0022): TOOL_VERSION says which
 # supervisor is running and is tagged together with loxodonta.py — the
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 TOOL_VERSION = "0.9.0"
 FORMAT_VERSION = "0.1"
 
@@ -957,9 +957,9 @@ def sidecar_heads(sidecar):
             and not is_attempt(record) and not is_chain_row(record)}
 
 
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 # Computed here only to compare with the memo's chain rows: the
 # fingerprint is never printed, served or written down by the supervisor.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def remote_id(url):
     """Which remote a chain row went to, without the URL (#263): the
     first 16 hex characters of the SHA-256 of the URL exactly as it was
@@ -1302,8 +1302,8 @@ DORMANT_SECONDS = int(os.environ.get("SUPERVISOR_DORMANT_SECONDS",
 TAIL_KEEPER = os.environ.get("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 # What the recorder writes down about the coverage it wired (ADR-0030).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 COVERAGE_NAME = "coverage.json"
 
 WATCH_WORDS = {
@@ -3835,7 +3835,6 @@ def legacy_recall_scope(args, repo):
     return repo, logs
 
 
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 # Receipt text is written by an agent and read back by agents: the
 # digest lands in every new session's context, and show, search,
 # timeline and the MCP tools hand it to whoever asks. A newline could
@@ -3851,6 +3850,7 @@ def legacy_recall_scope(args, repo):
 # exact bytes. Twin of loxodonta.py's `visible`; the files never import
 # each other (ADR-0035), and tools/twin_check.py holds the two copies
 # equal.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
@@ -4970,13 +4970,13 @@ MANIFEST_SIDECAR = "manifest.json.anchors.jsonl"   # the anchor's proof
 MANIFEST_STAMPS = "manifest.json.stamps.jsonl"   # the authority's token
 MANIFEST_SIGNATURE = "manifest.json.sig"   # ssh-keygen's detached signature
 MANIFEST_PUBLIC_KEY = "manifest.json.pub"  # the key that made it: testimony
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 # The ssh-keygen signature namespace, the verifier's and the signer's
 # both, so a signature made for anything else never verifies here.
-SIGNATURE_NAMESPACE = "loxodonta-package"
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+SIGNATURE_NAMESPACE = "loxodonta-package"
 # The verifier's allowed-signers principal, twice over: the packer runs
 # the recipient's check on what it ships before anything is written.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 SIGNATURE_PRINCIPAL = "issuer"
 # The completeness row travels with these fields only: no judge command,
 # no transcript path, no home. Paths the recipient cannot follow are
