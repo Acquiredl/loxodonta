@@ -1022,6 +1022,15 @@ def sidecar_records(path):
     return read_sidecar_records(str(path)) or []
 
 
+def row_when(record):
+    """When a sidecar row says it was written, or None: a `ts` that does
+    not parse, or names no time zone, counts for nothing. The rows are
+    writer-reachable, and one time with no zone beside one ending in Z
+    would stop the scan comparing them (#331's class)."""
+    when = parse_when(record.get("ts"))
+    return when if when is not None and when.tzinfo is not None else None
+
+
 # The outcomes that mean the step landed (the head sent, the digest
 # submitted, the token granted); anything else is a failure line.
 SENT_OUTCOMES = ("sent", "submitted", "granted")
@@ -1305,7 +1314,7 @@ def last_departure(log):
         # tried (#240), and a refused POST never left. A kind unknown
         # here, or a line that is not a row, is no departure (ADR-0038).
         kind = row_kind("memo", record)
-        when = parse_when(record.get("ts")) if kind in doors else None
+        when = row_when(record) if kind in doors else None
         if when is not None:
             departures.append((when, record["ts"], doors[kind]))
     # An upgrade appends a second record for the same head, stamped
@@ -1316,7 +1325,7 @@ def last_departure(log):
     for record in sidecar_records(Path(str(log) + ".anchors.jsonl")):
         if row_kind("anchors", record) != ANCHOR_KIND:
             continue
-        when, head = parse_when(record.get("ts")), record.get("head")
+        when, head = row_when(record), record.get("head")
         if when is not None and isinstance(head, str) \
                 and (head not in first or when < first[head][0]):
             first[head] = (when, record["ts"])
@@ -1326,7 +1335,7 @@ def last_departure(log):
     for record in sidecar_records(Path(str(log) + ".stamps.jsonl")):
         if row_kind("stamps", record) != STAMP_KIND:
             continue
-        when = parse_when(record.get("ts"))
+        when = row_when(record)
         if when is not None:
             departures.append((when, record["ts"], "stamped"))
     if not departures:
@@ -1350,7 +1359,7 @@ def last_failed(log):
             if not is_attempt(record) \
                     or record.get("outcome") in SENT_OUTCOMES:
                 continue
-            when = parse_when(record.get("ts"))
+            when = row_when(record)
             if when is not None and (newest is None or when > newest[0]):
                 newest = (when, {"step": record.get("step"),
                                  "ts": record["ts"],

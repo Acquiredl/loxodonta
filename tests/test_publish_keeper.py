@@ -456,6 +456,41 @@ class LeftReadingTest(ReceiverFixture):
         self.assertFalse(chain["head_published"])
         self.assertIsNone(chain["last_failed"])
 
+    def test_a_time_with_no_zone_counts_for_nothing_and_never_stops_the_scan(self):
+        # #363 review: a `ts` with no time zone beside one ending in Z
+        # cannot be compared with it, and the sidecars are
+        # writer-reachable. Such a row, in any sidecar, is no departure
+        # and no failure; the rows beside it are read as ever.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-zoneless")
+        head = chain_head(log)
+        zoned, bare = ago(600), "2026-09-25T10:00:00"
+        rows = {
+            ".anchors.jsonl": [{"head": head, "ts": bare, "proof": "AAAA"},
+                               {"head": "ab" * 32, "ts": zoned,
+                                "proof": "AAAA"}],
+            ".stamps.jsonl": [{"head": head, "ts": bare}],
+            ".published.jsonl": [{"head": head, "n": 2, "ts": bare},
+                                 {"kind": "attempt", "step": "publish-head",
+                                  "ts": bare, "outcome": "refused"},
+                                 {"kind": "attempt", "step": "publish-head",
+                                  "ts": zoned, "outcome": "the remote "
+                                  "answered 404"}],
+        }
+        for suffix, lines in rows.items():
+            Path(str(log) + suffix).write_text(
+                "".join(json.dumps(row) + "\n" for row in lines),
+                encoding="utf-8")
+
+        result = self.scan()
+
+        self.assertNotIn("Traceback", result.stderr)
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-zoneless")]
+        self.assertEqual(chain["left"], {"ts": zoned, "via": "anchored"})
+        self.assertEqual(chain["last_failed"],
+                         {"step": "publish-head", "ts": zoned,
+                          "outcome": "the remote answered 404"})
+
     def test_an_anchored_heads_departure_is_its_first_record(self):
         # An upgrade appends a second record for the same head, stamped
         # when the proof completed; the head left when it was first
