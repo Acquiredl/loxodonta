@@ -640,6 +640,27 @@ class NeverPublishedTest(ReceiverFixture):
         self.assertEqual(published, {"wired": True, "sent": True,
                                      "note": None})
 
+    def test_a_line_that_is_not_utf8_never_hides_a_chain_that_was_sent(self):
+        # #344 review: the reading is row by row, so one appended byte
+        # that is not UTF-8 is a line counting for nothing, and the batch
+        # the wired remote took still reads as sent.
+        self.wire(f'python loxodonta.py hook --publish-chain '
+                  f'"{self.receiver.url}"')
+        log = make_chain(self.root / "alpha" / "receipts", "sess-byte")
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "publish", "--chain", "--log",
+             str(log), self.receiver.url],
+            capture_output=True, check=True, env=clean_env())
+        with open(str(log) + ".published.jsonl", "ab") as out:
+            out.write(b'{"kind":"attempt","note":"\xff"}\n')
+
+        result = self.scan()
+
+        self.assertNotIn("Traceback", result.stderr)
+        published = json.loads(result.stdout)["published"]
+        self.assertEqual(published, {"wired": True, "sent": True,
+                                     "note": None})
+
     def test_a_head_that_left_does_not_answer_for_a_chain_that_never_did(self):
         # Both routes wired, the head sent, the chain never: the sentence
         # names the chain route alone, and `sent` says something left.

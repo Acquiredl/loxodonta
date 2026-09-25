@@ -158,10 +158,12 @@ def split_lines(data):
 
 
 def read_lines(path, errors="replace"):
-    """A chain's or a sidecar's lines as text, split by `split_lines`.
-    A byte that is not UTF-8 reads as U+FFFD by default: the readers
-    here display and count, and the verify walk is where such a line
-    gets its name."""
+    """A chain's lines as text, split by `split_lines`. A byte that is
+    not UTF-8 reads as U+FFFD by default: the readers here display and
+    count, and the verify walk is where such a line gets its name.
+    Sidecars are read by the copied `read_log` instead, which keeps the
+    bad byte so `read_sidecar_records` names the line unreadable; read
+    here, `{"head":"ab\\xff"}` would parse as a head."""
     with open(path, "rb") as f:
         return [line.decode("utf-8", errors) for line in split_lines(f.read())]
 
@@ -1067,7 +1069,11 @@ def chain_cursor(log, url):
     receiver drops, never a stuck keeper), and so is a line past the
     digit or recursion limit, which no reader here takes apart either;
     a memo that cannot be read at all is raised, not guessed at, since
-    -1 would send the whole chain again at every session end."""
+    -1 would send the whole chain again at every session end. The two
+    differ on purpose (#344): a line past a limit is still text in the
+    memo's format, one line this parser declines, while a byte that is
+    not UTF-8 means the file is not text in that format at all, so the
+    memo holding it is the unreadable one, as it was before #299."""
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
@@ -1676,20 +1682,20 @@ def sessionend_chain_remote(witness):
 
 
 def chain_landed(log, remote):
-    """Whether the memo beside `log` holds a batch the remote at `remote`
-    acknowledged, by the recorder's cursor. With no `remote` wired there
-    is no remote to read against, and any chain row counts. A memo that
-    cannot be read holds none that can be counted."""
-    if remote is None:
-        return any(is_chain_record(record)
-                   and isinstance(record.get("last"), int)
-                   and record["last"] >= 0
-                   for record in sidecar_records(
-                       Path(str(log) + ".published.jsonl")))
-    try:
-        return chain_cursor(str(log), remote) >= 0
-    except (OSError, ValueError):
-        return False
+    """Whether the memo beside `log` holds a chain row for a batch the
+    remote at `remote` acknowledged, naming it as the recorder's cursor
+    does (#263); with no `remote` wired, any chain row counts. Read row
+    by row, so a line that cannot be read counts for nothing and never
+    hides a row that can. This is a reading for the report, not the
+    keeper's schedule: `chain_cursor` still raises on such a memo, since
+    a send guessed from it could resend the whole chain."""
+    mine = remote_id(remote) if remote is not None else None
+    return any(is_chain_record(record)
+               and isinstance(record.get("last"), int)
+               and record["last"] >= 0
+               and (mine is None or record.get("remote_id") == mine)
+               for record in sidecar_records(
+                   Path(str(log) + ".published.jsonl")))
 
 
 def published_reading(witness, logs):

@@ -3507,7 +3507,11 @@ def chain_cursor(log, url):
     receiver drops, never a stuck keeper), and so is a line past the
     digit or recursion limit, which no reader here takes apart either;
     a memo that cannot be read at all is raised, not guessed at, since
-    -1 would send the whole chain again at every session end."""
+    -1 would send the whole chain again at every session end. The two
+    differ on purpose (#344): a line past a limit is still text in the
+    memo's format, one line this parser declines, while a byte that is
+    not UTF-8 means the file is not text in that format at all, so the
+    memo holding it is the unreadable one, as it was before #299."""
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
