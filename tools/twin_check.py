@@ -131,6 +131,32 @@ TWINS = (
          "The recorder notes how a session-end step went in a row of kind "
          "`attempt`, and every reader that judges or schedules skips it, "
          "the recorder's and the supervisor's alike (#240)."),
+    Twin("Reading a sidecar",
+         ("read_log", "sidecar_path", "published_path",
+          "read_sidecar_records"),
+         ORIGINAL, SUPERVISOR,
+         "Where each sidecar lives beside its chain, and how its lines "
+         "are read: a line that is not a JSON object, past the digit or "
+         "recursion limit, or not UTF-8, reads as unreadable and never "
+         "stops the reader. The recorder judges by it; the supervisor's "
+         "scan and keeper report and schedule by it (#299, #331, #344)."),
+    Twin("What a sidecar row is",
+         ("CHAIN_KIND", "ANCHOR_KIND", "STAMP_KIND", "HEAD_KIND",
+          "SIDECAR_KINDS", "UNREADABLE_ROW", "UNKNOWN_ROW", "row_kind",
+          "is_chain_record"),
+         ORIGINAL, SUPERVISOR,
+         "A row names its kind, a row with none reads as its sidecar's "
+         "evidence, and a kind unknown there counts for nothing "
+         "(ADR-0038). The recorder's judges and the supervisor's scan and "
+         "keeper ask the one answer, so the scan never counts a proof, a "
+         "token or a sent head that `verify` or `publish` would not "
+         "(#344)."),
+    Twin("Where the chain route left off", ("chain_cursor",),
+         ORIGINAL, SUPERVISOR,
+         "The keeper runs the recorder's `publish --chain` only when the "
+         "recorder's cursor for that remote is behind the chain's end, so "
+         "both read the memo alike, and a memo neither can read leaves a "
+         "note rather than a send from genesis (#263, #344)."),
     Twin("Naming a remote", ("remote_id",), ORIGINAL, SUPERVISOR,
          "The recorder writes a fingerprint of the receiver's URL into the "
          "publish memo, and the supervisor's keeper compares against it "
@@ -159,10 +185,6 @@ DIFFERENT = (
     Different("cmd_serve", ("supervisor.py", "receiver.py"),
               "The supervisor serves its dashboard and recall; the "
               "receiver serves the URL published chains are sent to."),
-    Different("chain_cursor", ("loxodonta.py", "supervisor.py"),
-              "Both find where the chain route left off, in different "
-              "shapes; a twin once #344 gives the supervisor the "
-              "recorder's."),
 )
 
 

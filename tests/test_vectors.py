@@ -8,6 +8,9 @@ row runs against loxodonta.py and against verifier.py, as a recipient
 would run them, and the two files must also agree with each other, exit
 and output alike.
 
+A sidecar row also gives every line of stdout, since a row that is not
+judged moves no exit code and shows only in the lines before the verdict.
+
 A row may also give an entry's canonical form in full (SPEC section 4).
 Its SHA256 must be that entry's stored `entry_hash`, so the bytes a
 verifier must reproduce are written down, not only their hash.
@@ -46,6 +49,13 @@ def target(row):
     return args[args.index("--log") + 1]
 
 
+def sidecars(row):
+    """The sidecars a row judges beside its chain, found by the chain's
+    name (SPEC section 9): `--anchors` reads one, `--stamps` the other."""
+    return [target(row) + f".{kind}.jsonl" for kind in ("anchors", "stamps")
+            if f"--{kind}" in row["args"]]
+
+
 def run_row(tool, row):
     """One row, run the way the README says: from inside tests/vectors/,
     so every path a row names is relative to that folder."""
@@ -79,6 +89,9 @@ class VectorsTest(unittest.TestCase):
                     else:
                         self.assertTrue(
                             line.startswith(row["last_line_prefix"]), said)
+                    if "stdout" in row:
+                        self.assertEqual(done.stdout.rstrip("\n").split("\n"),
+                                         row["stdout"], said)
 
     def test_the_two_files_agree_on_every_row(self):
         for row in rows():
@@ -99,9 +112,15 @@ class VectorsTest(unittest.TestCase):
                     ("last_line" in row) + ("last_line_prefix" in row), 1)
                 self.assertEqual((VECTORS / target(row)).exists(),
                                  not row.get("log_absent"), target(row))
+                for name in sidecars(row):
+                    self.assertTrue((VECTORS / name).is_file(), name)
+                if "stdout" in row:
+                    self.assertEqual(row["stdout"][-1], row["last_line"])
 
     def test_every_chain_file_and_package_is_run_by_some_row(self):
-        run = {target(row) for row in rows()}
+        # A sidecar ends in .jsonl too, and is run by the row that judges it.
+        run = {target(row) for row in rows()} \
+            | {name for row in rows() for name in sidecars(row)}
         chains = {path.name for path in VECTORS.glob("*.jsonl")}
         packages = {path.name for path in VECTORS.iterdir()
                     if path.is_dir() or path.suffix == ".zip"}

@@ -4,8 +4,9 @@
     python tools/build_vectors.py           write the vectors and vectors.json
     python tools/build_vectors.py --check   exit 1 if a committed vector differs
 
-A vector is a small chain file, or a package (SPEC section 10), and one
-row of tests/vectors/vectors.json saying what running a verb on it must
+A vector is a small chain file, a chain with a sidecar beside it (SPEC
+section 9), or a package (SPEC section 10), and one row of
+tests/vectors/vectors.json saying what running a verb on it must
 give: the exit code and the last line of stdout. tests/test_vectors.py
 runs every row against loxodonta.py and against verifier.py, and a second
 implementation checks itself against the same rows
@@ -20,9 +21,9 @@ never imported: every line the recorder wrote is hashed that way too, and
 the build stops if the two disagree. The packages are assembled here as
 `supervisor package` lays one out, from those chains, with every date
 pinned; the anchored one carries a proof and a block header made up here,
-as tests/test_anchor.py makes them, so no calendar is asked. The expected
-verdicts are written out below, one row at a time, and never read back
-from a run.
+as tests/test_anchor.py makes them, so no calendar is asked, and so do
+the anchor sidecars. The expected verdicts are written out below, one row
+at a time, and never read back from a run.
 """
 
 import base64
@@ -73,14 +74,23 @@ PACKAGE_UNIT = {"kind": "session", "session": "vector", "project":
 ZIP_TIME = (2026, 9, 23, 12, 10, 0)
 
 # The anchored package's made-up proof: the ops of a completed
-# OpenTimestamps proof (docs/ANCHORING.md section 4), append a nonce,
+# OpenTimestamps proof (docs/SPEC.md section 9.5), append a nonce,
 # sha256, prepend and append, then the double sha256 that ends at a
 # Bitcoin attestation. Its root goes into a made-up block header.
 OTS_APPEND, OTS_PREPEND, OTS_SHA256 = b"\xf0", b"\xf1", b"\x08"
 OTS_BITCOIN = bytes.fromhex("0588960d73d71901")
+OTS_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
 PROOF_NONCE, PROOF_PREFIX, PROOF_SUFFIX = (b"vector-nonce", b"vector-prefix",
                                            b"vector-suffix")
 PROOF_HEIGHT = 850123
+CALENDAR = "https://calendar.example/"
+
+# The sidecar rows (SPEC section 9), written as the recorder writes them.
+# A stamp row's response is never read here: no row gives an
+# --authority-chain, so the token is present and not judged, and these
+# bytes stand in for one (no openssl is needed to run the vectors).
+SIDECAR_TS = "2026-09-23T12:05:00Z"
+STAND_IN_TOKEN = b"a stand-in for a TimeStampResp, which nothing here reads"
 
 
 # --- SPEC section 4, written out again ----------------------------------------
@@ -242,6 +252,14 @@ def completed_proof():
             + OTS_PREPEND + ots_varbytes(PROOF_PREFIX)
             + OTS_APPEND + ots_varbytes(PROOF_SUFFIX) + OTS_SHA256 + OTS_SHA256
             + b"\x00" + OTS_BITCOIN + ots_varbytes(ots_varint(PROOF_HEIGHT)))
+
+
+def pending_proof():
+    """A pending proof from any digest, as a calendar first answers: the
+    nonce appended, sha256, then the attestation naming the calendar."""
+    return (OTS_APPEND + ots_varbytes(PROOF_NONCE) + OTS_SHA256
+            + b"\x00" + OTS_PENDING
+            + ots_varbytes(ots_varbytes(CALENDAR.encode("ascii"))))
 
 
 def replayed_root(digest_hex):
@@ -519,6 +537,169 @@ def build(workdir):
         "receipt log.", 66, "")
     row("log-empty-head", "head", "An empty file has no head.", 66, "",
         log="log-empty")
+
+    # The sidecars (SPEC section 9). Each vector is the honest chain under
+    # its own name, since a sidecar is found by the chain's name, and the
+    # sidecar beside it. Every line of stdout is written out, not only the
+    # last, because a row that is not judged moves no exit code.
+    def sidecar(name, kind, lines):
+        chain(name, base)
+        files[f"{name}.jsonl.{kind}.jsonl"] = "".join(
+            (line if isinstance(line, str) else stored(line)) + "\n"
+            for line in lines).encode("utf-8")
+
+    def sidecar_row(name, kind, about, exit, stdout, more=(), log=None):
+        row(name, "verify", about, exit, stdout[-1],
+            more=[f"--{kind}", *more], log=log, stdout=stdout)
+
+    def anchor(head_hex, proof_bytes, n, **fields):
+        return {"calendar": CALENDAR, "head": head_hex, "kind": "anchor",
+                "n": n, "proof": base64.b64encode(proof_bytes).decode("ascii"),
+                "ts": SIDECAR_TS, **fields}
+
+    def unknown(name, kind, shown):
+        return (f"{kind.upper()[:-1]}-UNKNOWN-KIND: line 1 of {name}.jsonl."
+                f"{kind}.jsonl is {shown} — this verifier does not know the "
+                "kind in this sidecar, and does not judge it")
+
+    def claimed(subject, head_hex):
+        return (f"{subject}: the attestation claims Bitcoin block "
+                f"{PROOF_HEIGHT}, and the block was not checked; that block's "
+                f"merkle root must read {replayed_root(head_hex)[::-1].hex()}, "
+                "which --block-header with its header checks")
+
+    other = wide_entry["entry_hash"]   # a head from another chain
+    sidecar("anchor-pending", "anchors",
+            [anchor(head, pending_proof(), 3)])
+    sidecar_row("anchor-pending", "anchors", "A pending proof of the head, "
+                "as a calendar first answers: not a failure, and it earns "
+                "nothing yet.", 0,
+                [f"ANCHOR-PENDING: head {head[:12]}… submitted {SIDECAR_TS} "
+                 f"via {CALENDAR} — run `loxodonta anchor --upgrade`",
+                 "VALID"])
+
+    sidecar("anchor-complete", "anchors",
+            [anchor(head, completed_proof(), 3)])
+    sidecar_row("anchor-complete", "anchors", "A completed proof of the "
+                "head and no block header given: the block is the "
+                "attestation's claim, and the line says it was not checked.",
+                0, [claimed("ANCHORED: entries 0..3", head), "VALID"])
+    chain_header = block_header(replayed_root(head))
+    sidecar_row("anchor-complete-checked", "anchors", "The same proof with "
+                "the header of the block it claims: its merkle root is the "
+                "one the proof replays to, so the block is checked and named "
+                "by the header's hash.", 0,
+                ["ANCHORED: entries 0..3 existed by the block whose header "
+                 f"hashes to {header_hash(chain_header)}, whose merkle root "
+                 f"{replayed_root(head)[::-1].hex()} is the one the proof "
+                 "replays to; the attestation calls it Bitcoin block "
+                 f"{PROOF_HEIGHT}, which is your header source's word, and "
+                 "the hash is what a second source can confirm", "VALID"],
+                more=["--block-header", chain_header.hex()],
+                log="anchor-complete")
+
+    sidecar("anchor-mismatch", "anchors",
+            [anchor(other, completed_proof(), 3)])
+    sidecar_row("anchor-mismatch", "anchors", "A completed proof of a head "
+                "that is no entry's hash in this chain: this log is not the "
+                "anchored history.", 3,
+                [f"ANCHOR-MISMATCH: anchored head {other} appears nowhere in "
+                 "this log — this log is not the anchored history"])
+
+    sidecar("anchor-invalid-proof", "anchors",
+            [anchor(head, completed_proof()[:-2], 3)])
+    sidecar_row("anchor-invalid-proof", "anchors", "A proof of the head cut "
+                "two bytes short, so it does not replay: evidence that does "
+                "not verify.", 3,
+                ["ANCHOR-INVALID: truncated proof — evidence that does not "
+                 "verify is not evidence"])
+
+    sidecar("anchor-unreadable-line", "anchors", ['["not","an","object"]'])
+    sidecar_row("anchor-unreadable-line", "anchors", "A line that is JSON "
+                "but not an object: no row at all, so invalid evidence, never "
+                "skipped.", 3,
+                ["ANCHOR-INVALID: sidecar line is not a record — evidence "
+                 "that does not verify is not evidence"])
+
+    sidecar("anchor-attempt-only", "anchors",
+            [{"budget": 12.0, "kind": "attempt",
+              "outcome": "no calendar answered within 12 seconds",
+              "step": "anchor", "ts": SIDECAR_TS}])
+    sidecar_row("anchor-attempt-only", "anchors", "The note a session-end "
+                "anchor leaves when no calendar answered, and no proof: "
+                "testimony, skipped, so the sidecar reads as an empty one.",
+                0, ["VALID"])
+
+    head_2 = e[2]["entry_hash"]
+    kindless = {k: v for k, v in anchor(head_2, completed_proof(), 2).items()
+                if k != "kind"}
+    sidecar("anchor-kindless", "anchors", [kindless])
+    sidecar_row("anchor-kindless", "anchors", "A completed proof of entry "
+                "2's head written with no kind member, as the first rows "
+                "were: it reads as an anchor, whenever it was written.", 0,
+                [claimed("ANCHORED: entries 0..2", head_2), "VALID"])
+
+    sidecar("anchor-kind-null", "anchors",
+            [anchor(other, completed_proof(), 3, kind=None)])
+    sidecar_row("anchor-kind-null", "anchors", "A proof of another chain's "
+                "head with the kind null: a kind that is not a string is "
+                "unknown, not kind-less, so the row is named and not judged "
+                "(a reader taking it for an anchor would say "
+                "ANCHOR-MISMATCH).", 0,
+                [unknown("anchor-kind-null", "anchors",
+                         "of a kind that is null, not a string"), "VALID"])
+
+    sidecar("anchor-unknown-kind", "anchors",
+            [{"kind": "witness-note", "note": "a row a later recorder writes",
+              "ts": SIDECAR_TS}])
+    sidecar_row("anchor-unknown-kind", "anchors", "A row of a kind this "
+                "verifier does not know, with no head and no proof: named "
+                "and not judged, and the exit is the chain's (a reader taking "
+                "it for an anchor would say ANCHOR-INVALID).", 0,
+                [unknown("anchor-unknown-kind", "anchors",
+                         'of kind "witness-note"'), "VALID"])
+
+    sidecar("anchor-misplaced-chain", "anchors",
+            [{"event": "session-end", "first": 0, "head": head,
+              "kind": "chain", "last": 3, "remote_id": "0123456789abcdef",
+              "ts": SIDECAR_TS}])
+    sidecar_row("anchor-misplaced-chain", "anchors", "The publish memo's "
+                "chain row, in the anchors sidecar: a kind of another "
+                "sidecar is named and not judged, as an unknown one is.", 0,
+                [unknown("anchor-misplaced-chain", "anchors",
+                         'of kind "chain"'), "VALID"])
+
+    sidecar("stamp-kindless", "stamps",
+            [{"authority": "https://authority.example/tsr", "head": head,
+              "n": 3, "response":
+              base64.b64encode(STAND_IN_TOKEN).decode("ascii"),
+              "ts": SIDECAR_TS}])
+    sidecar_row("stamp-kindless", "stamps", "A stamp row of the head written "
+                "with no kind member: it reads as a stamp, and with no "
+                "--authority-chain its token is present and not judged, a "
+                "note that moves no exit.", 0,
+                [f"stamp not judged: no --authority-chain FILE given — head "
+                 f"{head[:12]}… (entry 3) holds a token, present and not "
+                 "judged here (ADR-0032)", "VALID"])
+
+    sidecar("stamp-attempt-only", "stamps",
+            [{"budget": 3.0, "kind": "attempt",
+              "outcome": "no answer within 3 seconds", "step": "stamp",
+              "ts": SIDECAR_TS}])
+    sidecar_row("stamp-attempt-only", "stamps", "The note a session-end "
+                "stamp leaves when the authority did not answer, and no "
+                "token: skipped, so the sidecar reads as an empty one.", 0,
+                ["VALID"])
+
+    sidecar("stamp-unknown-kind", "stamps",
+            [{"kind": "witness-note", "note": "a row a later recorder writes",
+              "ts": SIDECAR_TS}])
+    sidecar_row("stamp-unknown-kind", "stamps", "A row of a kind this "
+                "verifier does not know, with no head and no response: named "
+                "and not judged (a reader taking it for a stamp would say "
+                "STAMP-INVALID).", 0,
+                [unknown("stamp-unknown-kind", "stamps",
+                         'of kind "witness-note"'), "VALID"])
 
     # The packages (SPEC section 10). A package row names a folder or a
     # zip in this folder, after the verb, and no --log.
