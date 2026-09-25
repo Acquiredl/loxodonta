@@ -3390,11 +3390,12 @@ def append_published_record(log, head, n, ts, event):
     the anchor sidecar's pattern. It is writer-reachable and therefore
     testimony (GLOSSARY): it exists so the keeper never posts the same
     head twice, never to prove anything. The remote's copy is the head
-    record; this is the note that says one was sent. It holds the head,
-    the entry count, the time, and the event kind, and never the URL: a
-    webhook URL is a credential."""
+    record; this is the note that says one was sent. It holds its kind,
+    the head, the entry count, the time, and the event kind, and never
+    the URL: a webhook URL is a credential."""
     append_sidecar_record(published_path(log),
-                          {"head": head, "n": n, "ts": ts, "event": event})
+                          {"kind": HEAD_KIND,   # ADR-0038
+                           "head": head, "n": n, "ts": ts, "event": event})
 
 
 def chain_session(log):
@@ -3450,8 +3451,8 @@ def is_chain_record(record):
     """True for a row of kind `chain`: a batch of entries the remote
     acknowledged, with its range. Not a head row, so the head keeper's
     ripeness test ignores it; not a proof of anything, like every row
-    in the memo."""
-    return isinstance(record, dict) and record.get("kind") == CHAIN_KIND
+    in the memo. What a row is, `row_kind` says (ADR-0038)."""
+    return isinstance(record, dict) and row_kind("memo", record) == CHAIN_KIND
 
 
 def entries_on_disk(log):
@@ -3495,10 +3496,12 @@ def chain_cursor(log, url):
     memo's chain rows that name it (#263); -1 when none does, so the
     send starts at genesis. A row that names no remote predates remote
     ids and counts for none: that chain goes once more from genesis, and
-    the receiver drops each line as an exact duplicate. A torn memo line
-    is read past (a resend the receiver drops, never a stuck keeper); a
-    memo that cannot be read at all is raised, not guessed at, since -1
-    would send the whole chain again at every session end."""
+    the receiver drops each line as an exact duplicate. A row of any
+    other kind, a head, a note or a kind unknown here, counts for none
+    either (ADR-0038). A torn memo line is read past (a resend the
+    receiver drops, never a stuck keeper); a memo that cannot be read
+    at all is raised, not guessed at, since -1 would send the whole
+    chain again at every session end."""
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
