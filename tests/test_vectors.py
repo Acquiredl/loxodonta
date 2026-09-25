@@ -1,8 +1,8 @@
 """The conformance vectors (ADR-0035): tests/vectors/, on both files.
 
-Each vector is a small chain file and one row of tests/vectors/vectors.json:
-the arguments to run, the exit expected, and the last line of stdout
-expected (or how it starts). The same rows are what a second
+Each vector is a small chain file, or a package (a folder or a zip), and
+one row of tests/vectors/vectors.json: the arguments to run, the exit
+expected, and the last line of stdout expected (or how it starts). The same rows are what a second
 implementation checks itself against (tests/vectors/README.md). Here each
 row runs against loxodonta.py and against verifier.py, as a recipient
 would run them, and the two files must also agree with each other, exit
@@ -35,6 +35,15 @@ TOOLS = {"loxodonta.py": REPO_ROOT / "loxodonta.py",
 
 def rows():
     return json.loads(MANIFEST.read_text(encoding="utf-8"))["vectors"]
+
+
+def target(row):
+    """What a row runs on: the chain `--log` names, or for a package row
+    the folder or zip named after `verify-package`."""
+    args = row["args"]
+    if args[0] == "verify-package":
+        return args[1]
+    return args[args.index("--log") + 1]
 
 
 def run_row(tool, row):
@@ -88,22 +97,24 @@ class VectorsTest(unittest.TestCase):
             with self.subTest(vector=row["name"]):
                 self.assertEqual(
                     ("last_line" in row) + ("last_line_prefix" in row), 1)
-                log = row["args"][row["args"].index("--log") + 1]
-                self.assertEqual((VECTORS / log).exists(),
-                                 not row.get("log_absent"), log)
+                self.assertEqual((VECTORS / target(row)).exists(),
+                                 not row.get("log_absent"), target(row))
 
-    def test_every_chain_file_is_run_by_some_row(self):
-        run = {row["args"][row["args"].index("--log") + 1] for row in rows()}
+    def test_every_chain_file_and_package_is_run_by_some_row(self):
+        run = {target(row) for row in rows()}
         chains = {path.name for path in VECTORS.glob("*.jsonl")}
-        self.assertEqual(chains - run, set(), "a chain no row runs")
+        packages = {path.name for path in VECTORS.iterdir()
+                    if path.is_dir() or path.suffix == ".zip"}
+        self.assertEqual((chains | packages) - run, set(),
+                         "a chain or a package no row runs")
 
     def test_each_canonical_form_written_down_hashes_to_its_entry(self):
         stated = [row for row in rows() if "canonical" in row]
         self.assertTrue(stated, "no row writes a canonical form down")
         for row in stated:
             with self.subTest(vector=row["name"]):
-                log = row["args"][row["args"].index("--log") + 1]
-                lines = (VECTORS / log).read_text(encoding="utf-8").split("\n")
+                lines = (VECTORS / target(row)).read_text(
+                    encoding="utf-8").split("\n")
                 canonical = row["canonical"]
                 entry = json.loads(lines[canonical["entry"]])
                 digest = hashlib.sha256(

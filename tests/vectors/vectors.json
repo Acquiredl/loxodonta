@@ -1,6 +1,6 @@
 {
   "format": "0.1",
-  "about": "Conformance vectors for the receipt format (docs/SPEC.md). Run each row's args from inside this folder; the exit and the last line of stdout must be as given. See README.md.",
+  "about": "Conformance vectors for the receipt format and the package (docs/SPEC.md). Run each row's args from inside this folder; the exit and the last line of stdout must be as given. See README.md.",
   "vectors": [
     {
       "name": "genesis-only",
@@ -410,6 +410,78 @@
       ],
       "exit": 66,
       "last_line": ""
+    },
+    {
+      "name": "package-unsealed",
+      "about": "One chain and the project record, listed by a manifest declaring no seal: the ceiling, with its limit.",
+      "args": [
+        "verify-package",
+        "package-unsealed"
+      ],
+      "exit": 0,
+      "last_line": "SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest; indistinguishable from a wholesale regeneration, since no seal is declared"
+    },
+    {
+      "name": "package-artifact-altered",
+      "about": "The same package with project.json rewritten after the manifest listed it: its sha256 is not the listed one.",
+      "args": [
+        "verify-package",
+        "package-artifact-altered"
+      ],
+      "exit": 2,
+      "last_line": "ARTIFACT-DIVERGED: something in this package is not what the manifest lists (the lines above say what)"
+    },
+    {
+      "name": "package-named-twice",
+      "about": "A zip of the unsealed package with a second member of the chain's name ahead of it, entry 2 edited: which one is read depends on the unzip, so it is refused unopened.",
+      "args": [
+        "verify-package",
+        "package-named-twice.zip"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: package-named-twice.zip holds two members that unpack to one file, 'receipts-vector.jsonl' twice; which one is read depends on the tool that unpacks it, so this verifier refuses it unopened"
+    },
+    {
+      "name": "package-seal-missing",
+      "about": "The manifest declares an anchor and no manifest.json.anchors.jsonl is in the package: a stripped seal fails, never reads as unsealed.",
+      "args": [
+        "verify-package",
+        "package-seal-missing"
+      ],
+      "exit": 3,
+      "last_line": "SEAL-MISSING: a seal the manifest declares is not in this package (the seal line above says which)"
+    },
+    {
+      "name": "package-unknown-format",
+      "about": "The manifest's format is a tag this verifier does not speak: a refusal, and nothing is judged.",
+      "args": [
+        "verify-package",
+        "package-unknown-format"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: package is format \"loxodonta-package/2\"; this verifier speaks \"loxodonta-package/1\""
+    },
+    {
+      "name": "package-anchored",
+      "about": "The manifest's sha256 anchored by a completed proof, and the header of the block its attestation claims given: the rung, the block named by the header's hash.",
+      "args": [
+        "verify-package",
+        "package-anchored",
+        "--block-header",
+        "000000201111111111111111111111111111111111111111111111111111111111111111d36e638ceba60d8e26beeaae130fcc280b248c9f738f343906b63ea6ac82c61a98c1b36a1942031707000000"
+      ],
+      "exit": 0,
+      "last_line": "SELF-CONSISTENT + ANCHORED: every chain walks clean and every artifact matches the manifest, and the manifest existed by the block whose header hashes to b6eed9fd921eb901384173feee3236d5dec2c511e7101efdbc461cca3790dcbd, which its anchor calls Bitcoin block 850123"
+    },
+    {
+      "name": "package-anchored-unchecked",
+      "about": "The same package with no header given: the rung is earned, and the block is the attestation's claim.",
+      "args": [
+        "verify-package",
+        "package-anchored"
+      ],
+      "exit": 0,
+      "last_line": "SELF-CONSISTENT + ANCHORED: every chain walks clean and every artifact matches the manifest, and the manifest's anchor claims Bitcoin block 850123, a block not checked here"
     }
   ]
 }
