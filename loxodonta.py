@@ -104,7 +104,7 @@ def split_lines(data):
     after the last `\\n`, when there are any, are a line too: the torn
     tail a crash leaves, which the walk names. Written the same way in
     loxodonta.py, supervisor.py and receiver.py, which never import one
-    another; tests/test_suite_shape.py holds the copies equal."""
+    another; tools/twin_check.py holds the copies equal."""
     lines = data.split(b"\n")
     if lines[-1] == b"":
         lines.pop()
@@ -292,7 +292,7 @@ def shape_problem(entry):
 # Display only: verify hashes the raw entry, and a backslash stays as it
 # is, so the chain file is where the exact bytes are read. Twin of
 # supervisor.py's `visible`; the files never import each other
-# (ADR-0035), and tests/test_suite_shape.py holds the two copies equal.
+# (ADR-0035), and tools/twin_check.py holds the two copies equal.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
@@ -2178,10 +2178,10 @@ def block_header(value):
 
 
 def checkout_commit(home):
-    """The short commit of the checkout `home` sits in, or "unknown" —
-    the same fact the recorder notice reports (ADR-0015). Local git only:
-    a version is a label on the file, never a channel to fetch a newer
-    one."""
+    """The short commit of the git checkout `home` sits in, or "unknown"
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
@@ -2199,7 +2199,7 @@ def version_line(prog, home):
 
 class VersionAction(argparse.Action):
     """`--version`, answered only when asked: the commit is one git
-    question, and the hook path must not pay for it on every call."""
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
@@ -2226,9 +2226,10 @@ def speak_utf8():
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's
-    stock 2, so no verdict exit is ever an argparse error (ADR-0026
-    ruling 7). The message is argparse's, unchanged, on stderr. Subparsers
-    inherit this class, so every command speaks the same number."""
+    stock 2, so no exit a script reads as an answer is ever an argparse
+    error (ADR-0026 ruling 7). The message is argparse's, unchanged, on
+    stderr. Subparsers inherit this class, so every command speaks the
+    same number."""
 
     def error(self, message):
         self.print_usage(sys.stderr)
@@ -3120,12 +3121,14 @@ SHELL_HAZARDS = "\"'`$\\"   # a quote, a backtick, a dollar sign, a backslash
 
 
 def publish_url(value):
-    """argparse validator for `install-hook --publish-head`: a plain http
-    or https URL. The installer writes it onto the wired SessionEnd
-    command, which the harness runs through a shell at every session end,
-    so anything a shell could expand or unquote is refused here rather
-    than escaped: a quote, a backtick, a dollar sign, a backslash, or
-    whitespace."""
+    """argparse validator for a URL the tools send to: where a head or
+    the chain is published, or the authority asked to stamp a head. A
+    plain http or https URL. The installer writes such a URL onto
+    the wired SessionEnd command, which the harness runs through a shell
+    at every session end, and the supervisor's keeper hands one to
+    `publish`, so anything a shell could expand or unquote is refused
+    when the URL is given rather than escaped later: a quote, a
+    backtick, a dollar sign, a backslash, or whitespace."""
     parts = urllib.parse.urlsplit(value)
     if parts.scheme not in PUBLISH_SCHEMES or not parts.netloc:
         raise argparse.ArgumentTypeError(
@@ -3392,9 +3395,9 @@ def remote_id(url):
     first 16 hex characters of the SHA-256 of the URL exactly as it was
     sent to. The receiver's URL carries its token, so the memo never
     holds it (ADR-0025); a fingerprint of it names the remote and
-    reveals nothing usable. The supervisor computes the same thing from
-    the same URL, the rule written twice, since the two files never
-    import each other."""
+    reveals nothing usable. The recorder writes it into the memo and the
+    supervisor's keeper compares against it, so both compute it alike
+    (docs/TWINS.md)."""
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
@@ -4409,9 +4412,9 @@ def store_home():
 def project_slug(project):
     """The store drawer name for a project: its basename plus 8 hex of
     the normalized full path's SHA256 — readable at a glance, and two
-    same-named projects can never share a drawer (ADR-0011). The math
-    must match supervisor.py's copy exactly; the recall tests hold the
-    two together behaviorally (hook in, digest out)."""
+    same-named projects can never share a drawer (ADR-0011). A hook
+    files its chain under it and the supervisor finds the drawer by it,
+    so both compute it alike (docs/TWINS.md)."""
     p = os.path.abspath(str(project))
     key = os.path.normcase(p).replace(os.sep, "/")
     # A lone surrogate (a folder name that is not UTF-8, on POSIX) is

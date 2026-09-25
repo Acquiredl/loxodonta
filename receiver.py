@@ -241,7 +241,7 @@ def split_lines(data):
     after the last `\\n`, when there are any, are a line too: the torn
     tail a crash leaves, which the walk names. Written the same way in
     loxodonta.py, supervisor.py and receiver.py, which never import one
-    another; tests/test_suite_shape.py holds the copies equal."""
+    another; tools/twin_check.py holds the copies equal."""
     lines = data.split(b"\n")
     if lines[-1] == b"":
         lines.pop()
@@ -619,10 +619,10 @@ def cmd_serve(args):
 # --- The command line ----------------------------------------------------------
 
 def checkout_commit(home):
-    """The short commit of the checkout `home` sits in, or "unknown" —
-    the recorder's own version fact (ADR-0015, ADR-0022). Local git
-    only: a version is a label on the file, never a channel to fetch a
-    newer one."""
+    """The short commit of the git checkout `home` sits in, or "unknown"
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
@@ -632,16 +632,22 @@ def checkout_commit(home):
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 
 
+def version_line(prog, home):
+    """Three identities on one line: tool, format, commit (ADR-0022)."""
+    return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
+            f"commit {checkout_commit(home)})")
+
+
 class VersionAction(argparse.Action):
-    """`--version`, answered only when asked: tool, format, commit."""
+    """`--version`, answered only when asked: the commit is one git
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None):
         home = os.path.dirname(os.path.abspath(__file__))
-        print(f"{parser.prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
-              f"commit {checkout_commit(home)})")
+        print(version_line(parser.prog, home))
         parser.exit()
 
 
@@ -672,9 +678,12 @@ def mebibytes(text):
 
 
 class UsageParser(argparse.ArgumentParser):
-    """argparse, with usage errors on an exit of their own, as the other
-    two files have it: a wrong flag exits 64, never a number a script
-    could mistake for something the receiver said."""
+    """argparse, with usage errors on an exit of their own. A wrong flag, a
+    missing argument, or a malformed value exits 64 instead of argparse's
+    stock 2, so no exit a script reads as an answer is ever an argparse
+    error (ADR-0026 ruling 7). The message is argparse's, unchanged, on
+    stderr. Subparsers inherit this class, so every command speaks the
+    same number."""
 
     def error(self, message):
         self.print_usage(sys.stderr)

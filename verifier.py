@@ -111,7 +111,7 @@ def split_lines(data):
     after the last `\\n`, when there are any, are a line too: the torn
     tail a crash leaves, which the walk names. Written the same way in
     loxodonta.py, supervisor.py and receiver.py, which never import one
-    another; tests/test_suite_shape.py holds the copies equal."""
+    another; tools/twin_check.py holds the copies equal."""
     lines = data.split(b"\n")
     if lines[-1] == b"":
         lines.pop()
@@ -299,7 +299,7 @@ def shape_problem(entry):
 # Display only: verify hashes the raw entry, and a backslash stays as it
 # is, so the chain file is where the exact bytes are read. Twin of
 # supervisor.py's `visible`; the files never import each other
-# (ADR-0035), and tests/test_suite_shape.py holds the two copies equal.
+# (ADR-0035), and tools/twin_check.py holds the two copies equal.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
@@ -2185,10 +2185,10 @@ def block_header(value):
 
 
 def checkout_commit(home):
-    """The short commit of the checkout `home` sits in, or "unknown" —
-    the same fact the recorder notice reports (ADR-0015). Local git only:
-    a version is a label on the file, never a channel to fetch a newer
-    one."""
+    """The short commit of the git checkout `home` sits in, or "unknown"
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
@@ -2206,7 +2206,7 @@ def version_line(prog, home):
 
 class VersionAction(argparse.Action):
     """`--version`, answered only when asked: the commit is one git
-    question, and the hook path must not pay for it on every call."""
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
@@ -2233,9 +2233,10 @@ def speak_utf8():
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's
-    stock 2, so no verdict exit is ever an argparse error (ADR-0026
-    ruling 7). The message is argparse's, unchanged, on stderr. Subparsers
-    inherit this class, so every command speaks the same number."""
+    stock 2, so no exit a script reads as an answer is ever an argparse
+    error (ADR-0026 ruling 7). The message is argparse's, unchanged, on
+    stderr. Subparsers inherit this class, so every command speaks the
+    same number."""
 
     def error(self, message):
         self.print_usage(sys.stderr)
