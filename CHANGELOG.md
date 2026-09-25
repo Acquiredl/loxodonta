@@ -17,6 +17,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Changed
 
 - Anchor rows name their kind (`"kind": "anchor"`), and a row with none reads as an anchor. A row of an unknown kind is named by its line (`ANCHOR-UNKNOWN-KIND`), never judged, and moves no exit code (ADR-0038, #335).
+- Publish memo head rows name their kind (`"kind": "head"`), and a row with none reads as a head. The chain cursor counts `chain` rows alone, so a row of an unknown kind moves nothing (ADR-0038, #340).
 
 ### Fixed
 

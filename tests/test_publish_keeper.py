@@ -121,11 +121,11 @@ class PublishCommandTest(ReceiverFixture):
         for secret in (self.root.name, "alpha", "secret-wren", "receipts-",
                        ".jsonl"):
             self.assertNotIn(secret, raw)
-        # The memo: head, n, ts, event, and nothing else. Never the URL —
-        # a webhook URL is a credential.
+        # The memo: the row's kind (ADR-0038), head, n, ts, event, and
+        # nothing else. Never the URL — a webhook URL is a credential.
         self.assertEqual(memo_of(log),
-                         [{"head": head, "n": 2, "ts": body["ts"],
-                           "event": "cadence"}])
+                         [{"kind": "head", "head": head, "n": 2,
+                           "ts": body["ts"], "event": "cadence"}])
         memo_text = Path(str(log) + ".published.jsonl").read_text(
             encoding="utf-8")
         self.assertNotIn("127.0.0.1", memo_text)
@@ -249,6 +249,27 @@ class PublishKeeperTest(ReceiverFixture):
         self.assertEqual([m["head"] for m in memo_of(log) if "head" in m],
                          [head])
 
+    def test_a_head_row_with_or_without_its_kind_stands_the_keeper_down(self):
+        # ADR-0038: new head rows name their kind, and a row with none,
+        # as every head row before them was written, still reads as a
+        # head that left. Either one for the current head is a head
+        # already sent, and the keeper never posts it twice.
+        for session, kind in (("sess-kindless", None), ("sess-kinded", "head")):
+            log = make_chain(self.root / "alpha" / "receipts", session)
+            row = {"head": chain_head(log), "n": 2, "ts": ago(600),
+                   "event": "session-end"}
+            if kind is not None:
+                row["kind"] = kind
+            with open(str(log) + ".published.jsonl", "a",
+                      encoding="utf-8") as out:
+                out.write(json.dumps(row, sort_keys=True) + "\n")
+
+        result = self.publishing()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.receiver.received, [],
+                         "a head already in the memo is never re-posted")
+
     def test_default_is_off_and_nothing_is_posted_without_the_flags(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-off")
 
@@ -359,7 +380,8 @@ class LeftReadingTest(ReceiverFixture):
                          {"ts": batch_at, "via": "published-chain"})
         self.assertEqual(chain["last_failed"]["step"], "publish-head")
         (chain,) = sessions[("alpha", "sess-doors")]
-        head_row = [row for row in memo_of(both) if "kind" not in row]
+        head_row = [row for row in memo_of(both)
+                    if row.get("kind", "head") == "head"]
         self.assertEqual(chain["left"],
                          {"ts": head_row[0]["ts"], "via": "published"})
 
