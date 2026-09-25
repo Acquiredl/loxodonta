@@ -14,6 +14,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `docs/TWINS.md` lists every rule written in more than one script, and `tools/twin_check.py --check` fails the suite when a copy drifts from the recorder's or a shared name goes undeclared (#337).
 
+### Changed
+
+- Anchor rows name their kind (`"kind": "anchor"`), and a row with none reads as an anchor. A row of an unknown kind is named by its line (`ANCHOR-UNKNOWN-KIND`), never judged, and moves no exit code (ADR-0038, #335).
+
 ### Fixed
 
 - `supervisor scan` no longer stops with a traceback on a sidecar or transcript line holding an integer past 4,300 digits or nesting past the recursion limit. The writer can reach those files, so one line could stop the audit (#331).

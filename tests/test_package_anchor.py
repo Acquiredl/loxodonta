@@ -472,5 +472,133 @@ class SealedPackageTest(AnchoredStoreCase):
                         .startswith("SELF-CONSISTENT:"))
 
 
+UNKNOWN_ROW = json.dumps({"kind": "witness-note", "ts": "2026-09-24T10:00:00Z"})
+
+
+class PackageRowKindTest(AnchoredStoreCase):
+    """ADR-0038 in a package: the manifest's proof row names its kind,
+    and a row of a kind this verifier does not know is named by its line
+    in either anchors sidecar, earning nothing and moving no exit code."""
+
+    def test_the_manifest_anchor_row_names_its_kind(self):
+        folder = self.anchored_folder()
+
+        (record,) = self.sidecar_records(folder)
+
+        self.assertEqual(record["kind"], "anchor")
+        self.assertEqual(set(record), {"kind", "head", "ts", "calendar",
+                                       "proof"})
+
+    def test_an_unknown_kind_beside_the_manifest_proof_is_named_not_judged(self):
+        folder = self.anchored_folder()
+        before = self.verify_package(folder)
+        with (folder / SIDECAR).open("a", encoding="utf-8") as out:
+            out.write(UNKNOWN_ROW + "\n")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, before.returncode,
+                         judged.stdout + judged.stderr)
+        note = (f'seal anchor: ANCHOR-UNKNOWN-KIND: line 2 of {SIDECAR} is of '
+                'kind "witness-note" — this verifier does not know the kind '
+                'in this sidecar, and does not judge it')
+        lines = judged.stdout.splitlines()
+        self.assertIn(note, lines)
+        self.assertEqual([l for l in lines if l != note],
+                         before.stdout.splitlines())
+
+    def test_a_manifest_sidecar_of_unknown_rows_only_is_seal_missing(self):
+        # A row of an unknown kind earns nothing, so a sidecar holding
+        # only that is a declared anchor the package does not carry.
+        folder = self.anchored_folder()
+        (folder / SIDECAR).write_text(UNKNOWN_ROW + "\n", encoding="utf-8")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 3, judged.stdout + judged.stderr)
+        self.assertIn("seal anchor: ANCHOR-UNKNOWN-KIND: line 1", judged.stdout)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("SEAL-MISSING:"), judged.stdout)
+
+    def test_an_unknown_kind_in_a_chain_sidecar_is_named_not_judged(self):
+        sidecar = self.chain.with_name(self.chain.name + ".anchors.jsonl")
+        folder = self.work / "plain"
+        self.package(SESSION, "--folder", "--out", str(folder))
+        before = self.verify_package(folder)
+        with sidecar.open("a", encoding="utf-8") as out:
+            out.write(UNKNOWN_ROW + "\n")
+        folder = self.work / "noted"
+        result = self.package(SESSION, "--folder", "--out", str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(judged.returncode, before.returncode)
+        self.assertIn(SealedPackageTest.CHAIN_DETAIL, judged.stdout)
+        # The sidecar by its bare name, never the unpack folder's path.
+        self.assertIn(f"ANCHOR-UNKNOWN-KIND: line 2 of {sidecar.name} is of "
+                      "kind \"witness-note\"", judged.stdout)
+        self.assertNotIn(str(folder), "\n".join(
+            l for l in judged.stdout.splitlines() if "UNKNOWN-KIND" in l))
+        self.assertNotIn("INVALID", judged.stdout)
+        self.assertEqual(judged.stdout.splitlines()[-1],
+                         before.stdout.splitlines()[-1])
+
+
+class ReleasedVerifierTest(AnchoredStoreCase):
+    """ADR-0038's compatibility promise, held against the bytes a
+    recipient already has: a package this recorder makes, its chain and
+    its manifest anchored with rows that name their kind, verifies the
+    same under the v0.9.0 verifier as under this one. That verifier
+    skips only `attempt` rows, so it judges an `anchor` row as it judged
+    a kind-less one."""
+
+    RELEASE = "v0.9.0"
+
+    def released_verifier(self):
+        try:
+            shown = subprocess.run(
+                ["git", "-C", str(LOXODONTA.parent), "show",
+                 f"{self.RELEASE}:verifier.py"], capture_output=True)
+        except OSError:
+            self.skipTest("git is not on PATH, so the released verifier's "
+                          "bytes cannot be read")
+        if shown.returncode != 0:
+            self.skipTest(f"the {self.RELEASE} tag is not in this checkout "
+                          "(a shallow clone fetches no tags), so the released "
+                          "verifier's bytes cannot be read")
+        path = self.root / f"verifier-{self.RELEASE}.py"
+        path.write_bytes(shown.stdout)
+        return path
+
+    def test_a_package_anchored_by_this_recorder_verifies_the_same_under_it(self):
+        released = self.released_verifier()
+        # The chain anchored by the recorder, so its sidecar holds an
+        # `anchor` row beside the fixture's kind-less one.
+        anchored = run(LOXODONTA, "anchor", "--log", str(self.chain),
+                       "--calendar", self.server.url, env=self.env)
+        self.assertEqual(anchored.returncode, 0, anchored.stderr)
+        folder = self.anchored_folder()
+        self.server.mode = "complete"
+        upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
+                      str(folder / "manifest.json"), env=self.env)
+        self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
+        kinds = [r.get("kind") for r in self.sidecar_records(folder)]
+        self.assertEqual(kinds, ["anchor", "anchor"])
+
+        now = self.verify_package(folder)
+        then = subprocess.run(
+            [sys.executable, "-I", str(released), "verify-package",
+             str(folder)], capture_output=True, cwd=str(self.work))
+        then_out = then.stdout.decode("utf-8", "replace")
+
+        self.assertEqual(now.returncode, 0, now.stdout + now.stderr)
+        self.assertTrue(now.stdout.splitlines()[-1]
+                        .startswith("SELF-CONSISTENT + ANCHORED:"), now.stdout)
+        self.assertEqual((then.returncode, then_out.splitlines()),
+                         (now.returncode, now.stdout.splitlines()))
+
+
 if __name__ == "__main__":
     unittest.main()

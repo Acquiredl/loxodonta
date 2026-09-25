@@ -823,6 +823,9 @@ def record_label(head, n):
 # the machine. The chain's schema is untouched.
 
 ATTEMPT_KIND = "attempt"
+# The publish memo's other note: a batch of entries sent to a receiver
+# (ADR-0031). Named here because the row reader below knows it.
+CHAIN_KIND = "chain"
 
 
 def is_attempt(record):
@@ -830,6 +833,87 @@ def is_attempt(record):
     step went, never a proof and never a sent head. Readers that judge
     skip these rows; readers that report use them."""
     return isinstance(record, dict) and record.get("kind") == ATTEMPT_KIND
+
+
+# --- What a sidecar row is (ADR-0038) -----------------------------------------
+# Every sidecar row names its kind. The first rows of each sidecar were
+# written before rows named one, so a row with no `kind` reads as its
+# sidecar's evidence row: a proof, a token, a sent head. That holds
+# whenever the row was written, since a sidecar is not chained and
+# nothing in it dates a row. A kind this verifier does not know, or one
+# that belongs in another sidecar, is named and never judged, so a row a
+# newer recorder writes is never evidence against an honest log. The
+# rule is written here and nowhere else: every reader asks `row_kind`.
+
+ANCHOR_KIND = "anchor"
+STAMP_KIND = "stamp"
+HEAD_KIND = "head"
+
+# The kinds each sidecar holds, its evidence kind first: the anchors
+# sidecar, the stamps sidecar, and the publish memo.
+SIDECAR_KINDS = {
+    "anchors": (ANCHOR_KIND, ATTEMPT_KIND),
+    "stamps": (STAMP_KIND, ATTEMPT_KIND),
+    "memo": (HEAD_KIND, CHAIN_KIND, ATTEMPT_KIND),
+}
+# What `row_kind` answers when a row has no kind of its sidecar's. No
+# sidecar holds either word as a kind, so a writer who writes one is
+# read as unknown, never as these.
+UNREADABLE_ROW = "unreadable"
+UNKNOWN_ROW = "unknown"
+
+
+def row_kind(sidecar, record):
+    """What one row of `sidecar` ("anchors", "stamps" or "memo") is, for
+    a row as `read_sidecar_records` gives it: the row's kind; the
+    sidecar's evidence kind for a row with no `kind`; UNREADABLE_ROW for
+    a line that is not a JSON object; UNKNOWN_ROW for a kind this
+    sidecar does not hold, a kind that is not a string among them."""
+    if record is None:
+        return UNREADABLE_ROW
+    kinds = SIDECAR_KINDS[sidecar]
+    if "kind" not in record:
+        return kinds[0]
+    kind = record["kind"]
+    if isinstance(kind, str) and kind in kinds:
+        return kind
+    return UNKNOWN_ROW
+
+
+JSON_TYPE_WORDS = ((bool, "true or false"), (int, "a number"),
+                   (float, "a number"), (list, "an array"),
+                   (dict, "an object"), (type(None), "null"))
+
+
+def rows_to_judge(sidecar, records, prefix, name):
+    """The rows of `records` a judge of `sidecar` weighs, in file order:
+    each evidence row, and None for each unreadable line, which the
+    judge names. Attempt rows and the memo's chain rows are left out
+    silently. A row of a kind unknown here is left out after one line
+    that names it, headed `prefix`, with its line number in the sidecar
+    file `name`: a bare file name, never a path of this machine. The kind is the writer's text, so it is printed escaped, and
+    a kind that is not a string is named by its JSON type, never its
+    value."""
+    judged = []
+    evidence = SIDECAR_KINDS[sidecar][0]
+    for number, record in enumerate(records, 1):
+        kind = row_kind(sidecar, record)
+        if kind in (evidence, UNREADABLE_ROW):
+            judged.append(record)
+            continue
+        if kind != UNKNOWN_ROW:
+            continue
+        written = record["kind"]
+        if isinstance(written, str):
+            shown = f'of kind "{visible(written)}"'
+        else:
+            words = next((words for types, words in JSON_TYPE_WORDS
+                          if isinstance(written, types)), "a value")
+            shown = f"of a kind that is {words}, not a string"
+        print(f"{prefix}: line {number} of {visible(name)} is {shown} — this "
+              "verifier does not know the kind in this sidecar, and does "
+              "not judge it")
+    return judged
 
 
 # --- Judging anchors (docs/ANCHORING.md §3) -----------------------------------
@@ -848,10 +932,11 @@ def check_anchors(log, entries, headers, used):
         return False
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
 
+    # A row of an unknown kind is named here, before any verdict line, so
+    # the last line printed is the one it would be without the row.
     judged = []
-    for record in records:
-        if is_attempt(record):
-            continue  # a note on how a step went, not evidence (#240)
+    for record in rows_to_judge("anchors", records, "ANCHOR-UNKNOWN-KIND",
+                                os.path.basename(anchors_path(log))):
         if record is None:
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
@@ -1616,9 +1701,12 @@ def judge_manifest_anchor(folder, headers, used):
     digest = sha256_file(manifest)
     records = read_anchor_records(manifest)
     if records:
-        # Attempt rows are notes, never proofs (#240): a sidecar holding
-        # only notes holds no record, the same as an empty one.
-        records = [r for r in records if not is_attempt(r)]
+        # Only proofs and unreadable lines are judged (ADR-0038): a
+        # sidecar holding only notes, or rows of kinds this verifier
+        # does not know, holds no record, the same as an empty one.
+        records = rows_to_judge("anchors", records,
+                                "seal anchor: ANCHOR-UNKNOWN-KIND",
+                                anchors_path("manifest.json"))
     if not records:
         what = "is not in this package" if records is None else "holds no record"
         print(f"seal anchor: SEAL-MISSING: {anchors_path('manifest.json')} "
@@ -2875,6 +2963,7 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
     number; a package manifest's anchor has none (ADR-0026 ruling 4),
     and its record then carries no `n` at all rather than a null."""
     record = {
+        "kind": ANCHOR_KIND,   # ADR-0038
         "head": head,
         "ts": now_ts(),
         "calendar": calendar,
@@ -2897,7 +2986,8 @@ def calendar_request(url, data=None, timeout=15):
 
 # --- Writing attempt records (#240) -------------------------------------------
 # The steps an attempt row names, and the writer. What a row is, and how
-# every judge skips it, is with is_attempt in the verifier above.
+# every judge skips it, is with is_attempt and row_kind in the verifier
+# above.
 
 STEP_ANCHOR = "anchor"
 STEP_PUBLISH_HEAD = "publish-head"
@@ -2979,7 +3069,7 @@ def anchor_and_upgrade(log, calendars, budget):
         return  # a damaged tail cannot be anchored
     head, n = last["entry_hash"], last["n"]
     anchored = {r["head"] for r in (read_anchor_records(log) or [])
-                if isinstance(r, dict) and "head" in r and not is_attempt(r)}
+                if row_kind("anchors", r) == ANCHOR_KIND and "head" in r}
     if head not in anchored:
         submitted = False
         for calendar in calendars:
@@ -3014,7 +3104,7 @@ def upgrade_pending_proofs(folder, remaining, deadline):
         chain = os.path.join(folder, name[:-len(".anchors.jsonl")])
         completed, pending = set(), []
         for record in (read_anchor_records(chain) or []):
-            if not isinstance(record, dict) or is_attempt(record):
+            if row_kind("anchors", record) != ANCHOR_KIND:
                 continue
             try:
                 verdict = judge_proof(record["head"],
@@ -3336,7 +3426,6 @@ def chain_session(log):
 # off is the keeper's next turn, from the cursor.
 
 CHAIN_TYPE = "application/x-ndjson"
-CHAIN_KIND = "chain"
 # Bytes per batch: the receiver's cap (docs/RECEIVER.md section 4),
 # which refuses a longer body on its Content-Length before reading any
 # of it. The env knob is the test suite's handle -- a batching rule that
@@ -4030,8 +4119,8 @@ def upgrade_anchors(args):
     settled_heads = set()
     pending = []
     for record in records:
-        if record is None or is_attempt(record):
-            continue
+        if row_kind("anchors", record) != ANCHOR_KIND:
+            continue  # unreadable, a note, or a kind unknown here
         try:
             verdict = judge_proof(record["head"],
                                   base64.b64decode(record["proof"]))
