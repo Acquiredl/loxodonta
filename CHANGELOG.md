@@ -29,6 +29,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `loxodonta hook` answers a payload holding the same lines with exit 65, as for any payload it cannot read, not a traceback and exit 70 (#331).
 - The supervisor reads sidecar rows as the recorder does, so an unknown kind no longer stops the keeper posting, stamping or anchoring a head. A memo line nested too deep no longer stops `publish --chain` (#344).
 - Malformed anchor and stamp rows (a field missing or of the wrong type) no longer crash `verify`, `verify-package`, `anchor`, `stamp`, `supervisor scan` or the session end. An anchor row reads `ANCHOR-INVALID`, a package manifest's `SEAL-INVALID`, naming the field (#348).
+- A planted row naming a head no longer stops it being stamped or anchored: `stamp`, the session end and the supervisor's keeper count it stamped only on a granted reply, and the keeper anchored only on a replaying proof (#366).
 
 ## [0.9.0] - 2026-09-23
 

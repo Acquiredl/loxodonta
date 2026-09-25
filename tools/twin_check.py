@@ -149,6 +149,30 @@ TWINS = (
          "keeper ask the one answer, so the scan never counts a proof, a "
          "token or a sent head that `verify` or `publish` would not "
          "(#344)."),
+    Twin("Which anchor row anchors a head",
+         ("OP_SHA256", "OP_APPEND", "OP_PREPEND", "ATTESTATION_MARKER",
+          "BRANCH_MARKER", "TAG_BITCOIN", "TAG_PENDING", "MAX_PROOF_BYTES",
+          "MAX_PROOF_DEPTH", "ProofError", "ProofReader", "parse_timestamp",
+          "replay_proof", "bitcoin_height", "judge_proof",
+          "JSON_TYPE_WORDS", "json_type", "anchor_row_problem",
+          "proof_replays"),
+         ORIGINAL, SUPERVISOR,
+         "The session end counts a head anchored only when a proof for it "
+         "replays, and the supervisor's keeper asks the same, so a row the "
+         "writer planted with an empty or broken proof never stops either "
+         "one submitting the head. The keeper asks it to schedule, never "
+         "to judge: its verdicts are still `verify --anchors`'s (ADR-0005, "
+         "#348, #366)."),
+    Twin("Which stamp row holds a token",
+         ("STAMP_GRANTED", "der_element", "der_expect", "stamp_status",
+          "token_granted"),
+         ORIGINAL, SUPERVISOR,
+         "`stamp` and the session end count a head stamped only on a row "
+         "whose reply the authority granted, reading the status and never "
+         "the token, and the supervisor's keeper asks the same, so a row "
+         "the writer planted never stops the head being stamped. Judging "
+         "the token stays with `verify --stamps` (ADR-0005, ADR-0032, "
+         "#366)."),
     Twin("Where the chain route left off", ("chain_cursor",),
          ORIGINAL, SUPERVISOR,
          "The keeper runs the recorder's `publish --chain` only when the "

@@ -10,6 +10,7 @@ test drives the public CLI against a local fake receiver: no network,
 ever, and never internals.
 """
 
+import base64
 import json
 import re
 import subprocess
@@ -29,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
-from test_stamp import reply, start_authority
+from test_stamp import GRANTED, NO_GRANTED_REPLY, reply, start_authority
 from test_supervisor import (BASELINE_NAME, ago, chain_head,
                              chains_by_session, home_outside,
                              install_witness_hook, isolated_env, keeper_env,
@@ -1316,6 +1317,44 @@ class ProfileKeeperTest(unittest.TestCase):
 
         self.assertEqual(len(authority.received), 2,
                          "the keeper asked about a head that had a token")
+
+    def test_a_row_holding_no_granted_reply_is_no_token_so_the_head_is_asked(self):
+        # #366: a token row naming the head counts only when its reply
+        # was granted, read as `stamp` reads one. One chain per planted
+        # row, each asked about on the turn; beside them a chain whose
+        # token the verb wrote is not asked about again.
+        authority = self.authority()
+        self.install("--profile", "timestamped", "--authority", authority.url)
+        planted = []
+        for number, response in enumerate(NO_GRANTED_REPLY):
+            log = self.aged_chain(f"sess-planted-{number}", age=7 * 3600)
+            row = {"kind": "stamp", "head": chain_head(log), "n": 1,
+                   "ts": ago(600), "response": response}
+            Path(str(log) + ".stamps.jsonl").write_text(
+                json.dumps(row) + "\n", encoding="utf-8")
+            planted.append(log)
+        good = self.aged_chain("sess-good", age=7 * 3600)
+        stamped = subprocess.run(
+            [sys.executable, str(LOXODONTA), "stamp", f"--log={good}",
+             "--authority", authority.url],
+            capture_output=True, encoding="utf-8",
+            env=keeper_env(PYTHONIOENCODING="utf-8"))
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+
+        self.serve()
+        self.tick()
+        self.said_at_startup()
+
+        self.assertEqual(len(authority.received), len(planted) + 1,
+                         "a planted row stood the keeper down, or a head "
+                         "with a token was asked about again")
+        for log in planted:
+            granted = [row for row in self.tokens_of(log)
+                       if row["response"] == base64.b64encode(
+                           GRANTED).decode()]
+            self.assertEqual([row["head"] for row in granted],
+                             [chain_head(log)])
+        self.assertEqual(len(self.tokens_of(good)), 1)
 
     def test_a_stamps_row_of_an_unknown_kind_is_no_token_so_the_head_is_asked(self):
         # ADR-0038, #344: a kind the stamps sidecar does not hold holds

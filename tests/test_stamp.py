@@ -137,6 +137,16 @@ def reply(status, token=b""):
 PLACEHOLDER_TOKEN = der(0x30, b"a placeholder token the recorder never reads")
 GRANTED = reply(0, PLACEHOLDER_TOKEN)
 
+# The `response` of a token row holding no reply the authority granted
+# (#366): not a string, not base64, base64 of bytes that are not a
+# TimeStampResp, and base64 of a reply the authority refused. None of
+# them stamps the head it names.
+NO_GRANTED_REPLY = (
+    5, None, "not base64!",
+    base64.b64encode(b"no timestamp response").decode(),
+    base64.b64encode(reply(2)).decode(),
+)
+
 
 # --- Fake authority -----------------------------------------------------------
 
@@ -821,6 +831,32 @@ class StampRowKindTest(unittest.TestCase):
         self.assertEqual((rows[1]["head"], rows[1]["kind"]),
                          (self.head, "stamp"))
 
+    def test_a_row_holding_no_granted_reply_is_not_the_heads_token(self):
+        # #366: one planted row naming the head must not switch its
+        # stamp off. Only a reply the authority granted stamps a head,
+        # its status read as the query reads it, so for each of these
+        # the verb still asks, and writes the token it is granted.
+        for response in NO_GRANTED_REPLY:
+            with self.subTest(response=response):
+                self.authority.received.clear()
+                planted = self.token_row(response=response)
+                self.write_sidecar(planted)
+
+                result = self.stamp()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(),
+                                 f"stamped head {self.head[:12]}… (entry 1) "
+                                 f"via {self.authority.url}")
+                self.assertEqual(len(self.authority.received), 1)
+                rows = rows_of(self.sidecar)
+                self.assertEqual(rows[0], json.loads(planted))
+                self.assertEqual(
+                    (rows[1]["head"], rows[1]["kind"],
+                     base64.b64decode(rows[1]["response"])),
+                    (self.head, "stamp", GRANTED))
+
     def test_a_row_of_an_unknown_kind_naming_the_head_is_not_its_token(self):
         # Only a token stamps a head. A row of a kind the recorder does
         # not know is not one, whatever head it names, so the verb still
@@ -1054,6 +1090,34 @@ class SessionEndStampTest(PublishBase):
         self.assertEqual(token["head"], self.head())
         (note,) = attempt_rows(self.stamps())
         self.assertEqual(note["outcome"], "granted")
+
+    def test_a_planted_row_naming_the_head_never_skips_the_stamp(self):
+        # #366: a row naming the sealed head with no granted reply in it
+        # is no token, so the session end still asks, and keeps the token.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        # The commitment the session end seals comes first, and that
+        # entry is the head the planted row must name.
+        self.session_end()
+        head = self.head()
+        for response in NO_GRANTED_REPLY:
+            with self.subTest(response=response):
+                self.authority.received.clear()
+                planted = {"kind": "stamp", "head": head,
+                           "response": response}
+                self.stamps().write_text(json.dumps(planted) + "\n", "utf-8")
+
+                result = self.session_end("--stamp", self.authority.url)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(len(self.authority.received), 1)
+                rows = rows_of(self.stamps())
+                self.assertEqual(rows[0], planted)
+                (token,) = [r for r in rows[1:] if r.get("kind") == "stamp"]
+                self.assertEqual((token["head"], self.head()), (head, head))
+                (note,) = attempt_rows(self.stamps())
+                self.assertEqual(note["outcome"], "granted")
 
     def test_an_authority_that_never_answers_is_abandoned_on_the_hooks_clock(self):
         # The one query has a bounded timeout well inside the budget, and

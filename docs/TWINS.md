@@ -116,6 +116,22 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 A row names its kind, a row with none reads as its sidecar's evidence, and a kind unknown there counts for nothing (ADR-0038). The recorder's judges and the supervisor's scan and keeper ask the one answer, so the scan never counts a proof, a token or a sent head that `verify` or `publish` would not (#344).
 
+### Which anchor row anchors a head
+
+Names: `OP_SHA256`, `OP_APPEND`, `OP_PREPEND`, `ATTESTATION_MARKER`, `BRANCH_MARKER`, `TAG_BITCOIN`, `TAG_PENDING`, `MAX_PROOF_BYTES`, `MAX_PROOF_DEPTH`, `ProofError`, `ProofReader`, `parse_timestamp`, `replay_proof`, `bitcoin_height`, `judge_proof`, `JSON_TYPE_WORDS`, `json_type`, `anchor_row_problem`, `proof_replays`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+The session end counts a head anchored only when a proof for it replays, and the supervisor's keeper asks the same, so a row the writer planted with an empty or broken proof never stops either one submitting the head. The keeper asks it to schedule, never to judge: its verdicts are still `verify --anchors`'s (ADR-0005, #348, #366).
+
+### Which stamp row holds a token
+
+Names: `STAMP_GRANTED`, `der_element`, `der_expect`, `stamp_status`, `token_granted`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+`stamp` and the session end count a head stamped only on a row whose reply the authority granted, reading the status and never the token, and the supervisor's keeper asks the same, so a row the writer planted never stops the head being stamped. Judging the token stays with `verify --stamps` (ADR-0005, ADR-0032, #366).
+
 ### Where the chain route left off
 
 Names: `chain_cursor`.

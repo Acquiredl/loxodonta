@@ -3953,23 +3953,39 @@ def append_stamp_record(log, head, n, authority, reply):
     append_sidecar_record(stamps_path(log), record)
 
 
+def token_granted(record):
+    """True for a token row whose head is a string and whose response
+    is base64 of a reply the authority granted: the status read as
+    `ask_authority` reads it, and the token itself not at all (judging
+    it is `verify --stamps`'s, through openssl). Offline, and never
+    raises: the sidecar is in the writer's reach, so a row verify would
+    call STAMP-INVALID is never a token."""
+    if row_kind("stamps", record) != STAMP_KIND \
+            or not isinstance(record.get("head"), str) \
+            or not isinstance(record.get("response"), str):
+        return False
+    try:
+        reply = base64.b64decode(record["response"], validate=True)
+        return stamp_status(reply) in STAMP_GRANTED
+    except ValueError:
+        return False
+
+
 def stamped_heads(log):
     """The heads this log's sidecar already holds a token for; an
-    attempt row, or a row of a kind unknown here, is never a token. A
-    sidecar that cannot be opened at all answers "none known", so the
-    dedupe asks the authority again rather than skip a head on an
-    unreadable file, and the write that follows reports the real
-    trouble. Never raises: the session-end step
-    promises the same."""
+    attempt row, a row of a kind unknown here, or a row holding no
+    granted reply is never a token. A sidecar that cannot be opened at
+    all answers "none known", so the dedupe asks the authority again
+    rather than skip a head on an unreadable file, and the write that
+    follows reports the real trouble. Never raises: the session-end
+    step promises the same."""
     try:
         records = read_stamp_records(log) or []
     except OSError:
         return set()
-    # A head that is not a string names no head, and a list would not
-    # even hash: the row is skipped, and the head is asked about.
-    return {record["head"] for record in records
-            if row_kind("stamps", record) == STAMP_KIND
-            and isinstance(record.get("head"), str)}
+    # Only a granted reply stamps a head: a row the writer shaped wrong
+    # never stops the head being asked about (#366).
+    return {record["head"] for record in records if token_granted(record)}
 
 
 def ask_authority(url, head, timeout):
