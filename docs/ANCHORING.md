@@ -62,13 +62,13 @@ A missing sidecar under `--anchors` prints `NO-ANCHORS` and leaves the exit code
 
 **`--block-header HEX`** gives the verifier one Bitcoin block header: its 80 bytes as 160 hex characters, from any source you trust. It is repeatable, one header per anchored block, and it needs `--anchors`. Given without it, the command is a usage error, exit 64, because the header was given to check an anchor, and a `VALID` with no anchor judged would read as though it had. A value that is not 160 hex characters is a usage error too. Nothing is fetched: the header is on the command line, or the block is not checked.
 
-What is compared, and how a header is matched to an attestation, is SPEC §9.6: 32 bytes, the header's merkle root against the digest the attestation sits on, as they stand, since the last operations of a Bitcoin proof are the double sha256 (the transaction id, then each step up the block's merkle tree) whose output a header stores. A header carries no height, so the verifier cannot know that it is block H: it knows only which merkle root the header holds. Explorers print the root and the block hash byte-reversed, and so does the verifier, so the printed values read directly against an explorer's page.
+A header is version, previous block hash, merkle root, time, bits and nonce. What is compared, and how a header is matched to an attestation, is SPEC §9.6: 32 bytes, the header's merkle root against the digest the attestation sits on, as they stand, since the last operations of a Bitcoin proof are the double sha256 (the transaction id, then each step up the block's merkle tree) whose output a header stores. A header carries no height, so the verifier cannot know that it is block H: it knows only which merkle root the header holds. Explorers print the root and the block hash byte-reversed, and so does the verifier, so the printed values read directly against an explorer's page.
 
 - An attestation whose root a header holds prints the second `ANCHORED` line, naming the block by the header's hash (double sha256 of the 80 bytes, reversed, as explorers show it). That hash is what to cross-check: ask a second source which block has it. The height the line repeats is the attestation's word and your source's, never the verifier's.
 - An attestation whose root no header holds keeps the first line, *not checked*, whatever headers were given.
 - A header whose root no attestation replays to prints `HEADER-UNMATCHED`. If you fetched it for a height an attestation claims, that attestation does not replay to that block, which is what a made-up attestation looks like. The verifier cannot know what the header was fetched for, so it notes the fact and draws no verdict from it.
 
-The exit code does not move for any of this (SPEC §9.6). A block not checked is not a failure, and neither is a header that checked nothing. A script that must know a block was checked reads for the second `ANCHORED` line, and one that must know every header was used reads for `HEADER-UNMATCHED`.
+The exit code does not move for any of this (SPEC §9.6). A block not checked is not a failure, and neither is a header that checked nothing. `ANCHOR-MISMATCH` and `ANCHOR-INVALID` keep their meaning and their exit 3: a proof for a head this log does not hold, or one that does not replay, whatever headers were given (SPEC §9.4). A script that must know a block was checked reads for the second `ANCHORED` line, and one that must know every header was used reads for `HEADER-UNMATCHED`.
 
 **Getting a header.** The attestation names the height, so ask for that height's header, and check what comes back against a second source:
 
@@ -79,7 +79,7 @@ The exit code does not move for any of this (SPEC §9.6). A block not checked is
 
 ## 4. The OTS subset (wire format)
 
-loxodonta implements the subset of the OTS format that calendar proofs actually use; anything else is refused by name, never guessed (ADR-0003). The subset a proof is replayed through, its operations, its tree and its two attestations, is SPEC §9.5. What the calendars speak is the recorder's side of it:
+loxodonta implements the subset of the OTS format that calendar proofs actually use; anything else is refused by name, never guessed (ADR-0003). The subset a proof is replayed through, its operations, its tree and its two attestations, is SPEC §9.5. Unknown tags are preserved on rewrite. What the calendars speak is the recorder's side of it:
 
 - **calendar HTTP**: `POST /digest` (body: raw digest bytes) returns a serialized timestamp starting at the digest; `GET /timestamp/<hex>` returns the continuation from a commitment, or HTTP 404 while Bitcoin confirmation is pending.
 
