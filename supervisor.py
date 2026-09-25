@@ -72,6 +72,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # supervisor is running and is tagged together with loxodonta.py — the
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 TOOL_VERSION = "0.9.0"
 FORMAT_VERSION = "0.1"
 
@@ -136,6 +137,7 @@ def chain_identity(root, log):
     return repo, session, seq
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def split_lines(data):
     """The lines of a chain's or a sidecar's bytes, by the one rule every
     reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
@@ -920,9 +922,11 @@ def sidecar_records(sidecar):
             yield record
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 ATTEMPT_KIND = "attempt"
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def is_attempt(record):
     """True for a row of kind `attempt`: a note on how a session-end
     step went, never a proof and never a sent head. Readers that judge
@@ -955,6 +959,7 @@ def sidecar_heads(sidecar):
 
 # Computed here only to compare with the memo's chain rows: the
 # fingerprint is never printed, served or written down by the supervisor.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def remote_id(url):
     """Which remote a chain row went to, without the URL (#263): the
     first 16 hex characters of the SHA-256 of the URL exactly as it was
@@ -1062,10 +1067,12 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
 # was published or anchored. Same throttle, same ripeness test, same
 # posture as the anchor keeper: off by default, staleness quiet.
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 PUBLISH_SCHEMES = ("http", "https")
 SHELL_HAZARDS = "\"'`$\\"   # a quote, a backtick, a dollar sign, a backslash
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def publish_url(value):
     """argparse validator for a URL the tools send to: where a head or
     the chain is published, or the authority asked to stamp a head. A
@@ -1296,6 +1303,7 @@ TAIL_KEEPER = os.environ.get("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
 # What the recorder writes down about the coverage it wired (ADR-0030).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 COVERAGE_NAME = "coverage.json"
 
 WATCH_WORDS = {
@@ -1376,12 +1384,14 @@ def read_settings(settings_file):
 # as the recorder's SessionEnd (#303). Only the recorder's `hook` entries
 # are read here: the supervisor's own digest entry wires no receipt.
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 RECORDER_NAMES = ("loxodonta.py", "receipts.py")
 DIGEST_NAMES = ("supervisor.py",)
 WIRED_VERB = {"loxodonta.py": "hook", "receipts.py": "hook",
               "supervisor.py": "digest"}
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def command_words(command):
     """A hook command split into words as a shell would, or None when
     it cannot be. A backslash is an ordinary character here, not an
@@ -1400,12 +1410,14 @@ def command_words(command):
         return None
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def file_name(path):
     """The last part of a path written with either separator, on any
     platform: a settings file can hold a Windows path read elsewhere."""
     return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def is_interpreter(word):
     """A Python interpreter: this one exactly as the installer writes
     it, or any whose file name says python (python3, python.exe,
@@ -1418,6 +1430,7 @@ def is_interpreter(word):
     return "python" in name or name.startswith("pypy")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def owned_script(command, names):
     """The script path in `command` when the installer wrote it for one
     of `names`, else None: an interpreter, then a script with one of
@@ -1435,6 +1448,7 @@ def owned_script(command, names):
     return script
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def beside_a_recorder(script):
     """Whether a supervisor.py is this project's, as far as the disk
     can say. The name is common enough that a user's own script can
@@ -3643,6 +3657,7 @@ def invoking_repo(args):
     return main_repo_of(Path(os.path.abspath(str(spoken))))
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def store_home():
     """The machine-wide home of hook-written chains (ADR-0011):
     ~/.loxodonta, or wherever LOXODONTA_HOME points."""
@@ -3650,6 +3665,7 @@ def store_home():
             or os.path.join(os.path.expanduser("~"), ".loxodonta"))
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def project_slug(project):
     """The store drawer name for a project: its basename plus 8 hex of
     the normalized full path's SHA256 — readable at a glance, and two
@@ -3834,10 +3850,12 @@ def legacy_recall_scope(args, repo):
 # exact bytes. Twin of loxodonta.py's `visible`; the files never import
 # each other (ADR-0035), and tools/twin_check.py holds the two copies
 # equal.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def visible(text):
     """`text` with every steering character written as its escape: `\\n`,
     `\\x1b`, `\\u202e`, `\\U000e0041`. One line in, one line out,
@@ -4940,6 +4958,7 @@ def send_export(data, out, archive):
 # builds and the recorder judges (ADR-0005, ADR-0009), so the recipient
 # downloads the one file that already verifies a bare chain.
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
 # The seals a package can declare (ADR-0007's declared seal set), in the
 # order they are declared and applied: the anchor (--anchor) says when,
@@ -4953,9 +4972,11 @@ MANIFEST_SIGNATURE = "manifest.json.sig"   # ssh-keygen's detached signature
 MANIFEST_PUBLIC_KEY = "manifest.json.pub"  # the key that made it: testimony
 # The ssh-keygen signature namespace, the verifier's and the signer's
 # both, so a signature made for anything else never verifies here.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 SIGNATURE_NAMESPACE = "loxodonta-package"
 # The verifier's allowed-signers principal, twice over: the packer runs
 # the recipient's check on what it ships before anything is written.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 SIGNATURE_PRINCIPAL = "issuer"
 # The completeness row travels with these fields only: no judge command,
 # no transcript path, no home. Paths the recipient cannot follow are
@@ -5040,6 +5061,7 @@ def artifact_listing(path):
     return {"path": path.name, "sha256": digest.hexdigest(), "bytes": size}
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 PACKAGE_MAX_BYTES = 1 << 30   # the verifier's cap, twice over
 
 
@@ -5395,6 +5417,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     return written
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def key_fingerprint(public_key):
     """The SHA256 fingerprint of a public key file, as ssh-keygen prints
     it (`ssh-keygen -lf`), or None when the file is not a key it reads.
@@ -8868,6 +8891,7 @@ setInterval(loadActivity, 30000);
 """
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
@@ -8882,12 +8906,14 @@ def checkout_commit(home):
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def version_line(prog, home):
     """Three identities on one line: tool, format, commit (ADR-0022)."""
     return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
             f"commit {checkout_commit(home)})")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class VersionAction(argparse.Action):
     """`--version`, answered only when asked: the commit is one git
     question, and no other command pays for it."""
@@ -8901,10 +8927,12 @@ class VersionAction(argparse.Action):
         parser.exit()
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: `verify` found no chain to judge
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def speak_utf8():
     """Write stdout and stderr in UTF-8, whatever the console dealt
     (#294): Windows hands a pipe cp1252, where one CJK character or
@@ -8918,6 +8946,7 @@ def speak_utf8():
             reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's
