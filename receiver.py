@@ -497,17 +497,12 @@ class Door(BaseHTTPRequestHandler):
         """Put the lines on disk: None once they are there (nothing to
         write counts), else the (status, reason) refusing them. Called
         holding `appending`, and answering nothing itself, so a sender
-        slow to read its answer never holds the lock.
-
-        Past a cap is 507 Insufficient Storage, not 413. The request is
-        well formed and inside the body cap; it is this receiver's
-        storage that has no room for it, which is what 507 says (RFC
-        4918), and 413 stays the one answer for a body too large to take
-        at all, so the sender's failure line tells the two apart. A
-        refusal writes nothing and trims nothing: the receiver only adds.
-
-        A disk that refuses is a 500 with the reason. Either way the
-        sender's memo never advances over bytes that did not land."""
+        slow to read its answer never holds the lock. Past a cap is 507
+        Insufficient Storage (RFC 4918), not 413, which stays the answer
+        for a body too large to take at all, so the sender's failure
+        line tells the two apart; a disk that refuses is a 500. A
+        refusal writes nothing and trims nothing, so the sender's memo
+        never advances over bytes that did not land."""
         if not lines:
             return None
         server = self.server
@@ -651,15 +646,12 @@ class VersionAction(argparse.Action):
 
 
 def speak_utf8():
-    """Write stdout and stderr in UTF-8, whatever encoding the console
-    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
-    which has no CJK and no emoji: one such character in a receipt killed
-    the verb mid-output with UnicodeEncodeError, and a hook reading
-    through a pipe got nothing. The text printed is unchanged; only its
-    bytes are. UTF-8 carries every character but a lone surrogate (a file
-    name that did not decode), which backslashreplace prints as its
-    escape rather than crash on. A stream without `reconfigure` (None
-    under pythonw, or one an embedder swapped in) is left as it is."""
+    """Write stdout and stderr in UTF-8, whatever the console dealt
+    (#294): Windows hands a pipe cp1252, where one CJK character or
+    emoji in a receipt killed the verb mid-output. Only the bytes change,
+    never the text; a lone surrogate prints as its backslash escape. A
+    stream without `reconfigure` (None under pythonw, or one an embedder
+    swapped in) is left as it is."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
