@@ -6,18 +6,27 @@ a rule two of them need is written in each: a twin. The list below is
 every twin, the names it covers, the files it lives in and why it is
 written twice, and every name the files share that is not a twin. The
 recorder holds the original of every twin; a copy is its text again,
-docstring included.
+docstring included, under one comment line naming its original.
 
     python tools/twin_check.py --page    write docs/TWINS.md from the list
+    python tools/twin_check.py --write   copy each original over its copies
     python tools/twin_check.py --check   exit 1 on drift, naming each problem
-    ... --root DIR                       judge the files under DIR instead
+    ... --root DIR                       work on the files under DIR instead
 
 `--check` fails on a copy whose top-level source differs from its
-original, on a name the list declares that a file no longer defines, on
-a stale docs/TWINS.md, on a top-level name defined in two of the files
-that the list does not declare, and on an import that binds a name one
-of the files defines or the list declares. The files are read as text,
-never imported. The suite runs the check.
+original, on a copy without its pointer line, on a name the list
+declares that a file no longer defines, on a stale docs/TWINS.md, on a
+top-level name defined in two of the files that the list does not
+declare, and on an import that binds a name one of the files defines or
+the list declares. The files are read as text, never imported. The
+suite runs the check.
+
+`--write` replaces each copy's top-level definition with its original's
+text and adds a missing pointer, leaving every other byte of the file as
+it was, line endings included. It never writes the original, and never
+adds a copy a file lacks: it names it and exits 1, since that is the
+list's problem, for a person. A copy directly below another copy, with
+no line between them, shares that copy's pointer.
 
 What counts as a top-level definition: a function or
 class, from its first decorator; an assignment, an annotated one or an
@@ -29,6 +38,7 @@ around it, and a name bound as a loop variable, a `with ... as` or an
 """
 
 import ast
+import re
 import sys
 from collections import namedtuple
 from pathlib import Path
@@ -184,28 +194,40 @@ def target_names(target):
     return []
 
 
-def segment(lines, node):
-    """The source text of `node` from the start of its first line (its
-    first decorator's, for a decorated function or class) to its end,
-    cut from lines split once: ast.get_source_segment splits the whole
-    file again on every call. The end column counts UTF-8 bytes."""
+# A top-level definition: its first and last line (counted from 1), the
+# UTF-8 byte its text ends at on the last line, and its text.
+Definition = namedtuple("Definition", "first last end source")
+
+
+def definition(lines, node):
+    """`node`'s Definition: its text from the start of its first line
+    (its first decorator's, for a decorated function or class) to its
+    end, cut from lines split once, since ast.get_source_segment splits
+    the whole file again on every call."""
     first = min([node.lineno] + [d.lineno for d in
                                  getattr(node, "decorator_list", [])])
     last = lines[node.end_lineno - 1].encode("utf-8")
-    return "\n".join(lines[first - 1:node.end_lineno - 1]
-                     + [last[:node.end_col_offset].decode("utf-8")])
+    source = "\n".join(lines[first - 1:node.end_lineno - 1]
+                       + [last[:node.end_col_offset].decode("utf-8")])
+    return Definition(first, node.end_lineno, node.end_col_offset, source)
 
 
-def top_level(path):
-    """({name: source}, {name bound by an import}) for `path`, read as
-    text: every top-level definition's source by the names it binds or
-    changes, and the names its imports bind. A name defined twice in one
-    file keeps both definitions, one after the other."""
-    text = path.read_text(encoding="utf-8")
-    # Read in text mode, so every line ends in a lone newline.
-    lines = text.split("\n")
+def read_lines(path):
+    """`path`'s text split into lines, as text mode reads it, and the
+    line ending each line had on disk ("" after the last)."""
+    raw = path.read_bytes().decode("utf-8")
+    # Text mode ends a line at \r\n, \r or \n; split where it does.
+    pieces = re.split(r"(\r\n|\r|\n)", raw)
+    return pieces[0::2], pieces[1::2] + [""]
+
+
+def top_level(lines, filename):
+    """({name: [Definition]}, {name bound by an import}) for a file's
+    `lines`: every top-level definition by the names it binds or
+    changes, in file order, and the names its imports bind."""
+    text = "\n".join(lines)
     found, imported = {}, set()
-    for node in statements(ast.parse(text, filename=str(path)).body):
+    for node in statements(ast.parse(text, filename=filename).body):
         if isinstance(node, DEFS):
             names = [node.name]
         elif isinstance(node, ast.Assign):
@@ -219,11 +241,53 @@ def top_level(path):
             continue
         else:
             continue
-        source = segment(lines, node)
+        found_here = definition(lines, node)
         for name in names:
-            found[name] = (found[name] + "\n" + source if name in found
-                           else source)
+            found.setdefault(name, []).append(found_here)
     return found, imported
+
+
+def source(definitions):
+    """The text compared for a name: each of its definitions in one
+    file, one after the other."""
+    return "\n".join(d.source for d in definitions)
+
+
+# --- the pointer ----------------------------------------------------------
+
+def pointer(twin):
+    """The comment line above each copy, naming where to edit it."""
+    return (f"# Copy of {twin.original}'s; edit there, then run "
+            "tools/twin_check.py --write.")
+
+
+def copies_in(file):
+    """{name: twin} for every name `file` holds a copy of."""
+    return {name: twin for twin in TWINS if file in twin.copies
+            for name in twin.names}
+
+
+def unpointed(lines, defined, file):
+    """[(twin, name, Definition)] for each copy in `file` with no
+    pointer: none in the comment lines directly above its first
+    definition, and no copy of the same original ending on the line
+    just before it."""
+    copies = copies_in(file)
+    firsts = {name: defined[name][0] for name in copies if name in defined}
+    ends = {(d.last, copies[name].original) for name, d in firsts.items()}
+    missing = []
+    for name, found in sorted(firsts.items(), key=lambda kv: kv[1].first):
+        twin = copies[name]
+        if (found.first - 1, twin.original) in ends:
+            continue
+        above = found.first - 1          # the line above, counted from 1
+        comments = []
+        while above >= 1 and lines[above - 1].lstrip().startswith("#"):
+            comments.append(lines[above - 1].strip())
+            above -= 1
+        if pointer(twin) not in comments:
+            missing.append((twin, name, found))
+    return missing
 
 
 # --- the page -------------------------------------------------------------
@@ -233,7 +297,9 @@ INTRO = """\
 
 `loxodonta.py`, `supervisor.py` and `receiver.py` never import each other (ADR-0035): each is one file a reader can check alone, run from its own source. So a rule two of them need is written in each. This page lists every such rule, a twin: the names it covers, the files it lives in, and why it is written more than once.
 
-The original of every twin is the recorder, `loxodonta.py`. To change a twin, change the recorder's text, then make each copy the same text, docstring included, since the check compares source. `python tools/twin_check.py --check` fails when a copy differs from its original, when a file no longer defines a name listed here, when this page is stale, when a top-level name is defined in two of the files without being listed here, and when an import binds a name one of the files defines. The suite runs it.
+The original of every twin is the recorder, `loxodonta.py`, and each copy carries one comment line above it that says so (a copy directly below another copy shares its line). To change a twin, edit the original in `loxodonta.py`, run `python tools/twin_check.py --write`, which copies it over each copy in place, then `python tools/twin_check.py --check`. When the original lies inside the verifier region, `--write` says so, and `python tools/build_verifier.py` carries it into `verifier.py`. `--write` never adds a copy a file lacks: it names it and exits 1.
+
+`python tools/twin_check.py --check` fails when a copy differs from its original, when a copy has no line naming its original, when a file no longer defines a name listed here, when this page is stale, when a top-level name is defined in two of the files without being listed here, and when an import binds a name one of the files defines. The suite runs it.
 
 A top-level definition is a function or class, from its first decorator, or an assignment to a name (plain, annotated or augmented, or to an item or attribute of it), at the top of a file or inside a top-level `if`, `try`, `with`, `for`, `while` or `match` block. The check compares the definition's text, not the condition or loop around it, and does not see a name bound as a loop variable, by `with ... as` or `except ... as`, or by `global` inside a function.
 
@@ -271,7 +337,8 @@ def problems(root):
     """Every way the files under `root` and the page there disagree with
     the lists, one sentence each."""
     found = []
-    read = {name: top_level(root / name) for name in FILES}
+    lines = {name: read_lines(root / name)[0] for name in FILES}
+    read = {name: top_level(lines[name], name) for name in FILES}
     defined = {name: read[name][0] for name in FILES}
     imported = {name: read[name][1] for name in FILES}
 
@@ -298,9 +365,15 @@ def problems(root):
                 if text is None:
                     found.append(f"{twin.rule}: {copy} no longer defines "
                                  f"{name}")
-                elif text != original:
+                elif source(text) != source(original):
                     found.append(f"{twin.rule}: {name} in {copy} differs "
-                                 f"from {twin.original}, its original")
+                                 f"from {twin.original}, its original: "
+                                 f"run python tools/twin_check.py --write")
+    for copy in FILES:
+        for twin, name, _ in unpointed(lines[copy], defined[copy], copy):
+            found.append(f"{twin.rule}: {name} in {copy} has no pointer "
+                         f"to {twin.original} above it: run python "
+                         "tools/twin_check.py --write")
     for different in DIFFERENT:
         for file in different.files:
             if different.name not in defined[file]:
@@ -339,6 +412,120 @@ def problems(root):
     return found
 
 
+# --- the copier -----------------------------------------------------------
+
+# tools/build_verifier.py's fence lines: an original between them is also
+# copied into verifier.py, by that tool and not by this one.
+OPEN = "# === The verifier (ADR-0035) "
+CLOSE = "# === End of the verifier (ADR-0035) "
+
+
+def in_the_fence(lines, found):
+    """Whether the Definition `found`, in the recorder's `lines`, lies
+    inside the verifier region."""
+    opens = [n for n, line in enumerate(lines, 1) if line.startswith(OPEN)]
+    closes = [n for n, line in enumerate(lines, 1) if line.startswith(CLOSE)]
+    return any(o < found.first and found.last < c
+               for o in opens for c in closes)
+
+
+def ending(endings, at):
+    """The line ending for new lines written at line `at`: the one that
+    line has, else the file's first, else LF."""
+    return endings[at - 1] or next((e for e in endings if e), "\n")
+
+
+def replace(lines, endings, found, text):
+    """Put `text` where the Definition `found` stands. Whatever followed
+    it on its last line stays, as does that line's ending."""
+    tail = lines[found.last - 1].encode("utf-8")[found.end:].decode("utf-8")
+    new = text.split("\n")
+    new[-1] += tail
+    new_endings = ([ending(endings, found.first)] * (len(new) - 1)
+                   + [endings[found.last - 1]])
+    lines[found.first - 1:found.last] = new
+    endings[found.first - 1:found.last] = new_endings
+
+
+def add_pointer(lines, endings, twin, found):
+    """Put `twin`'s pointer above the Definition `found`, first among
+    the comment lines already there, at the definition's indent."""
+    top = found.first - 1                # the line above, counted from 0
+    while top >= 1 and lines[top - 1].lstrip().startswith("#"):
+        top -= 1
+    first = lines[found.first - 1]
+    indent = first[:len(first) - len(first.lstrip())]
+    lines.insert(top, indent + pointer(twin))
+    endings.insert(top, ending(endings, found.first))
+
+
+def write_copies(root):
+    """Copy each original's text over its copies under `root`, and add
+    each missing pointer. Returns (what was done, the problems it left,
+    the names whose original lies inside the verifier region), a
+    sentence each for the first two."""
+    done, found, fenced = [], [], []
+    recorder = read_lines(root / ORIGINAL)[0]
+    defined = {name: top_level(read_lines(root / name)[0], name)[0]
+               for name in FILES}
+    for copy in FILES:
+        copies = copies_in(copy)
+        if not copies:
+            continue
+        path = root / copy
+        lines, endings = read_lines(path)
+        here = top_level(lines, copy)[0]
+        edits = {}   # Definition in the copy: the text to put there
+        wrote = []   # the names rewritten, and whether they are fenced
+        for name, twin in copies.items():
+            original = defined[twin.original].get(name)
+            text = here.get(name)
+            if original is None:
+                found.append(f"{twin.rule}: {twin.original} no longer "
+                             f"defines {name}, the original")
+            elif text is None:
+                found.append(f"{twin.rule}: {copy} no longer defines "
+                             f"{name}, and --write never adds a copy: add "
+                             "it by hand, or take it off the list")
+            elif source(text) == source(original):
+                continue
+            elif len(text) != 1 or len(original) != 1:
+                found.append(f"{twin.rule}: {name} is defined "
+                             f"{len(original)} time(s) in {twin.original} "
+                             f"and {len(text)} in {copy}, and --write "
+                             "copies one definition over one: fix it by "
+                             "hand")
+            elif edits.get(text[0], original[0].source) != original[0].source:
+                found.append(f"{twin.rule}: {name} in {copy} shares its "
+                             "statement with a name whose original "
+                             "differs: fix it by hand")
+            else:
+                edits[text[0]] = original[0].source
+                wrote.append((name, twin.original == ORIGINAL
+                              and in_the_fence(recorder, original[0])))
+        # From the bottom up, so each edit leaves the lines above in place.
+        for at in sorted(edits, key=lambda d: d.first, reverse=True):
+            replace(lines, endings, at, edits[at])
+        try:
+            here = top_level(lines, copy)[0]
+        except SyntaxError as error:
+            found.append(f"--write would leave {copy} unreadable as "
+                         f"Python ({error.msg}, line {error.lineno}), so "
+                         "it wrote nothing there: fix it by hand")
+            continue
+        done += [f"wrote {name} in {copy}" for name, _ in wrote]
+        fenced += [name for name, inside in wrote if inside]
+        missing = unpointed(lines, here, copy)
+        for twin, name, at in reversed(missing):
+            add_pointer(lines, endings, twin, at)
+        done += [f"added the pointer above {name} in {copy}"
+                 for _, name, _ in missing]
+        written = "".join(line + end for line, end in zip(lines, endings))
+        if written.encode("utf-8") != path.read_bytes():
+            path.write_bytes(written.encode("utf-8"))
+    return done, found, fenced
+
+
 def main(argv):
     args = list(argv)
     root = ROOT
@@ -355,6 +542,24 @@ def main(argv):
         # Bytes, since write_text takes no newline before Python 3.10.
         written.write_bytes(page().encode("utf-8"))
         print(f"wrote {PAGE.as_posix()}")
+        return 0
+    if args == ["--write"]:
+        done, found, fenced = write_copies(root)
+        for line in done:
+            print(line)
+        if fenced:
+            print(f"{', '.join(sorted(set(fenced)))}: the original lies "
+                  "inside the verifier region, so run python "
+                  "tools/build_verifier.py too")
+        for problem in found:
+            print(problem, file=sys.stderr)
+        if found:
+            print(f"{len(found)} problem(s) --write leaves for a person",
+                  file=sys.stderr)
+            return 1
+        if not done:
+            print("every copy already holds its original's text and "
+                  "its pointer")
         return 0
     if args == ["--check"]:
         found = problems(root)
