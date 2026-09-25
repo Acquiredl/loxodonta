@@ -146,6 +146,8 @@ NO_GRANTED_REPLY = (
     base64.b64encode(b"no timestamp response").decode(),
     base64.b64encode(reply(2)).decode(),
 )
+# A granted reply in seven bytes, made by nobody: status 0, and no token.
+FORGED_GRANTED = base64.b64encode(reply(0)).decode()
 
 
 # --- Fake authority -----------------------------------------------------------
@@ -832,10 +834,10 @@ class StampRowKindTest(unittest.TestCase):
                          (self.head, "stamp"))
 
     def test_a_row_holding_no_granted_reply_is_not_the_heads_token(self):
-        # #366: one planted row naming the head must not switch its
-        # stamp off. Only a reply the authority granted stamps a head,
-        # its status read as the query reads it, so for each of these
-        # the verb still asks, and writes the token it is granted.
+        # #366: a row naming the head and holding no granted reply is
+        # not its token. Only a reply whose status says granted stamps a
+        # head, read as the query reads it, so for each of these the
+        # verb still asks, and writes the token it is granted.
         for response in NO_GRANTED_REPLY:
             with self.subTest(response=response):
                 self.authority.received.clear()
@@ -856,6 +858,39 @@ class StampRowKindTest(unittest.TestCase):
                     (rows[1]["head"], rows[1]["kind"],
                      base64.b64decode(rows[1]["response"])),
                     (self.head, "stamp", GRANTED))
+
+    def test_the_limit_a_forged_or_copied_granted_reply_stops_a_new_stamp(self):
+        # #366, the limit SPEC 9.7 names, pinned so it stays visible: a
+        # granted status is not signed, so a reply forged in seven bytes,
+        # or a real one copied from another head's row, is taken for the
+        # head's token and nothing is asked. Without openssl verify says
+        # the token is not judged, never that it is stamped.
+        first = self.stamp()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        (token,) = [r for r in rows_of(self.sidecar)
+                    if r.get("kind") == "stamp"]
+        run_receipts("log", "--actor", "agent", "--action", "step 2",
+                     cwd=self.workdir)
+        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        for name, response in (("forged", FORGED_GRANTED),
+                               ("copied", token["response"])):
+            with self.subTest(row=name):
+                self.authority.received.clear()
+                self.write_sidecar(self.token_row(head=newer, n=2,
+                                                  response=response))
+
+                result = self.stamp()
+                judged = self.verify()
+
+                self.assertEqual(result.stdout.strip(),
+                                 f"already stamped head {newer[:12]}… "
+                                 "(entry 2)")
+                self.assertEqual(self.authority.received, [])
+                self.assertEqual(judged.returncode, 0,
+                                 judged.stdout + judged.stderr)
+                self.assertIn("stamp not judged: no --authority-chain FILE "
+                              "given", judged.stdout)
+                self.assertNotIn("STAMPED", judged.stdout)
 
     def test_a_row_of_an_unknown_kind_naming_the_head_is_not_its_token(self):
         # Only a token stamps a head. A row of a kind the recorder does
@@ -1500,6 +1535,38 @@ class JudgedStampTest(unittest.TestCase):
         self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)",
                       result.stdout)
         self.assertNotRegex(result.stdout, r"(?m)^VALID$")
+
+    def test_the_limit_a_forged_or_copied_reply_stops_a_new_stamp(self):
+        # #366, the limit SPEC 9.7 names: a reply's status sits outside
+        # the token's signature, so a forged granted status, or a real
+        # token moved to another head, is taken for the head's token and
+        # no query is sent. With openssl and the chain file, verify calls
+        # either one STAMP-INVALID, never STAMPED.
+        self.stamp()
+        run_receipts("log", "--actor", "agent", "--action", "step 3",
+                     cwd=self.workdir)
+        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        (row,) = rows_of(self.sidecar)
+        for name, response in (("forged", FORGED_GRANTED),
+                               ("copied", row["response"])):
+            with self.subTest(row=name):
+                self.sidecar.write_text(json.dumps(
+                    {**row, "head": newer, "n": 3, "response": response})
+                    + "\n", encoding="utf-8")
+                asked = self.queries
+
+                again = self.stamp()
+                judged = self.verify()
+
+                self.assertEqual(again.stdout.strip(),
+                                 f"already stamped head {newer[:12]}… "
+                                 "(entry 3)")
+                self.assertEqual(self.queries, asked)
+                self.assertEqual(judged.returncode, 3,
+                                 judged.stdout + judged.stderr)
+                self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)",
+                              judged.stdout)
+                self.assertNotIn("STAMPED", judged.stdout)
 
     def test_a_token_from_an_authority_the_chain_file_does_not_name_is_invalid(self):
         # The chain file is whom the operator trusts: a token signed by

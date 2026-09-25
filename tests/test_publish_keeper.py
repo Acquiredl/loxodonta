@@ -1319,10 +1319,11 @@ class ProfileKeeperTest(unittest.TestCase):
                          "the keeper asked about a head that had a token")
 
     def test_a_row_holding_no_granted_reply_is_no_token_so_the_head_is_asked(self):
-        # #366: a token row naming the head counts only when its reply
-        # was granted, read as `stamp` reads one. One chain per planted
-        # row, each asked about on the turn; beside them a chain whose
-        # token the verb wrote is not asked about again.
+        # #366: the keeper runs `stamp` on each ripe head and leaves it
+        # to the verb, which counts a token row only when its reply was
+        # granted. One chain per row holding none, each asked about on
+        # the turn; beside them a chain whose token the verb wrote is
+        # `already stamped` and not asked about again.
         authority = self.authority()
         self.install("--profile", "timestamped", "--authority", authority.url)
         planted = []

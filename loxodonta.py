@@ -3113,6 +3113,19 @@ def proof_replays(record):
     return True
 
 
+def anchored_heads(target):
+    """The heads `target`'s anchor sidecar holds a proof for that
+    replays, pending or complete (`proof_replays`): the dedupe of the
+    session end and of `anchor`. A sidecar that cannot be opened at all
+    answers "none known", so the head is submitted rather than skipped
+    on an unreadable file. Never raises."""
+    try:
+        records = read_anchor_records(target) or []
+    except OSError:
+        return set()
+    return {record["head"] for record in records if proof_replays(record)}
+
+
 def anchor_and_upgrade(log, calendars, budget):
     deadline = time.monotonic() + budget
 
@@ -3127,11 +3140,10 @@ def anchor_and_upgrade(log, calendars, budget):
         return  # a damaged tail cannot be anchored
     head, n = last["entry_hash"], last["n"]
     # Only a proof that replays anchors a head: a row the writer shaped
-    # wrong, or whose proof verify would call invalid, never stops the
-    # head being submitted (#348).
-    anchored = {r["head"] for r in (read_anchor_records(log) or [])
-                if proof_replays(r)}
-    if head not in anchored:
+    # wrong, or whose proof verify would call invalid, does not stop the
+    # head being submitted (#348). One that replays does, planted or not
+    # (SPEC 9.4).
+    if head not in anchored_heads(log):
         submitted = False
         for calendar in calendars:
             if remaining() <= 0:
@@ -3958,8 +3970,11 @@ def token_granted(record):
     is base64 of a reply the authority granted: the status read as
     `ask_authority` reads it, and the token itself not at all (judging
     it is `verify --stamps`'s, through openssl). Offline, and never
-    raises: the sidecar is in the writer's reach, so a row verify would
-    call STAMP-INVALID is never a token."""
+    raises. The sidecar is in the writer's reach: a row of the wrong
+    shape, or a reply that was not granted, is never a token, but the
+    status sits outside the token's signature, so a reply forged with a
+    granted status, or copied from another head's row, passes, and
+    nothing offline can tell it apart (SPEC 9.7)."""
     if row_kind("stamps", record) != STAMP_KIND \
             or not isinstance(record.get("head"), str) \
             or not isinstance(record.get("response"), str):
@@ -3983,8 +3998,8 @@ def stamped_heads(log):
         records = read_stamp_records(log) or []
     except OSError:
         return set()
-    # Only a granted reply stamps a head: a row the writer shaped wrong
-    # never stops the head being asked about (#366).
+    # A row holding no granted reply does not stop the head being asked
+    # about (#366); a forged or copied granted reply does (SPEC 9.7).
     return {record["head"] for record in records if token_granted(record)}
 
 
@@ -4133,6 +4148,10 @@ def stamp_digest(target, head, n, url):
 
 
 def cmd_anchor(args):
+    if args.upgrade and args.force:
+        print("error: --force submits a head again, and --upgrade submits "
+              "nothing; give one of them", file=sys.stderr)
+        return EX_USAGE
     if args.upgrade:
         return upgrade_anchors(args)
     if args.manifest and args.log != DEFAULT_LOG:
@@ -4149,7 +4168,8 @@ def cmd_anchor(args):
             print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
             return EX_NOINPUT
         return submit_digest(args.manifest, head, None, args.calendar,
-                             f"--upgrade --manifest={args.manifest}")
+                             f"--upgrade --manifest={args.manifest}",
+                             args.force)
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -4166,15 +4186,23 @@ def cmd_anchor(args):
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
     return submit_digest(args.log, last["entry_hash"], last["n"],
-                         args.calendar, "--upgrade")
+                         args.calendar, "--upgrade", args.force)
 
 
-def submit_digest(target, head, n, calendars, upgrade_flags):
+def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
     """POST the digest `head` to each calendar and append one record
     beside `target` per calendar that answered: a chain (`n` is the
     entry number) or a package manifest (`n` is None). Success is one
     record or more; `upgrade_flags` is how the operator completes the
-    proof later."""
+    proof later. A head the sidecar already holds a proof for that
+    replays is not submitted again unless `force` says so."""
+    if not force and head in anchored_heads(target):
+        # The session end's rule, and `stamp`'s: the keeper runs this
+        # verb on every turn a head is ripe (#366), and a cadence that
+        # submitted an anchored head every turn would fill the sidecar
+        # with proofs of it. Nothing to do is exit 0, and no row.
+        print(f"already anchored {record_label(head, n)}")
+        return 0
     digest = bytes.fromhex(head)
     written = 0
     for calendar in (calendars or DEFAULT_CALENDARS):
@@ -5737,6 +5765,11 @@ def main(argv=None):
                                     "--upgrade, complete that proof "
                                     "(ADR-0026 ruling 4; `supervisor "
                                     "package --anchor` drives this)")
+    anchor_parser.add_argument("--force", action="store_true",
+                               help="submit the head even when the sidecar "
+                                    "already holds a proof for it that "
+                                    "replays, which is otherwise `already "
+                                    "anchored` and asks no calendar")
     anchor_parser.set_defaults(func=cmd_anchor)
     publish_parser = sub.add_parser(
         "publish", parents=[common],

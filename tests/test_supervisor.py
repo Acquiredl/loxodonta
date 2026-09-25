@@ -3183,11 +3183,12 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertEqual(calendar.submitted, [bytes.fromhex(head)])
 
     def test_a_row_whose_proof_does_not_replay_never_stands_the_keeper_down(self):
-        # #366: an anchor row naming the head is that head's anchor only
-        # when its proof replays, as the session end counts one (#348).
-        # One chain per planted row, and one beside them holding a proof
-        # the calendar gave: one scan asks the calendar about each
-        # planted head, and never about the anchored one.
+        # #366: the keeper runs `anchor` on each ripe head and leaves it
+        # to the verb, which counts a head anchored only on a proof that
+        # replays (#348). One chain per row that does not, and one beside
+        # them holding a proof the calendar gave: one scan asks the
+        # calendar about each planted head, and never about the anchored
+        # one, which `anchor` answers `already anchored`.
         calendar = self.start_calendar()
         planted = {}
         for session, proof in (("sess-empty", ""), ("sess-short", "AAAA"),

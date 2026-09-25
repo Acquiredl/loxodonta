@@ -44,7 +44,6 @@ Nothing is ever offered off-machine.
 """
 
 import argparse
-import base64
 import contextlib
 import hashlib
 import io
@@ -1037,299 +1036,18 @@ def row_when(record):
 SENT_OUTCOMES = ("sent", "submitted", "granted")
 
 
-# --- Which rows commit a head, as the recorder counts them (#366) -------------
-# A row naming a head is not yet that head's commitment: the sidecars are
-# in the writer's reach, so one planted row per head would switch the
-# keeper off for it. The keeper counts a head anchored or stamped only on
-# a row the recorder's own session end would count, by copies of the
-# recorder's own tests: an anchor proof that replays from its head, and a
-# reply whose status says granted. Offline, and for scheduling only: each
-# answers whether to spend a process, and every verdict stays verify's.
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-OP_SHA256, OP_APPEND, OP_PREPEND = 0x08, 0xF0, 0xF1
-ATTESTATION_MARKER = 0x00
-BRANCH_MARKER = 0xFF
-TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
-TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
-MAX_PROOF_BYTES = 8192
-MAX_PROOF_DEPTH = 512
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-class ProofError(ValueError):
-    """A proof this verifier cannot judge — malformed or outside the subset."""
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-class ProofReader:
-    """Cursor over proof bytes; every read is bounds-checked."""
-
-    def __init__(self, data):
-        self.data = data
-        self.pos = 0
-
-    def byte(self):
-        return self.bytes(1)[0]
-
-    def bytes(self, count):
-        if self.pos + count > len(self.data):
-            raise ProofError("truncated proof")
-        chunk = self.data[self.pos:self.pos + count]
-        self.pos += count
-        return chunk
-
-    def varint(self):
-        # Unsigned, little-endian base 128; high bit means "more".
-        value = shift = 0
-        while True:
-            byte = self.byte()
-            value |= (byte & 0x7F) << shift
-            if not byte & 0x80:
-                return value
-            shift += 7
-            if shift > 63:
-                raise ProofError("varint too large")
-
-    def varbytes(self):
-        length = self.varint()
-        if length > MAX_PROOF_BYTES:
-            raise ProofError("proof field too large")
-        return self.bytes(length)
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def parse_timestamp(reader, depth=0):
-    """One node of the proof tree: attestations that hold at the current
-    digest, plus operations that each transform it and continue into a
-    child node. Wire format: every element but the last is 0xff-prefixed.
-
-    Depth is capped: each chained op nests one level, so without a cap a
-    crafted proof a few KB long could exhaust the interpreter's recursion
-    limit — a crash where a verdict belongs. Malformed evidence is judged
-    (ANCHOR-INVALID), never guessed at and never crashed on."""
-    if depth > MAX_PROOF_DEPTH:
-        raise ProofError(f"proof nests deeper than {MAX_PROOF_DEPTH} operations")
-    node = {"attestations": [], "ops": []}
-    while True:
-        tag = reader.byte()
-        last = tag != BRANCH_MARKER
-        if not last:
-            tag = reader.byte()
-        if tag == ATTESTATION_MARKER:
-            node["attestations"].append(
-                (bytes(reader.bytes(8)), bytes(reader.varbytes()))
-            )
-        elif tag in (OP_APPEND, OP_PREPEND):
-            arg = bytes(reader.varbytes())
-            node["ops"].append((tag, arg, parse_timestamp(reader, depth + 1)))
-        elif tag == OP_SHA256:
-            node["ops"].append((tag, None, parse_timestamp(reader, depth + 1)))
-        else:
-            raise ProofError(
-                f"proof uses operation 0x{tag:02x}, "
-                "which this verifier does not implement"
-            )
-        if last:
-            return node
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def replay_proof(digest, node, results=None):
-    """Walk the proof applying each operation to the digest; collect every
-    attestation together with the digest it attests to and the node holding
-    it (the node reference is what upgrade splices into)."""
-    if results is None:
-        results = []
-    for tag, payload in node["attestations"]:
-        results.append(
-            {"tag": tag, "payload": payload, "digest": digest, "node": node}
-        )
-    for op, arg, child in node["ops"]:
-        if op == OP_SHA256:
-            next_digest = hashlib.sha256(digest).digest()
-        elif op == OP_APPEND:
-            next_digest = digest + arg
-        else:  # OP_PREPEND
-            next_digest = arg + digest
-        replay_proof(next_digest, child, results)
-    return results
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def bitcoin_height(payload):
-    reader = ProofReader(payload)
-    height = reader.varint()
-    if reader.pos != len(payload):
-        raise ProofError("malformed Bitcoin attestation payload")
-    return height
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def judge_proof(head_hex, proof_bytes):
-    """Replay a proof from a chain head. Returns ("bitcoin", height, root),
-    ("pending", digest_hex), or raises ProofError."""
-    node = parse_timestamp(ProofReader(proof_bytes))
-    results = replay_proof(bytes.fromhex(head_hex), node)
-    for r in results:
-        if r["tag"] == TAG_BITCOIN:
-            return ("bitcoin", bitcoin_height(r["payload"]), r["digest"])
-    for r in results:
-        if r["tag"] == TAG_PENDING:
-            return ("pending", r["digest"].hex())
-    raise ProofError("proof contains no attestation this verifier can judge")
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-JSON_TYPE_WORDS = ((bool, "true or false"), (int, "a number"),
-                   (float, "a number"), (str, "a string"),
-                   (list, "an array"), (dict, "an object"),
-                   (type(None), "null"))
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def json_type(value):
-    """What JSON type `value` is, in words: how a message names a field
-    the writer filled with the wrong type, without printing the value."""
-    return next((words for types, words in JSON_TYPE_WORDS
-                 if isinstance(value, types)), "a value")
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def anchor_row_problem(record):
-    """The first way an anchor row is not the shape of one, named by its
-    field and the JSON type the field holds, never its value; None for a
-    row every reader can act on. A proof needs its head and its proof,
-    each a string, the proof base64. The calendar and the time may be
-    left out, and the entry number is left out of a package manifest's
-    row, but each is of its type when present: a judge prints them and
-    keys on them. The sidecar is in the writer's reach, so this is asked
-    of every row before anything reads it: a judge calls a row that
-    fails it invalid evidence, and the recorder skips it, since it is no
-    proof it can act on."""
-    for field in ("head", "proof"):
-        if field not in record:
-            return f"record has no {field}"
-        if not isinstance(record[field], str):
-            return (f"record's {field} is {json_type(record[field])}, "
-                    "not a string")
-    try:
-        base64.b64decode(record["proof"], validate=True)
-    except ValueError:
-        return "record's proof is not base64"
-    for field in ("calendar", "ts"):
-        if field in record and not isinstance(record[field], str):
-            return (f"record's {field} is {json_type(record[field])}, "
-                    "not a string")
-    n = record.get("n")
-    if "n" in record and (isinstance(n, bool) or not isinstance(n, int)):
-        return f"record's n is {json_type(n)}, not an integer"
-    return None
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def proof_replays(record):
-    """True for an anchor row whose proof replays from its head, pending
-    or complete: offline, and the same test verify --anchors applies."""
-    if row_kind("anchors", record) != ANCHOR_KIND \
-            or anchor_row_problem(record) is not None:
-        return False
-    try:
-        judge_proof(record["head"], base64.b64decode(record["proof"]))
-    except (ProofError, ValueError):
-        return False
-    return True
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-STAMP_GRANTED = (0, 1)
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def der_element(data, at=0):
-    """The DER element that starts at `data[at]`: (tag, content, the
-    offset after it). Definite lengths only, which is all DER has; a
-    reply cut short or shaped some other way is a ValueError, since
-    bytes that are not DER are not a timestamp response."""
-    if at + 2 > len(data):
-        raise ValueError("the reply is cut short")
-    tag, length = data[at], data[at + 1]
-    at += 2
-    if length & 0x80:
-        size = length & 0x7F
-        if not 0 < size <= 4 or at + size > len(data):
-            raise ValueError("a length is not definite")
-        length = int.from_bytes(data[at:at + size], "big")
-        at += size
-    if at + length > len(data):
-        raise ValueError("the reply is cut short")
-    return tag, data[at:at + length], at + length
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def der_expect(data, tag, what):
-    """The content of the first element in `data`, which must carry `tag`."""
-    found, content, _ = der_element(data)
-    if found != tag:
-        raise ValueError(f"{what} is not the element RFC 3161 puts there")
-    return content
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def stamp_status(reply):
-    """The PKIStatus of a TimeStampResp, and nothing else of it: the
-    first INTEGER of the first SEQUENCE of the outer SEQUENCE. Whatever
-    follows, the token, is kept verbatim and read by nobody here."""
-    response = der_expect(reply, 0x30, "the response")
-    info = der_expect(response, 0x30, "its status")
-    status = der_expect(info, 0x02, "the status code")
-    if not 0 < len(status) <= 4:
-        raise ValueError("the status code is not a small integer")
-    return int.from_bytes(status, "big", signed=True)
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def token_granted(record):
-    """True for a token row whose head is a string and whose response
-    is base64 of a reply the authority granted: the status read as
-    `ask_authority` reads it, and the token itself not at all (judging
-    it is `verify --stamps`'s, through openssl). Offline, and never
-    raises: the sidecar is in the writer's reach, so a row verify would
-    call STAMP-INVALID is never a token."""
-    if row_kind("stamps", record) != STAMP_KIND \
-            or not isinstance(record.get("head"), str) \
-            or not isinstance(record.get("response"), str):
-        return False
-    try:
-        reply = base64.b64decode(record["response"], validate=True)
-        return stamp_status(reply) in STAMP_GRANTED
-    except ValueError:
-        return False
-
-
 def sidecar_heads(path, sidecar):
-    """The heads committed by the rows of `path`, a sidecar of kind
-    `sidecar` ("anchors", "stamps" or "memo"), for scheduling only: a
-    head anchored, stamped or sent. A head counts only on a row the
-    recorder would count (#366): an anchor proof that replays
-    (`proof_replays`), a granted reply (`token_granted`), a head row
-    naming a head as a string, a row with no kind among them
-    (ADR-0038). An attempt, a chain row, a kind unknown there, an
-    unreadable line or a row the writer shaped wrong commits none, so a
-    head only such a row names is still asked about, as `anchor`,
-    `stamp` and `publish` would ask."""
-    heads = set()
-    for record in sidecar_records(path):
-        if sidecar == "anchors":
-            commits = proof_replays(record)
-        elif sidecar == "stamps":
-            commits = token_granted(record)
-        else:
-            commits = (row_kind("memo", record) == HEAD_KIND
-                       and isinstance(record.get("head"), str))
-        if commits:
-            heads.add(record["head"])
-    return heads
+    """The heads named by the evidence rows of `path`, a sidecar of kind
+    `sidecar` ("anchors", "stamps" or "memo"), a row with no kind among
+    them (ADR-0038), for scheduling and display only. An attempt, a
+    chain row, a kind unknown there or an unreadable line names none,
+    so a head only such a row names is still asked about, as `publish`
+    would ask. The keeper asks it of the memo alone: whether a head is
+    already anchored or stamped, `anchor` and `stamp` say (#366)."""
+    evidence = SIDECAR_KINDS[sidecar][0]
+    return {record["head"] for record in sidecar_records(path)
+            if row_kind(sidecar, record) == evidence
+            and isinstance(record.get("head"), str)}
 
 
 # Computed here only to compare with the memo's chain rows: the
@@ -1411,14 +1129,14 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     --upgrade` (the record's own calendar; judgment stays with verify),
     and, only when the operator opted in with a cadence, a fresh head
     that has aged past it is anchored, and stamped by the authority the
-    marker names, on this same turn (ADR-0032 ruling 3). A head that
-    already holds a token is not asked about again: this guard saves the
-    process, and the recorder's own dedupe makes it safe to get wrong.
-    `failed` stays the anchor's; a refused stamp is already written down
-    in the stamps sidecar by the verb itself. Returns (attempted, note,
-    failed)."""
+    marker names, on this same turn (ADR-0032 ruling 3). Whether the
+    head already holds a proof or a token is the recorder's to say, not
+    this reader's (ADR-0005, #366): `anchor` and `stamp` each answer a
+    head they already hold with exit 0 and ask nobody, which is neither
+    a failure nor a departure. `failed` stays the anchor's; a refused
+    stamp is already written down in the stamps sidecar by the verb
+    itself. Returns (attempted, note, failed)."""
     sidecar = Path(str(log) + ".anchors.jsonl")
-    stamps = Path(str(log) + ".stamps.jsonl")
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
@@ -1436,7 +1154,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                          "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
-        if head and head not in sidecar_heads(sidecar, "anchors"):
+        if head:
             command = [sys.executable, str(LOXODONTA), "anchor",
                        f"--log={log}"]
             for calendar in calendars:
@@ -1449,8 +1167,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
                              "keeper will try again")
-        if head and authority \
-                and head not in sidecar_heads(stamps, "stamps"):
+        if head and authority:
             finished = subprocess.run(
                 [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
                  "--authority", authority],
