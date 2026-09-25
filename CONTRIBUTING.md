@@ -46,9 +46,10 @@ Reading three files first saves everyone a round trip:
 
 The three scripts never import each other (ADR-0035), so a rule two of them
 need is written in each. Every such rule is listed in `docs/TWINS.md` and
-held by `python tools/twin_check.py --check`, which the suite runs: change
-the original, in `loxodonta.py`, then make each copy in the other files the
-same text.
+held by `python tools/twin_check.py --check`, which the suite runs. To
+change one, edit the original in `loxodonta.py`, run
+`python tools/twin_check.py --write` to copy it over each copy in the other
+files, then run `python tools/twin_check.py --check`.
 
 ## The one local check
 
