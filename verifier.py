@@ -1049,6 +1049,93 @@ def read_stamp_records(log):
     return read_sidecar_records(stamps_path(log))
 
 
+# A stamp row keeps the authority's whole reply, an RFC 3161
+# TimeStampResp: a status saying whether the request was granted, then,
+# only when it was, the token, which is the part the authority signed.
+# This file reads the status and whether a token follows it, never what
+# the token holds. The status is signed by nobody, so a granted one
+# proves nothing alone, and a reply that was not granted, or holds no
+# token, holds nothing to judge: invalid on its face, with no tool.
+
+# PKIStatus (RFC 3161 §2.4.2), in order: the first two come with a token.
+STAMP_STATUS_WORDS = ("granted", "granted with modifications", "rejection",
+                      "waiting", "revocation warning",
+                      "revocation notification")
+STAMP_GRANTED = (0, 1)
+
+
+def der_element(data, at=0):
+    """The DER element that starts at `data[at]`: (tag, content, the
+    offset after it). Definite lengths only, which is all DER has; a
+    reply cut short or shaped some other way is a ValueError, since
+    bytes that are not DER are not a timestamp response."""
+    if at + 2 > len(data):
+        raise ValueError("the reply is cut short")
+    tag, length = data[at], data[at + 1]
+    at += 2
+    if length & 0x80:
+        size = length & 0x7F
+        if not 0 < size <= 4 or at + size > len(data):
+            raise ValueError("a length is not definite")
+        length = int.from_bytes(data[at:at + size], "big")
+        at += size
+    if at + length > len(data):
+        raise ValueError("the reply is cut short")
+    return tag, data[at:at + length], at + length
+
+
+def der_expect(data, tag, what):
+    """The content of the first element in `data`, which must carry `tag`."""
+    found, content, _ = der_element(data)
+    if found != tag:
+        raise ValueError(f"{what} is not the element RFC 3161 puts there")
+    return content
+
+
+def stamp_status(reply):
+    """The PKIStatus of a TimeStampResp, and whether a token follows it:
+    (status, holds_token). The status is the first INTEGER of the first
+    SEQUENCE of the outer SEQUENCE; a token is the SEQUENCE after that
+    first one, read for its tag and length and nothing inside it. Bytes
+    that are not this shape are a ValueError."""
+    response = der_expect(reply, 0x30, "the response")
+    tag, info, after = der_element(response)
+    if tag != 0x30:
+        raise ValueError("its status is not the element RFC 3161 puts there")
+    status = der_expect(info, 0x02, "the status code")
+    if not 0 < len(status) <= 4:
+        raise ValueError("the status code is not a small integer")
+    holds_token = after < len(response)
+    if holds_token:
+        der_expect(response[after:], 0x30, "the token")
+    return int.from_bytes(status, "big", signed=True), holds_token
+
+
+def status_word(status):
+    """A PKIStatus in RFC 3161's words, or `unknown`."""
+    if 0 <= status < len(STAMP_STATUS_WORDS):
+        return STAMP_STATUS_WORDS[status]
+    return "unknown"
+
+
+def stamp_reply_problem(reply):
+    """Why the bytes `reply` hold no token, in one line of this file's
+    own words, never the reply's; None for a reply whose status says
+    granted with a token after it. RFC 3161 puts a token in every
+    granted reply and none in any other, so a granted status with no
+    token holds none either. Offline, and never raises."""
+    try:
+        status, holds_token = stamp_status(reply)
+    except ValueError as e:
+        return f"the reply is not a timestamp response: {e}"
+    said = f"the reply's status is {status} ({status_word(status)})"
+    if status not in STAMP_GRANTED:
+        return f"{said}, so it holds no token"
+    if not holds_token:
+        return f"{said} and it holds no token"
+    return None
+
+
 def openssl_reason(stderr):
     """Why openssl refused, in its own words and on one line. Its error
     lines are colon-separated fields (an id, `error`, a code, a library,
@@ -1234,6 +1321,14 @@ def check_stamps(log, entries, chain_file):
             bad = True
             print(f"STAMP-INVALID: {label}: the response is not base64 — "
                   "evidence that does not verify is not evidence")
+            continue
+        # Read before any tool, so a reply holding no token is never
+        # "present, not judged" on a machine without one.
+        problem = stamp_reply_problem(reply)
+        if problem is not None:
+            bad = True
+            print(f"STAMP-INVALID: {label}: {problem} — evidence that does "
+                  "not verify is not evidence")
             continue
         verdict, detail = judge_stamp(head, reply, chain_file)
         if verdict == "stamped":
@@ -1911,7 +2006,8 @@ def judge_manifest_stamp(folder, chain_file):
     is earned, and why nobody judged the seal when nobody did. A token
     this machine cannot judge, or whose certificate expired after it was
     issued (#264), is a note and never a verdict: the rung is neither
-    earned nor failed. Only the manifest's own token can earn the
+    earned nor failed; a reply holding no token is none to judge, and
+    invalid with no tool. Only the manifest's own token can earn the
     package rung; the chains' tokens stamp a different object."""
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
@@ -1946,6 +2042,8 @@ def judge_manifest_stamp(folder, chain_file):
             except ValueError:
                 reason = "the response is not base64"
             else:
+                reason = stamp_reply_problem(reply)
+            if reason is None:
                 verdict, detail = judge_stamp(head, reply, chain_file)
                 if verdict == "stamped":
                     # The signer is the key the recipient's chain file
