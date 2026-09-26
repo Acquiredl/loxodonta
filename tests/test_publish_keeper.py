@@ -428,8 +428,12 @@ class LeftReadingTest(ReceiverFixture):
                {"kind": "head", "head": chain_head(kinded), "n": 2,
                 "ts": when})
         stamped = make_chain(self.root / "alpha" / "receipts", "sess-stamped")
+        # A granted reply, since a row holding no token is no departure
+        # (#370).
         append(stamped, ".stamps.jsonl",
-               {"head": chain_head(stamped), "n": 2, "ts": when}, *unreadable)
+               {"head": chain_head(stamped), "n": 2, "ts": when,
+                "response": base64.b64encode(GRANTED).decode()},
+               *unreadable)
         unknown = make_chain(self.root / "alpha" / "receipts", "sess-unknown")
         for suffix in (".published.jsonl", ".stamps.jsonl",
                        ".anchors.jsonl"):

@@ -111,7 +111,8 @@ TWINNED = {
     "test_anchor": ["AnchorTest", "BlockHeaderTest", "AnchorRowKindTest",
                     "MalformedAnchorRowTest", "AnchorFieldEscapeTest"],
     "test_stamp": ["JudgedStampTest", "OutlivedCertificateTest",
-                   "StampRowKindTest", "StampFieldEscapeTest"],
+                   "StampRowKindTest", "StampReplyStatusTest",
+                   "StampFieldEscapeTest"],
     "test_package": ["DemoStorePackageTest"],
     "test_package_anchor": ["SealedPackageTest", "PackageRowKindTest",
                             "MalformedPackageRowTest",
@@ -119,7 +120,8 @@ TWINNED = {
     "test_package_sign": ["SignedPackageTest"],
     "test_package_stamp": ["StampedPackageTest", "JudgedPackageStampTest",
                            "OutlivedPackageStampTest",
-                           "PackageStampRowKindTest"],
+                           "PackageStampRowKindTest",
+                           "PackageStampReplyStatusTest"],
 }
 
 
