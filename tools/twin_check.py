@@ -132,18 +132,19 @@ TWINS = (
          "`attempt`, and every reader that judges or schedules skips it, "
          "the recorder's and the supervisor's alike (#240)."),
     Twin("Reading a sidecar",
-         ("read_log", "sidecar_path", "published_path", "KeyGivenTwice",
-          "object_with_each_key_once", "NotStrictJson", "not_json",
-          "finite_float", "read_sidecar_records"),
+         ("read_log", "sidecar_path", "published_path", "NOT_A_FOLDER",
+          "NOT_REGULAR", "open_regular", "file_problem", "sidecar_lines",
+          "KeyGivenTwice", "object_with_each_key_once", "NotStrictJson",
+          "not_json", "finite_float", "read_sidecar_records"),
          ORIGINAL, SUPERVISOR,
          "Where each sidecar lives beside its chain, and how its lines "
          "are read: a line that is not a JSON object, past the digit or "
          "recursion limit, or not UTF-8, or that a strict parser refuses "
          "(a key given twice, NaN, Infinity or 1e999), reads as unreadable "
-         "and "
-         "never stops the reader. The recorder judges by it; the "
-         "supervisor's scan and keeper report and schedule by it (#299, "
-         "#331, #344, #365)."),
+         "and never stops the reader, and so does a sidecar that is not a "
+         "file, a folder or a pipe in its place. The recorder judges by "
+         "it; the supervisor's scan and keeper report and schedule by it "
+         "(#299, #331, #344, #364, #365)."),
     Twin("What a sidecar row is",
          ("CHAIN_KIND", "ANCHOR_KIND", "STAMP_KIND", "HEAD_KIND",
           "SIDECAR_KINDS", "UNREADABLE_ROW", "UNKNOWN_ROW", "row_kind",
