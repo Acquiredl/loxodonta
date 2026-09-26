@@ -53,6 +53,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -960,17 +961,78 @@ def published_path(log):
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+NOT_A_FOLDER = "it is a folder, not a file"
+NOT_REGULAR = "it is not a regular file"
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def open_regular(path):
+    """`path` opened for reading, as a binary file, when it is a regular
+    file; FileNotFoundError when nothing is there, and an OSError naming
+    why when something else is: a folder, a pipe or a device. A sidecar
+    is in the writer's reach, and `mkdir` or `mkfifo` puts one of those
+    where it belongs in one command (#364). The open never waits, since
+    an ordinary open of a pipe waits for a writer that may never come,
+    and the type is asked of the open file, so nothing can be swapped in
+    between the question and the read."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                 | getattr(os, "O_BINARY", 0))
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            raise OSError(NOT_A_FOLDER if stat.S_ISDIR(mode)
+                          else NOT_REGULAR)
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def file_problem(path):
+    """Why something is at `path` and cannot be read as a file, in
+    words (`open_regular`): a folder, a pipe or a device, or a file this
+    user may not open. None when nothing is there, or a file that
+    opens."""
+    try:
+        with open_regular(path):
+            return None
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        # Windows refuses to open a folder at all, as a denied permission.
+        if os.path.isdir(path):
+            return NOT_A_FOLDER
+        return error.strerror or str(error)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def sidecar_lines(path):
+    """The lines of the sidecar at `path`, split and decoded as
+    `read_log` reads a chain's, from the one file `open_regular` opened:
+    FileNotFoundError when there is none, and an OSError naming why when
+    what is there is not a file."""
+    with open_regular(path) as f:
+        return [line.decode("utf-8", "surrogateescape")
+                for line in split_lines(f.read())]
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
-    surrogate from `read_log`), an integer too long to read, nesting too
-    deep (#299)."""
+    surrogate from `sidecar_lines`), an integer too long to read, nesting
+    too deep (#299). A sidecar that is there and cannot be read as a file
+    (`open_regular`) reads as one unreadable line, so no reader stops
+    on it and a judge names it (#364)."""
     try:
-        lines = read_log(path)
+        lines = sidecar_lines(path)
     except FileNotFoundError:
         return None
+    except OSError:
+        return [None]
     records = []
     for line in lines:
         try:
@@ -1263,7 +1325,9 @@ def chain_cursor(log, url):
     not UTF-8 means the file is not text in that format at all, so the
     memo holding it is the unreadable one, as it was before #299."""
     try:
-        lines = read_log(published_path(log))
+        # A folder or a pipe where the memo belongs (#364) is a memo
+        # that cannot be read, raised as such, and never waited on.
+        lines = sidecar_lines(published_path(log))
     except FileNotFoundError:
         return -1
     mine = remote_id(url)
@@ -1321,41 +1385,81 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    if sidecar.exists():
-        finished = subprocess.run(
-            [sys.executable, str(LOXODONTA), "anchor", "--upgrade",
-             f"--log={log}"],
-            capture_output=True, encoding="utf-8", env=env)
+    # A folder or a pipe where the sidecar belongs holds no proof to
+    # upgrade (#364); the scan's verify names it.
+    if sidecar.is_file():
+        finished = run_verb(["anchor", "--upgrade", f"--log={log}"], env)
         attempted = True
-        if finished.returncode != 0:
+        if finished is None:
+            notes.append("upgrading did not finish in time; the proofs stay "
+                         "as the sidecar holds them and the keeper will try "
+                         "again")
+        elif finished.returncode != 0:
             notes.append("upgrade attempted; a calendar did not answer — "
                          "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
         if head:
-            command = [sys.executable, str(LOXODONTA), "anchor",
-                       f"--log={log}"]
+            command = ["anchor", f"--log={log}"]
             for calendar in calendars:
                 command += ["--calendar", calendar]
-            finished = subprocess.run(command, capture_output=True,
-                                      encoding="utf-8", env=env)
+            finished = run_verb(command, env)
             attempted = True
-            if finished.returncode != 0:
+            if finished is None:
+                failed = True
+                notes.append("anchoring did not finish in time; whether a "
+                             "calendar took this head is unknown, and the "
+                             "keeper will try again")
+            elif finished.returncode == 73:
+                # EX_CANTCREAT: a calendar answered and the proof could
+                # not be kept, a folder where the sidecar belongs say.
+                failed = True
+                notes.append("anchoring failed — a calendar answered and "
+                             "the proof could not be written beside the "
+                             "chain; it stays unanchored until the sidecar "
+                             "can be written")
+            elif finished.returncode != 0:
                 failed = True
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
                              "keeper will try again")
         if head and authority:
-            finished = subprocess.run(
-                [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
-                 "--authority", authority],
-                capture_output=True, encoding="utf-8", env=env)
+            finished = run_verb(["stamp", f"--log={log}", "--authority",
+                                 authority], env)
             attempted = True
-            if finished.returncode != 0:
+            if finished is None:
+                notes.append("stamping did not finish in time; whether the "
+                             "authority granted a token is unknown, and the "
+                             "keeper will try again")
+            elif finished.returncode == 73:
+                # EX_CANTCREAT: the token could not be kept, a folder
+                # where the stamps sidecar belongs say (#364).
+                notes.append("stamping failed — the token could not be "
+                             "written beside the chain; it stays unstamped "
+                             "until the sidecar can be written")
+            elif finished.returncode != 0:
                 notes.append("stamping failed — the authority did not "
                              "grant a token for this head; it stays "
                              "unstamped and the keeper will try again")
     return attempted, "; ".join(notes) or None, failed
+
+
+# Seconds the keeper waits for `anchor`, its upgrade, or `stamp`: past
+# four calendars at fifteen seconds each, the most the verbs ask for,
+# with room to spare. A backstop, like the publish keeper's, so one verb
+# that never ends can never hold a tick (#364, #331's class).
+VERB_BACKSTOP = 120
+
+
+def run_verb(args, env):
+    """One recorder verb as a subprocess, its output captured; None when
+    it did not finish inside VERB_BACKSTOP, and it is then left behind."""
+    try:
+        return subprocess.run([sys.executable, str(LOXODONTA), *args],
+                              capture_output=True, encoding="utf-8", env=env,
+                              timeout=VERB_BACKSTOP)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 # --- Publish keeper -----------------------------------------------------------
@@ -1459,8 +1563,10 @@ def publish_through_recorder(log, url, what):
     except subprocess.TimeoutExpired:
         # The recorder bounds its own POST; this is the backstop above
         # it, so one stuck publish can never hold a tick.
-        return (f"publishing the {what} did not finish in time; {stays} "
-                "and the keeper will try again")
+        # Past the POST, the remote may hold what was sent, so this does
+        # not say it stays unsent.
+        return (f"publishing the {what} did not finish in time; whether "
+                "it left is unknown, and the keeper will try again")
     if finished.returncode == 64:
         # A usage exit is the URL refused, not the remote: retrying
         # would never help, and the note must say so.
@@ -1468,6 +1574,11 @@ def publish_through_recorder(log, url, what):
         return (f"publishing the {what} refused: the recorder would not "
                 f"take {flag} as given; fix the URL (see "
                 "`loxodonta publish --help`)")
+    if finished.returncode == 73:
+        # EX_CANTCREAT: the head left, and the memo that would say so
+        # could not be written (#364), so the next turn posts it again.
+        return (f"published the {what}, and the memo could not be written; "
+                "the keeper will post it again until it can be")
     if finished.returncode != 0:
         return (f"publishing failed — the remote did not take this {what}; "
                 f"{stays} and the keeper will try again")
@@ -5151,7 +5262,7 @@ def write_raw_archive(report, ordinal, path):
                     log = Path(chain["log"])
                     archive.write(log, f"{label}/{log.name}")
                     sidecar = log.with_name(log.name + ".anchors.jsonl")
-                    if sidecar.exists():
+                    if sidecar.is_file():
                         archive.write(sidecar, f"{label}/{sidecar.name}")
 
 
@@ -6063,6 +6174,16 @@ def cmd_package(args):
         # split session may sit in a drawer no selector reaches.
         if split_refusal(session, everywhere.get(session, sessions[session])):
             return 1
+    for log in (log for logs in sessions.values() for log in logs):
+        for suffix in (".anchors.jsonl", ".stamps.jsonl"):
+            # A package carries a chain's sidecars as they stand, and a
+            # folder or a pipe in one's place cannot be carried (#364).
+            problem = file_problem(str(log) + suffix)
+            if problem is not None:
+                print(f"error: {log.name}{suffix} cannot be packed: "
+                      f"{problem}; nothing written (`verify --anchors` "
+                      "names it too)", file=sys.stderr)
+                return 1
     packed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     default = Path.cwd() / f"loxodonta-package-{stem}"
     out = Path(args.out) if args.out else (
