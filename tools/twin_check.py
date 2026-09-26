@@ -133,12 +133,14 @@ TWINS = (
          "the recorder's and the supervisor's alike (#240)."),
     Twin("Reading a sidecar",
          ("read_log", "sidecar_path", "published_path", "KeyGivenTwice",
-          "object_with_each_key_once", "not_json", "read_sidecar_records"),
+          "object_with_each_key_once", "NotStrictJson", "not_json",
+          "finite_float", "read_sidecar_records"),
          ORIGINAL, SUPERVISOR,
          "Where each sidecar lives beside its chain, and how its lines "
          "are read: a line that is not a JSON object, past the digit or "
          "recursion limit, or not UTF-8, or that a strict parser refuses "
-         "(a key given twice, NaN or Infinity), reads as unreadable and "
+         "(a key given twice, NaN, Infinity or 1e999), reads as unreadable "
+         "and "
          "never stops the reader. The recorder judges by it; the "
          "supervisor's scan and keeper report and schedule by it (#299, "
          "#331, #344, #365)."),

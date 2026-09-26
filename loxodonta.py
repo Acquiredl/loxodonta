@@ -210,12 +210,27 @@ def object_with_each_key_once(pairs):
     return seen
 
 
+class NotStrictJson(ValueError):
+    """A spelling Python's JSON reader takes and a strict parser refuses,
+    so a line or a manifest holding one says something to this reader
+    and nothing to another (#365)."""
+
+
 def not_json(word):
     """Refuse `NaN`, `Infinity` or `-Infinity` (json's parse_constant
     hook): words Python's JSON reader takes as numbers and JSON does not
-    have, so a strict parser cannot read a line holding one, and a line
-    one reader judges and another cannot read says two things (#365)."""
-    raise ValueError(f"{word} is not JSON")
+    have."""
+    raise NotStrictJson(f"{word}, which is not JSON")
+
+
+def finite_float(text):
+    """The number `text` spells (json's parse_float hook), refused when
+    it is not finite: Python reads `1e999` as infinity, where a strict
+    parser refuses it as it refuses `Infinity`."""
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise NotStrictJson(f"{text}, a number past what JSON holds")
+    return value
 
 
 def path_leaving_base(path):
@@ -785,7 +800,8 @@ def read_sidecar_records(path):
     surrogate from `read_log`), an integer too long to read, nesting too
     deep (#299). A line a strict JSON parser refuses is unreadable too,
     before its kind is read: a key given twice, as the walk refuses one
-    in an entry, and `NaN`, `Infinity` or `-Infinity` (#365)."""
+    in an entry, `NaN`, `Infinity` or `-Infinity`, and a number too
+    large to be finite, `1e999` (#365)."""
     try:
         lines = read_log(path)
     except FileNotFoundError:
@@ -796,7 +812,8 @@ def read_sidecar_records(path):
             line.encode("utf-8")
             record = json.loads(line,
                                 object_pairs_hook=object_with_each_key_once,
-                                parse_constant=not_json)
+                                parse_constant=not_json,
+                                parse_float=finite_float)
             if not isinstance(record, dict):
                 record = None
         except (ValueError, RecursionError):
@@ -1108,8 +1125,15 @@ def stamp_status(reply):
     (status, holds_token). The status is the first INTEGER of the first
     SEQUENCE of the outer SEQUENCE; a token is the SEQUENCE after that
     first one, read for its tag and length and nothing inside it. Bytes
-    that are not this shape are a ValueError."""
-    response = der_expect(reply, 0x30, "the response")
+    that are not this shape are a ValueError, and so are bytes after the
+    reply or after the token (#365): a reader stopping at the element's
+    end and one reading on would see two replies."""
+    tag, response, end = der_element(reply)
+    if tag != 0x30:
+        raise ValueError("the response is not the element RFC 3161 puts "
+                         "there")
+    if end != len(reply):
+        raise ValueError("bytes after the reply")
     tag, info, after = der_element(response)
     if tag != 0x30:
         raise ValueError("its status is not the element RFC 3161 puts there")
@@ -1118,7 +1142,12 @@ def stamp_status(reply):
         raise ValueError("the status code is not a small integer")
     holds_token = after < len(response)
     if holds_token:
-        der_expect(response[after:], 0x30, "the token")
+        tag, _, token_end = der_element(response, after)
+        if tag != 0x30:
+            raise ValueError("the token is not the element RFC 3161 puts "
+                             "there")
+        if token_end != len(response):
+            raise ValueError("bytes after the token")
     return int.from_bytes(status, "big", signed=True), holds_token
 
 
@@ -1781,12 +1810,21 @@ def read_manifest(folder):
         # first and another to one keeping the last, and whatever this
         # verifier judged, the recipient's own tools may read the other
         # (#299).
+        # So is a spelling a strict parser refuses (#365): `NaN` in the
+        # testimony a verifier prints and never judges still makes a
+        # manifest one verifier reads and another cannot.
         with open(os.path.join(folder, "manifest.json"), encoding="utf-8") as f:
-            manifest = json.load(f, object_pairs_hook=object_with_each_key_once)
+            manifest = json.load(f, object_pairs_hook=object_with_each_key_once,
+                                 parse_constant=not_json,
+                                 parse_float=finite_float)
     except KeyGivenTwice as twice:
         return None, (f"UNSUPPORTED-FORMAT: manifest.json has key "
                       f"{visible(repr(twice.key))} given twice; no reading "
                       "of it is the manifest")
+    except NotStrictJson as spelled:
+        return None, (f"UNSUPPORTED-FORMAT: manifest.json holds "
+                      f"{visible(str(spelled))}; a strict JSON reader "
+                      "cannot read it")
     except (OSError, ValueError, RecursionError):
         return None, ("UNSUPPORTED-FORMAT: no readable manifest.json at the "
                       "top of this package; not a loxodonta package")
@@ -3855,7 +3893,8 @@ def chain_cursor(log, url):
             # parser refuses is no chain row.
             record = json.loads(line,
                                 object_pairs_hook=object_with_each_key_once,
-                                parse_constant=not_json)
+                                parse_constant=not_json,
+                                parse_float=finite_float)
         except (ValueError, RecursionError):
             # One appended line must not stop the chain route at every
             # session end and keeper turn (#331, #344): at worst a chain

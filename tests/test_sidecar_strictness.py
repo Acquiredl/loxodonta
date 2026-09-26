@@ -39,7 +39,9 @@ NOT_A_RECORD = ("ANCHOR-INVALID: sidecar line is not a record — evidence "
                 "that does not verify is not evidence")
 NOT_A_STAMP = ("STAMP-INVALID: sidecar line is not a stamp record — "
                "evidence that does not verify is not evidence")
-WORDS = ("NaN", "Infinity", "-Infinity")
+# The spellings a strict parser refuses and Python reads as numbers:
+# the three words, and numbers too large to be finite.
+WORDS = ("NaN", "Infinity", "-Infinity", "1e999", "-1e999")
 
 
 def run_receipts(*args, cwd):
@@ -199,6 +201,33 @@ class StrictRowTest(unittest.TestCase):
                                  result.stdout + result.stderr)
                 self.assertEqual(result.stdout.strip().splitlines(),
                                  [NOT_A_STAMP])
+
+    def test_a_stamp_reply_with_bytes_after_it_is_stamp_invalid(self):
+        # A granted reply holding a token, then bytes past its outer
+        # SEQUENCE: a reader stopping at its end and one reading on see
+        # two replies, so it is invalid with no tool.
+        token = bytes([0x30, 3]) + b"tok"
+        status = bytes([0x30, 3, 0x02, 1, 0])
+        granted = bytes([0x30, len(status + token)]) + status + token
+        for tail, why in ((b"", None), (bytes(1), "bytes after the reply")):
+            with self.subTest(tail=tail.hex()):
+                line = row_line(kind="stamp", head=self.head, n=1,
+                                ts="2026-09-25T10:00:00Z",
+                                authority="https://authority.example/tsr",
+                                response=base64.b64encode(granted + tail)
+                                .decode("ascii"))
+
+                result = self.verify("--stamps", line)
+
+                if why is None:
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    self.assertIn("stamp not judged", result.stdout)
+                    continue
+                self.assertEqual(result.returncode, 3,
+                                 result.stdout + result.stderr)
+                self.assertIn(f"the reply is not a timestamp response: {why}",
+                              result.stdout)
 
     def test_a_proof_with_bytes_after_its_tree_is_anchor_invalid(self):
         for tail in (b"\x00", b"\x08\x08\x08"):
