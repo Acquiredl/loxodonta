@@ -84,17 +84,6 @@ def entry_hash(entry_without_hash):
     return hashlib.sha256(canonical_bytes(entry_without_hash)).hexdigest()
 
 
-def receipt_text(text):
-    """`text` as a receipt can hold it: each lone surrogate written as
-    its six ASCII characters of escape text (`\\ud800`), everything
-    else exactly as it stands (#292). A lone surrogate has no UTF-8
-    form, so the canonical form cannot hold it, yet JSON and POSIX argv
-    both hand Python one; escaped, the receipt still says what was sent
-    and the format does not change. Every string an entry takes from
-    outside passes through here: actor, action, file paths."""
-    return text.encode("utf-8", "backslashreplace").decode("utf-8")
-
-
 # --- Reading a chain ----------------------------------------------------------
 # The log's lines, the tail, and the files an entry names, read and
 # never written.
@@ -1026,8 +1015,8 @@ def check_anchors(log, entries, headers, used):
             # among them, and a reader of this output would take it for
             # the verifier's.
             head = visible(record["head"][:12])
-            ts, calendar = (visible(record.get(field))
-                            for field in ("ts", "calendar"))
+            ts = visible(record.get("ts"))
+            calendar = visible(record.get("calendar"))
             if record["head"] in settled_heads:
                 print(f"ANCHOR-UNANSWERED: head {head}… submitted {ts} via "
                       f"{calendar} never came back, and another calendar "
@@ -1468,7 +1457,16 @@ def cmd_head(args):
               "`loxodonta verify` (a torn tail has no head to record)",
               file=sys.stderr)
         return 1
-    print(last["entry_hash"])
+    head = last["entry_hash"]
+    # A head is a SHA256 in lowercase hex and nothing else, so anything
+    # else is refused unprinted: the line is the writer's text, and the
+    # walk calls it BROKEN, since no such value matches a canonical form.
+    if not (isinstance(head, str) and len(head) == 64
+            and all(c in "0123456789abcdef" for c in head)):
+        print(f"error: {args.log} ends in an entry whose entry_hash is not "
+              "a chain head — run `loxodonta verify`", file=sys.stderr)
+        return 1
+    print(head)
     return 0
 
 
@@ -1819,8 +1817,8 @@ def judge_manifest_anchor(folder, headers, used):
         if record.get("calendar") in completed:
             continue  # superseded by the upgraded record from that calendar
         # The row's words, escaped, as check_anchors prints a chain's.
-        ts, calendar = (visible(record.get(field))
-                        for field in ("ts", "calendar"))
+        ts = visible(record.get("ts"))
+        calendar = visible(record.get("calendar"))
         if completed:
             # Some calendar settled this manifest, so the stragglers are
             # not work the recipient owes either (#199).
@@ -1890,9 +1888,9 @@ def judge_manifest_stamp(folder, chain_file):
                           f"{chain_file} signed this manifest's sha256 under "
                           "its own clock (the record names "
                           f"{visible(record.get('authority'))}, testimony) — "
-                          "the time "
-                          "inside the token is that key's word, not this "
-                          "machine's (`openssl ts -reply -text` prints it)")
+                          "the time inside the token is that key's word, not "
+                          "this machine's (`openssl ts -reply -text` prints "
+                          "it)")
                     stamped = True
                     continue
                 if verdict == "not judged":

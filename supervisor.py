@@ -602,27 +602,22 @@ def fortnight(days, now):
 UPGRADE_EVERY_SECONDS = int(
     os.environ.get("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600))
 
-# Both of verify's ANCHORED lines: the block an attestation claims, not
-# checked, and the block a --block-header checked (ruling 3 on #299). The
-# span is the same either way; the height is the attestation's word in
-# both, which is all the panel shows it as. Each is matched as a whole
-# line, word for word as the recorder's `attestation_words` writes it
-# (#349): a line that only starts the same way is not the recorder's
-# verdict, whatever it says after, so a sidecar row whose text reached
-# verify's output as a line of its own could never read as an anchor.
-# A change to either sentence there changes the pattern here.
-HEX64 = "[0-9a-f]{64}"
+# verify's ANCHORED line as the scan meets it: the block an attestation
+# claims, not checked (ruling 3 on #299), since the scan runs verify
+# without --block-header and so never meets the checked sentence. The
+# height is the attestation's word, which is all the panel shows it as.
+# The line is matched whole, word for word as the recorder's
+# `attestation_words` writes it (#349): a line that only starts the same
+# way is not the recorder's verdict, whatever it says after, so a
+# sidecar row whose text reached verify's output as a line of its own
+# could never read as an anchor. A change to that sentence changes the
+# pattern here, and the scan's anchor tests fail until it does. If the
+# scan ever passes --block-header, add the checked sentence beside it.
 ANCHORED_LINES = (
     re.compile(r"ANCHORED: entries 0\.\.(\d+): the attestation claims "
                r"Bitcoin block (\d+), and the block was not checked; that "
-               r"block's merkle root must read " + HEX64 + r", which "
+               r"block's merkle root must read [0-9a-f]{64}, which "
                r"--block-header with its header checks"),
-    re.compile(r"ANCHORED: entries 0\.\.(\d+) existed by the block whose "
-               r"header hashes to " + HEX64 + r", whose merkle root "
-               + HEX64 + r" is the one the proof replays to; the "
-               r"attestation calls it Bitcoin block (\d+), which is your "
-               r"header source's word, and the hash is what a second "
-               r"source can confirm"),
 )
 # verify's pending line, whole: the time and the calendar are the row's,
 # printed escaped, so neither holds a space an honest row would write.
@@ -632,8 +627,8 @@ PENDING_LINE = re.compile(
 
 
 def anchored_span(line):
-    """(entries up to, block height) when `line` is one of verify's
-    ANCHORED lines, whole and word for word; None for any other line."""
+    """(entries up to, block height) when `line` is one of the ANCHORED
+    lines above, whole and word for word; None for any other line."""
     for pattern in ANCHORED_LINES:
         found = pattern.fullmatch(line)
         if found:
@@ -7502,7 +7497,7 @@ function chainRow(chain) {
   const spans = (chain.anchors ? chain.anchors.anchored : [])
     .map(span => "ANCHORED: entries 0.." + span.upto);
   const anchoredLine = chain.detail.find(line => spans.some(span =>
-    line.startsWith(span + ": ") || line.startsWith(span + " existed ")));
+    line.startsWith(span + ": ")));
   row.appendChild(el("p", "claim",
     rung === "anchored" && anchoredLine ? anchoredLine : CLAIM[rung]));
   if (chain.detail.length) {
