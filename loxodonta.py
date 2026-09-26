@@ -3095,7 +3095,11 @@ def build_references(log, file_paths):
         print(f"error: {e}", file=sys.stderr)
         return None, EX_USAGE
     except OSError as e:
-        print(f"error: {e}", file=sys.stderr)
+        # An OSError that names its file, a pipe refused say, is printed
+        # without its errno: the path and the reason are the message.
+        said = f"{e.filename}: {e.strerror}" if e.filename and e.strerror \
+            else e
+        print(f"error: {said}", file=sys.stderr)
         return None, EX_NOINPUT
     files.sort(key=lambda ref: ref["path"])  # by path bytes (SPEC §3)
     return files, 0

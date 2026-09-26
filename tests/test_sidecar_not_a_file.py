@@ -365,6 +365,56 @@ class WrittenPipeLinkTest(WrittenPipeTest):
         return stat.S_ISFIFO(os.stat(path).st_mode)
 
 
+@unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+class ReferencedPipeTest(unittest.TestCase):
+    """A file reference that is a pipe or a device goes through the same
+    open as a sidecar (#364, the pipe and device half of #270): `log
+    --file` refuses it, and `verify --files` names it and goes on to its
+    verdict. Neither waits on the pipe or reads the device."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        run_receipts("init", cwd=self.workdir)
+
+    def pipe_and_device(self):
+        os.mkfifo(self.workdir / "pipe")
+        os.symlink("/dev/zero", self.workdir / "zero")
+        return ("pipe", "zero")
+
+    def test_log_refuses_a_pipe_or_a_device(self):
+        for name in self.pipe_and_device():
+            with self.subTest(reference=name):
+                result = run_receipts("log", "--actor", "agent", "--action",
+                                      "x", "--file", name, cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 66,
+                                 result.stdout + result.stderr)
+                self.assertIn(f"{name}: {PIPE}", result.stderr)
+                self.assertNotIn("Errno", result.stderr)
+
+    def test_verify_files_names_a_reference_that_became_a_pipe(self):
+        later = self.workdir / "later"
+        for make in (os.mkfifo, lambda p: os.symlink("/dev/zero", p)):
+            with self.subTest(make=make):
+                later.write_text("hi", encoding="utf-8")
+                run_receipts("log", "--actor", "agent", "--action", "x",
+                             "--file", "later", cwd=self.workdir)
+                later.unlink()
+                make(later)
+
+                result = run_receipts("verify", "--files", cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn("MISSING (not a readable file here): later",
+                              result.stdout)
+                self.assertEqual(result.stdout.strip().splitlines()[-1],
+                                 "VALID")
+                later.unlink()
+
+
 class SessionEndNotAFileTest(PublishBase):
     """The hook at SessionEnd, wired for every step that writes a
     sidecar (the head, the chain, the stamp, the anchor), with a folder

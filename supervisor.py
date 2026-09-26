@@ -1455,7 +1455,7 @@ VERB_BACKSTOP = 120
 
 def run_verb(args, env):
     """One recorder verb as a subprocess, its output captured; None when
-    it did not finish inside VERB_BACKSTOP, and it is then left behind."""
+    it did not finish inside VERB_BACKSTOP, and it is then killed."""
     try:
         return subprocess.run([sys.executable, str(LOXODONTA), *args],
                               capture_output=True, encoding="utf-8", env=env,
