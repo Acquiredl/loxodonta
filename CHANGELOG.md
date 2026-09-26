@@ -30,6 +30,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `verify-package` no longer gives a verdict that depends on the recipient's system: it refuses a name Windows reads otherwise (`C:x`, `a?b`, `NUL`, `LONGFI~1.TXT`, a trailing dot), one past 255 bytes, and two names differing in case or Unicode form (#358).
 - The supervisor reads sidecar rows as the recorder does, so an unknown kind no longer stops the keeper posting, stamping or anchoring a head. A memo line nested too deep no longer stops `publish --chain` (#344).
 - Malformed anchor and stamp rows (a field missing or of the wrong type) no longer crash `verify`, `verify-package`, `anchor`, `stamp`, `supervisor scan` or the session end. An anchor row reads `ANCHOR-INVALID`, a package manifest's `SEAL-INVALID`, naming the field (#348).
+- `verify-package` refuses a manifest whose `entries` or `bytes` is `true` or `false`, named by its field: Python counted a boolean as an integer, so a one-line chain listed with `"entries": true` passed (#359).
 - The verifier prints sidecar, manifest and file-name text escaped, and `head` refuses a tail hash that is not a head, so a crafted row can no longer forge an `ANCHORED` line `supervisor scan` believed. Sidecars are named bare (#349).
 
 ## [0.9.0] - 2026-09-23

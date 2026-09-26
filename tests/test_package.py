@@ -589,6 +589,23 @@ class DemoStorePackageTest(PackageCase):
         self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"), lines[0])
         self.assertIn("'head' given twice", lines[0])
 
+    def test_a_boolean_where_the_manifest_counts_is_refused_by_name(self):
+        # #359: Python counts true as 1, so `"entries": true` passed the
+        # integer check (a one-line chain even verified) and `"bytes":
+        # true` was judged ARTIFACT-DIVERGED. A count is never a boolean.
+        folder = self.folder_package()
+        written = (folder / "manifest.json").read_bytes()
+        cases = (("chains", "entries", True), ("chains", "entries", False),
+                 ("artifacts", "bytes", True), ("artifacts", "bytes", False))
+        for row, field, value in cases:
+            with self.subTest(field=field, value=value):
+                (folder / "manifest.json").write_bytes(written)
+                self.rewrite_manifest(
+                    folder, lambda m, row=row, field=field, value=value:
+                    m[row][0].update({field: value}))
+                self.refused(folder, f"whose {field} is true or false, not "
+                             "an integer")
+
     def test_a_malformed_manifest_is_refused_not_a_traceback(self):
         folder = self.folder_package()
         shapes = {
