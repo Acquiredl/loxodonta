@@ -5242,12 +5242,81 @@ def artifact_listing(path):
 PACKAGE_MAX_BYTES = 1 << 30   # the verifier's cap, twice over
 
 
-def bare_file_name(value):
-    """The verifier's rule for a packaged name, twice over: a bare file
-    name, nothing a path could be, since the layout is flat."""
-    return (isinstance(value, str) and value not in ("", ".", "..")
-            and "/" not in value and "\\" not in value
-            and value == os.path.basename(value))
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+WINDOWS_REFUSED_CHARACTERS = ':<>|"?*'
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+WINDOWS_UNZIP_UNDERSCORES = str.maketrans(
+    WINDOWS_REFUSED_CHARACTERS, "_" * len(WINDOWS_REFUSED_CHARACTERS))
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def landing_name(name):
+    """The file a zip member's name unpacks to, folded so that two names
+    landing on one file on any system compare equal: a drive or a
+    `\\\\server\\share` prefix dropped and either slash a separator
+    (Windows), empty, `.` and `..` segments dropped (every unzip), a
+    segment's trailing dots and spaces dropped and `:<>|"?*` read as `_`
+    (Windows), one Unicode normal form (macOS), and case folded (Windows
+    and macOS). The fold is the union of those systems' rules, applied on
+    every system, so a package's verdict never depends on where the
+    recipient unpacks it; it folds a little more than any one system
+    does, and a package the supervisor wrote, flat and plainly named,
+    never comes near it (#299)."""
+    import ntpath  # Windows's own path rules, the same on every system
+    _, rest = ntpath.splitdrive(name.replace("/", "\\"))
+    segments = (segment.rstrip(". ") for segment in rest.split("\\"))
+    landed = "/".join(segment for segment in segments if segment)
+    landed = landed.translate(WINDOWS_UNZIP_UNDERSCORES)
+    return unicodedata.normalize("NFC", landed).casefold()
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def one_file_twice(names):
+    """The first two of a zip's member names that unpack to one file, or
+    None. Unpacking writes both and keeps the last, while `unzip -p` and
+    a zip reader that stops at the first show the first: a tampered
+    chain ahead of the original verified SELF-CONSISTENT (#299)."""
+    seen = {}
+    for name in names:
+        landed = landing_name(name)
+        if landed in seen:
+            return seen[landed], name
+        seen[landed] = name
+    return None
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def bare_name(value):
+    """A manifest path is accepted only as a bare file name: the layout is
+    flat, and a name that could leave the package, or that one system
+    opens as another file than the rest do, is refused, never followed.
+    Judged by its characters alone, the same on every system, so one
+    package gets one verdict wherever it is read: not empty, not `.` or
+    `..`, at most 255 bytes in UTF-8 (the longest file name Linux and
+    macOS take); no `/` or `\\` (a folder), none of `:<>|"?*`, which
+    Windows refuses in a name (`C:x` is a drive there, `a?b` lands as
+    `a_b`), no control character, below U+0020, and no lone surrogate;
+    no `~`, since Windows also opens a file by its 8.3 short name
+    (`LONGFI~1.TXT` for `longfilename.txt`), which no listing shows and
+    no other system has; no trailing dot or space, which Windows strips, so `project.json.`
+    would open `project.json` there and nothing elsewhere; and not a
+    Windows device name, in any case, alone or before a dot and with
+    any spaces before that dot (`NUL`, `con.txt`, `nul .txt`, `CONIN$`,
+    `CONOUT$`, `PRN`, `AUX`, `COM1` to `COM9` and `LPT1` to `LPT9`, and
+    `COM¹`, `COM²`, `COM³`, `LPT¹`, `LPT²`, `LPT³`)."""
+    if not isinstance(value, str) or value in ("", ".", ".."):
+        return False
+    if any(c in "/\\~" + WINDOWS_REFUSED_CHARACTERS or c < " "
+           or "\ud800" <= c <= "\udfff" for c in value):
+        return False
+    if len(value.encode("utf-8")) > 255 or value[-1] in ". ":
+        return False
+    device = value.split(".")[0].rstrip(" ").upper()
+    return not (device in ("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$")
+                or (len(device) == 4 and device[:3] in ("COM", "LPT")
+                    and device[3] in "123456789¹²³"))
 
 
 def package_too_large(stage, written):
@@ -5759,6 +5828,40 @@ def split_refusal(session, chains):
     return True
 
 
+def unpackageable(sessions, with_transcripts):
+    """Why a package of these sessions would never verify, or None. The
+    verifier refuses a manifest naming anything but a bare name, a chain
+    whose name leaves no room for its sidecars', and two names some
+    system opens as one file (#358), so none of them is written. The
+    hook names no chain so: it keeps a session id's letters, digits,
+    `-`, `_` and `.` between `receipts-` and `.jsonl`, so no `:`, no
+    `~`, no device name and no trailing dot. A chain put in the store by hand,
+    where a `:` is allowed, or two sessions whose ids differ only in
+    case, can be."""
+    names = ["manifest.json", "project.json", "witness.json", "README.md"]
+    for session, chains in sessions.items():
+        for log in chains:
+            if not (bare_name(log.name) and bare_name(log.name
+                                                      + ".anchors.jsonl")):
+                return (f"chain {log.name!r} cannot be packaged: its name "
+                        "is not a bare file name on every system, and the "
+                        "package layout is flat")
+            names += [log.name, log.name + ".anchors.jsonl",
+                      log.name + ".stamps.jsonl"]
+        if with_transcripts:
+            transcript = f"transcript-{session}.jsonl"
+            if not bare_name(transcript):
+                return (f"session {session!r} cannot carry a transcript: its "
+                        "name is not a bare file name, and the package "
+                        "layout is flat")
+            names.append(transcript)
+    twice = one_file_twice(list(dict.fromkeys(names)))
+    if twice is not None:
+        return (f"{twice[0]!r} and {twice[1]!r} cannot be packaged together: "
+                "some systems open the two names as one file")
+    return None
+
+
 def cmd_package(args):
     """Build one package (ADR-0026 ruling 1): of a session, selected by
     id or by an entry address inside it, siblings included; or, with
@@ -5841,15 +5944,10 @@ def cmd_package(args):
             row["session"]: Path(row["transcript"])
             for row in report.get("completeness", {}).get("sessions", [])
             if row.get("session") in sessions and row.get("transcript")}
-    if transcripts is not None:
-        for session in sessions:
-            if not bare_file_name(f"transcript-{session}.jsonl"):
-                # The verifier refuses a manifest naming anything but a
-                # bare file name, so such a package would never verify.
-                print(f"error: session {session!r} cannot carry a transcript: "
-                      "its name is not a bare file name, and the package "
-                      "layout is flat", file=sys.stderr)
-                return 1
+    problem = unpackageable(sessions, transcripts is not None)
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
     out.parent.mkdir(parents=True, exist_ok=True)
     if args.folder:
         out.mkdir()
