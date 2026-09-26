@@ -962,6 +962,53 @@ def published_path(log):
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+class KeyGivenTwice(ValueError):
+    """A JSON object that names one key twice. A last-wins reader (this
+    one) and a first-wins reader see two different lines, and a hash that
+    holds under one reading says nothing under the other; no reading of
+    such a line is an entry (SPEC §6 step 1)."""
+
+    def __init__(self, key):
+        super().__init__(key)
+        self.key = key
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def object_with_each_key_once(pairs):
+    """The dict of a JSON object's pairs, refusing a key given twice at
+    any depth (json's object_pairs_hook is called for every object)."""
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise KeyGivenTwice(key)
+        seen[key] = value
+    return seen
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def not_json(word):
+    """Refuse `NaN`, `Infinity` or `-Infinity` (json's parse_constant
+    hook): words Python's JSON reader takes as numbers and JSON does not
+    have."""
+    raise NotStrictJson(f"{word}, which is not JSON")
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+class NotStrictJson(ValueError):
+    """A spelling Python's JSON reader takes and a strict parser refuses,
+    so a line or a manifest holding one says something to this reader
+    and nothing to another (#365)."""
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def finite_float(text):
+    """The number `text` spells (json's parse_float hook), refused when
+    it is not finite: Python reads `1e999` as infinity, where a strict
+    parser refuses it as it refuses `Infinity`."""
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise NotStrictJson(f"{text}, a number past what JSON holds")
+    return value
 NOT_A_FOLDER = "it is a folder, not a file"
 NOT_REGULAR = "it is not a regular file"
 
@@ -1026,9 +1073,12 @@ def read_sidecar_records(path):
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
     surrogate from `sidecar_lines`), an integer too long to read, nesting
-    too deep (#299). A sidecar that is there and cannot be read as a file
-    (`open_regular`) reads as one unreadable line, so no reader stops
-    on it and a judge names it (#364)."""
+    too deep (#299). A line a strict JSON parser refuses is unreadable
+    too, before its kind is read: a key given twice, as the walk refuses
+    one in an entry, `NaN`, `Infinity` or `-Infinity`, and a number too
+    large to be finite, `1e999` (#365). A sidecar that is there and
+    cannot be read as a file (`open_regular`) reads as one unreadable
+    line, so no reader stops on it and a judge names it (#364)."""
     try:
         lines = sidecar_lines(path)
     except FileNotFoundError:
@@ -1039,7 +1089,10 @@ def read_sidecar_records(path):
     for line in lines:
         try:
             line.encode("utf-8")
-            record = json.loads(line)
+            record = json.loads(line,
+                                object_pairs_hook=object_with_each_key_once,
+                                parse_constant=not_json,
+                                parse_float=finite_float)
             if not isinstance(record, dict):
                 record = None
         except (ValueError, RecursionError):
@@ -1191,8 +1244,15 @@ def stamp_status(reply):
     (status, holds_token). The status is the first INTEGER of the first
     SEQUENCE of the outer SEQUENCE; a token is the SEQUENCE after that
     first one, read for its tag and length and nothing inside it. Bytes
-    that are not this shape are a ValueError."""
-    response = der_expect(reply, 0x30, "the response")
+    that are not this shape are a ValueError, and so are bytes after the
+    reply or after the token (#365): a reader stopping at the element's
+    end and one reading on would see two replies."""
+    tag, response, end = der_element(reply)
+    if tag != 0x30:
+        raise ValueError("the response is not the element RFC 3161 puts "
+                         "there")
+    if end != len(reply):
+        raise ValueError("bytes after the reply")
     tag, info, after = der_element(response)
     if tag != 0x30:
         raise ValueError("its status is not the element RFC 3161 puts there")
@@ -1201,7 +1261,12 @@ def stamp_status(reply):
         raise ValueError("the status code is not a small integer")
     holds_token = after < len(response)
     if holds_token:
-        der_expect(response[after:], 0x30, "the token")
+        tag, _, token_end = der_element(response, after)
+        if tag != 0x30:
+            raise ValueError("the token is not the element RFC 3161 puts "
+                             "there")
+        if token_end != len(response):
+            raise ValueError("bytes after the token")
     return int.from_bytes(status, "big", signed=True), holds_token
 
 
@@ -1260,7 +1325,8 @@ def sidecar_records(path):
     verify. [] for a missing file; None for a line that is not a JSON
     object, which `row_kind` calls unreadable. A line past the digit or
     recursion limit, or not UTF-8, is one of those, never a stopped
-    scan (#331)."""
+    scan (#331), and so is one a strict parser refuses: a key given
+    twice, `NaN`, `Infinity`, or a number past what JSON holds (#365)."""
     return read_sidecar_records(str(path)) or []
 
 
@@ -1341,7 +1407,12 @@ def chain_cursor(log, url):
         # `read_log` read such bytes at all (#299).
         line.encode("utf-8")
         try:
-            record = json.loads(line)
+            # Read as every sidecar row is read (#365): a row a strict
+            # parser refuses is no chain row.
+            record = json.loads(line,
+                                object_pairs_hook=object_with_each_key_once,
+                                parse_constant=not_json,
+                                parse_float=finite_float)
         except (ValueError, RecursionError):
             # One appended line must not stop the chain route at every
             # session end and keeper turn (#331, #344): at worst a chain
@@ -1589,10 +1660,11 @@ def publish_through_recorder(log, url, what):
 
 def last_departure(log):
     """When something of this chain last left the machine, and by which
-    door: the newest `ts` across the publish memo and the anchor
-    sidecar, or {"ts": None, "via": None} when nothing has left. The
-    door is the route, not the file (#248): `published` a head,
-    `published-chain` a batch of the entries, `anchored` a digest. A
+    door: the newest `ts` across the publish memo, the anchors sidecar
+    and the stamps sidecar, or {"ts": None, "via": None} when nothing has
+    left. The door is the route, not the file (#248): `published` a
+    head, `published-chain` a batch of the entries, `anchored` a digest,
+    `stamped` a head an authority granted a token for. A
     batch counts, but not as the head route's departure, so a dead head
     route beside a live chain route reads as what it is. Staleness
     evidence the reader ages, never an alarm or the exit: both files

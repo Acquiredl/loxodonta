@@ -688,6 +688,43 @@ def build(workdir):
                 [unknown("anchor-misplaced-chain", "anchors",
                          'of kind "chain"'), "VALID"])
 
+    # A row a strict JSON parser refuses is no row (#365), and a proof
+    # ends where its tree does.
+    not_a_record = ("ANCHOR-INVALID: sidecar line is not a record — "
+                    "evidence that does not verify is not evidence")
+    proof_row = stored(anchor(head, completed_proof(), 3))
+    sidecar("anchor-key-twice", "anchors",
+            [proof_row.replace(f'"head":"{head}"',
+                               f'"head":"{other}","head":"{head}"')])
+    sidecar_row("anchor-key-twice", "anchors", "A completed proof of the "
+                "head in a row that gives head twice, another chain's "
+                "first: a reader keeping the first would say ANCHOR-MISMATCH "
+                "and one keeping the last ANCHORED, so no reading of the "
+                "line is the row, and it is unreadable.", 3, [not_a_record])
+
+    sidecar("anchor-nan", "anchors", [proof_row[:-1] + ',"x":NaN}'])
+    sidecar_row("anchor-nan", "anchors", "A completed proof of the head "
+                "in a row that also holds NaN, which JSON does not have: a "
+                "strict parser cannot read the line, so it is unreadable "
+                "(Infinity and -Infinity are refused alike).", 3,
+                [not_a_record])
+
+    sidecar("anchor-number-too-large", "anchors",
+            [proof_row[:-1] + ',"x":1e999}'])
+    sidecar_row("anchor-number-too-large", "anchors", "A completed proof of "
+                "the head in a row that also holds 1e999, a number too large "
+                "to be finite: Python reads it as infinity and a strict "
+                "parser refuses it, so the line is unreadable.", 3,
+                [not_a_record])
+
+    sidecar("anchor-trailing-bytes", "anchors",
+            [anchor(head, completed_proof() + b"\x00", 3)])
+    sidecar_row("anchor-trailing-bytes", "anchors", "A completed proof of "
+                "the head with one byte after its timestamp tree: a proof "
+                "is its tree and nothing after it.", 3,
+                ["ANCHOR-INVALID: proof holds bytes after its timestamp tree "
+                 "— evidence that does not verify is not evidence"])
+
     sidecar("stamp-kindless", "stamps",
             [{"authority": "https://authority.example/tsr", "head": head,
               "n": 3, "response":
@@ -714,6 +751,19 @@ def build(workdir):
                 [f"STAMP-INVALID: head {head[:12]}… (entry 3): the reply's "
                  "status is 2 (rejection), so it holds no token — evidence "
                  "that does not verify is not evidence"])
+
+    sidecar("stamp-trailing-bytes", "stamps",
+            [{"authority": "https://authority.example/tsr", "head": head,
+              "kind": "stamp", "n": 3, "response":
+              base64.b64encode(GRANTED_REPLY + bytes(1)).decode("ascii"),
+              "ts": SIDECAR_TS}])
+    sidecar_row("stamp-trailing-bytes", "stamps", "A stamp row of the head "
+                "whose granted reply has one byte after its outer SEQUENCE: "
+                "a reply ends where that SEQUENCE ends, so it is invalid "
+                "with no tool (#365).", 3,
+                [f"STAMP-INVALID: head {head[:12]}… (entry 3): the reply is "
+                 "not a timestamp response: bytes after the reply — "
+                 "evidence that does not verify is not evidence"])
 
     sidecar("stamp-attempt-only", "stamps",
             [{"budget": 3.0, "kind": "attempt",
@@ -856,6 +906,16 @@ def build(workdir):
                 "boolean, so the manifest is refused unread.", 4,
                 "UNSUPPORTED-FORMAT: manifest.json lists a chain whose "
                 "entries is true or false, not an integer")
+
+    # A manifest holding a spelling a strict parser refuses (#365), in
+    # testimony nobody judges: read by one verifier and not another.
+    package("package-tool-nan", package_files(
+        base, change=lambda m: m.update(tool=float("nan"))))
+    package_row("package-tool-nan", "The manifest's tool, testimony nobody "
+                "judges, is NaN, which JSON does not have: a strict JSON "
+                "reader cannot read the manifest, so it is refused unread.",
+                4, "UNSUPPORTED-FORMAT: manifest.json holds NaN, which is "
+                "not JSON; a strict JSON reader cannot read it")
 
     anchored = package_files(base, seals=["anchor"])
     digest = hashlib.sha256(anchored["manifest.json"]).hexdigest()

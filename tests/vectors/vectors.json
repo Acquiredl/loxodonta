@@ -586,6 +586,66 @@
       ]
     },
     {
+      "name": "anchor-key-twice",
+      "about": "A completed proof of the head in a row that gives head twice, another chain's first: a reader keeping the first would say ANCHOR-MISMATCH and one keeping the last ANCHORED, so no reading of the line is the row, and it is unreadable.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-key-twice.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "anchor-nan",
+      "about": "A completed proof of the head in a row that also holds NaN, which JSON does not have: a strict parser cannot read the line, so it is unreadable (Infinity and -Infinity are refused alike).",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-nan.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "anchor-number-too-large",
+      "about": "A completed proof of the head in a row that also holds 1e999, a number too large to be finite: Python reads it as infinity and a strict parser refuses it, so the line is unreadable.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-number-too-large.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "anchor-trailing-bytes",
+      "about": "A completed proof of the head with one byte after its timestamp tree: a proof is its tree and nothing after it.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-trailing-bytes.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
       "name": "stamp-kindless",
       "about": "A stamp row of the head written with no kind member: it reads as a stamp, its reply is granted and holds a token, and with no --authority-chain that token is present and not judged, a note that moves no exit.",
       "args": [
@@ -614,6 +674,21 @@
       "last_line": "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence",
       "stdout": [
         "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "stamp-trailing-bytes",
+      "about": "A stamp row of the head whose granted reply has one byte after its outer SEQUENCE: a reply ends where that SEQUENCE ends, so it is invalid with no tool (#365).",
+      "args": [
+        "verify",
+        "--stamps",
+        "--log",
+        "stamp-trailing-bytes.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply is not a timestamp response: bytes after the reply \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply is not a timestamp response: bytes after the reply \u2014 evidence that does not verify is not evidence"
       ]
     },
     {
@@ -786,6 +861,16 @@
       ],
       "exit": 4,
       "last_line": "UNSUPPORTED-FORMAT: manifest.json lists a chain whose entries is true or false, not an integer"
+    },
+    {
+      "name": "package-tool-nan",
+      "about": "The manifest's tool, testimony nobody judges, is NaN, which JSON does not have: a strict JSON reader cannot read the manifest, so it is refused unread.",
+      "args": [
+        "verify-package",
+        "package-tool-nan"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json holds NaN, which is not JSON; a strict JSON reader cannot read it"
     },
     {
       "name": "package-anchored",

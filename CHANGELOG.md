@@ -35,6 +35,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The verifier prints sidecar, manifest and file-name text escaped, and `head` refuses a tail hash that is not a head, so a crafted row can no longer forge an `ANCHORED` line `supervisor scan` believed. Sidecars are named bare (#349).
 - `verify --stamps` and `verify-package` read a stamp reply's status offline: a rejection, non-DER bytes, or a granted status with no token is `STAMP-INVALID` (`SEAL-INVALID`), holds no token for `stamp`, and is no departure in `supervisor scan` (#370).
 - A folder or a pipe named like a sidecar no longer stops `supervisor scan`, `verify`, `verify-package` or the recorder's writing verbs. `verify` calls it `ANCHOR-INVALID` or `STAMP-INVALID`, exit 3; `anchor`, `stamp` and `publish` say why, exit 73 (#364).
+- A sidecar row giving a key twice, or holding `NaN`, `Infinity` or `-Infinity`, is an unreadable line (`ANCHOR-INVALID`, `STAMP-INVALID`), as a strict parser reads it. A proof with bytes after its timestamp tree is `ANCHOR-INVALID` (#365).
 
 ## [0.9.0] - 2026-09-23
 

@@ -123,6 +123,7 @@ TWINNED = {
                            "PackageStampRowKindTest",
                            "PackageStampReplyStatusTest"],
     "test_sidecar_not_a_file": ["JudgedNotAFileTest", "PackagedNotAFileTest"],
+    "test_sidecar_strictness": ["StrictRowTest"],
 }
 
 

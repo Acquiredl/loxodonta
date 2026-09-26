@@ -213,6 +213,29 @@ def object_with_each_key_once(pairs):
     return seen
 
 
+class NotStrictJson(ValueError):
+    """A spelling Python's JSON reader takes and a strict parser refuses,
+    so a line or a manifest holding one says something to this reader
+    and nothing to another (#365)."""
+
+
+def not_json(word):
+    """Refuse `NaN`, `Infinity` or `-Infinity` (json's parse_constant
+    hook): words Python's JSON reader takes as numbers and JSON does not
+    have."""
+    raise NotStrictJson(f"{word}, which is not JSON")
+
+
+def finite_float(text):
+    """The number `text` spells (json's parse_float hook), refused when
+    it is not finite: Python reads `1e999` as infinity, where a strict
+    parser refuses it as it refuses `Infinity`."""
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise NotStrictJson(f"{text}, a number past what JSON holds")
+    return value
+
+
 def path_leaving_base(path):
     """How a reference path's spelling could lead outside the reference
     base, named; None when it cannot (SPEC §3). A leading slash of
@@ -676,8 +699,14 @@ def bitcoin_height(payload):
 
 def judge_proof(head_hex, proof_bytes):
     """Replay a proof from a chain head. Returns ("bitcoin", height, root),
-    ("pending", digest_hex), or raises ProofError."""
-    node = parse_timestamp(ProofReader(proof_bytes))
+    ("pending", digest_hex), or raises ProofError. A proof is its tree
+    and nothing after it: bytes past the tree's end are refused, as the
+    OpenTimestamps library refuses them, since two readers could each
+    take them for something else (#365)."""
+    reader = ProofReader(proof_bytes)
+    node = parse_timestamp(reader)
+    if reader.pos != len(proof_bytes):
+        raise ProofError("proof holds bytes after its timestamp tree")
     results = replay_proof(bytes.fromhex(head_hex), node)
     for r in results:
         if r["tag"] == TAG_BITCOIN:
@@ -826,9 +855,12 @@ def read_sidecar_records(path):
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
     surrogate from `sidecar_lines`), an integer too long to read, nesting
-    too deep (#299). A sidecar that is there and cannot be read as a file
-    (`open_regular`) reads as one unreadable line, so no reader stops
-    on it and a judge names it (#364)."""
+    too deep (#299). A line a strict JSON parser refuses is unreadable
+    too, before its kind is read: a key given twice, as the walk refuses
+    one in an entry, `NaN`, `Infinity` or `-Infinity`, and a number too
+    large to be finite, `1e999` (#365). A sidecar that is there and
+    cannot be read as a file (`open_regular`) reads as one unreadable
+    line, so no reader stops on it and a judge names it (#364)."""
     try:
         lines = sidecar_lines(path)
     except FileNotFoundError:
@@ -839,7 +871,10 @@ def read_sidecar_records(path):
     for line in lines:
         try:
             line.encode("utf-8")
-            record = json.loads(line)
+            record = json.loads(line,
+                                object_pairs_hook=object_with_each_key_once,
+                                parse_constant=not_json,
+                                parse_float=finite_float)
             if not isinstance(record, dict):
                 record = None
         except (ValueError, RecursionError):
@@ -1170,8 +1205,15 @@ def stamp_status(reply):
     (status, holds_token). The status is the first INTEGER of the first
     SEQUENCE of the outer SEQUENCE; a token is the SEQUENCE after that
     first one, read for its tag and length and nothing inside it. Bytes
-    that are not this shape are a ValueError."""
-    response = der_expect(reply, 0x30, "the response")
+    that are not this shape are a ValueError, and so are bytes after the
+    reply or after the token (#365): a reader stopping at the element's
+    end and one reading on would see two replies."""
+    tag, response, end = der_element(reply)
+    if tag != 0x30:
+        raise ValueError("the response is not the element RFC 3161 puts "
+                         "there")
+    if end != len(reply):
+        raise ValueError("bytes after the reply")
     tag, info, after = der_element(response)
     if tag != 0x30:
         raise ValueError("its status is not the element RFC 3161 puts there")
@@ -1180,7 +1222,12 @@ def stamp_status(reply):
         raise ValueError("the status code is not a small integer")
     holds_token = after < len(response)
     if holds_token:
-        der_expect(response[after:], 0x30, "the token")
+        tag, _, token_end = der_element(response, after)
+        if tag != 0x30:
+            raise ValueError("the token is not the element RFC 3161 puts "
+                             "there")
+        if token_end != len(response):
+            raise ValueError("bytes after the token")
     return int.from_bytes(status, "big", signed=True), holds_token
 
 
@@ -1847,12 +1894,21 @@ def read_manifest(folder):
         # first and another to one keeping the last, and whatever this
         # verifier judged, the recipient's own tools may read the other
         # (#299).
+        # So is a spelling a strict parser refuses (#365): `NaN` in the
+        # testimony a verifier prints and never judges still makes a
+        # manifest one verifier reads and another cannot.
         with open(os.path.join(folder, "manifest.json"), encoding="utf-8") as f:
-            manifest = json.load(f, object_pairs_hook=object_with_each_key_once)
+            manifest = json.load(f, object_pairs_hook=object_with_each_key_once,
+                                 parse_constant=not_json,
+                                 parse_float=finite_float)
     except KeyGivenTwice as twice:
         return None, (f"UNSUPPORTED-FORMAT: manifest.json has key "
                       f"{visible(repr(twice.key))} given twice; no reading "
                       "of it is the manifest")
+    except NotStrictJson as spelled:
+        return None, (f"UNSUPPORTED-FORMAT: manifest.json holds "
+                      f"{visible(str(spelled))}; a strict JSON reader "
+                      "cannot read it")
     except (OSError, ValueError, RecursionError):
         return None, ("UNSUPPORTED-FORMAT: no readable manifest.json at the "
                       "top of this package; not a loxodonta package")
@@ -3960,7 +4016,12 @@ def chain_cursor(log, url):
         # `read_log` read such bytes at all (#299).
         line.encode("utf-8")
         try:
-            record = json.loads(line)
+            # Read as every sidecar row is read (#365): a row a strict
+            # parser refuses is no chain row.
+            record = json.loads(line,
+                                object_pairs_hook=object_with_each_key_once,
+                                parse_constant=not_json,
+                                parse_float=finite_float)
         except (ValueError, RecursionError):
             # One appended line must not stop the chain route at every
             # session end and keeper turn (#331, #344): at worst a chain
