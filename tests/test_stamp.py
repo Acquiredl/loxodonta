@@ -1126,7 +1126,7 @@ class SessionEndStampTest(PublishBase):
         (note,) = attempt_rows(self.stamps())
         self.assertEqual(note["outcome"], "granted")
 
-    def test_a_planted_row_naming_the_head_never_skips_the_stamp(self):
+    def test_a_row_holding_no_granted_reply_does_not_skip_the_stamp(self):
         # #366: a row naming the sealed head with no granted reply in it
         # is no token, so the session end still asks, and keeps the token.
         self.transcript.write_bytes(b"page one\n")

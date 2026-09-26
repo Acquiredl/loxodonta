@@ -1401,6 +1401,41 @@ class AnchorDedupeTest(unittest.TestCase):
         self.assertEqual([r["head"] for r in self.anchor_rows()],
                          [self.head, self.head])
 
+    def manifest(self):
+        """A file to anchor by `--manifest`, and its sha256: the digest
+        the proof is over, which has no entry number."""
+        manifest = self.workdir / "manifest.json"
+        manifest.write_text('{"format": "loxodonta-package/1"}\n',
+                            encoding="utf-8")
+        return manifest, hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    def test_an_anchored_manifest_is_already_anchored_too(self):
+        manifest, digest = self.manifest()
+        first = self.anchor("--manifest", str(manifest))
+        rows = Path(str(manifest) + ".anchors.jsonl").read_text("utf-8")
+
+        again = self.anchor("--manifest", str(manifest))
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual((again.returncode, again.stdout.strip()),
+                         (0, f"already anchored manifest {digest[:12]}…"),
+                         again.stderr)
+        self.assertEqual(self.server.submitted, [bytes.fromhex(digest)])
+        self.assertEqual(
+            Path(str(manifest) + ".anchors.jsonl").read_text("utf-8"), rows)
+
+    def test_force_submits_an_anchored_manifest_again(self):
+        manifest, digest = self.manifest()
+        self.anchor("--manifest", str(manifest))
+
+        forced = self.anchor("--manifest", str(manifest), "--force")
+
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertIn(f"anchored manifest {digest[:12]}… via "
+                      f"{self.server.url}", forced.stdout)
+        self.assertNotIn("already", forced.stdout)
+        self.assertEqual(self.server.submitted, [bytes.fromhex(digest)] * 2)
+
     def test_force_beside_upgrade_is_a_usage_error(self):
         self.anchor()
 
