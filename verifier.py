@@ -790,9 +790,10 @@ def open_regular(path):
                  | getattr(os, "O_BINARY", 0))
     try:
         mode = os.fstat(fd).st_mode
+        if stat.S_ISDIR(mode):
+            raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
         if not stat.S_ISREG(mode):
-            raise OSError(NOT_A_FOLDER if stat.S_ISDIR(mode)
-                          else NOT_REGULAR)
+            raise OSError(errno.EINVAL, NOT_REGULAR, path)
         return os.fdopen(fd, "rb")
     except BaseException:
         os.close(fd)
