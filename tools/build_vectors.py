@@ -814,6 +814,16 @@ def build(workdir):
                 "open as one file; which one is read would depend on where "
                 "the package is verified")
 
+    # A count is an integer and never a boolean (#359): Python reads
+    # true as 1, so a one-line chain listed with "entries": true passed.
+    package("package-entries-boolean", package_files(
+        base, change=lambda m: m["chains"][0].update(entries=True)))
+    package_row("package-entries-boolean", "The manifest lists its chain "
+                "with \"entries\": true: a count is an integer, never a "
+                "boolean, so the manifest is refused unread.", 4,
+                "UNSUPPORTED-FORMAT: manifest.json lists a chain whose "
+                "entries is true or false, not an integer")
+
     anchored = package_files(base, seals=["anchor"])
     digest = hashlib.sha256(anchored["manifest.json"]).hexdigest()
     proof = {"calendar": "https://calendar.example/", "head": digest,

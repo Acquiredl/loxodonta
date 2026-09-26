@@ -102,7 +102,7 @@ The recorder notes how a session-end step went in a row of kind `attempt`, and e
 
 ### Reading a sidecar
 
-Names: `read_log`, `sidecar_path`, `published_path`, `file_problem`, `read_sidecar_records`.
+Names: `read_log`, `sidecar_path`, `published_path`, `NOT_A_FOLDER`, `NOT_REGULAR`, `open_regular`, `file_problem`, `sidecar_lines`, `read_sidecar_records`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 

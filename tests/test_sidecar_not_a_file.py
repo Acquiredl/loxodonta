@@ -15,6 +15,7 @@ authority and receiver the other suites use. No network, no internals.
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -246,7 +247,10 @@ class WrittenNotAFileTest(unittest.TestCase):
     """The operator's verbs that append to a sidecar, with a folder in
     its place: each says what it could not write and why, with the exit
     ADR-0037 gives a file the verb must create and cannot (73), or a
-    sidecar it must read and cannot (66); the folder stays a folder."""
+    sidecar it must read and cannot (66); the folder stays a folder.
+    Every run is bounded, so a verb that waited would fail, not hang."""
+
+    WHY = FOLDER
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -257,9 +261,13 @@ class WrittenNotAFileTest(unittest.TestCase):
                      cwd=self.workdir)
 
     def folder(self, suffix):
+        """What stands where the sidecar belongs: a folder here."""
         path = self.workdir / ("receipts.jsonl" + suffix)
         path.mkdir()
         return path
+
+    def still_there(self, path):
+        return path.is_dir()
 
     def test_anchor_says_the_proof_could_not_be_written(self):
         calendar = start_calendar(self)
@@ -271,8 +279,8 @@ class WrittenNotAFileTest(unittest.TestCase):
         self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("could not be written", result.stderr)
-        self.assertIn(FOLDER, result.stderr)
-        self.assertTrue(sidecar.is_dir())
+        self.assertIn(self.WHY, result.stderr)
+        self.assertTrue(self.still_there(sidecar))
 
     def test_anchor_upgrade_says_the_sidecar_cannot_be_read(self):
         self.folder(".anchors.jsonl")
@@ -282,7 +290,7 @@ class WrittenNotAFileTest(unittest.TestCase):
         self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("receipts.jsonl.anchors.jsonl cannot be read as a "
-                      f"sidecar: {FOLDER}", result.stderr)
+                      f"sidecar: {self.WHY}", result.stderr)
 
     def test_stamp_says_the_token_could_not_be_written(self):
         authority = start_authority(self)
@@ -293,7 +301,7 @@ class WrittenNotAFileTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertIn(FOLDER, result.stderr)
+        self.assertIn(self.WHY, result.stderr)
 
     def test_publish_says_the_memo_could_not_be_written(self):
         # The remote took the head, so the verb says so; the memo that
@@ -308,7 +316,7 @@ class WrittenNotAFileTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("published head", result.stdout)
         self.assertIn("the memo could not be written", result.stderr)
-        self.assertIn(FOLDER, result.stderr)
+        self.assertIn(self.WHY, result.stderr)
         self.assertEqual(len(receiver.received), 1)
 
     def test_publish_chain_sends_nothing_without_the_memo(self):
@@ -322,6 +330,39 @@ class WrittenNotAFileTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("the memo could not be read", result.stderr)
         self.assertEqual(receiver.received, [])
+
+
+@unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+class WrittenPipeTest(WrittenNotAFileTest):
+    """The same verbs with a pipe, and no reader, where the sidecar
+    belongs. An ordinary open of it for appending never returns, so each
+    verb opens without waiting and answers as it does a folder."""
+
+    WHY = PIPE
+
+    def folder(self, suffix):
+        path = self.workdir / ("receipts.jsonl" + suffix)
+        os.mkfifo(path)
+        return path
+
+    def still_there(self, path):
+        return stat.S_ISFIFO(os.lstat(path).st_mode)
+
+
+@unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "symlink"),
+                     "no named pipes here")
+class WrittenPipeLinkTest(WrittenPipeTest):
+    """A link to a pipe is followed, as every file is, and is a pipe."""
+
+    def folder(self, suffix):
+        pipe = self.workdir / ("elsewhere" + suffix)
+        os.mkfifo(pipe)
+        path = self.workdir / ("receipts.jsonl" + suffix)
+        os.symlink(pipe, path)
+        return path
+
+    def still_there(self, path):
+        return stat.S_ISFIFO(os.stat(path).st_mode)
 
 
 class SessionEndNotAFileTest(PublishBase):
@@ -353,6 +394,42 @@ class SessionEndNotAFileTest(PublishBase):
         self.assertNotIn("Traceback", result.stdout)
         for folder in folders:
             self.assertTrue(folder.is_dir(), folder.name)
+
+    def hook(self, payload, *extra):
+        # PublishBase's hook, bounded: a step that waited on a pipe would
+        # fail the test rather than hold the suite.
+        env = isolated_env(self.home, CLAUDE_PROJECT_DIR=str(self.project),
+                           LOXODONTA_HOME=str(self.store),
+                           PYTHONIOENCODING="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook", *extra],
+            cwd=self.project, input=json.dumps(payload).encode("utf-8"),
+            capture_output=True, env=env, timeout=BOUND)
+        result.stdout = result.stdout.decode("utf-8", "replace")
+        result.stderr = result.stderr.decode("utf-8", "replace")
+        return result
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+    def test_every_session_end_step_passes_a_pipe_by_quietly(self):
+        calendar = start_calendar(self)
+        authority = start_authority(self)
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        pipes = [self.chain().with_name(self.chain().name + suffix)
+                 for suffix in SUFFIXES]
+        for pipe in pipes:
+            os.mkfifo(pipe)
+
+        result = self.session_end(
+            "--publish", self.receiver.url,
+            "--publish-chain", self.receiver.url,
+            "--stamp", authority.url,
+            "--anchor", "--calendar", calendar.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        for pipe in pipes:
+            self.assertTrue(stat.S_ISFIFO(os.lstat(pipe).st_mode), pipe.name)
 
 
 class ScannedNotAFileTest(unittest.TestCase):

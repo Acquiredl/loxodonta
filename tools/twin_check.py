@@ -132,7 +132,8 @@ TWINS = (
          "`attempt`, and every reader that judges or schedules skips it, "
          "the recorder's and the supervisor's alike (#240)."),
     Twin("Reading a sidecar",
-         ("read_log", "sidecar_path", "published_path", "file_problem",
+         ("read_log", "sidecar_path", "published_path", "NOT_A_FOLDER",
+          "NOT_REGULAR", "open_regular", "file_problem", "sidecar_lines",
           "read_sidecar_records"),
          ORIGINAL, SUPERVISOR,
          "Where each sidecar lives beside its chain, and how its lines "

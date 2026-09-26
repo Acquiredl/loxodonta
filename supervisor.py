@@ -603,14 +603,38 @@ def fortnight(days, now):
 UPGRADE_EVERY_SECONDS = int(
     os.environ.get("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600))
 
-# Both of verify's ANCHORED lines: the block an attestation claims, not
-# checked, and the block a --block-header checked (ruling 3 on #299). The
-# span is the same either way; the height is the attestation's word in
-# both, which is all the panel shows it as.
-ANCHORED_LINE = re.compile(
-    r"^ANCHORED: entries 0\.\.(\d+)\b.*?Bitcoin block (\d+)")
+# verify's ANCHORED line as the scan meets it: the block an attestation
+# claims, not checked (ruling 3 on #299), since the scan runs verify
+# without --block-header and so never meets the checked sentence. The
+# height is the attestation's word, which is all the panel shows it as.
+# The line is matched whole, word for word as the recorder's
+# `attestation_words` writes it (#349): a line that only starts the same
+# way is not the recorder's verdict, whatever it says after, so a
+# sidecar row whose text reached verify's output as a line of its own
+# could never read as an anchor. A change to that sentence changes the
+# pattern here, and the scan's anchor tests fail until it does. If the
+# scan ever passes --block-header, add the checked sentence beside it.
+ANCHORED_LINES = (
+    re.compile(r"ANCHORED: entries 0\.\.(\d+): the attestation claims "
+               r"Bitcoin block (\d+), and the block was not checked; that "
+               r"block's merkle root must read [0-9a-f]{64}, which "
+               r"--block-header with its header checks"),
+)
+# verify's pending line, whole: the time and the calendar are the row's,
+# printed escaped, so neither holds a space an honest row would write.
 PENDING_LINE = re.compile(
-    r"^ANCHOR-PENDING: head (\S+) submitted (\S+) via (\S+)")
+    r"ANCHOR-PENDING: head ([0-9a-f]{12}…) submitted (\S+) via (\S+) — "
+    r"run `loxodonta anchor --upgrade`")
+
+
+def anchored_span(line):
+    """(entries up to, block height) when `line` is one of the ANCHORED
+    lines above, whole and word for word; None for any other line."""
+    for pattern in ANCHORED_LINES:
+        found = pattern.fullmatch(line)
+        if found:
+            return int(found.group(1)), int(found.group(2))
+    return None
 
 
 def parse_cadence(text):
@@ -936,31 +960,60 @@ def published_path(log):
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+NOT_A_FOLDER = "it is a folder, not a file"
+NOT_REGULAR = "it is not a regular file"
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def open_regular(path):
+    """`path` opened for reading, as a binary file, when it is a regular
+    file; FileNotFoundError when nothing is there, and an OSError naming
+    why when something else is: a folder, a pipe or a device. A sidecar
+    is in the writer's reach, and `mkdir` or `mkfifo` puts one of those
+    where it belongs in one command (#364). The open never waits, since
+    an ordinary open of a pipe waits for a writer that may never come,
+    and the type is asked of the open file, so nothing can be swapped in
+    between the question and the read."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                 | getattr(os, "O_BINARY", 0))
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            raise OSError(NOT_A_FOLDER if stat.S_ISDIR(mode)
+                          else NOT_REGULAR)
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def file_problem(path):
     """Why something is at `path` and cannot be read as a file, in
-    words: a folder, a pipe or a device, or a file this user may not
-    open. None when nothing is there, or a file that opens. A sidecar
-    is in the writer's reach, and `mkdir` puts a folder where one
-    belongs in one command (#364). The type is asked before anything is
-    opened, since opening a pipe waits for a writer that may never
-    come."""
+    words (`open_regular`): a folder, a pipe or a device, or a file this
+    user may not open. None when nothing is there, or a file that
+    opens."""
     try:
-        mode = os.stat(path).st_mode
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        return error.strerror or str(error)
-    if stat.S_ISDIR(mode):
-        return "it is a folder, not a file"
-    if not stat.S_ISREG(mode):
-        return "it is not a regular file"
-    try:
-        with open(path, "rb"):
+        with open_regular(path):
             return None
     except FileNotFoundError:
         return None
     except OSError as error:
+        # Windows refuses to open a folder at all, as a denied permission.
+        if os.path.isdir(path):
+            return NOT_A_FOLDER
         return error.strerror or str(error)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def sidecar_lines(path):
+    """The lines of the sidecar at `path`, split and decoded as
+    `read_log` reads a chain's, from the one file `open_regular` opened:
+    FileNotFoundError when there is none, and an OSError naming why when
+    what is there is not a file."""
+    with open_regular(path) as f:
+        return [line.decode("utf-8", "surrogateescape")
+                for line in split_lines(f.read())]
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
@@ -969,14 +1022,12 @@ def read_sidecar_records(path):
     (every sidecar is optional). A line that is not a JSON object reads
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
-    surrogate from `read_log`), an integer too long to read, nesting too
-    deep (#299). A sidecar that is there and cannot be read as a file
-    (`file_problem`) reads as one unreadable line, so no reader stops
+    surrogate from `sidecar_lines`), an integer too long to read, nesting
+    too deep (#299). A sidecar that is there and cannot be read as a file
+    (`open_regular`) reads as one unreadable line, so no reader stops
     on it and a judge names it (#364)."""
-    if file_problem(path) is not None:
-        return [None]
     try:
-        lines = read_log(path)
+        lines = sidecar_lines(path)
     except FileNotFoundError:
         return None
     except OSError:
@@ -1074,10 +1125,11 @@ SENT_OUTCOMES = ("sent", "submitted", "granted")
 def sidecar_heads(path, sidecar):
     """The heads named by the evidence rows of `path`, a sidecar of kind
     `sidecar` ("anchors", "stamps" or "memo"), a row with no kind among
-    them (ADR-0038), for scheduling only: a head anchored, stamped or
-    sent. An attempt, a chain row, a kind unknown there or an unreadable
-    line names none, so a head only such a row names is still asked
-    about, as `anchor`, `stamp` and `publish` would ask."""
+    them (ADR-0038), for scheduling and display only. An attempt, a
+    chain row, a kind unknown there or an unreadable line names none,
+    so a head only such a row names is still asked about, as `publish`
+    would ask. The keeper asks it of the memo alone: whether a head is
+    already anchored or stamped, `anchor` and `stamp` say (#366)."""
     evidence = SIDECAR_KINDS[sidecar][0]
     return {record["head"] for record in sidecar_records(path)
             if row_kind(sidecar, record) == evidence
@@ -1118,13 +1170,10 @@ def chain_cursor(log, url):
     memo's format, one line this parser declines, while a byte that is
     not UTF-8 means the file is not text in that format at all, so the
     memo holding it is the unreadable one, as it was before #299."""
-    problem = file_problem(published_path(log))
-    if problem is not None:
-        # A folder or a pipe where the memo belongs (#364): a memo that
-        # cannot be read, raised as such, and a pipe is never opened.
-        raise OSError(problem)
     try:
-        lines = read_log(published_path(log))
+        # A folder or a pipe where the memo belongs (#364) is a memo
+        # that cannot be read, raised as such, and never waited on.
+        lines = sidecar_lines(published_path(log))
     except FileNotFoundError:
         return -1
     mine = remote_id(url)
@@ -1168,14 +1217,14 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     --upgrade` (the record's own calendar; judgment stays with verify),
     and, only when the operator opted in with a cadence, a fresh head
     that has aged past it is anchored, and stamped by the authority the
-    marker names, on this same turn (ADR-0032 ruling 3). A head that
-    already holds a token is not asked about again: this guard saves the
-    process, and the recorder's own dedupe makes it safe to get wrong.
-    `failed` stays the anchor's; a refused stamp is already written down
-    in the stamps sidecar by the verb itself. Returns (attempted, note,
-    failed)."""
+    marker names, on this same turn (ADR-0032 ruling 3). Whether the
+    head already holds a proof or a token is the recorder's to say, not
+    this reader's (ADR-0005, #366): `anchor` and `stamp` each answer a
+    head they already hold with exit 0 and ask nobody, which is neither
+    a failure nor a departure. `failed` stays the anchor's; a refused
+    stamp is already written down in the stamps sidecar by the verb
+    itself. Returns (attempted, note, failed)."""
     sidecar = Path(str(log) + ".anchors.jsonl")
-    stamps = Path(str(log) + ".stamps.jsonl")
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
@@ -1185,25 +1234,29 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
     if sidecar.is_file():
-        finished = subprocess.run(
-            [sys.executable, str(LOXODONTA), "anchor", "--upgrade",
-             f"--log={log}"],
-            capture_output=True, encoding="utf-8", env=env)
+        finished = run_verb(["anchor", "--upgrade", f"--log={log}"], env)
         attempted = True
-        if finished.returncode != 0:
+        if finished is None:
+            notes.append("upgrading did not finish in time; the proofs stay "
+                         "as the sidecar holds them and the keeper will try "
+                         "again")
+        elif finished.returncode != 0:
             notes.append("upgrade attempted; a calendar did not answer — "
                          "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
-        if head and head not in sidecar_heads(sidecar, "anchors"):
-            command = [sys.executable, str(LOXODONTA), "anchor",
-                       f"--log={log}"]
+        if head:
+            command = ["anchor", f"--log={log}"]
             for calendar in calendars:
                 command += ["--calendar", calendar]
-            finished = subprocess.run(command, capture_output=True,
-                                      encoding="utf-8", env=env)
+            finished = run_verb(command, env)
             attempted = True
-            if finished.returncode == 73:
+            if finished is None:
+                failed = True
+                notes.append("anchoring did not finish in time; whether a "
+                             "calendar took this head is unknown, and the "
+                             "keeper will try again")
+            elif finished.returncode == 73:
                 # EX_CANTCREAT: a calendar answered and the proof could
                 # not be kept, a folder where the sidecar belongs say.
                 failed = True
@@ -1216,18 +1269,43 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
                              "keeper will try again")
-        if head and authority \
-                and head not in sidecar_heads(stamps, "stamps"):
-            finished = subprocess.run(
-                [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
-                 "--authority", authority],
-                capture_output=True, encoding="utf-8", env=env)
+        if head and authority:
+            finished = run_verb(["stamp", f"--log={log}", "--authority",
+                                 authority], env)
             attempted = True
-            if finished.returncode != 0:
+            if finished is None:
+                notes.append("stamping did not finish in time; whether the "
+                             "authority granted a token is unknown, and the "
+                             "keeper will try again")
+            elif finished.returncode == 73:
+                # EX_CANTCREAT: the token could not be kept, a folder
+                # where the stamps sidecar belongs say (#364).
+                notes.append("stamping failed — the token could not be "
+                             "written beside the chain; it stays unstamped "
+                             "until the sidecar can be written")
+            elif finished.returncode != 0:
                 notes.append("stamping failed — the authority did not "
                              "grant a token for this head; it stays "
                              "unstamped and the keeper will try again")
     return attempted, "; ".join(notes) or None, failed
+
+
+# Seconds the keeper waits for `anchor`, its upgrade, or `stamp`: past
+# four calendars at fifteen seconds each, the most the verbs ask for,
+# with room to spare. A backstop, like the publish keeper's, so one verb
+# that never ends can never hold a tick (#364, #331's class).
+VERB_BACKSTOP = 120
+
+
+def run_verb(args, env):
+    """One recorder verb as a subprocess, its output captured; None when
+    it did not finish inside VERB_BACKSTOP, and it is then left behind."""
+    try:
+        return subprocess.run([sys.executable, str(LOXODONTA), *args],
+                              capture_output=True, encoding="utf-8", env=env,
+                              timeout=VERB_BACKSTOP)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 # --- Publish keeper -----------------------------------------------------------
@@ -1331,8 +1409,10 @@ def publish_through_recorder(log, url, what):
     except subprocess.TimeoutExpired:
         # The recorder bounds its own POST; this is the backstop above
         # it, so one stuck publish can never hold a tick.
-        return (f"publishing the {what} did not finish in time; {stays} "
-                "and the keeper will try again")
+        # Past the POST, the remote may hold what was sent, so this does
+        # not say it stays unsent.
+        return (f"publishing the {what} did not finish in time; whether "
+                "it left is unknown, and the keeper will try again")
     if finished.returncode == 64:
         # A usage exit is the URL refused, not the remote: retrying
         # would never help, and the note must say so.
@@ -1449,11 +1529,10 @@ def assess_anchors(detail, entries):
     anchored = []
     pending = []
     for line in detail:
-        span = ANCHORED_LINE.match(line)
+        span = anchored_span(line)
         if span:
-            anchored.append({"upto": int(span.group(1)),
-                             "height": int(span.group(2))})
-        wait = PENDING_LINE.match(line)
+            anchored.append({"upto": span[0], "height": span[1]})
+        wait = PENDING_LINE.fullmatch(line)
         if wait:
             pending.append({"head": wait.group(1),
                             "submitted": wait.group(2),
@@ -3019,6 +3098,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         verdict, code, detail = verify(log)
         exit_code = scan_exit(code)
         stood_down = exit_code != 0 and superseded(log, detail)
+        anchors = assess_anchors(detail, entries)
         chain = {
             "log": log.as_posix(),
             # Stranded in a worktree: still this repo's history, but pruning
@@ -3030,11 +3110,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             "verdict": verdict,
             "exit": exit_code,
             # VALID says the chain agrees with itself; ANCHORED says it
-            # agrees with a Bitcoin block. Different claims, kept apart.
-            "anchored": any(line.startswith("ANCHORED") for line in detail),
+            # agrees with a Bitcoin block. Different claims, kept apart,
+            # and only verify's own ANCHORED line earns this (#349).
+            "anchored": bool(anchors["anchored"]),
             "superseded": stood_down,
             "detail": detail,
-            "anchors": assess_anchors(detail, entries),
+            "anchors": anchors,
             # When a head last left the machine, published or anchored
             # (ADR-0025): staleness evidence beside the anchor panel,
             # aged by the reader, never raising the exit.
@@ -5946,7 +6027,7 @@ def cmd_package(args):
                       f"{problem}; nothing written (`verify --anchors` "
                       "names it too)", file=sys.stderr)
                 return 1
-    packed =datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    packed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     default = Path.cwd() / f"loxodonta-package-{stem}"
     out = Path(args.out) if args.out else (
         default if args.folder else default.with_name(default.name + ".zip"))
@@ -7630,8 +7711,12 @@ function chainRow(chain) {
   drill.type = "button";
   drill.addEventListener("click", () => runDrill(chain.log));
   row.appendChild(drill);
-  const anchoredLine =
-    chain.detail.find(line => line.startsWith("ANCHORED"));
+  // The line shown is one the scan read as an anchor, by its span; a
+  // line that only starts "ANCHORED" is not taken for one (#349).
+  const spans = (chain.anchors ? chain.anchors.anchored : [])
+    .map(span => "ANCHORED: entries 0.." + span.upto);
+  const anchoredLine = chain.detail.find(line => spans.some(span =>
+    line.startsWith(span + ": ")));
   row.appendChild(el("p", "claim",
     rung === "anchored" && anchoredLine ? anchoredLine : CLAIM[rung]));
   if (chain.detail.length) {
