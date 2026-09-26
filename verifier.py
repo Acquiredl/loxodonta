@@ -1591,6 +1591,11 @@ def manifest_refusal(manifest):
                 and isinstance(listing.get("entries"), int)):
             return ("manifest.json lists a chain without a bare file name, "
                     "a head, and an entry count")
+        # JSON's true and false read as 1 and 0 to Python's int check,
+        # and a count is never either (SPEC §10.2), as a chain's n is not.
+        if isinstance(listing["entries"], bool):
+            return ("manifest.json lists a chain whose entries is true or "
+                    "false, not an integer")
         # Its sidecars are found by its name plus a suffix, the longer
         # one `.anchors.jsonl`, so the name must leave room for both.
         if not bare_name(anchors_path(listing["path"])):
@@ -1611,6 +1616,9 @@ def manifest_refusal(manifest):
                 and isinstance(listing.get("bytes"), int)):
             return ("manifest.json lists an artifact without a bare file "
                     "name, a sha256, and a byte count")
+        if isinstance(listing["bytes"], bool):
+            return ("manifest.json lists an artifact whose bytes is true or "
+                    "false, not an integer")
     # The transcript's bytes are committed by the artifacts list and
     # nowhere else (one commitment home per fact), so a chain naming a
     # transcript the artifacts do not list names a file nothing vouches for.
