@@ -3217,6 +3217,43 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calendar.submitted, [bytes.fromhex(head)])
 
+    def test_a_row_whose_proof_does_not_replay_never_stands_the_keeper_down(self):
+        # #366: the keeper runs `anchor` on each ripe head and leaves it
+        # to the verb, which counts a head anchored only on a proof that
+        # replays (#348). One chain per row that does not, and one beside
+        # them holding a proof the calendar gave: one scan asks the
+        # calendar about each planted head, and never about the anchored
+        # one, which `anchor` answers `already anchored`.
+        calendar = self.start_calendar()
+        planted = {}
+        for session, proof in (("sess-empty", ""), ("sess-short", "AAAA"),
+                               ("sess-unread", "not base64!"),
+                               ("sess-number", 5)):
+            # Its own actions, so no two chains share a head.
+            log = make_chain(self.root / "alpha" / "receipts", session,
+                             action=session + " step {i}")
+            planted[session] = chain_head(log)
+            Path(str(log) + ".anchors.jsonl").write_text(
+                json.dumps({"kind": "anchor", "head": chain_head(log),
+                            "n": 2, "ts": ago(600), "proof": proof}) + "\n",
+                encoding="utf-8")
+        good = make_chain(self.root / "alpha" / "receipts", "sess-good",
+                          action="sess-good step {i}")
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "anchor", "--log", str(good),
+             "--calendar", calendar.url],
+            capture_output=True, check=True, env=self.env)
+        calendar.submitted.clear()
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=self.env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(sorted(d.hex() for d in calendar.submitted),
+                         sorted(planted.values()),
+                         "a planted row stood the keeper down, or a head "
+                         "with a proof was submitted again")
+
     def test_default_is_off_and_nothing_is_submitted_without_opt_in(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")

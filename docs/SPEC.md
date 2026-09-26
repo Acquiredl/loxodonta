@@ -264,7 +264,9 @@ The rows of unknown kinds are named first (§9.2). Then each proof and each unre
 
 `ANCHOR-MISMATCH` and `ANCHOR-INVALID` are exit 3, the tier of `HEAD-MISMATCH` in §6's precedence (1 > 3 > 5 > 2), and every finding is printed. `ANCHORED`, `ANCHOR-PENDING`, `ANCHOR-UNANSWERED`, `NO-ANCHORS`, a row of an unknown kind and `HEADER-UNMATCHED` (§9.6) move no exit code, and with no finding the last line is `VALID`.
 
-The recorder's writing paths ask the same shape question of every row. `anchor --upgrade` and the session-end upgrade skip a row of the wrong shape, and a pending proof with no `calendar`, since there is no calendar to ask. At session end a head counts as already anchored only when a row for it has a proof that replays, pending or complete, so a row of the wrong shape, an empty proof or one that does not replay never stops the head being submitted (#348).
+The recorder's writing paths ask the same shape question of every row. `anchor --upgrade` and the session-end upgrade skip a row of the wrong shape, and a pending proof with no `calendar`, since there is no calendar to ask. At session end a head counts as already anchored only when a row for it has a proof that replays, pending or complete, so a row of the wrong shape, an empty proof or one that does not replay never stops the head being submitted (#348). `anchor` asks the same: a head the sidecar holds such a proof for is `already anchored`, exit 0, and no calendar is asked, unless `--force` is given. The supervisor's keeper runs `anchor` and leaves the question to it (#366).
+
+**The limit.** A pending attestation is signed by nobody, so a row naming a head with a well-formed proof that replays, forged in a dozen bytes or copied from another head's row, stops a new commitment of that head, and nothing offline can tell it from a calendar's. Such a row never reads as a checked anchor. A forged or copied pending proof is `ANCHOR-PENDING`. A completed proof copied from another head is `ANCHORED` as a claim of its block, not checked, since what it replays to from this head is not that block's merkle root: a `--block-header` for the real block checks the row it was copied from and never this one, and with no such row beside it is `HEADER-UNMATCHED`.
 
 A package judges each chain's anchors sidecar by these rules, its words mapped as §10.5 says; the manifest's anchor is judged by §10.6.
 
@@ -304,6 +306,10 @@ The rows of unknown kinds are named first (§9.2). Then each token and each unre
 4. The token goes to `openssl` as §10.8 says, with `head` as the digest it must carry and FILE as the chain. Accepted, it is `STAMPED` for entries `0..n`, `n` taken from the chain as in §9.4: a key the chain file certifies signed that head under its own clock, the time inside the token is that key's word, and the row's `authority` is named as testimony. Refused, it is `STAMP-INVALID`, with `openssl`'s reason. When no tool or input could judge it, for a reason §10.8 lists, it is `stamp not judged: <reason>`: the token is present, and nobody judged it.
 
 `STAMP-INVALID` is exit 3, the tier of `ANCHOR-MISMATCH`. `STAMPED`, `stamp not judged`, `NO-STAMPS` and a row of an unknown kind move no exit code. A package judges each chain's stamps sidecar by these rules when its row sets `stamps` (§10.2), and the manifest's token by §10.6.
+
+`stamp` and the session end count a head as already stamped only when a stamp row for it has a `response` that is base64, read strictly, of a reply whose status is granted (0 or 1), read as the query reads it; the token is not judged. A row of the wrong shape, or a reply that was not granted, does not stop the head being asked about, and the supervisor's keeper runs `stamp` and leaves the question to it (#366).
+
+**The limit.** A reply's status sits outside the token's signature, so a row naming a head with a granted status, a reply forged in seven bytes or copied from another head's row, stops a new stamp of that head, and nothing offline can tell it from the authority's. Such a row never reads as a judged stamp: without `openssl` and the authority's chain file it is `stamp not judged`, and with them `STAMP-INVALID`, since no key the chain certifies signed that head.
 
 ### 9.8 The memo
 

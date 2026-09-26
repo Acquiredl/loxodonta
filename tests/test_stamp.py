@@ -139,6 +139,18 @@ def reply(status, token=b""):
 PLACEHOLDER_TOKEN = der(0x30, b"a placeholder token the recorder never reads")
 GRANTED = reply(0, PLACEHOLDER_TOKEN)
 
+# The `response` of a token row holding no reply the authority granted
+# (#366): not a string, not base64, base64 of bytes that are not a
+# TimeStampResp, and base64 of a reply the authority refused. None of
+# them stamps the head it names.
+NO_GRANTED_REPLY = (
+    5, None, "not base64!",
+    base64.b64encode(b"no timestamp response").decode(),
+    base64.b64encode(reply(2)).decode(),
+)
+# A granted reply in seven bytes, made by nobody: status 0, and no token.
+FORGED_GRANTED = base64.b64encode(reply(0)).decode()
+
 
 # --- Fake authority -----------------------------------------------------------
 
@@ -823,6 +835,65 @@ class StampRowKindTest(unittest.TestCase):
         self.assertEqual((rows[1]["head"], rows[1]["kind"]),
                          (self.head, "stamp"))
 
+    def test_a_row_holding_no_granted_reply_is_not_the_heads_token(self):
+        # #366: a row naming the head and holding no granted reply is
+        # not its token. Only a reply whose status says granted stamps a
+        # head, read as the query reads it, so for each of these the
+        # verb still asks, and writes the token it is granted.
+        for response in NO_GRANTED_REPLY:
+            with self.subTest(response=response):
+                self.authority.received.clear()
+                planted = self.token_row(response=response)
+                self.write_sidecar(planted)
+
+                result = self.stamp()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(),
+                                 f"stamped head {self.head[:12]}… (entry 1) "
+                                 f"via {self.authority.url}")
+                self.assertEqual(len(self.authority.received), 1)
+                rows = rows_of(self.sidecar)
+                self.assertEqual(rows[0], json.loads(planted))
+                self.assertEqual(
+                    (rows[1]["head"], rows[1]["kind"],
+                     base64.b64decode(rows[1]["response"])),
+                    (self.head, "stamp", GRANTED))
+
+    def test_the_limit_a_forged_or_copied_granted_reply_stops_a_new_stamp(self):
+        # #366, the limit SPEC 9.7 names, pinned so it stays visible: a
+        # granted status is not signed, so a reply forged in seven bytes,
+        # or a real one copied from another head's row, is taken for the
+        # head's token and nothing is asked. Without openssl verify says
+        # the token is not judged, never that it is stamped.
+        first = self.stamp()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        (token,) = [r for r in rows_of(self.sidecar)
+                    if r.get("kind") == "stamp"]
+        run_receipts("log", "--actor", "agent", "--action", "step 2",
+                     cwd=self.workdir)
+        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        for name, response in (("forged", FORGED_GRANTED),
+                               ("copied", token["response"])):
+            with self.subTest(row=name):
+                self.authority.received.clear()
+                self.write_sidecar(self.token_row(head=newer, n=2,
+                                                  response=response))
+
+                result = self.stamp()
+                judged = self.verify()
+
+                self.assertEqual(result.stdout.strip(),
+                                 f"already stamped head {newer[:12]}… "
+                                 "(entry 2)")
+                self.assertEqual(self.authority.received, [])
+                self.assertEqual(judged.returncode, 0,
+                                 judged.stdout + judged.stderr)
+                self.assertIn("stamp not judged: no --authority-chain FILE "
+                              "given", judged.stdout)
+                self.assertNotIn("STAMPED", judged.stdout)
+
     def test_a_row_of_an_unknown_kind_naming_the_head_is_not_its_token(self):
         # Only a token stamps a head. A row of a kind the recorder does
         # not know is not one, whatever head it names, so the verb still
@@ -1089,6 +1160,34 @@ class SessionEndStampTest(PublishBase):
         self.assertEqual(token["head"], self.head())
         (note,) = attempt_rows(self.stamps())
         self.assertEqual(note["outcome"], "granted")
+
+    def test_a_row_holding_no_granted_reply_does_not_skip_the_stamp(self):
+        # #366: a row naming the sealed head with no granted reply in it
+        # is no token, so the session end still asks, and keeps the token.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        # The commitment the session end seals comes first, and that
+        # entry is the head the planted row must name.
+        self.session_end()
+        head = self.head()
+        for response in NO_GRANTED_REPLY:
+            with self.subTest(response=response):
+                self.authority.received.clear()
+                planted = {"kind": "stamp", "head": head,
+                           "response": response}
+                self.stamps().write_text(json.dumps(planted) + "\n", "utf-8")
+
+                result = self.session_end("--stamp", self.authority.url)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(len(self.authority.received), 1)
+                rows = rows_of(self.stamps())
+                self.assertEqual(rows[0], planted)
+                (token,) = [r for r in rows[1:] if r.get("kind") == "stamp"]
+                self.assertEqual((token["head"], self.head()), (head, head))
+                (note,) = attempt_rows(self.stamps())
+                self.assertEqual(note["outcome"], "granted")
 
     def test_an_authority_that_never_answers_is_abandoned_on_the_hooks_clock(self):
         # The one query has a bounded timeout well inside the budget, and
@@ -1471,6 +1570,38 @@ class JudgedStampTest(unittest.TestCase):
         self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)",
                       result.stdout)
         self.assertNotRegex(result.stdout, r"(?m)^VALID$")
+
+    def test_the_limit_a_forged_or_copied_reply_stops_a_new_stamp(self):
+        # #366, the limit SPEC 9.7 names: a reply's status sits outside
+        # the token's signature, so a forged granted status, or a real
+        # token moved to another head, is taken for the head's token and
+        # no query is sent. With openssl and the chain file, verify calls
+        # either one STAMP-INVALID, never STAMPED.
+        self.stamp()
+        run_receipts("log", "--actor", "agent", "--action", "step 3",
+                     cwd=self.workdir)
+        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        (row,) = rows_of(self.sidecar)
+        for name, response in (("forged", FORGED_GRANTED),
+                               ("copied", row["response"])):
+            with self.subTest(row=name):
+                self.sidecar.write_text(json.dumps(
+                    {**row, "head": newer, "n": 3, "response": response})
+                    + "\n", encoding="utf-8")
+                asked = self.queries
+
+                again = self.stamp()
+                judged = self.verify()
+
+                self.assertEqual(again.stdout.strip(),
+                                 f"already stamped head {newer[:12]}… "
+                                 "(entry 3)")
+                self.assertEqual(self.queries, asked)
+                self.assertEqual(judged.returncode, 3,
+                                 judged.stdout + judged.stderr)
+                self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)",
+                              judged.stdout)
+                self.assertNotIn("STAMPED", judged.stdout)
 
     def test_a_token_from_an_authority_the_chain_file_does_not_name_is_invalid(self):
         # The chain file is whom the operator trusts: a token signed by

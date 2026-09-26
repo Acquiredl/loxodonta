@@ -1322,6 +1322,228 @@ class MalformedAnchorRowTest(unittest.TestCase):
                 self.assertEqual(len(lines), 3)
 
 
+# A pending proof in twelve bytes, made by nobody: a pending attestation
+# naming "http://x" and no operation before it. It replays from any head.
+FORGED_PENDING = "AIPf4w0u+QyOCQhodHRwOi8veA=="
+
+
+class AnchorDedupeTest(unittest.TestCase):
+    """#366: `anchor` asks the session end's question before it asks a
+    calendar. A head the sidecar holds a proof for that replays is
+    `already anchored`, exit 0, and no calendar is asked, unless `--force`
+    says otherwise, so the supervisor's keeper can run the verb on every
+    turn a head is ripe and leave the answer to it. A row that does not
+    replay is not the head's anchor. A row that does replay, forged or
+    copied from another head, is taken for one: nothing offline tells a
+    pending proof from a calendar's apart, and the tests below that say
+    so pin the limit SPEC 9.4 names, and what verify says of such a row."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+        self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
+        self.server = start_calendar(self, b"fake-nonce")
+        run_receipts("init", cwd=self.workdir)
+        self.log_step("step 1")
+
+    def log_step(self, action):
+        run_receipts("log", "--actor", "agent", "--action", action,
+                     cwd=self.workdir)
+        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+
+    def anchor(self, *extra):
+        return run_receipts("anchor", "--calendar", self.server.url, *extra,
+                            cwd=self.workdir)
+
+    def anchor_rows(self):
+        return [json.loads(line) for line in
+                self.sidecar.read_text("utf-8").splitlines()]
+
+    def test_an_anchored_head_is_already_anchored_and_no_calendar_is_asked(self):
+        first = self.anchor()
+        rows = self.sidecar.read_text("utf-8")
+
+        again = self.anchor()
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual((again.returncode, again.stdout.strip()),
+                         (0, f"already anchored head {self.head[:12]}… "
+                             "(entry 1)"), again.stderr)
+        self.assertEqual(len(self.server.submitted), 1)
+        self.assertEqual(self.sidecar.read_text("utf-8"), rows,
+                         "nothing was tried, so nothing is written down")
+
+    def test_a_completed_proof_is_already_anchored_too(self):
+        self.anchor()
+        self.server.mode = "complete"
+        upgraded = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+        self.sidecar.write_text(json.dumps(self.anchor_rows()[-1]) + "\n",
+                                encoding="utf-8")
+
+        again = self.anchor()
+
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("already anchored", again.stdout)
+        self.assertEqual(len(self.server.submitted), 1)
+
+    def test_force_submits_an_anchored_head_again(self):
+        self.anchor()
+
+        forced = self.anchor("--force")
+
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertIn(f"anchored head {self.head[:12]}… (entry 1) via "
+                      f"{self.server.url}", forced.stdout)
+        self.assertNotIn("already", forced.stdout)
+        self.assertEqual(self.server.submitted, [bytes.fromhex(self.head)] * 2)
+        self.assertEqual([r["head"] for r in self.anchor_rows()],
+                         [self.head, self.head])
+
+    def manifest(self):
+        """A file to anchor by `--manifest`, and its sha256: the digest
+        the proof is over, which has no entry number."""
+        manifest = self.workdir / "manifest.json"
+        manifest.write_text('{"format": "loxodonta-package/1"}\n',
+                            encoding="utf-8")
+        return manifest, hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    def test_an_anchored_manifest_is_already_anchored_too(self):
+        manifest, digest = self.manifest()
+        first = self.anchor("--manifest", str(manifest))
+        rows = Path(str(manifest) + ".anchors.jsonl").read_text("utf-8")
+
+        again = self.anchor("--manifest", str(manifest))
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual((again.returncode, again.stdout.strip()),
+                         (0, f"already anchored manifest {digest[:12]}…"),
+                         again.stderr)
+        self.assertEqual(self.server.submitted, [bytes.fromhex(digest)])
+        self.assertEqual(
+            Path(str(manifest) + ".anchors.jsonl").read_text("utf-8"), rows)
+
+    def test_force_submits_an_anchored_manifest_again(self):
+        manifest, digest = self.manifest()
+        self.anchor("--manifest", str(manifest))
+
+        forced = self.anchor("--manifest", str(manifest), "--force")
+
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertIn(f"anchored manifest {digest[:12]}… via "
+                      f"{self.server.url}", forced.stdout)
+        self.assertNotIn("already", forced.stdout)
+        self.assertEqual(self.server.submitted, [bytes.fromhex(digest)] * 2)
+
+    def test_force_beside_upgrade_is_a_usage_error(self):
+        self.anchor()
+
+        result = run_receipts("anchor", "--upgrade", "--force",
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("--force", result.stderr)
+        self.assertEqual(self.server.polled, [])
+
+    def test_a_new_head_is_anchored_although_the_old_one_holds_a_proof(self):
+        self.anchor()
+        old = self.head
+        self.log_step("step 2")
+
+        result = self.anchor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([r["head"] for r in self.anchor_rows()],
+                         [old, self.head])
+
+    def test_a_row_whose_proof_does_not_replay_is_not_the_heads_anchor(self):
+        for proof in ("", "AAAA", "not base64!", 5, None):
+            with self.subTest(proof=proof):
+                self.server.submitted.clear()
+                planted = {"kind": "anchor", "head": self.head, "n": 1,
+                           "proof": proof}
+                self.sidecar.write_text(json.dumps(planted) + "\n",
+                                        encoding="utf-8")
+
+                result = self.anchor()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertNotIn("already", result.stdout)
+                self.assertEqual(self.server.submitted,
+                                 [bytes.fromhex(self.head)])
+                self.assertEqual(self.anchor_rows()[0], planted)
+
+    def test_the_limit_a_forged_pending_proof_stops_a_new_anchor(self):
+        # The limit, pinned: nobody signs a pending attestation, so a
+        # dozen bytes naming the head replay and are taken for its
+        # anchor. verify never reads it as a checked one: it is pending.
+        self.sidecar.write_text(json.dumps(
+            {"kind": "anchor", "head": self.head, "n": 1,
+             "proof": FORGED_PENDING}) + "\n", encoding="utf-8")
+
+        result = self.anchor()
+        judged = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already anchored", result.stdout)
+        self.assertEqual(self.server.submitted, [])
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertIn(f"ANCHOR-PENDING: head {self.head[:12]}…",
+                      judged.stdout)
+        self.assertNotIn("ANCHORED", judged.stdout)
+
+    def test_the_limit_a_pending_proof_copied_from_another_head_stops_it(self):
+        # A calendar's own pending proof, moved to the next head: it
+        # still replays, to another commitment, so it is taken for that
+        # head's anchor, and verify reads it as pending, never anchored.
+        self.anchor()
+        (row,) = self.anchor_rows()
+        self.log_step("step 2")
+        self.sidecar.write_text(json.dumps({**row, "head": self.head, "n": 2})
+                                + "\n", encoding="utf-8")
+
+        result = self.anchor()
+        judged = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertIn("already anchored", result.stdout)
+        self.assertEqual(len(self.server.submitted), 1)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertIn(f"ANCHOR-PENDING: head {self.head[:12]}…",
+                      judged.stdout)
+        self.assertNotIn("ANCHORED", judged.stdout)
+
+    def test_the_limit_a_completed_proof_copied_from_another_head(self):
+        # A completed proof moved to the next head replays too, but to a
+        # root that is not its block's: verify reads the claim as not
+        # checked, and the block's own header checks the row it came
+        # from and never the copy, which alone is HEADER-UNMATCHED.
+        self.anchor()
+        self.server.mode = "complete"
+        run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        completed = self.anchor_rows()[-1]
+        header = block_header(replayed_root(
+            completed["head"], self.server.nonce, self.server.prefix,
+            self.server.suffix))
+        self.log_step("step 2")
+        copied = {**completed, "head": self.head, "n": 2}
+        self.sidecar.write_text(json.dumps(copied) + "\n", encoding="utf-8")
+
+        result = self.anchor()
+        judged = run_receipts("verify", "--anchors", "--block-header",
+                              header.hex(), cwd=self.workdir)
+
+        self.assertIn("already anchored", result.stdout)
+        self.assertEqual(len(self.server.submitted), 1)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertIn("ANCHORED: entries 0..2: the attestation claims Bitcoin "
+                      "block 850000, and the block was not checked",
+                      judged.stdout)
+        self.assertIn("HEADER-UNMATCHED", judged.stdout)
+        self.assertNotIn("existed by the block", judged.stdout)
+
+
 # A sidecar field as a writer bent on fooling the reader would fill it
 # (#349): an escape sequence that turns the terminal red, a newline and
 # a forged verdict line, and a bidi override that reorders what follows.

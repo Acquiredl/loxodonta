@@ -1063,10 +1063,11 @@ SENT_OUTCOMES = ("sent", "submitted", "granted")
 def sidecar_heads(path, sidecar):
     """The heads named by the evidence rows of `path`, a sidecar of kind
     `sidecar` ("anchors", "stamps" or "memo"), a row with no kind among
-    them (ADR-0038), for scheduling only: a head anchored, stamped or
-    sent. An attempt, a chain row, a kind unknown there or an unreadable
-    line names none, so a head only such a row names is still asked
-    about, as `anchor`, `stamp` and `publish` would ask."""
+    them (ADR-0038), for scheduling and display only. An attempt, a
+    chain row, a kind unknown there or an unreadable line names none,
+    so a head only such a row names is still asked about, as `publish`
+    would ask. The keeper asks it of the memo alone: whether a head is
+    already anchored or stamped, `anchor` and `stamp` say (#366)."""
     evidence = SIDECAR_KINDS[sidecar][0]
     return {record["head"] for record in sidecar_records(path)
             if row_kind(sidecar, record) == evidence
@@ -1152,14 +1153,14 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     --upgrade` (the record's own calendar; judgment stays with verify),
     and, only when the operator opted in with a cadence, a fresh head
     that has aged past it is anchored, and stamped by the authority the
-    marker names, on this same turn (ADR-0032 ruling 3). A head that
-    already holds a token is not asked about again: this guard saves the
-    process, and the recorder's own dedupe makes it safe to get wrong.
-    `failed` stays the anchor's; a refused stamp is already written down
-    in the stamps sidecar by the verb itself. Returns (attempted, note,
-    failed)."""
+    marker names, on this same turn (ADR-0032 ruling 3). Whether the
+    head already holds a proof or a token is the recorder's to say, not
+    this reader's (ADR-0005, #366): `anchor` and `stamp` each answer a
+    head they already hold with exit 0 and ask nobody, which is neither
+    a failure nor a departure. `failed` stays the anchor's; a refused
+    stamp is already written down in the stamps sidecar by the verb
+    itself. Returns (attempted, note, failed)."""
     sidecar = Path(str(log) + ".anchors.jsonl")
-    stamps = Path(str(log) + ".stamps.jsonl")
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
@@ -1177,7 +1178,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                          "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
-        if head and head not in sidecar_heads(sidecar, "anchors"):
+        if head:
             command = [sys.executable, str(LOXODONTA), "anchor",
                        f"--log={log}"]
             for calendar in calendars:
@@ -1190,8 +1191,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
                              "keeper will try again")
-        if head and authority \
-                and head not in sidecar_heads(stamps, "stamps"):
+        if head and authority:
             finished = subprocess.run(
                 [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
                  "--authority", authority],
