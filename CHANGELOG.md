@@ -13,16 +13,27 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Added
 
 - `docs/TWINS.md` lists every rule written in more than one script, and `tools/twin_check.py --check` fails the suite when a copy drifts from the recorder's or a shared name goes undeclared (#337).
+- `tools/twin_check.py --write` copies each twin's original from `loxodonta.py` over its copies in place, and each copy now carries a line naming its original. `--check` fails on a copy without one (#342).
+- SPEC section 10 states every rule `verify-package` applies, and `docs/PACKAGE.md` points at it. Six package vectors join `tests/vectors/`: unsealed, an altered artifact, a name twice in a zip, a missing seal, an unknown format, an anchored manifest (#341).
+- SPEC section 9 states every rule `verify --anchors` and `verify --stamps` apply to a sidecar row, and `docs/ANCHORING.md` points at it. Fourteen anchor and stamp sidecar vectors join `tests/vectors/`, none needing a network or `openssl` (#343).
 - `docs/CONTROLS.md`: each mechanism mapped to the NIST SP 800-53, PCI DSS, OWASP T8, AIUC-1 and WIMSE controls it bears on, in NIST IR 8477's vocabulary, as a mapping and never an attestation; `house_check` refuses attestation words there (#338).
 
 ### Changed
 
 - Anchor rows name their kind (`"kind": "anchor"`), and a row with none reads as an anchor. A row of an unknown kind is named by its line (`ANCHOR-UNKNOWN-KIND`), never judged, and moves no exit code (ADR-0038, #335).
+- Stamp rows name their kind (`"kind": "stamp"`), and a row with none reads as a stamp. A row of an unknown kind is named by its line (`STAMP-UNKNOWN-KIND`), never judged, and moves no exit code (ADR-0038, #339).
+- Publish memo head rows name their kind (`"kind": "head"`), and a row with none reads as a head. The chain cursor counts `chain` rows alone, so a row of an unknown kind moves nothing (ADR-0038, #340).
 
 ### Fixed
 
 - `supervisor scan` no longer stops with a traceback on a sidecar or transcript line holding an integer past 4,300 digits or nesting past the recursion limit. The writer can reach those files, so one line could stop the audit (#331).
 - `loxodonta hook` answers a payload holding the same lines with exit 65, as for any payload it cannot read, not a traceback and exit 70 (#331).
+- `verify-package` no longer gives a verdict that depends on the recipient's system: it refuses a name Windows reads otherwise (`C:x`, `a?b`, `NUL`, `LONGFI~1.TXT`, a trailing dot), one past 255 bytes, and two names differing in case or Unicode form (#358).
+- The supervisor reads sidecar rows as the recorder does, so an unknown kind no longer stops the keeper posting, stamping or anchoring a head. A memo line nested too deep no longer stops `publish --chain` (#344).
+- Malformed anchor and stamp rows (a field missing or of the wrong type) no longer crash `verify`, `verify-package`, `anchor`, `stamp`, `supervisor scan` or the session end. An anchor row reads `ANCHOR-INVALID`, a package manifest's `SEAL-INVALID`, naming the field (#348).
+- A row holding no granted reply no longer stops `stamp` or the session end stamping its head. The keeper now asks `anchor` and `stamp`; `anchor` says `already anchored` for a replaying proof (`--force` resubmits). Forged rows stay a limit (#366).
+- `verify-package` refuses a manifest whose `entries` or `bytes` is `true` or `false`, named by its field: Python counted a boolean as an integer, so a one-line chain listed with `"entries": true` passed (#359).
+- The verifier prints sidecar, manifest and file-name text escaped, and `head` refuses a tail hash that is not a head, so a crafted row can no longer forge an `ANCHORED` line `supervisor scan` believed. Sidecars are named bare (#349).
 
 ## [0.9.0] - 2026-09-23
 

@@ -1,6 +1,6 @@
 {
   "format": "0.1",
-  "about": "Conformance vectors for the receipt format (docs/SPEC.md). Run each row's args from inside this folder; the exit and the last line of stdout must be as given. See README.md.",
+  "about": "Conformance vectors for the receipt format and the package (docs/SPEC.md). Run each row's args from inside this folder; the exit and the last line of stdout must be as given. See README.md.",
   "vectors": [
     {
       "name": "genesis-only",
@@ -410,6 +410,389 @@
       ],
       "exit": 66,
       "last_line": ""
+    },
+    {
+      "name": "anchor-pending",
+      "about": "A pending proof of the head, as a calendar first answers: not a failure, and it earns nothing yet.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-pending.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHOR-PENDING: head fab3462eec00\u2026 submitted 2026-09-23T12:05:00Z via https://calendar.example/ \u2014 run `loxodonta anchor --upgrade`",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-complete",
+      "about": "A completed proof of the head and no block header given: the block is the attestation's claim, and the line says it was not checked.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-complete.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHORED: entries 0..3: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read a0592f67027757ad17f4b44d3ea1e19395807e8bf7be07fa8de69b5c347a72f1, which --block-header with its header checks",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-complete-checked",
+      "about": "The same proof with the header of the block it claims: its merkle root is the one the proof replays to, so the block is checked and named by the header's hash.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--block-header",
+        "000000201111111111111111111111111111111111111111111111111111111111111111f1727a345c9be68dfa07bef78b7e809593e1a13e4db4f417ad577702672f59a098c1b36a1942031707000000",
+        "--log",
+        "anchor-complete.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHORED: entries 0..3 existed by the block whose header hashes to aa11334a81018ef6a6e5425937b1d1101d0c7f498f06a928293febd510d8c411, whose merkle root a0592f67027757ad17f4b44d3ea1e19395807e8bf7be07fa8de69b5c347a72f1 is the one the proof replays to; the attestation calls it Bitcoin block 850123, which is your header source's word, and the hash is what a second source can confirm",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-mismatch",
+      "about": "A completed proof of a head that is no entry's hash in this chain: this log is not the anchored history.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-mismatch.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-MISMATCH: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history",
+      "stdout": [
+        "ANCHOR-MISMATCH: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history"
+      ]
+    },
+    {
+      "name": "anchor-invalid-proof",
+      "about": "A proof of the head cut two bytes short, so it does not replay: evidence that does not verify.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-invalid-proof.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: truncated proof \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: truncated proof \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "anchor-unreadable-line",
+      "about": "A line that is JSON but not an object: no row at all, so invalid evidence, never skipped.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-unreadable-line.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "anchor-attempt-only",
+      "about": "The note a session-end anchor leaves when no calendar answered, and no proof: testimony, skipped, so the sidecar reads as an empty one.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-attempt-only.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-kindless",
+      "about": "A completed proof of entry 2's head written with no kind member, as the first rows were: it reads as an anchor, whenever it was written.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-kindless.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHORED: entries 0..2: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read b8d161dd366ecbf694607e39b08d90d9365f6c76eb7aad941b933196c7621f83, which --block-header with its header checks",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-kind-null",
+      "about": "A proof of another chain's head with the kind null: a kind that is not a string is unknown, not kind-less, so the row is named and not judged (a reader taking it for an anchor would say ANCHOR-MISMATCH).",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-kind-null.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHOR-UNKNOWN-KIND: line 1 of anchor-kind-null.jsonl.anchors.jsonl is of a kind that is null, not a string \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-unknown-kind",
+      "about": "A row of a kind this verifier does not know, with no head and no proof: named and not judged, and the exit is the chain's (a reader taking it for an anchor would say ANCHOR-INVALID).",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-unknown-kind.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHOR-UNKNOWN-KIND: line 1 of anchor-unknown-kind.jsonl.anchors.jsonl is of kind \"witness-note\" \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
+        "VALID"
+      ]
+    },
+    {
+      "name": "anchor-misplaced-chain",
+      "about": "The publish memo's chain row, in the anchors sidecar: a kind of another sidecar is named and not judged, as an unknown one is.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-misplaced-chain.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "ANCHOR-UNKNOWN-KIND: line 1 of anchor-misplaced-chain.jsonl.anchors.jsonl is of kind \"chain\" \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
+        "VALID"
+      ]
+    },
+    {
+      "name": "stamp-kindless",
+      "about": "A stamp row of the head written with no kind member: it reads as a stamp, and with no --authority-chain its token is present and not judged, a note that moves no exit.",
+      "args": [
+        "verify",
+        "--stamps",
+        "--log",
+        "stamp-kindless.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "stamp not judged: no --authority-chain FILE given \u2014 head fab3462eec00\u2026 (entry 3) holds a token, present and not judged here (ADR-0032)",
+        "VALID"
+      ]
+    },
+    {
+      "name": "stamp-attempt-only",
+      "about": "The note a session-end stamp leaves when the authority did not answer, and no token: skipped, so the sidecar reads as an empty one.",
+      "args": [
+        "verify",
+        "--stamps",
+        "--log",
+        "stamp-attempt-only.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "VALID"
+      ]
+    },
+    {
+      "name": "stamp-unknown-kind",
+      "about": "A row of a kind this verifier does not know, with no head and no response: named and not judged (a reader taking it for a stamp would say STAMP-INVALID).",
+      "args": [
+        "verify",
+        "--stamps",
+        "--log",
+        "stamp-unknown-kind.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "stdout": [
+        "STAMP-UNKNOWN-KIND: line 1 of stamp-unknown-kind.jsonl.stamps.jsonl is of kind \"witness-note\" \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
+        "VALID"
+      ]
+    },
+    {
+      "name": "package-unsealed",
+      "about": "One chain and the project record, listed by a manifest declaring no seal: the ceiling, with its limit.",
+      "args": [
+        "verify-package",
+        "package-unsealed"
+      ],
+      "exit": 0,
+      "last_line": "SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest; indistinguishable from a wholesale regeneration, since no seal is declared"
+    },
+    {
+      "name": "package-artifact-altered",
+      "about": "The same package with project.json rewritten after the manifest listed it: its sha256 is not the listed one.",
+      "args": [
+        "verify-package",
+        "package-artifact-altered"
+      ],
+      "exit": 2,
+      "last_line": "ARTIFACT-DIVERGED: something in this package is not what the manifest lists (the lines above say what)"
+    },
+    {
+      "name": "package-named-twice",
+      "about": "A zip of the unsealed package with a second member of the chain's name ahead of it, entry 2 edited: which one is read depends on the unzip, so it is refused unopened.",
+      "args": [
+        "verify-package",
+        "package-named-twice.zip"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: package-named-twice.zip holds two members that unpack to one file, 'receipts-vector.jsonl' twice; which one is read depends on the tool that unpacks it, so this verifier refuses it unopened"
+    },
+    {
+      "name": "package-seal-missing",
+      "about": "The manifest declares an anchor and no manifest.json.anchors.jsonl is in the package: a stripped seal fails, never reads as unsealed.",
+      "args": [
+        "verify-package",
+        "package-seal-missing"
+      ],
+      "exit": 3,
+      "last_line": "SEAL-MISSING: a seal the manifest declares is not in this package (the seal line above says which)"
+    },
+    {
+      "name": "package-unknown-format",
+      "about": "The manifest's format is a tag this verifier does not speak: a refusal, and nothing is judged.",
+      "args": [
+        "verify-package",
+        "package-unknown-format"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: package is format \"loxodonta-package/2\"; this verifier speaks \"loxodonta-package/1\""
+    },
+    {
+      "name": "package-name-drive",
+      "about": "The manifest lists its artifact as C:x, a drive only on Windows: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-drive"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
+      "name": "package-name-backslash",
+      "about": "The manifest lists its artifact as a\\b, a folder only on Windows: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-backslash"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
+      "name": "package-name-trailing-dot",
+      "about": "The manifest lists its artifact as project.json., which Windows opens as project.json, stripping the dot, and no other system does: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-trailing-dot"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
+      "name": "package-name-device",
+      "about": "The manifest lists its artifact as NUL, a device on Windows: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-device"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
+      "name": "package-name-refused-character",
+      "about": "The manifest lists its artifact as a?b, which a Windows unzip lands as a_b: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-refused-character"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
+      "name": "package-name-short",
+      "about": "The manifest lists its artifact as LONGFI~1.TXT, an 8.3 short name Windows opens for a long one: a name is judged by its characters, so it is refused on every system, unread.",
+      "args": [
+        "verify-package",
+        "package-name-short"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+    },
+    {
+      "name": "package-name-case",
+      "about": "The manifest lists project.json and the package holds PROJECT.JSON: some systems open it for the name and others do not, so it is refused on every system.",
+      "args": [
+        "verify-package",
+        "package-name-case"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: this package holds 'PROJECT.JSON', which some systems open as 'project.json', a name the verifier reads, and others do not; which file is judged would depend on where it is verified, so this verifier refuses it"
+    },
+    {
+      "name": "package-names-one-file",
+      "about": "The manifest lists A.txt and a.txt with one hash, and only a.txt is in the package: one file on Windows and macOS, two names elsewhere, so it is refused on every system.",
+      "args": [
+        "verify-package",
+        "package-names-one-file"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json names 'A.txt' and 'a.txt', which some systems open as one file; which one is read would depend on where the package is verified"
+    },
+    {
+      "name": "package-entries-boolean",
+      "about": "The manifest lists its chain with \"entries\": true: a count is an integer, never a boolean, so the manifest is refused unread.",
+      "args": [
+        "verify-package",
+        "package-entries-boolean"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists a chain whose entries is true or false, not an integer"
+    },
+    {
+      "name": "package-anchored",
+      "about": "The manifest's sha256 anchored by a completed proof, and the header of the block its attestation claims given: the rung, the block named by the header's hash.",
+      "args": [
+        "verify-package",
+        "package-anchored",
+        "--block-header",
+        "000000201111111111111111111111111111111111111111111111111111111111111111d36e638ceba60d8e26beeaae130fcc280b248c9f738f343906b63ea6ac82c61a98c1b36a1942031707000000"
+      ],
+      "exit": 0,
+      "last_line": "SELF-CONSISTENT + ANCHORED: every chain walks clean and every artifact matches the manifest, and the manifest existed by the block whose header hashes to b6eed9fd921eb901384173feee3236d5dec2c511e7101efdbc461cca3790dcbd, which its anchor calls Bitcoin block 850123"
+    },
+    {
+      "name": "package-anchored-unchecked",
+      "about": "The same package with no header given: the rung is earned, and the block is the attestation's claim.",
+      "args": [
+        "verify-package",
+        "package-anchored"
+      ],
+      "exit": 0,
+      "last_line": "SELF-CONSISTENT + ANCHORED: every chain walks clean and every artifact matches the manifest, and the manifest's anchor claims Bitcoin block 850123, a block not checked here"
     }
   ]
 }

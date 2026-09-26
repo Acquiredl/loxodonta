@@ -51,6 +51,7 @@ from urllib.parse import urlsplit
 # supervisor.py — the three constants must agree (the suite says so).
 # FORMAT_VERSION is the frozen receipt format of the chain files it
 # keeps (SPEC §2.1).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 TOOL_VERSION = "0.9.0"
 FORMAT_VERSION = "0.1"
 
@@ -63,6 +64,7 @@ HEADS_FILE = "heads.jsonl"
 # delimited entries exactly as they sit in the chain file; the content
 # type says which. A chain batch names its file in one header.
 HEAD_TYPE = "application/json"
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 CHAIN_TYPE = "application/x-ndjson"
 CHAIN_HEADER = "X-Loxodonta-Chain"
 
@@ -104,6 +106,7 @@ DEADLINE_SECONDS = float(os.environ.get("RECEIVER_DEADLINE_SECONDS", 60))
 # hand-edited token file that would not make a clean URL is replaced.
 TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+")
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 
 
@@ -229,6 +232,7 @@ def receipt_of(line):
     return n, digest
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def split_lines(data):
     """The lines of a chain's or a sidecar's bytes, by the one rule every
     reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
@@ -618,6 +622,7 @@ def cmd_serve(args):
 
 # --- The command line ----------------------------------------------------------
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
@@ -632,12 +637,14 @@ def checkout_commit(home):
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def version_line(prog, home):
     """Three identities on one line: tool, format, commit (ADR-0022)."""
     return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
             f"commit {checkout_commit(home)})")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class VersionAction(argparse.Action):
     """`--version`, answered only when asked: the commit is one git
     question, and no other command pays for it."""
@@ -651,6 +658,7 @@ class VersionAction(argparse.Action):
         parser.exit()
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def speak_utf8():
     """Write stdout and stderr in UTF-8, whatever the console dealt
     (#294): Windows hands a pipe cp1252, where one CJK character or
@@ -677,6 +685,7 @@ def mebibytes(text):
     return value
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's

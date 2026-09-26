@@ -381,6 +381,78 @@ class SessionEndAnchorTest(unittest.TestCase):
         (proof,) = self.proofs()
         self.assertEqual((proof["head"], proof["kind"]), (head, "anchor"))
 
+    def test_a_malformed_row_leaves_the_session_end_anchor_working(self):
+        # #348: one row the writer shaped wrong must not turn the anchor
+        # off. A row naming the head with a proof that is not a string is
+        # not its anchor, so the head is still submitted, and the step
+        # still writes down how it went.
+        self.tool_call()
+        head = run_receipts("head", "--log", str(self.chain),
+                            cwd=self.workdir).stdout.strip()
+        self.sidecar.write_text(
+            json.dumps({"head": [1]}) + "\n"
+            + json.dumps({"head": head, "proof": 5}) + "\n",
+            encoding="utf-8")
+
+        result = self.session_end("--anchor", "--calendar", self.server.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertEqual(self.server.submitted, [bytes.fromhex(head)])
+        (row,) = self.attempts()
+        self.assertEqual((row["step"], row["outcome"]), ("anchor", "submitted"))
+        anchors = [r for r in self.records() if r.get("kind") == "anchor"]
+        self.assertEqual([r["head"] for r in anchors], [head])
+
+    def test_a_proof_that_does_not_replay_is_not_the_heads_anchor(self):
+        # A string, and base64, so the row has its shape; but verify calls
+        # it ANCHOR-INVALID, so it anchors nothing, and the session end
+        # still submits the head and writes down how it went.
+        self.tool_call()
+        head = run_receipts("head", "--log", str(self.chain),
+                            cwd=self.workdir).stdout.strip()
+        for proof in ("", "AAAA"):
+            with self.subTest(proof=proof):
+                self.server.submitted.clear()
+                self.sidecar.write_text(
+                    json.dumps({"kind": "anchor", "head": head, "n": 1,
+                                "proof": proof}) + "\n", encoding="utf-8")
+
+                result = self.session_end("--anchor", "--calendar",
+                                          self.server.url)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.server.submitted, [bytes.fromhex(head)])
+                (row,) = self.attempts()
+                self.assertEqual(row["outcome"], "submitted")
+
+    def test_a_malformed_row_leaves_the_session_end_upgrade_working(self):
+        # The upgrade half reads every sidecar in the folder: rows it
+        # cannot act on ahead of a pending proof are skipped, and the
+        # proof is still completed.
+        self.tool_call()
+        self.session_end("--anchor", "--calendar", self.server.url)
+        rows = self.sidecar.read_text("utf-8")
+        (pending,) = [r for r in self.records() if r.get("kind") == "anchor"]
+        no_calendar = {k: v for k, v in pending.items() if k != "calendar"}
+        self.sidecar.write_text(
+            json.dumps(no_calendar) + "\n"
+            + json.dumps({**pending, "proof": 5}) + "\n"
+            + json.dumps({**pending, "calendar": [1]}) + "\n" + rows,
+            encoding="utf-8")
+        self.server.mode = "complete"
+        self.tool_call()
+
+        result = self.session_end("--anchor", "--calendar", self.server.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commitment = hashlib.sha256(bytes.fromhex(pending["head"])
+                                    + self.server.nonce).hexdigest()
+        self.assertIn(commitment, self.server.polled)
+        upgraded = [r for r in self.records()[5:]
+                    if r.get("kind") == "anchor" and r["head"] == pending["head"]]
+        self.assertEqual(len(upgraded), 1, self.records())
+
     def test_a_later_session_end_upgrades_the_pending_proof(self):
         self.tool_call()
         self.session_end("--anchor", "--calendar", self.server.url)
@@ -1105,6 +1177,488 @@ class AnchorRowKindTest(unittest.TestCase):
         self.assertEqual(other.polled, [])
         self.assertEqual(self.sidecar.read_text("utf-8").splitlines(),
                          [foreign])
+
+
+class LeftOut:
+    """A field left out of a row rather than given a value."""
+
+    def __repr__(self):
+        return "<left out>"
+
+
+DROP = LeftOut()
+
+# Anchor rows that are JSON objects but not the shape of one (#348): the
+# fields changed from a good pending row, and the reason the judge gives.
+# Each value is one a reader would crash on or misread, and none of them
+# may reach a verdict line: the reason names the field and its JSON type.
+MALFORMED_ROWS = (
+    ({"head": [1]}, "record's head is an array, not a string"),
+    ({"head": 7}, "record's head is a number, not a string"),
+    ({"proof": DROP}, "record has no proof"),
+    ({"proof": 5}, "record's proof is a number, not a string"),
+    ({"proof": None}, "record's proof is null, not a string"),
+    ({"proof": "zz!not-base64!zz"}, "record's proof is not base64"),
+    ({"calendar": ["http://sneaky.test"]},
+     "record's calendar is an array, not a string"),
+    ({"ts": {"when": "sneaky"}}, "record's ts is an object, not a string"),
+    ({"n": "sneaky"}, "record's n is a string, not an integer"),
+    ({"n": True}, "record's n is true or false, not an integer"),
+)
+
+
+class MalformedAnchorRowTest(unittest.TestCase):
+    """#348: the anchors sidecar is writer-reachable, so a row that is a
+    JSON object but not the shape of an anchor row is judged, never
+    trusted: `ANCHOR-INVALID`, exit 3, with a reason naming the field and
+    its type and never its value. The recorder's own paths skip such a
+    row, since it is not a proof they can act on, and never crash."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+        self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
+        self.server = start_calendar(self, b"fake-nonce")
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+
+    def row(self, change=None):
+        """A pending proof of the head, as the recorder writes one, with
+        `change` applied: a field replaced, or left out for DROP."""
+        row = {"kind": "anchor", "head": self.head, "n": 1,
+               "ts": "2026-09-25T10:00:00Z", "calendar": self.server.url,
+               "proof": base64.b64encode(pending_proof(
+                   self.server.nonce, self.server.url)).decode()}
+        for field, value in (change or {}).items():
+            if value is DROP:
+                del row[field]
+            else:
+                row[field] = value
+        return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+    def write_sidecar(self, *lines):
+        self.sidecar.write_text("".join(line + "\n" for line in lines),
+                                encoding="utf-8")
+
+    def test_a_malformed_row_is_anchor_invalid_naming_the_field(self):
+        for change, reason in MALFORMED_ROWS:
+            with self.subTest(change=change):
+                self.write_sidecar(self.row(), self.row(change))
+
+                result = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 3,
+                                 result.stdout + result.stderr)
+                self.assertIn(f"ANCHOR-INVALID: {reason} — evidence that "
+                              "does not verify is not evidence", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+                # The good row beside it is still judged.
+                self.assertIn("ANCHOR-PENDING", result.stdout)
+                self.assertNotIn("sneaky", result.stdout)
+                self.assertNotIn("not-base64", result.stdout)
+
+    def test_a_pending_row_naming_no_calendar_is_still_judged(self):
+        # A calendar is where an upgrade asks, not part of the proof: a
+        # row without one still replays, so it is no evidence against.
+        self.write_sidecar(self.row({"calendar": DROP}))
+
+        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ANCHOR-PENDING", result.stdout)
+
+    def test_upgrade_skips_a_malformed_row_and_upgrades_the_good_one(self):
+        self.server.mode = "complete"
+        malformed = [self.row(change) for change, _ in MALFORMED_ROWS]
+        # A calendar left out is no fault in a proof, but nothing to ask.
+        malformed.append(self.row({"calendar": DROP}))
+        self.write_sidecar(*malformed, self.row())
+
+        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("upgraded:", result.stdout)
+        self.assertEqual(len(self.server.polled), 1)
+        lines = self.sidecar.read_text("utf-8").splitlines()
+        self.assertEqual(lines[:-1], malformed + [self.row()])
+        upgraded = json.loads(lines[-1])
+        self.assertEqual((upgraded["kind"], upgraded["head"], upgraded["n"]),
+                         ("anchor", self.head, 1))
+
+    def test_upgrade_skips_a_calendar_that_is_not_a_url(self):
+        # A string, so the row has its shape, but no URL urllib can open:
+        # the row is skipped with a line naming the field, and the good
+        # pending proof behind it is still asked about and upgraded.
+        other = start_calendar(self, b"other-nonce")
+        other.mode = "complete"
+        good = json.dumps({
+            "kind": "anchor", "head": self.head, "n": 1,
+            "ts": "2026-09-25T10:00:00Z", "calendar": other.url,
+            "proof": base64.b64encode(pending_proof(
+                other.nonce, other.url)).decode()},
+            sort_keys=True, separators=(",", ":"))
+        for calendar in ("not a sneaky url", "http://[sneaky"):
+            with self.subTest(calendar=calendar):
+                other.polled.clear()
+                bad = self.row({"calendar": calendar})
+                self.write_sidecar(bad, good)
+
+                result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn("the record's calendar is not a URL this "
+                              "recorder can ask", result.stderr)
+                self.assertNotIn("sneaky", result.stdout + result.stderr)
+                self.assertEqual(len(other.polled), 1)
+                self.assertIn("upgraded:", result.stdout)
+                lines = self.sidecar.read_text("utf-8").splitlines()
+                self.assertEqual(lines[:2], [bad, good])
+                self.assertEqual(len(lines), 3)
+
+
+# A pending proof in twelve bytes, made by nobody: a pending attestation
+# naming "http://x" and no operation before it. It replays from any head.
+FORGED_PENDING = "AIPf4w0u+QyOCQhodHRwOi8veA=="
+
+
+class AnchorDedupeTest(unittest.TestCase):
+    """#366: `anchor` asks the session end's question before it asks a
+    calendar. A head the sidecar holds a proof for that replays is
+    `already anchored`, exit 0, and no calendar is asked, unless `--force`
+    says otherwise, so the supervisor's keeper can run the verb on every
+    turn a head is ripe and leave the answer to it. A row that does not
+    replay is not the head's anchor. A row that does replay, forged or
+    copied from another head, is taken for one: nothing offline tells a
+    pending proof from a calendar's apart, and the tests below that say
+    so pin the limit SPEC 9.4 names, and what verify says of such a row."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+        self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
+        self.server = start_calendar(self, b"fake-nonce")
+        run_receipts("init", cwd=self.workdir)
+        self.log_step("step 1")
+
+    def log_step(self, action):
+        run_receipts("log", "--actor", "agent", "--action", action,
+                     cwd=self.workdir)
+        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+
+    def anchor(self, *extra):
+        return run_receipts("anchor", "--calendar", self.server.url, *extra,
+                            cwd=self.workdir)
+
+    def anchor_rows(self):
+        return [json.loads(line) for line in
+                self.sidecar.read_text("utf-8").splitlines()]
+
+    def test_an_anchored_head_is_already_anchored_and_no_calendar_is_asked(self):
+        first = self.anchor()
+        rows = self.sidecar.read_text("utf-8")
+
+        again = self.anchor()
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual((again.returncode, again.stdout.strip()),
+                         (0, f"already anchored head {self.head[:12]}… "
+                             "(entry 1)"), again.stderr)
+        self.assertEqual(len(self.server.submitted), 1)
+        self.assertEqual(self.sidecar.read_text("utf-8"), rows,
+                         "nothing was tried, so nothing is written down")
+
+    def test_a_completed_proof_is_already_anchored_too(self):
+        self.anchor()
+        self.server.mode = "complete"
+        upgraded = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+        self.sidecar.write_text(json.dumps(self.anchor_rows()[-1]) + "\n",
+                                encoding="utf-8")
+
+        again = self.anchor()
+
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("already anchored", again.stdout)
+        self.assertEqual(len(self.server.submitted), 1)
+
+    def test_force_submits_an_anchored_head_again(self):
+        self.anchor()
+
+        forced = self.anchor("--force")
+
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertIn(f"anchored head {self.head[:12]}… (entry 1) via "
+                      f"{self.server.url}", forced.stdout)
+        self.assertNotIn("already", forced.stdout)
+        self.assertEqual(self.server.submitted, [bytes.fromhex(self.head)] * 2)
+        self.assertEqual([r["head"] for r in self.anchor_rows()],
+                         [self.head, self.head])
+
+    def manifest(self):
+        """A file to anchor by `--manifest`, and its sha256: the digest
+        the proof is over, which has no entry number."""
+        manifest = self.workdir / "manifest.json"
+        manifest.write_text('{"format": "loxodonta-package/1"}\n',
+                            encoding="utf-8")
+        return manifest, hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    def test_an_anchored_manifest_is_already_anchored_too(self):
+        manifest, digest = self.manifest()
+        first = self.anchor("--manifest", str(manifest))
+        rows = Path(str(manifest) + ".anchors.jsonl").read_text("utf-8")
+
+        again = self.anchor("--manifest", str(manifest))
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual((again.returncode, again.stdout.strip()),
+                         (0, f"already anchored manifest {digest[:12]}…"),
+                         again.stderr)
+        self.assertEqual(self.server.submitted, [bytes.fromhex(digest)])
+        self.assertEqual(
+            Path(str(manifest) + ".anchors.jsonl").read_text("utf-8"), rows)
+
+    def test_force_submits_an_anchored_manifest_again(self):
+        manifest, digest = self.manifest()
+        self.anchor("--manifest", str(manifest))
+
+        forced = self.anchor("--manifest", str(manifest), "--force")
+
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertIn(f"anchored manifest {digest[:12]}… via "
+                      f"{self.server.url}", forced.stdout)
+        self.assertNotIn("already", forced.stdout)
+        self.assertEqual(self.server.submitted, [bytes.fromhex(digest)] * 2)
+
+    def test_force_beside_upgrade_is_a_usage_error(self):
+        self.anchor()
+
+        result = run_receipts("anchor", "--upgrade", "--force",
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertIn("--force", result.stderr)
+        self.assertEqual(self.server.polled, [])
+
+    def test_a_new_head_is_anchored_although_the_old_one_holds_a_proof(self):
+        self.anchor()
+        old = self.head
+        self.log_step("step 2")
+
+        result = self.anchor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([r["head"] for r in self.anchor_rows()],
+                         [old, self.head])
+
+    def test_a_row_whose_proof_does_not_replay_is_not_the_heads_anchor(self):
+        for proof in ("", "AAAA", "not base64!", 5, None):
+            with self.subTest(proof=proof):
+                self.server.submitted.clear()
+                planted = {"kind": "anchor", "head": self.head, "n": 1,
+                           "proof": proof}
+                self.sidecar.write_text(json.dumps(planted) + "\n",
+                                        encoding="utf-8")
+
+                result = self.anchor()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertNotIn("already", result.stdout)
+                self.assertEqual(self.server.submitted,
+                                 [bytes.fromhex(self.head)])
+                self.assertEqual(self.anchor_rows()[0], planted)
+
+    def test_the_limit_a_forged_pending_proof_stops_a_new_anchor(self):
+        # The limit, pinned: nobody signs a pending attestation, so a
+        # dozen bytes naming the head replay and are taken for its
+        # anchor. verify never reads it as a checked one: it is pending.
+        self.sidecar.write_text(json.dumps(
+            {"kind": "anchor", "head": self.head, "n": 1,
+             "proof": FORGED_PENDING}) + "\n", encoding="utf-8")
+
+        result = self.anchor()
+        judged = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already anchored", result.stdout)
+        self.assertEqual(self.server.submitted, [])
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertIn(f"ANCHOR-PENDING: head {self.head[:12]}…",
+                      judged.stdout)
+        self.assertNotIn("ANCHORED", judged.stdout)
+
+    def test_the_limit_a_pending_proof_copied_from_another_head_stops_it(self):
+        # A calendar's own pending proof, moved to the next head: it
+        # still replays, to another commitment, so it is taken for that
+        # head's anchor, and verify reads it as pending, never anchored.
+        self.anchor()
+        (row,) = self.anchor_rows()
+        self.log_step("step 2")
+        self.sidecar.write_text(json.dumps({**row, "head": self.head, "n": 2})
+                                + "\n", encoding="utf-8")
+
+        result = self.anchor()
+        judged = run_receipts("verify", "--anchors", cwd=self.workdir)
+
+        self.assertIn("already anchored", result.stdout)
+        self.assertEqual(len(self.server.submitted), 1)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertIn(f"ANCHOR-PENDING: head {self.head[:12]}…",
+                      judged.stdout)
+        self.assertNotIn("ANCHORED", judged.stdout)
+
+    def test_the_limit_a_completed_proof_copied_from_another_head(self):
+        # A completed proof moved to the next head replays too, but to a
+        # root that is not its block's: verify reads the claim as not
+        # checked, and the block's own header checks the row it came
+        # from and never the copy, which alone is HEADER-UNMATCHED.
+        self.anchor()
+        self.server.mode = "complete"
+        run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        completed = self.anchor_rows()[-1]
+        header = block_header(replayed_root(
+            completed["head"], self.server.nonce, self.server.prefix,
+            self.server.suffix))
+        self.log_step("step 2")
+        copied = {**completed, "head": self.head, "n": 2}
+        self.sidecar.write_text(json.dumps(copied) + "\n", encoding="utf-8")
+
+        result = self.anchor()
+        judged = run_receipts("verify", "--anchors", "--block-header",
+                              header.hex(), cwd=self.workdir)
+
+        self.assertIn("already anchored", result.stdout)
+        self.assertEqual(len(self.server.submitted), 1)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertIn("ANCHORED: entries 0..2: the attestation claims Bitcoin "
+                      "block 850000, and the block was not checked",
+                      judged.stdout)
+        self.assertIn("HEADER-UNMATCHED", judged.stdout)
+        self.assertNotIn("existed by the block", judged.stdout)
+
+
+# A sidecar field as a writer bent on fooling the reader would fill it
+# (#349): an escape sequence that turns the terminal red, a newline and
+# a forged verdict line, and a bidi override that reorders what follows.
+# HOSTILE is a whole field; HOSTILE_HEAD puts all three in the first 12
+# characters, which is as much of a head as most lines print. SHOWN and
+# SHOWN_HEAD are how each must read: every steering character written as
+# its escape (#295), so none of them reaches the terminal.
+FORGED_LINE = "ANCHORED: entries 0..99 in Bitcoin block 777"
+HOSTILE = "2026-09-25T10:00:00Z\x1b[31m\n" + FORGED_LINE + "‮"
+SHOWN = "2026-09-25T10:00:00Z\\x1b[31m\\n" + FORGED_LINE + "\\u202e"
+HOSTILE_HEAD = "\x1b[31m‮\n" + FORGED_LINE
+SHOWN_HEAD = "\\x1b[31m\\u202e\\n" + FORGED_LINE
+SHOWN_HEAD_12 = "\\x1b[31m\\u202e\\nANCHO"
+
+
+def assert_printed_escaped(case, stdout, shown):
+    """`shown` is in `stdout`, and nothing a hostile field held reached it
+    raw: no escape character, no bidi override, and no line the forged
+    verdict starts."""
+    case.assertIn(shown, stdout)
+    case.assertNotIn("\x1b", stdout)
+    case.assertNotIn("‮", stdout)
+    forged = [line for line in stdout.splitlines()
+              if line.lstrip().startswith(FORGED_LINE)]
+    case.assertEqual(forged, [], stdout)
+
+
+def completed_row(head, calendar="https://calendar.example.test"):
+    """A completed proof of `head`, as one sidecar line: one sha256 op,
+    then a Bitcoin attestation at block 850000."""
+    proof = b"\x08" + b"\x00" + TAG_BITCOIN + ots_varbytes(ots_varint(850000))
+    return json.dumps({"kind": "anchor", "head": head, "n": 1,
+                       "ts": "2026-09-24T09:00:00Z", "calendar": calendar,
+                       "proof": base64.b64encode(proof).decode()},
+                      sort_keys=True, separators=(",", ":"))
+
+
+class AnchorFieldEscapeTest(unittest.TestCase):
+    """#349: every field of an anchor row that `verify --anchors` prints
+    is the writer's text, and is printed escaped (#295), so no row can
+    paint a verdict of its own. The fixture is AnchorRowKindTest's."""
+
+    setUp = AnchorRowKindTest.setUp
+    pending_row = AnchorRowKindTest.pending_row
+    write_sidecar = AnchorRowKindTest.write_sidecar
+    verify = AnchorRowKindTest.verify
+
+    def test_a_pending_rows_time_and_calendar_print_escaped(self):
+        for field in ("ts", "calendar"):
+            with self.subTest(field=field):
+                self.write_sidecar(self.pending_row(**{field: HOSTILE}))
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                assert_printed_escaped(self, result.stdout, SHOWN)
+                (pending,) = [line for line in result.stdout.splitlines()
+                              if line.startswith("ANCHOR-PENDING")]
+                self.assertIn(SHOWN, pending)
+                self.assertEqual(result.stdout.splitlines()[-1], "VALID")
+
+    def test_an_unanswered_rows_time_and_calendar_print_escaped(self):
+        for field in ("ts", "calendar"):
+            with self.subTest(field=field):
+                self.write_sidecar(completed_row(self.head),
+                                   self.pending_row(**{field: HOSTILE}))
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                assert_printed_escaped(self, result.stdout, SHOWN)
+                (unanswered,) = [line for line in result.stdout.splitlines()
+                                 if line.startswith("ANCHOR-UNANSWERED")]
+                self.assertIn(SHOWN, unanswered)
+                anchored = [line for line in result.stdout.splitlines()
+                            if line.startswith("ANCHORED")]
+                self.assertEqual(len(anchored), 1)
+                self.assertTrue(anchored[0].startswith(
+                    "ANCHORED: entries 0..1: "), anchored)
+
+    def test_a_head_that_appears_nowhere_prints_escaped(self):
+        self.write_sidecar(self.pending_row(head=HOSTILE_HEAD))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        assert_printed_escaped(self, result.stdout,
+                               f"ANCHOR-MISMATCH: anchored head {SHOWN_HEAD} "
+                               "appears nowhere in this log")
+
+    def test_no_sidecar_is_named_by_its_bare_name(self):
+        log = self.workdir / "receipts.jsonl"
+
+        result = run_receipts("verify", "--anchors", "--log", str(log),
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NO-ANCHORS: receipts.jsonl.anchors.jsonl not found — ",
+                      result.stdout)
+        self.assertNotIn(str(self.workdir), result.stdout)
+
+    def test_upgrade_prints_a_settled_heads_calendar_escaped(self):
+        # Nothing is asked of a calendar whose head another calendar
+        # settled, so its URL reaches the line as the row wrote it.
+        self.write_sidecar(completed_row(self.head),
+                           self.pending_row(calendar=HOSTILE))
+
+        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        assert_printed_escaped(self, result.stdout + result.stderr, SHOWN)
+        self.assertIn(f"at {SHOWN}: another calendar already settled",
+                      result.stdout)
 
 
 if __name__ == "__main__":

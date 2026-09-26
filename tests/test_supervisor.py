@@ -724,6 +724,61 @@ class ScanAnchorTest(unittest.TestCase):
         self.assertEqual(regenerated["exit"], 3)
         self.assertFalse(regenerated["anchored"])
 
+    def test_a_malformed_anchor_row_is_invalid_and_never_a_departure(self):
+        # #348: a row whose head is not a string is judged by verify,
+        # and read by nobody as a head that left the machine, however
+        # new the time it gives.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+        with open(str(log) + ".anchors.jsonl", "a", encoding="utf-8") as out:
+            out.write(json.dumps({"head": [1], "ts": "2026-09-25T10:00:00Z"})
+                      + "\n")
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "ANCHOR-INVALID")
+        self.assertEqual(chain["left"], {"ts": "2026-08-22T09:00:00Z",
+                                         "via": "anchored"})
+
+    def test_a_forged_anchored_line_in_a_row_never_reads_as_anchored(self):
+        # #349: a newline in a row's time or calendar once started a line
+        # of verify's own output, and the scan read the forged line as
+        # the chain's anchor. The row is printed escaped now, and the
+        # scan reads only the recorder's exact words, as a whole line.
+        forged = "\nANCHORED: entries 0..99 in Bitcoin block 777"
+        rows = {"ts": {"submitted": "2026-09-25T10:00:00Z" + forged},
+                "calendar": {"submitted": "2026-09-25T10:00:00Z",
+                             "calendar": "http://127.0.0.1:1" + forged}}
+        for field, row in rows.items():
+            for settled in (False, True):
+                with self.subTest(field=field, settled=settled):
+                    root = self.root / f"{field}-{settled}"
+                    log = make_chain(root / "alpha" / "receipts", "sess-aaaa")
+                    write_pending_anchor(log, chain_head(log), **row)
+                    if settled:
+                        # Another calendar settled the head, so the row
+                        # prints as ANCHOR-UNANSWERED.
+                        write_completed_anchor(log, chain_head(log),
+                                               append=True)
+
+                    result = run_scan(root, env=self.env)
+
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    (chain,) = chains_by_session(json.loads(result.stdout))[
+                        ("alpha", "sess-aaaa")]
+                    spans = chain["anchors"]["anchored"]
+                    self.assertEqual(spans, [{"upto": 2, "height": 850000}]
+                                     if settled else [])
+                    self.assertEqual(chain["anchored"], settled)
+                    self.assertFalse(any(line.startswith(
+                        "ANCHORED: entries 0..99") for line in chain["detail"]),
+                        chain["detail"])
+
     def test_a_line_json_cannot_hold_in_a_sidecar_never_stops_the_scan(self):
         # #331: the sidecars are writer-reachable, so one appended line
         # must not stop the audit. An integer past Python's digit limit
@@ -3144,6 +3199,60 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertEqual(len(chain["anchors"]["pending"]), 1)
         self.assertNotIn("note", chain["anchors"],
                          "a sidecar of notes alone owes no upgrade")
+
+    def test_a_row_of_an_unknown_kind_is_not_a_proof_so_the_keeper_anchors(self):
+        # ADR-0038, #344: a kind the anchors sidecar does not hold is
+        # named by verify and never judged, so the keeper, reading rows
+        # as the recorder does, does not take it for the head's proof.
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-unknown")
+        head = chain_head(log)
+        Path(str(log) + ".anchors.jsonl").write_text(
+            json.dumps({"kind": "witness-note", "head": head, "n": 2,
+                        "ts": ago(600)}) + "\n", encoding="utf-8")
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calendar.submitted, [bytes.fromhex(head)])
+
+    def test_a_row_whose_proof_does_not_replay_never_stands_the_keeper_down(self):
+        # #366: the keeper runs `anchor` on each ripe head and leaves it
+        # to the verb, which counts a head anchored only on a proof that
+        # replays (#348). One chain per row that does not, and one beside
+        # them holding a proof the calendar gave: one scan asks the
+        # calendar about each planted head, and never about the anchored
+        # one, which `anchor` answers `already anchored`.
+        calendar = self.start_calendar()
+        planted = {}
+        for session, proof in (("sess-empty", ""), ("sess-short", "AAAA"),
+                               ("sess-unread", "not base64!"),
+                               ("sess-number", 5)):
+            # Its own actions, so no two chains share a head.
+            log = make_chain(self.root / "alpha" / "receipts", session,
+                             action=session + " step {i}")
+            planted[session] = chain_head(log)
+            Path(str(log) + ".anchors.jsonl").write_text(
+                json.dumps({"kind": "anchor", "head": chain_head(log),
+                            "n": 2, "ts": ago(600), "proof": proof}) + "\n",
+                encoding="utf-8")
+        good = make_chain(self.root / "alpha" / "receipts", "sess-good",
+                          action="sess-good step {i}")
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "anchor", "--log", str(good),
+             "--calendar", calendar.url],
+            capture_output=True, check=True, env=self.env)
+        calendar.submitted.clear()
+
+        result = run_scan(self.root, "--anchor-every", "0s",
+                          "--calendar", calendar.url, env=self.env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(sorted(d.hex() for d in calendar.submitted),
+                         sorted(planted.values()),
+                         "a planted row stood the keeper down, or a head "
+                         "with a proof was submitted again")
 
     def test_default_is_off_and_nothing_is_submitted_without_opt_in(self):
         calendar = self.start_calendar()

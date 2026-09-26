@@ -39,6 +39,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import start_calendar
+from test_package_anchor import released_verifier
 from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run
 from test_stamp import (GRANTED, MISSING_AUTHORITY_TOOLING,
                         MISSING_EXPIRY_TOOLING, REQ_CONFIG, TSA_CONFIG,
@@ -883,6 +884,182 @@ class OutlivedPackageStampTest(PackageCase):
         self.assertNotIn("not judged", lines[-1])
         self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
         self.assertNotIn("not judged", lines[-2])
+
+
+UNKNOWN_ROW = json.dumps({"kind": "witness-note", "ts": "2026-09-24T10:00:00Z"})
+
+
+class PackageStampRowKindTest(StampedStoreCase):
+    """ADR-0038 in a package: the manifest's token row names its kind,
+    and a row of a kind this verifier does not know is named by its line
+    in either stamps sidecar, earning nothing and moving no exit code."""
+
+    def test_the_manifest_stamp_row_names_its_kind(self):
+        folder = self.stamped_folder()
+
+        (record,) = self.sidecar_records(folder)
+
+        self.assertEqual(record["kind"], "stamp")
+        self.assertEqual(set(record), {"kind", "head", "ts", "authority",
+                                       "response"})
+
+    def test_an_unknown_kind_beside_the_manifest_token_is_named_not_judged(self):
+        folder = self.stamped_folder()
+        before = self.verify_package(folder)
+        with (folder / SIDECAR).open("a", encoding="utf-8") as out:
+            out.write(UNKNOWN_ROW + "\n")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, before.returncode,
+                         judged.stdout + judged.stderr)
+        note = (f'seal stamp: STAMP-UNKNOWN-KIND: line 2 of {SIDECAR} is of '
+                'kind "witness-note" — this verifier does not know the kind '
+                'in this sidecar, and does not judge it')
+        lines = judged.stdout.splitlines()
+        self.assertIn(note, lines)
+        self.assertEqual([l for l in lines if l != note],
+                         before.stdout.splitlines())
+
+    def test_an_anchor_row_in_the_manifest_stamps_sidecar_is_named_not_judged(self):
+        # A known kind, but the anchors sidecar's. Shaped like a token
+        # over another digest, it would be SEAL-INVALID if it were judged.
+        folder = self.stamped_folder()
+        before = self.verify_package(folder)
+        (record,) = self.sidecar_records(folder)
+        misplaced = dict(record, kind="anchor", head="ab" * 32)
+        with (folder / SIDECAR).open("a", encoding="utf-8") as out:
+            out.write(json.dumps(misplaced) + "\n")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, before.returncode,
+                         judged.stdout + judged.stderr)
+        self.assertIn(f'seal stamp: STAMP-UNKNOWN-KIND: line 2 of {SIDECAR} is '
+                      'of kind "anchor"', judged.stdout)
+        self.assertNotIn("SEAL-INVALID", judged.stdout)
+        self.assertEqual(judged.stdout.splitlines()[-1],
+                         before.stdout.splitlines()[-1])
+
+    def test_a_manifest_sidecar_of_unknown_rows_only_is_seal_missing(self):
+        # A row of an unknown kind earns nothing, so a sidecar holding
+        # only that is a declared token the package does not carry.
+        folder = self.stamped_folder()
+        (folder / SIDECAR).write_text(UNKNOWN_ROW + "\n", encoding="utf-8")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 3, judged.stdout + judged.stderr)
+        self.assertIn("seal stamp: STAMP-UNKNOWN-KIND: line 1", judged.stdout)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("SEAL-MISSING:"), judged.stdout)
+
+    def test_an_unknown_kind_in_a_chain_sidecar_is_named_not_judged(self):
+        self.stamp_chain()
+        sidecar = Path(str(self.chain) + ".stamps.jsonl")
+        folder = self.work / "plain"
+        built = self.package(SESSION, "--folder", "--out", str(folder))
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        before = self.verify_package(folder)
+        with sidecar.open("a", encoding="utf-8") as out:
+            out.write(UNKNOWN_ROW + "\n")
+        folder = self.work / "noted"
+        built = self.package(SESSION, "--folder", "--out", str(folder))
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(judged.returncode, before.returncode)
+        self.assertIn("stamp not judged", judged.stdout)
+        # The sidecar by its bare name, never the unpack folder's path.
+        self.assertIn(f"STAMP-UNKNOWN-KIND: line 2 of {sidecar.name} is of "
+                      "kind \"witness-note\"", judged.stdout)
+        self.assertNotIn(str(folder), "\n".join(
+            l for l in judged.stdout.splitlines() if "UNKNOWN-KIND" in l))
+        self.assertNotIn("INVALID", judged.stdout)
+        self.assertEqual(judged.stdout.splitlines()[-1],
+                         before.stdout.splitlines()[-1])
+
+
+def bare_sidecars(stdout):
+    """The released verifier's lines, with each NO-ANCHORS line naming
+    its sidecar bare, as this one does (#349): v0.9.0 named it by its
+    path in the package's folder, a wording that changed and no verdict."""
+    lines = []
+    for line in stdout.splitlines():
+        if line.startswith("NO-ANCHORS: "):
+            path, found, rest = line[len("NO-ANCHORS: "):].partition(
+                " not found")
+            line = f"NO-ANCHORS: {os.path.basename(path)}{found}{rest}"
+        lines.append(line)
+    return lines
+
+
+class ReleasedVerifierTest(StampedStoreCase):
+    """ADR-0038's compatibility promise for the stamps sidecar, held
+    against the bytes a recipient already has: a package this recorder
+    makes, its chain and its manifest stamped with rows that name their
+    kind, verifies the same under the v0.9.0 verifier as under this one.
+    That verifier skips only `attempt` rows, so it judges a `stamp` row
+    as it judged a kind-less one."""
+
+    def stamped_by_this_recorder(self):
+        """A package whose chain sidecar and manifest sidecar each hold
+        a `stamp` row this recorder wrote."""
+        self.stamp_chain()
+        folder = self.stamped_folder()
+        chain_rows = [json.loads(line) for line in
+                      Path(str(self.chain) + ".stamps.jsonl")
+                      .read_text("utf-8").splitlines()]
+        self.assertEqual([r.get("kind") for r in chain_rows], ["stamp"])
+        self.assertEqual([r.get("kind") for r in self.sidecar_records(folder)],
+                         ["stamp"])
+        return folder
+
+    def assert_the_same_under_both(self, folder, *extra):
+        released = released_verifier(self, self.root)
+        now = self.verify_package(folder, *extra)
+        then = subprocess.run(
+            [sys.executable, "-I", str(released), "verify-package",
+             str(folder), *extra], capture_output=True, cwd=str(self.work),
+            env=self.env)
+        then_out = then.stdout.decode("utf-8", "replace")
+        self.assertEqual((then.returncode, bare_sidecars(then_out)),
+                         (now.returncode, now.stdout.splitlines()))
+        return now
+
+    def test_a_package_stamped_by_this_recorder_verifies_the_same_under_it(self):
+        folder = self.stamped_by_this_recorder()
+
+        now = self.assert_the_same_under_both(folder)
+
+        self.assertEqual(now.returncode, 0, now.stdout + now.stderr)
+        self.assertIn("seal stamp: not judged", now.stdout)
+        self.assertTrue(now.stdout.splitlines()[-1]
+                        .startswith("SELF-CONSISTENT:"), now.stdout)
+
+    @unittest.skipIf(MISSING_AUTHORITY_TOOLING,
+                     f"{MISSING_AUTHORITY_TOOLING}; the authority timestamp is "
+                     "judged by openssl, and this suite's authority is made "
+                     "by it")
+    def test_a_judged_package_verifies_the_same_under_it(self):
+        # The same, with the token judged through openssl, so both
+        # verifiers weigh the `stamp` row and earn the rung from it.
+        self.queries = 0
+        _, chain_file, sign = self.openssl_authority("authority")
+        self.authority.answer = sign
+        folder = self.stamped_by_this_recorder()
+
+        now = self.assert_the_same_under_both(folder, "--authority-chain",
+                                              str(chain_file))
+
+        self.assertEqual(now.returncode, 0, now.stdout + now.stderr)
+        self.assertTrue(now.stdout.splitlines()[-1]
+                        .startswith("SELF-CONSISTENT + STAMPED:"), now.stdout)
+
+    openssl = JudgedPackageStampTest.openssl
+    openssl_authority = JudgedPackageStampTest.openssl_authority
 
 
 if __name__ == "__main__":

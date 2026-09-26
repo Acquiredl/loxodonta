@@ -108,13 +108,18 @@ TWINNED = {
                  "UnreadableLineTest", "LineRuleTest", "NotUtf8LogTest",
                  "UnknownVersionTest", "NoInputTest"],
     "test_concurrency": ["ForkedTailTest"],
-    "test_anchor": ["AnchorTest", "BlockHeaderTest", "AnchorRowKindTest"],
-    "test_stamp": ["JudgedStampTest", "OutlivedCertificateTest"],
+    "test_anchor": ["AnchorTest", "BlockHeaderTest", "AnchorRowKindTest",
+                    "MalformedAnchorRowTest", "AnchorFieldEscapeTest"],
+    "test_stamp": ["JudgedStampTest", "OutlivedCertificateTest",
+                   "StampRowKindTest", "StampFieldEscapeTest"],
     "test_package": ["DemoStorePackageTest"],
-    "test_package_anchor": ["SealedPackageTest", "PackageRowKindTest"],
+    "test_package_anchor": ["SealedPackageTest", "PackageRowKindTest",
+                            "MalformedPackageRowTest",
+                            "PackageFieldEscapeTest"],
     "test_package_sign": ["SignedPackageTest"],
     "test_package_stamp": ["StampedPackageTest", "JudgedPackageStampTest",
-                           "OutlivedPackageStampTest"],
+                           "OutlivedPackageStampTest",
+                           "PackageStampRowKindTest"],
 }
 
 

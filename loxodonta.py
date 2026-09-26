@@ -77,17 +77,6 @@ def entry_hash(entry_without_hash):
     return hashlib.sha256(canonical_bytes(entry_without_hash)).hexdigest()
 
 
-def receipt_text(text):
-    """`text` as a receipt can hold it: each lone surrogate written as
-    its six ASCII characters of escape text (`\\ud800`), everything
-    else exactly as it stands (#292). A lone surrogate has no UTF-8
-    form, so the canonical form cannot hold it, yet JSON and POSIX argv
-    both hand Python one; escaped, the receipt still says what was sent
-    and the format does not change. Every string an entry takes from
-    outside passes through here: actor, action, file paths."""
-    return text.encode("utf-8", "backslashreplace").decode("utf-8")
-
-
 # --- Reading a chain ----------------------------------------------------------
 # The log's lines, the tail, and the files an entry names, read and
 # never written.
@@ -192,8 +181,8 @@ def files_base(log):
         return None, f"project record unreadable: {record}"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
-    return None, (f"project record points at a missing project ({path}) — "
-                  "references cannot be resolved")
+    return None, (f"project record points at a missing project "
+                  f"({visible(path)}) — references cannot be resolved")
 
 
 # --- The walk (SPEC §6) -------------------------------------------------------
@@ -806,10 +795,10 @@ def read_anchor_records(log):
 def record_label(head, n):
     """How an anchor record is named in messages: a chain head by its
     entry number; a manifest digest, which has no entry, as the
-    manifest's."""
+    manifest's. The head may be a row's, so it is printed escaped."""
     if n is None:
-        return f"manifest {head[:12]}…"
-    return f"head {head[:12]}… (entry {n})"
+        return f"manifest {visible(head[:12])}…"
+    return f"head {visible(head[:12])}… (entry {visible(n)})"
 
 
 # --- Attempt records (#240, PRD #244) ----------------------------------------
@@ -881,8 +870,16 @@ def row_kind(sidecar, record):
 
 
 JSON_TYPE_WORDS = ((bool, "true or false"), (int, "a number"),
-                   (float, "a number"), (list, "an array"),
-                   (dict, "an object"), (type(None), "null"))
+                   (float, "a number"), (str, "a string"),
+                   (list, "an array"), (dict, "an object"),
+                   (type(None), "null"))
+
+
+def json_type(value):
+    """What JSON type `value` is, in words: how a message names a field
+    the writer filled with the wrong type, without printing the value."""
+    return next((words for types, words in JSON_TYPE_WORDS
+                 if isinstance(value, types)), "a value")
 
 
 def rows_to_judge(sidecar, records, prefix, name):
@@ -907,13 +904,42 @@ def rows_to_judge(sidecar, records, prefix, name):
         if isinstance(written, str):
             shown = f'of kind "{visible(written)}"'
         else:
-            words = next((words for types, words in JSON_TYPE_WORDS
-                          if isinstance(written, types)), "a value")
-            shown = f"of a kind that is {words}, not a string"
+            shown = f"of a kind that is {json_type(written)}, not a string"
         print(f"{prefix}: line {number} of {visible(name)} is {shown} — this "
               "verifier does not know the kind in this sidecar, and does "
               "not judge it")
     return judged
+
+
+def anchor_row_problem(record):
+    """The first way an anchor row is not the shape of one, named by its
+    field and the JSON type the field holds, never its value; None for a
+    row every reader can act on. A proof needs its head and its proof,
+    each a string, the proof base64. The calendar and the time may be
+    left out, and the entry number is left out of a package manifest's
+    row, but each is of its type when present: a judge prints them and
+    keys on them. The sidecar is in the writer's reach, so this is asked
+    of every row before anything reads it: a judge calls a row that
+    fails it invalid evidence, and the recorder skips it, since it is no
+    proof it can act on."""
+    for field in ("head", "proof"):
+        if field not in record:
+            return f"record has no {field}"
+        if not isinstance(record[field], str):
+            return (f"record's {field} is {json_type(record[field])}, "
+                    "not a string")
+    try:
+        base64.b64decode(record["proof"], validate=True)
+    except ValueError:
+        return "record's proof is not base64"
+    for field in ("calendar", "ts"):
+        if field in record and not isinstance(record[field], str):
+            return (f"record's {field} is {json_type(record[field])}, "
+                    "not a string")
+    n = record.get("n")
+    if "n" in record and (isinstance(n, bool) or not isinstance(n, int)):
+        return f"record's n is {json_type(n)}, not an integer"
+    return None
 
 
 # --- Judging anchors (docs/ANCHORING.md §3) -----------------------------------
@@ -926,8 +952,11 @@ def check_anchors(log, entries, headers, used):
     against this log (mismatch or invalid — exit-3 tier); a block left
     unchecked is said so, and is never that."""
     records = read_anchor_records(log)
+    # The sidecar by its bare name, never a path of this machine: in a
+    # zip package the chain sits in a folder the zip was unpacked into.
+    name = os.path.basename(anchors_path(log))
     if records is None:
-        print(f"NO-ANCHORS: {anchors_path(log)} not found — anchoring is "
+        print(f"NO-ANCHORS: {visible(name)} not found — anchoring is "
               "optional; run `loxodonta anchor` to add one")
         return False
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
@@ -936,22 +965,23 @@ def check_anchors(log, entries, headers, used):
     # the last line printed is the one it would be without the row.
     judged = []
     for record in rows_to_judge("anchors", records, "ANCHOR-UNKNOWN-KIND",
-                                os.path.basename(anchors_path(log))):
+                                name):
         if record is None:
             judged.append((record, "invalid", "sidecar line is not a record"))
             continue
-        head = record.get("head")
-        if head is None:
-            # No head at all is malformed evidence, not a mismatch
-            # against a head called "None".
-            judged.append((record, "invalid", "record has no head"))
+        # A row missing a field, or holding the wrong type in one, is
+        # malformed evidence: judged invalid before any head is compared.
+        problem = anchor_row_problem(record)
+        if problem is not None:
+            judged.append((record, "invalid", problem))
             continue
+        head = record["head"]
         if head not in hash_to_n:
             judged.append((record, "mismatch", None))
             continue
         try:
             verdict = judge_proof(head, base64.b64decode(record["proof"]))
-        except (ProofError, KeyError, ValueError) as e:
+        except (ProofError, ValueError) as e:
             judged.append((record, "invalid", str(e)))
             continue
         judged.append((record, *verdict))
@@ -972,21 +1002,26 @@ def check_anchors(log, entries, headers, used):
         elif kind == "pending":
             if (record["head"], record.get("calendar")) in completed:
                 continue  # this submission's own upgraded record supersedes it
+            # Every field a line prints from a row is the writer's text,
+            # and is printed escaped: a newline in the time or the
+            # calendar would start a line of its own, a forged ANCHORED
+            # among them, and a reader of this output would take it for
+            # the verifier's.
+            head = visible(record["head"][:12])
+            ts = visible(record.get("ts"))
+            calendar = visible(record.get("calendar"))
             if record["head"] in settled_heads:
-                print(f"ANCHOR-UNANSWERED: head {record['head'][:12]}… "
-                      f"submitted {record.get('ts')} via "
-                      f"{record.get('calendar')} never came back, and "
-                      "another calendar settled this head — no upgrade is "
-                      "owed")
+                print(f"ANCHOR-UNANSWERED: head {head}… submitted {ts} via "
+                      f"{calendar} never came back, and another calendar "
+                      "settled this head — no upgrade is owed")
                 continue
-            print(f"ANCHOR-PENDING: head {record['head'][:12]}… submitted "
-                  f"{record.get('ts')} via {record.get('calendar')} — run "
-                  "`loxodonta anchor --upgrade`")
+            print(f"ANCHOR-PENDING: head {head}… submitted {ts} via "
+                  f"{calendar} — run `loxodonta anchor --upgrade`")
         elif kind == "mismatch":
             bad = True
-            print(f"ANCHOR-MISMATCH: anchored head {record.get('head')} "
-                  "appears nowhere in this log — this log is not the "
-                  "anchored history")
+            print(f"ANCHOR-MISMATCH: anchored head "
+                  f"{visible(record['head'])} appears nowhere in this log "
+                  "— this log is not the anchored history")
         else:
             bad = True
             reason = detail[0]
@@ -1018,13 +1053,15 @@ def openssl_reason(stderr):
     said = [line.strip() for line in stderr.splitlines()
             if line.strip() and not line.startswith("Using configuration")]
     errors = [line for line in said if line.split(":")[1:2] == ["error"]]
+    # Escaped as it is returned: openssl may quote what the token holds,
+    # a certificate's subject among it, and the token is the writer's.
     if errors:
         fields = errors[-1].split(":")
         if len(fields) > 8:
             tail = ": ".join(f.strip() for f in fields[8:] if f.strip())
-            return fields[5] + (f": {tail}" if tail else "")
-        return errors[-1]
-    return "; ".join(said) or "openssl gave no reason"
+            return visible(fields[5] + (f": {tail}" if tail else ""))
+        return visible(errors[-1])
+    return visible("; ".join(said) or "openssl gave no reason")
 
 
 # openssl's words when a certificate in the chain it checks is past its
@@ -1158,16 +1195,18 @@ def check_stamps(log, entries, chain_file):
     token nobody judged is a note, never a verdict: the exit stays the
     chain's."""
     records = read_stamp_records(log)
+    name = os.path.basename(stamps_path(log))   # bare, as for the anchors
     if records is None:
-        print(f"NO-STAMPS: {stamps_path(log)} not found — the authority "
+        print(f"NO-STAMPS: {visible(name)} not found — the authority "
               "timestamp is optional; run `loxodonta stamp --authority URL` "
               "to add one")
         return False
     hash_to_n = {e["entry_hash"]: e["n"] for e in entries}
     bad = False
-    for record in records:
-        if is_attempt(record):
-            continue  # a note on how a step went, not evidence (#240)
+    # A row of an unknown kind is named here, before any verdict line, so
+    # the last line printed is the one it would be without the row.
+    for record in rows_to_judge("stamps", records, "STAMP-UNKNOWN-KIND",
+                                name):
         head = record.get("head") if record else None
         if not isinstance(head, str) or \
                 not isinstance(record.get("response"), str):
@@ -1177,8 +1216,8 @@ def check_stamps(log, entries, chain_file):
             continue
         if head not in hash_to_n:
             bad = True
-            print(f"STAMP-INVALID: stamped head {head} appears nowhere in "
-                  "this log — this log is not the stamped history")
+            print(f"STAMP-INVALID: stamped head {visible(head)} appears "
+                  "nowhere in this log — this log is not the stamped history")
             continue
         n = hash_to_n[head]
         label = record_label(head, n)
@@ -1199,7 +1238,7 @@ def check_stamps(log, entries, chain_file):
             # ADR-0008 ruling 4 closes for the signature).
             print(f"STAMPED: entries 0..{n} existed when a key certified "
                   f"by {chain_file} signed this head under its own clock "
-                  f"(the record names {record.get('authority')}, "
+                  f"(the record names {visible(record.get('authority'))}, "
                   "testimony) — the time inside the token is that key's "
                   "word, not this machine's (`openssl ts -reply -text` "
                   "prints it)")
@@ -1283,22 +1322,23 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
             print(f"FILES-UNRESOLVED: {problem} — file checks skipped")
             latest = {}
         for path in sorted(latest):
+            shown = visible(path)   # the writer's text, one line (#349)
             try:
                 on_disk = sha256_file(os.path.join(base, path))
             except FileNotFoundError:
-                print(f"MISSING (not on disk): {path}")
+                print(f"MISSING (not on disk): {shown}")
                 continue
             except (OSError, ValueError):
                 # A path this machine cannot open as a file: a directory,
                 # a name the platform refuses, a NUL (#292). Nothing to
                 # fingerprint, so it is missing in the same sense, and
                 # the verdict stays the chain's.
-                print(f"MISSING (not a readable file here): {path}")
+                print(f"MISSING (not a readable file here): {shown}")
                 continue
             if on_disk == latest[path]:
-                print(f"CURRENT: {path}")
+                print(f"CURRENT: {shown}")
             else:
-                print(f"MODIFIED-SINCE-LOGGED: {path}")
+                print(f"MODIFIED-SINCE-LOGGED: {shown}")
                 diverged += 1
         if diverged:
             print(f"FILES-DIVERGED: chain intact, {diverged} file(s) "
@@ -1373,8 +1413,10 @@ def verify_unknown_version(lines, log_version, expect_head):
         for _, message in breaks:
             print(message)
         return 1
-    # Escape text, so a claim holding a lone surrogate prints (#292).
-    claimed = receipt_text(str(log_version))
+    # The claim is the writer's text: escaped, so a newline in it cannot
+    # end this line with a verdict of its own, and a lone surrogate
+    # prints (#292).
+    claimed = visible(log_version)
     print(f'UNSUPPORTED-VERSION: log is format "{claimed}"; '
           f'this verifier speaks "{FORMAT_VERSION}"')
     if head_mismatch(entries[-1]["entry_hash"], expect_head):
@@ -1408,7 +1450,16 @@ def cmd_head(args):
               "`loxodonta verify` (a torn tail has no head to record)",
               file=sys.stderr)
         return 1
-    print(last["entry_hash"])
+    head = last["entry_hash"]
+    # A head is a SHA256 in lowercase hex and nothing else, so anything
+    # else is refused unprinted: the line is the writer's text, and the
+    # walk calls it BROKEN, since no such value matches a canonical form.
+    if not (isinstance(head, str) and len(head) == 64
+            and all(c in "0123456789abcdef" for c in head)):
+        print(f"error: {args.log} ends in an entry whose entry_hash is not "
+              "a chain head — run `loxodonta verify`", file=sys.stderr)
+        return 1
+    print(head)
     return 0
 
 
@@ -1475,13 +1526,53 @@ SIGNATURE_NAMESPACE = "loxodonta-package"
 SIGNATURE_PRINCIPAL = "issuer"
 
 
+# The characters Windows refuses in a file name: its unzip lands each one
+# as `_` (landing_name), and a bare name holds none of them (bare_name).
+WINDOWS_REFUSED_CHARACTERS = ':<>|"?*'
+
+
 def bare_name(value):
     """A manifest path is accepted only as a bare file name: the layout is
-    flat, and a path that could leave the package (a folder, `..`, an
-    absolute path, a backslash) is refused, never followed."""
-    return (isinstance(value, str) and value not in ("", ".", "..")
-            and "/" not in value and "\\" not in value
-            and value == os.path.basename(value))
+    flat, and a name that could leave the package, or that one system
+    opens as another file than the rest do, is refused, never followed.
+    Judged by its characters alone, the same on every system, so one
+    package gets one verdict wherever it is read: not empty, not `.` or
+    `..`, at most 255 bytes in UTF-8 (the longest file name Linux and
+    macOS take); no `/` or `\\` (a folder), none of `:<>|"?*`, which
+    Windows refuses in a name (`C:x` is a drive there, `a?b` lands as
+    `a_b`), no control character, below U+0020, and no lone surrogate;
+    no `~`, since Windows also opens a file by its 8.3 short name
+    (`LONGFI~1.TXT` for `longfilename.txt`), which no listing shows and
+    no other system has; no trailing dot or space, which Windows strips, so `project.json.`
+    would open `project.json` there and nothing elsewhere; and not a
+    Windows device name, in any case, alone or before a dot and with
+    any spaces before that dot (`NUL`, `con.txt`, `nul .txt`, `CONIN$`,
+    `CONOUT$`, `PRN`, `AUX`, `COM1` to `COM9` and `LPT1` to `LPT9`, and
+    `COM¹`, `COM²`, `COM³`, `LPT¹`, `LPT²`, `LPT³`)."""
+    if not isinstance(value, str) or value in ("", ".", ".."):
+        return False
+    if any(c in "/\\~" + WINDOWS_REFUSED_CHARACTERS or c < " "
+           or "\ud800" <= c <= "\udfff" for c in value):
+        return False
+    if len(value.encode("utf-8")) > 255 or value[-1] in ". ":
+        return False
+    device = value.split(".")[0].rstrip(" ").upper()
+    return not (device in ("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$")
+                or (len(device) == 4 and device[:3] in ("COM", "LPT")
+                    and device[3] in "123456789¹²³"))
+
+
+def package_names(manifest):
+    """Every name the verifier opens in a package with this manifest, in
+    the manifest's order and each once: the manifest and its declared
+    seals' files, each chain and the two sidecars found beside it by
+    name, and each artifact (a transcript is one)."""
+    names = ["manifest.json", *sorted(seal_files(manifest))]
+    for listing in manifest["chains"]:
+        names += [listing["path"], anchors_path(listing["path"]),
+                  stamps_path(listing["path"])]
+    names += [listing["path"] for listing in manifest["artifacts"]]
+    return list(dict.fromkeys(names))
 
 
 def manifest_refusal(manifest):
@@ -1493,7 +1584,10 @@ def manifest_refusal(manifest):
         return "manifest.json is not an object"
     tag = manifest.get("format")
     if tag != PACKAGE_FORMAT:
-        return f'package is format "{tag}"; this verifier speaks "{PACKAGE_FORMAT}"'
+        # The manifest is the issuer's text, and every field of it this
+        # file prints is printed escaped, like receipt text.
+        return (f'package is format "{visible(tag)}"; this verifier speaks '
+                f'"{PACKAGE_FORMAT}"')
     if not isinstance(manifest.get("unit"), dict):
         return "manifest.json has no unit"
     chains = manifest.get("chains")
@@ -1505,6 +1599,16 @@ def manifest_refusal(manifest):
                 and isinstance(listing.get("entries"), int)):
             return ("manifest.json lists a chain without a bare file name, "
                     "a head, and an entry count")
+        # JSON's true and false read as 1 and 0 to Python's int check,
+        # and a count is never either (SPEC §10.2), as a chain's n is not.
+        if isinstance(listing["entries"], bool):
+            return ("manifest.json lists a chain whose entries is true or "
+                    "false, not an integer")
+        # Its sidecars are found by its name plus a suffix, the longer
+        # one `.anchors.jsonl`, so the name must leave room for both.
+        if not bare_name(anchors_path(listing["path"])):
+            return ("manifest.json lists a chain whose name leaves its "
+                    "sidecars' names past 255 bytes")
         # A transcript named on a chain (--transcript, ADR-0026 ruling 2)
         # is a file of this package like any other: a bare name only.
         if listing.get("transcript") is not None \
@@ -1520,6 +1624,9 @@ def manifest_refusal(manifest):
                 and isinstance(listing.get("bytes"), int)):
             return ("manifest.json lists an artifact without a bare file "
                     "name, a sha256, and a byte count")
+        if isinstance(listing["bytes"], bool):
+            return ("manifest.json lists an artifact whose bytes is true or "
+                    "false, not an integer")
     # The transcript's bytes are committed by the artifacts list and
     # nowhere else (one commitment home per fact), so a chain naming a
     # transcript the artifacts do not list names a file nothing vouches for.
@@ -1527,12 +1634,21 @@ def manifest_refusal(manifest):
     for listing in chains:
         named = listing.get("transcript")
         if named is not None and named not in listed:
-            return (f"manifest.json names transcript {named} on a chain, "
-                    "and its artifacts do not list it")
+            return (f"manifest.json names transcript {visible(named)} on a "
+                    "chain, and its artifacts do not list it")
     seals = manifest.get("seals")
     if not isinstance(seals, list) or not all(isinstance(k, str) for k in seals):
         return ("manifest.json declares no seal set; a stripped seal is "
                 "judged against the declared set (ADR-0007)")
+    # Two names one system opens as one file (`A.txt` and `a.txt` on
+    # Windows and macOS) would be judged as one there and as two
+    # elsewhere, so a manifest naming both is refused everywhere.
+    twice = one_file_twice(package_names(manifest))
+    if twice is not None:
+        first, second = (visible(repr(name)) for name in twice)
+        return (f"manifest.json names {first} and {second}, which some "
+                "systems open as one file; which one is read would depend "
+                "on where the package is verified")
     return None
 
 
@@ -1541,6 +1657,11 @@ def read_manifest(folder):
     at the top of the folder; a missing or unreadable one, an unknown
     format tag, and a shape this verifier cannot judge are refusals, the
     way UNSUPPORTED-VERSION is."""
+    # Only a file named exactly manifest.json is the manifest: Windows and
+    # macOS would open `MANIFEST.JSON` for it, and Linux would not.
+    if "manifest.json" not in os.listdir(folder):
+        return None, ("UNSUPPORTED-FORMAT: no readable manifest.json at the "
+                      "top of this package; not a loxodonta package")
     try:
         # Read with the walk's guard (SPEC §6 step 1): a manifest giving
         # one key twice says two things, one to a reader keeping the
@@ -1565,14 +1686,17 @@ def read_manifest(folder):
 def print_manifest_summary(path, manifest):
     """The manifest's displayed fields, testimony like every convenience
     copy (ADR-0007 ruling 3); the committed facts are judged below. The
-    unit prints whatever it holds, so a later kind needs no new line."""
+    unit prints whatever it holds, so a later kind needs no new line.
+    `path` is the recipient's own; every other field is the issuer's
+    text, printed escaped."""
     unit = manifest["unit"]
-    seals = manifest["seals"]
+    seals = [visible(kind) for kind in manifest["seals"]]
     print(f"package: {path}")
     print(f"format: {manifest['format']}")
-    print(f"packed: {manifest.get('packed')} by {manifest.get('tool')} "
-          "(testimony)")
-    print("unit: " + ", ".join(f"{k} {v}" for k, v in unit.items()))
+    print(f"packed: {visible(manifest.get('packed'))} by "
+          f"{visible(manifest.get('tool'))} (testimony)")
+    print("unit: " + ", ".join(f"{visible(k)} {visible(v)}"
+                               for k, v in unit.items()))
     print(f"contents: {len(manifest['chains'])} chain(s), "
           f"{len(manifest['artifacts'])} artifact(s), seals: "
           f"{', '.join(seals) if seals else 'none declared'}")
@@ -1607,11 +1731,14 @@ def judge_chain(folder, listing, chain_file=None, headers=None, used=None):
     record of the roots they matched. Returns (findings, file references
     counted); a finding is (exit code, verdict word)."""
     name, head = listing["path"], listing["head"]
-    print(f"chain: {name} (manifest: head {head[:12]}…, "
+    # The manifest's words, printed escaped; the walk's own head too,
+    # since a chain that does not walk clean can hold any text there.
+    shown, listed = visible(name), visible(head[:12])
+    print(f"chain: {shown} (manifest: head {listed}…, "
           f"{listing['entries']} entries)")
     log = os.path.join(folder, name)
     if not os.path.isfile(log):
-        print(f"{name}: MISSING (listed in the manifest, not in the package)")
+        print(f"{shown}: MISSING (listed in the manifest, not in the package)")
         return [(2, "ARTIFACT-DIVERGED")], 0
     # The packaged transcript the listing names, judged the way `verify
     # --transcript PATH` judges one: every commitment against its prefix,
@@ -1621,8 +1748,8 @@ def judge_chain(folder, listing, chain_file=None, headers=None, used=None):
     if transcript is not None and not os.path.isfile(transcript):
         # The artifact judge reports the missing file; here only its
         # bare name, never a path of this machine.
-        print(f"{named}: MISSING (named on this chain, not in the package); "
-              "its commitments go unjudged")
+        print(f"{visible(named)}: MISSING (named on this chain, not in the "
+              "package); its commitments go unjudged")
         transcript = None
     # verify_log runs without the files check (a package carries no
     # working tree) and without a head the recipient was not given.
@@ -1650,9 +1777,9 @@ def judge_chain(folder, listing, chain_file=None, headers=None, used=None):
               "commitment(s) in this chain, no transcript in this package "
               "— commitments unjudgeable; chain verdict unaffected")
     if walked != head or count != listing["entries"]:
-        print(f"{name}: off the manifest: walks to head "
-              f"{(walked or 'none')[:12]}… with {count} lines, listed as "
-              f"{head[:12]}… with {listing['entries']}")
+        print(f"{shown}: off the manifest: walks to head "
+              f"{visible((walked or 'none')[:12])}… with {count} lines, "
+              f"listed as {listed}… with {listing['entries']}")
         findings.append((2, "ARTIFACT-DIVERGED"))
     return findings, references
 
@@ -1663,24 +1790,25 @@ def judge_artifact(folder, listing):
     it diverged. The witness snapshot is testimony, and the line says so
     where the file is judged: its bytes are checked, its words never are."""
     name = listing["path"]
+    shown = visible(name)   # the manifest's words, as judge_chain prints them
     path = os.path.join(folder, name)
     try:
         digest = sha256_file(path)
         size = os.path.getsize(path)
     except OSError:
-        print(f"{name}: MISSING (listed in the manifest, not in the package)")
+        print(f"{shown}: MISSING (listed in the manifest, not in the package)")
         return True
     listed = listing["sha256"]
     if digest != listed or size != listing["bytes"]:
-        print(f"{name}: DIVERGED from the manifest (sha256 {digest[:12]}…, "
-              f"{size} bytes; listed {listed[:12]}…, "
+        print(f"{shown}: DIVERGED from the manifest (sha256 {digest[:12]}…, "
+              f"{size} bytes; listed {visible(listed[:12])}…, "
               f"{listing['bytes']} bytes)")
         return True
     note = ""
     if name == "witness.json":
         note = (" (testimony: the packing machine's reading, unaltered; no "
                 "verdict is drawn from it)")
-    print(f"{name}: matches the manifest (sha256 {digest[:12]}…, "
+    print(f"{shown}: matches the manifest (sha256 {digest[:12]}…, "
           f"{size} bytes){note}")
     return False
 
@@ -1717,16 +1845,19 @@ def judge_manifest_anchor(folder, headers, used):
     completed = set()
     pending = []
     for record in records:
-        head = record.get("head") if record else None
-        if not isinstance(head, str) or not isinstance(record.get("proof"), str):
-            reason = "sidecar line is not an anchor record"
-        elif head != digest:
-            reason = (f"the proof is for digest {head[:12]}…, and this "
+        problem = ("sidecar line is not an anchor record" if record is None
+                   else anchor_row_problem(record))
+        if problem is not None:
+            reason = problem
+        elif record["head"] != digest:
+            reason = (f"the proof is for digest "
+                      f"{visible(record['head'][:12])}…, and this "
                       f"manifest's sha256 is {digest[:12]}…")
         else:
             try:
-                verdict = judge_proof(head, base64.b64decode(record["proof"]))
-            except (ProofError, KeyError, ValueError) as e:
+                verdict = judge_proof(record["head"],
+                                      base64.b64decode(record["proof"]))
+            except (ProofError, ValueError) as e:
                 reason = str(e)
             else:
                 if verdict[0] == "pending":
@@ -1745,19 +1876,20 @@ def judge_manifest_anchor(folder, headers, used):
     for record in pending:
         if record.get("calendar") in completed:
             continue  # superseded by the upgraded record from that calendar
+        # The row's words, escaped, as check_anchors prints a chain's.
+        ts = visible(record.get("ts"))
+        calendar = visible(record.get("calendar"))
         if completed:
             # Some calendar settled this manifest, so the stragglers are
             # not work the recipient owes either (#199).
             print(f"seal anchor: ANCHOR-UNANSWERED: the manifest was "
-                  f"submitted {record.get('ts')} via "
-                  f"{record.get('calendar')}, which never came back; "
+                  f"submitted {ts} via {calendar}, which never came back; "
                   "another calendar settled it, so no upgrade is owed")
             continue
         print(f"seal anchor: ANCHOR-PENDING: the manifest was submitted "
-              f"{record.get('ts')} via {record.get('calendar')} — unpack the "
-              "package and run `loxodonta anchor --upgrade --manifest=<its "
-              "manifest.json>` after a few hours; the rung is not earned "
-              "until the proof completes")
+              f"{ts} via {calendar} — unpack the package and run `loxodonta "
+              "anchor --upgrade --manifest=<its manifest.json>` after a few "
+              "hours; the rung is not earned until the proof completes")
     checked = [c for c in claimed if c[1] is not None]
     height, block = min(checked or claimed, key=lambda c: c[0],
                         default=(None, None))
@@ -1778,8 +1910,12 @@ def judge_manifest_stamp(folder, chain_file):
     digest = sha256_file(manifest)
     records = read_stamp_records(manifest)
     if records:
-        # Attempt rows are notes, never tokens (#240).
-        records = [r for r in records if not is_attempt(r)]
+        # Only tokens and unreadable lines are judged (ADR-0038): a
+        # sidecar holding only notes, or rows of kinds this verifier
+        # does not know, holds no record, the same as an empty one.
+        records = rows_to_judge("stamps", records,
+                                "seal stamp: STAMP-UNKNOWN-KIND",
+                                stamps_path("manifest.json"))
     if not records:
         what = "is not in this package" if records is None else "holds no record"
         print(f"seal stamp: SEAL-MISSING: {stamps_path('manifest.json')} "
@@ -1795,8 +1931,8 @@ def judge_manifest_stamp(folder, chain_file):
                 not isinstance(record.get("response"), str):
             reason = "sidecar line is not a stamp record"
         elif head != digest:
-            reason = (f"the token is over digest {head[:12]}…, and this "
-                      f"manifest's sha256 is {digest[:12]}…")
+            reason = (f"the token is over digest {visible(head[:12])}…, and "
+                      f"this manifest's sha256 is {digest[:12]}…")
         else:
             try:
                 reply = base64.b64decode(record["response"], validate=True)
@@ -1811,9 +1947,10 @@ def judge_manifest_stamp(folder, chain_file):
                     print(f"seal stamp: STAMPED: a key certified by "
                           f"{chain_file} signed this manifest's sha256 under "
                           "its own clock (the record names "
-                          f"{record.get('authority')}, testimony) — the time "
-                          "inside the token is that key's word, not this "
-                          "machine's (`openssl ts -reply -text` prints it)")
+                          f"{visible(record.get('authority'))}, testimony) — "
+                          "the time inside the token is that key's word, not "
+                          "this machine's (`openssl ts -reply -text` prints "
+                          "it)")
                     stamped = True
                     continue
                 if verdict == "not judged":
@@ -1926,8 +2063,9 @@ def judge_manifest_signature(folder):
               "and this command judges the seal once it can run it")
         return [], None, why
     if verified.returncode != 0:
-        reason = "; ".join(verified.stderr.strip().splitlines()) \
-            or "ssh-keygen gave no reason"
+        # Escaped: ssh-keygen may quote the signature file, the issuer's.
+        reason = visible("; ".join(verified.stderr.strip().splitlines())
+                         or "ssh-keygen gave no reason")
         print(f"seal signature: SEAL-INVALID: {reason} — the signature is "
               "not the shipped key's over this manifest's bytes")
         return [(3, "SEAL-INVALID")], None, None
@@ -1967,8 +2105,8 @@ def judge_seals(folder, manifest, chain_file=None, headers=None, used=None):
                 earned["unjudged"].append(
                     f"its signature was not judged, since {why}")
         else:
-            print(f"seal {kind}: declared; this verifier does not know the "
-                  "kind, and does not judge it")
+            print(f"seal {visible(kind)}: declared; this verifier does not "
+                  "know the kind, and does not judge it")
         findings += found
     return findings, earned
 
@@ -1995,7 +2133,8 @@ def print_unlisted(folder, manifest):
     listed.update(a["path"] for a in manifest["artifacts"])
     for name in sorted(os.listdir(folder)):
         if name not in listed:
-            print(f"unlisted: {name} (not in the manifest, not judged)")
+            print(f"unlisted: {visible(name)} (not in the manifest, not "
+                  "judged)")
 
 
 def gravest(findings):
@@ -2116,6 +2255,14 @@ def judge_package(shown, folder, chain_file=None, block_headers=None):
     if refusal:
         print(refusal)
         return 4
+    spelled = another_spelling(folder, manifest)
+    if spelled is not None:
+        held, name = (visible(repr(n)) for n in spelled)
+        print(f"UNSUPPORTED-FORMAT: this package holds {held}, which some "
+              f"systems open as {name}, a name the verifier reads, and "
+              "others do not; which file is judged would depend on where "
+              "it is verified, so this verifier refuses it")
+        return 4
     print_manifest_summary(shown, manifest)
     findings = []
     references = 0
@@ -2151,7 +2298,8 @@ def judge_package(shown, folder, chain_file=None, block_headers=None):
 
 
 # The characters a Windows unzip turns into `_` in a member's name.
-WINDOWS_UNZIP_UNDERSCORES = str.maketrans(':<>|"?*', "_" * 7)
+WINDOWS_UNZIP_UNDERSCORES = str.maketrans(
+    WINDOWS_REFUSED_CHARACTERS, "_" * len(WINDOWS_REFUSED_CHARACTERS))
 
 
 def landing_name(name):
@@ -2172,6 +2320,21 @@ def landing_name(name):
     landed = "/".join(segment for segment in segments if segment)
     landed = landed.translate(WINDOWS_UNZIP_UNDERSCORES)
     return unicodedata.normalize("NFC", landed).casefold()
+
+
+def another_spelling(folder, manifest):
+    """(the file, the name), when a file at the top of the package is not
+    a name the verifier reads (package_names) but lands on one, another
+    case or Unicode form of it; else None. Windows and macOS would open
+    that file for the name and Linux would not, so the verifier reads a
+    name only when a file holds exactly it, judged from the folder's
+    listing, which is the same on every system."""
+    names = {landing_name(name): name for name in package_names(manifest)}
+    for held in sorted(os.listdir(folder)):
+        name = names.get(landing_name(held))
+        if name is not None and name != held:
+            return held, name
+    return None
 
 
 def one_file_twice(names):
@@ -2226,13 +2389,25 @@ def cmd_verify_package(args):
                           "read depends on the tool that unpacks it, so "
                           "this verifier refuses it unopened")
                     return 4
+                # The layout is flat, and a member's name is kept only as
+                # it stands: a Windows unzip lands `project.json.` as
+                # `project.json` and `a?b` as `a_b`, which no other does.
+                crooked = next((name for name in package.namelist()
+                                if not bare_name(name)), None)
+                if crooked is not None:
+                    print(f"UNSUPPORTED-FORMAT: {path} holds a member named "
+                          f"{visible(repr(crooked))}, not a bare file name; "
+                          "some systems would unpack it under another name, "
+                          "so this verifier refuses it unopened")
+                    return 4
                 package.extractall(unpacked)
         # ValueError: a member whose name leaves nothing to unpack to,
         # such as `..`, which extractall refuses by raising.
         except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError,
                 ValueError) as e:
-            print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked ({e}); "
-                  "not a loxodonta package")
+            # The reason may quote a member's name, the issuer's text.
+            print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked "
+                  f"({visible(e)}); not a loxodonta package")
             return 4
         return judge_package(path, unpacked, args.authority_chain, headers)
 
@@ -2670,6 +2845,17 @@ def cmd_init(args):
     return 0
 
 
+def receipt_text(text):
+    """`text` as a receipt can hold it: each lone surrogate written as
+    its six ASCII characters of escape text (`\\ud800`), everything
+    else exactly as it stands (#292). A lone surrogate has no UTF-8
+    form, so the canonical form cannot hold it, yet JSON and POSIX argv
+    both hand Python one; escaped, the receipt still says what was sent
+    and the format does not change. Every string an entry takes from
+    outside passes through here: actor, action, file paths."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def file_reference(base, raw_path):
     """Build a {path, sha256} reference per SPEC §3 (v0.1.1): paths are
     stored and hashed relative to the reference base — the project
@@ -3055,6 +3241,32 @@ def session_end_anchor(log, calendars, budget=SESSION_END_BUDGET):
         return
 
 
+def proof_replays(record):
+    """True for an anchor row whose proof replays from its head, pending
+    or complete: offline, and the same test verify --anchors applies."""
+    if row_kind("anchors", record) != ANCHOR_KIND \
+            or anchor_row_problem(record) is not None:
+        return False
+    try:
+        judge_proof(record["head"], base64.b64decode(record["proof"]))
+    except (ProofError, ValueError):
+        return False
+    return True
+
+
+def anchored_heads(target):
+    """The heads `target`'s anchor sidecar holds a proof for that
+    replays, pending or complete (`proof_replays`): the dedupe of the
+    session end and of `anchor`. A sidecar that cannot be opened at all
+    answers "none known", so the head is submitted rather than skipped
+    on an unreadable file. Never raises."""
+    try:
+        records = read_anchor_records(target) or []
+    except OSError:
+        return set()
+    return {record["head"] for record in records if proof_replays(record)}
+
+
 def anchor_and_upgrade(log, calendars, budget):
     deadline = time.monotonic() + budget
 
@@ -3068,9 +3280,11 @@ def anchor_and_upgrade(log, calendars, budget):
     if last is None:
         return  # a damaged tail cannot be anchored
     head, n = last["entry_hash"], last["n"]
-    anchored = {r["head"] for r in (read_anchor_records(log) or [])
-                if row_kind("anchors", r) == ANCHOR_KIND and "head" in r}
-    if head not in anchored:
+    # Only a proof that replays anchors a head: a row the writer shaped
+    # wrong, or whose proof verify would call invalid, does not stop the
+    # head being submitted (#348). One that replays does, planted or not
+    # (SPEC 9.4).
+    if head not in anchored_heads(log):
         submitted = False
         for calendar in calendars:
             if remaining() <= 0:
@@ -3104,17 +3318,18 @@ def upgrade_pending_proofs(folder, remaining, deadline):
         chain = os.path.join(folder, name[:-len(".anchors.jsonl")])
         completed, pending = set(), []
         for record in (read_anchor_records(chain) or []):
-            if row_kind("anchors", record) != ANCHOR_KIND:
+            if row_kind("anchors", record) != ANCHOR_KIND \
+                    or anchor_row_problem(record) is not None:
                 continue
             try:
                 verdict = judge_proof(record["head"],
                                       base64.b64decode(record["proof"]))
-            except (ProofError, KeyError, ValueError):
+            except (ProofError, ValueError):
                 continue
-            key = (record["head"], record["calendar"])
+            key = (record["head"], record.get("calendar"))
             if verdict[0] == "bitcoin":
                 completed.add(key)
-            else:
+            elif "calendar" in record:   # with none, there is no one to ask
                 pending.append((record, verdict[1]))
         for record, commitment_hex in pending:
             if time.monotonic() >= deadline:
@@ -3390,11 +3605,12 @@ def append_published_record(log, head, n, ts, event):
     the anchor sidecar's pattern. It is writer-reachable and therefore
     testimony (GLOSSARY): it exists so the keeper never posts the same
     head twice, never to prove anything. The remote's copy is the head
-    record; this is the note that says one was sent. It holds the head,
-    the entry count, the time, and the event kind, and never the URL: a
-    webhook URL is a credential."""
+    record; this is the note that says one was sent. It holds its kind,
+    the head, the entry count, the time, and the event kind, and never
+    the URL: a webhook URL is a credential."""
     append_sidecar_record(published_path(log),
-                          {"head": head, "n": n, "ts": ts, "event": event})
+                          {"kind": HEAD_KIND,   # ADR-0038
+                           "head": head, "n": n, "ts": ts, "event": event})
 
 
 def chain_session(log):
@@ -3450,8 +3666,8 @@ def is_chain_record(record):
     """True for a row of kind `chain`: a batch of entries the remote
     acknowledged, with its range. Not a head row, so the head keeper's
     ripeness test ignores it; not a proof of anything, like every row
-    in the memo."""
-    return isinstance(record, dict) and record.get("kind") == CHAIN_KIND
+    in the memo. What a row is, `row_kind` says (ADR-0038)."""
+    return isinstance(record, dict) and row_kind("memo", record) == CHAIN_KIND
 
 
 def entries_on_disk(log):
@@ -3495,10 +3711,17 @@ def chain_cursor(log, url):
     memo's chain rows that name it (#263); -1 when none does, so the
     send starts at genesis. A row that names no remote predates remote
     ids and counts for none: that chain goes once more from genesis, and
-    the receiver drops each line as an exact duplicate. A torn memo line
-    is read past (a resend the receiver drops, never a stuck keeper); a
-    memo that cannot be read at all is raised, not guessed at, since -1
-    would send the whole chain again at every session end."""
+    the receiver drops each line as an exact duplicate. A row of any
+    other kind, a head, a note or a kind unknown here, counts for none
+    either (ADR-0038). A torn memo line is read past (a resend the
+    receiver drops, never a stuck keeper), and so is a line past the
+    digit or recursion limit, which no reader here takes apart either;
+    a memo that cannot be read at all is raised, not guessed at, since
+    -1 would send the whole chain again at every session end. The two
+    differ on purpose (#344): a line past a limit is still text in the
+    memo's format, one line this parser declines, while a byte that is
+    not UTF-8 means the file is not text in that format at all, so the
+    memo holding it is the unreadable one, as it was before #299."""
     try:
         lines = read_log(published_path(log))
     except FileNotFoundError:
@@ -3513,7 +3736,10 @@ def chain_cursor(log, url):
         line.encode("utf-8")
         try:
             record = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # One appended line must not stop the chain route at every
+            # session end and keeper turn (#331, #344): at worst a chain
+            # row is missed and a batch the receiver drops goes again.
             continue
         if is_chain_record(record) and isinstance(record.get("last"), int) \
                 and record.get("remote_id") == mine:
@@ -3872,26 +4098,50 @@ def append_stamp_record(log, head, n, authority, reply):
     number; a package manifest's stamp has none (ADR-0026 ruling 4), and
     its record then carries no `n` at all rather than a null, exactly as
     the manifest's anchor record does."""
-    record = {"head": head, "ts": now_ts(), "authority": authority,
+    record = {"kind": STAMP_KIND,   # ADR-0038
+              "head": head, "ts": now_ts(), "authority": authority,
               "response": base64.b64encode(reply).decode("ascii")}
     if n is not None:
         record["n"] = n
     append_sidecar_record(stamps_path(log), record)
 
 
+def token_granted(record):
+    """True for a token row whose head is a string and whose response
+    is base64 of a reply the authority granted: the status read as
+    `ask_authority` reads it, and the token itself not at all (judging
+    it is `verify --stamps`'s, through openssl). Offline, and never
+    raises. The sidecar is in the writer's reach: a row of the wrong
+    shape, or a reply that was not granted, is never a token, but the
+    status sits outside the token's signature, so a reply forged with a
+    granted status, or copied from another head's row, passes, and
+    nothing offline can tell it apart (SPEC 9.7)."""
+    if row_kind("stamps", record) != STAMP_KIND \
+            or not isinstance(record.get("head"), str) \
+            or not isinstance(record.get("response"), str):
+        return False
+    try:
+        reply = base64.b64decode(record["response"], validate=True)
+        return stamp_status(reply) in STAMP_GRANTED
+    except ValueError:
+        return False
+
+
 def stamped_heads(log):
     """The heads this log's sidecar already holds a token for; an
-    attempt row is never a token. A sidecar that cannot be opened at all
-    answers "none known", so the dedupe asks the authority again rather
-    than skip a head on an unreadable file, and the write that follows
-    reports the real trouble. Never raises: the session-end step
-    promises the same."""
+    attempt row, a row of a kind unknown here, or a row holding no
+    granted reply is never a token. A sidecar that cannot be opened at
+    all answers "none known", so the dedupe asks the authority again
+    rather than skip a head on an unreadable file, and the write that
+    follows reports the real trouble. Never raises: the session-end
+    step promises the same."""
     try:
         records = read_stamp_records(log) or []
     except OSError:
         return set()
-    return {record.get("head") for record in records
-            if isinstance(record, dict) and not is_attempt(record)}
+    # A row holding no granted reply does not stop the head being asked
+    # about (#366); a forged or copied granted reply does (SPEC 9.7).
+    return {record["head"] for record in records if token_granted(record)}
 
 
 def ask_authority(url, head, timeout):
@@ -4039,6 +4289,10 @@ def stamp_digest(target, head, n, url):
 
 
 def cmd_anchor(args):
+    if args.upgrade and args.force:
+        print("error: --force submits a head again, and --upgrade submits "
+              "nothing; give one of them", file=sys.stderr)
+        return EX_USAGE
     if args.upgrade:
         return upgrade_anchors(args)
     if args.manifest and args.log != DEFAULT_LOG:
@@ -4055,7 +4309,8 @@ def cmd_anchor(args):
             print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
             return EX_NOINPUT
         return submit_digest(args.manifest, head, None, args.calendar,
-                             f"--upgrade --manifest={args.manifest}")
+                             f"--upgrade --manifest={args.manifest}",
+                             args.force)
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -4072,15 +4327,23 @@ def cmd_anchor(args):
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
     return submit_digest(args.log, last["entry_hash"], last["n"],
-                         args.calendar, "--upgrade")
+                         args.calendar, "--upgrade", args.force)
 
 
-def submit_digest(target, head, n, calendars, upgrade_flags):
+def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
     """POST the digest `head` to each calendar and append one record
     beside `target` per calendar that answered: a chain (`n` is the
     entry number) or a package manifest (`n` is None). Success is one
     record or more; `upgrade_flags` is how the operator completes the
-    proof later."""
+    proof later. A head the sidecar already holds a proof for that
+    replays is not submitted again unless `force` says so."""
+    if not force and head in anchored_heads(target):
+        # The session end's rule, and `stamp`'s: the keeper runs this
+        # verb on every turn a head is ripe (#366), and a cadence that
+        # submitted an anchored head every turn would fill the sidecar
+        # with proofs of it. Nothing to do is exit 0, and no row.
+        print(f"already anchored {record_label(head, n)}")
+        return 0
     digest = bytes.fromhex(head)
     written = 0
     for calendar in (calendars or DEFAULT_CALENDARS):
@@ -4121,16 +4384,19 @@ def upgrade_anchors(args):
     for record in records:
         if row_kind("anchors", record) != ANCHOR_KIND:
             continue  # unreadable, a note, or a kind unknown here
+        # verify --anchors reports these; upgrade just skips
+        if anchor_row_problem(record) is not None:
+            continue
         try:
             verdict = judge_proof(record["head"],
                                   base64.b64decode(record["proof"]))
-        except (ProofError, KeyError, ValueError):
-            continue  # verify --anchors reports these; upgrade just skips
-        key = (record["head"], record["calendar"])
+        except (ProofError, ValueError):
+            continue
+        key = (record["head"], record.get("calendar"))
         if verdict[0] == "bitcoin":
             completed.add(key)
             settled_heads.add(record["head"])
-        else:
+        elif "calendar" in record:   # with none, there is no one to ask
             pending.append((record, verdict[1]))
 
     failures = 0
@@ -4139,32 +4405,43 @@ def upgrade_anchors(args):
         if key in completed:
             continue
         url = record["calendar"].rstrip("/")
+        # The calendar is the row's text, and the sidecar is in the
+        # writer's reach: every line below prints it escaped (#349).
+        shown = visible(url)
         label = record_label(record["head"], record.get("n"))
         if record["head"] in settled_heads:
-            print(f"skipped {label} at {url}: another calendar already "
+            print(f"skipped {label} at {shown}: another calendar already "
                   "settled this head")
             continue
         try:
             continuation = calendar_request(f"{url}/timestamp/{commitment_hex}")
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                print(f"still pending at {url} ({label}) — "
+                print(f"still pending at {shown} ({label}) — "
                       "Bitcoin confirmation takes a few hours")
             else:
-                print(f"warning: calendar {url}: {e}", file=sys.stderr)
+                print(f"warning: calendar {shown}: {visible(e)}",
+                      file=sys.stderr)
                 failures += 1
             continue
         except OSError as e:
-            print(f"warning: calendar {url}: {e}", file=sys.stderr)
+            print(f"warning: calendar {shown}: {visible(e)}", file=sys.stderr)
             failures += 1
+            continue
+        except ValueError:
+            # A calendar that is not a URL urllib can open was written by
+            # hand, not by a calendar that answered (#348). Named by its
+            # field, never its value, and no calendar failed to answer.
+            print(f"warning: skipped {label}: the record's calendar is not "
+                  "a URL this recorder can ask", file=sys.stderr)
             continue
         try:
             upgraded = splice_continuation(
                 base64.b64decode(record["proof"]), record["head"], continuation
             )
         except ProofError as e:
-            print(f"warning: calendar {url} sent an unusable completion: {e}",
-                  file=sys.stderr)
+            print(f"warning: calendar {shown} sent an unusable completion: "
+                  f"{e}", file=sys.stderr)
             failures += 1
             continue
         append_anchor_record(target, record["head"], record.get("n"), url,
@@ -5633,6 +5910,11 @@ def main(argv=None):
                                     "--upgrade, complete that proof "
                                     "(ADR-0026 ruling 4; `supervisor "
                                     "package --anchor` drives this)")
+    anchor_parser.add_argument("--force", action="store_true",
+                               help="submit the head even when the sidecar "
+                                    "already holds a proof for it that "
+                                    "replays, which is otherwise `already "
+                                    "anchored` and asks no calendar")
     anchor_parser.set_defaults(func=cmd_anchor)
     publish_parser = sub.add_parser(
         "publish", parents=[common],

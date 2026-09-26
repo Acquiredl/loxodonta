@@ -72,6 +72,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # supervisor is running and is tagged together with loxodonta.py — the
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 TOOL_VERSION = "0.9.0"
 FORMAT_VERSION = "0.1"
 
@@ -136,6 +137,7 @@ def chain_identity(root, log):
     return repo, session, seq
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def split_lines(data):
     """The lines of a chain's or a sidecar's bytes, by the one rule every
     reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
@@ -156,10 +158,12 @@ def split_lines(data):
 
 
 def read_lines(path, errors="replace"):
-    """A chain's or a sidecar's lines as text, split by `split_lines`.
-    A byte that is not UTF-8 reads as U+FFFD by default: the readers
-    here display and count, and the verify walk is where such a line
-    gets its name."""
+    """A chain's lines as text, split by `split_lines`. A byte that is
+    not UTF-8 reads as U+FFFD by default: the readers here display and
+    count, and the verify walk is where such a line gets its name.
+    Sidecars are read by the copied `read_log` instead, which keeps the
+    bad byte so `read_sidecar_records` names the line unreadable; read
+    here, `{"head":"ab\\xff"}` would parse as a head."""
     with open(path, "rb") as f:
         return [line.decode("utf-8", errors) for line in split_lines(f.read())]
 
@@ -598,14 +602,38 @@ def fortnight(days, now):
 UPGRADE_EVERY_SECONDS = int(
     os.environ.get("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600))
 
-# Both of verify's ANCHORED lines: the block an attestation claims, not
-# checked, and the block a --block-header checked (ruling 3 on #299). The
-# span is the same either way; the height is the attestation's word in
-# both, which is all the panel shows it as.
-ANCHORED_LINE = re.compile(
-    r"^ANCHORED: entries 0\.\.(\d+)\b.*?Bitcoin block (\d+)")
+# verify's ANCHORED line as the scan meets it: the block an attestation
+# claims, not checked (ruling 3 on #299), since the scan runs verify
+# without --block-header and so never meets the checked sentence. The
+# height is the attestation's word, which is all the panel shows it as.
+# The line is matched whole, word for word as the recorder's
+# `attestation_words` writes it (#349): a line that only starts the same
+# way is not the recorder's verdict, whatever it says after, so a
+# sidecar row whose text reached verify's output as a line of its own
+# could never read as an anchor. A change to that sentence changes the
+# pattern here, and the scan's anchor tests fail until it does. If the
+# scan ever passes --block-header, add the checked sentence beside it.
+ANCHORED_LINES = (
+    re.compile(r"ANCHORED: entries 0\.\.(\d+): the attestation claims "
+               r"Bitcoin block (\d+), and the block was not checked; that "
+               r"block's merkle root must read [0-9a-f]{64}, which "
+               r"--block-header with its header checks"),
+)
+# verify's pending line, whole: the time and the calendar are the row's,
+# printed escaped, so neither holds a space an honest row would write.
 PENDING_LINE = re.compile(
-    r"^ANCHOR-PENDING: head (\S+) submitted (\S+) via (\S+)")
+    r"ANCHOR-PENDING: head ([0-9a-f]{12}…) submitted (\S+) via (\S+) — "
+    r"run `loxodonta anchor --upgrade`")
+
+
+def anchored_span(line):
+    """(entries up to, block height) when `line` is one of the ANCHORED
+    lines above, whole and word for word; None for any other line."""
+    for pattern in ANCHORED_LINES:
+        found = pattern.fullmatch(line)
+        if found:
+            return int(found.group(1)), int(found.group(2))
+    return None
 
 
 def parse_cadence(text):
@@ -899,30 +927,68 @@ def upgrade_due(last_attempt, now):
     return (now - attempted).total_seconds() >= UPGRADE_EVERY_SECONDS
 
 
-def sidecar_records(sidecar):
-    """The records of a file beside a chain (the anchor sidecar, the
-    publish memo), read tolerantly and for scheduling or display only —
-    judging the proofs stays with verify. A missing file, a torn line,
-    or a line that is not an object yields nothing."""
+# --- Reading a sidecar, as the recorder reads it (ADR-0038) -------------------
+# The sidecars are read by copies of the recorder's own reader, so the
+# scan and the keeper never count a row `verify` would not, and one line
+# the writer appends never stops the scan (#331).
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def read_log(path):
+    """All lines of the receipt log, split by `split_lines`, for every
+    reader and writer here; FileNotFoundError if it doesn't exist. A
+    byte that is not UTF-8 arrives as a lone surrogate (surrogateescape)
+    instead of ending the whole read in a traceback: the walk refuses
+    the one line it sits on by name (SPEC §6), and `tail_entry` calls a
+    tail holding one damaged. The recorder only ever writes ASCII lines,
+    so no line it wrote is read any differently."""
+    with open(path, "rb") as f:
+        return [line.decode("utf-8", "surrogateescape")
+                for line in split_lines(f.read())]
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def sidecar_path(log, suffix):
+    """A file beside a chain that is not a chain: the anchor sidecar,
+    the publish memo. Named after the chain so the two travel together."""
+    return log + suffix
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def published_path(log):
+    return sidecar_path(log, ".published.jsonl")
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def read_sidecar_records(path):
+    """The records of one sidecar, or None when the file does not exist
+    (every sidecar is optional). A line that is not a JSON object reads
+    as None, so a judge can name it rather than skip it, and so does a
+    line the reader cannot take apart: a byte that is not UTF-8 (a lone
+    surrogate from `read_log`), an integer too long to read, nesting too
+    deep (#299)."""
     try:
-        lines = read_lines(sidecar)
+        lines = read_log(path)
     except FileNotFoundError:
-        return
+        return None
+    records = []
     for line in lines:
         try:
+            line.encode("utf-8")
             record = json.loads(line)
+            if not isinstance(record, dict):
+                record = None
         except (ValueError, RecursionError):
-            # A writer-reachable line: an integer past the digit limit
-            # or nesting past the recursion limit is skipped like any
-            # other, never a stopped scan (#331).
-            continue
-        if isinstance(record, dict):
-            yield record
+            record = None
+        records.append(record)
+    return records
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 ATTEMPT_KIND = "attempt"
+CHAIN_KIND = "chain"
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def is_attempt(record):
     """True for a row of kind `attempt`: a note on how a session-end
     step went, never a proof and never a sent head. Readers that judge
@@ -930,31 +996,87 @@ def is_attempt(record):
     return isinstance(record, dict) and record.get("kind") == ATTEMPT_KIND
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+ANCHOR_KIND = "anchor"
+STAMP_KIND = "stamp"
+HEAD_KIND = "head"
+SIDECAR_KINDS = {
+    "anchors": (ANCHOR_KIND, ATTEMPT_KIND),
+    "stamps": (STAMP_KIND, ATTEMPT_KIND),
+    "memo": (HEAD_KIND, CHAIN_KIND, ATTEMPT_KIND),
+}
+UNREADABLE_ROW = "unreadable"
+UNKNOWN_ROW = "unknown"
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def row_kind(sidecar, record):
+    """What one row of `sidecar` ("anchors", "stamps" or "memo") is, for
+    a row as `read_sidecar_records` gives it: the row's kind; the
+    sidecar's evidence kind for a row with no `kind`; UNREADABLE_ROW for
+    a line that is not a JSON object; UNKNOWN_ROW for a kind this
+    sidecar does not hold, a kind that is not a string among them."""
+    if record is None:
+        return UNREADABLE_ROW
+    kinds = SIDECAR_KINDS[sidecar]
+    if "kind" not in record:
+        return kinds[0]
+    kind = record["kind"]
+    if isinstance(kind, str) and kind in kinds:
+        return kind
+    return UNKNOWN_ROW
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def is_chain_record(record):
+    """True for a row of kind `chain`: a batch of entries the remote
+    acknowledged, with its range. Not a head row, so the head keeper's
+    ripeness test ignores it; not a proof of anything, like every row
+    in the memo. What a row is, `row_kind` says (ADR-0038)."""
+    return isinstance(record, dict) and row_kind("memo", record) == CHAIN_KIND
+
+
+def sidecar_records(path):
+    """The rows of a file beside a chain, as `read_sidecar_records`
+    gives them, for scheduling and display only: judging stays with
+    verify. [] for a missing file; None for a line that is not a JSON
+    object, which `row_kind` calls unreadable. A line past the digit or
+    recursion limit, or not UTF-8, is one of those, never a stopped
+    scan (#331)."""
+    return read_sidecar_records(str(path)) or []
+
+
+def row_when(record):
+    """When a sidecar row says it was written, or None: a `ts` that does
+    not parse, or names no time zone, counts for nothing. The rows are
+    writer-reachable, and one time with no zone beside one ending in Z
+    would stop the scan comparing them (#331's class)."""
+    when = parse_when(record.get("ts"))
+    return when if when is not None and when.tzinfo is not None else None
+
+
 # The outcomes that mean the step landed (the head sent, the digest
 # submitted, the token granted); anything else is a failure line.
 SENT_OUTCOMES = ("sent", "submitted", "granted")
 
 
-def is_chain_row(record):
-    """True for a row of kind `chain` (ADR-0031 ruling 2): a batch of the
-    chain's entries the remote acknowledged, with its range. The
-    recorder's rule, twice over: it carries the head after its last
-    entry for the operator's reading and is not a head row, so the head
-    route's ripeness never mistakes it for a head that left by the head
-    route; the two routes are counted apart."""
-    return isinstance(record, dict) and record.get("kind") == "chain"
-
-
-def sidecar_heads(sidecar):
-    """Heads that already have a record, for scheduling only: the head
-    route's rows, never a note and never a chain row."""
-    return {record["head"] for record in sidecar_records(sidecar)
-            if isinstance(record.get("head"), str)
-            and not is_attempt(record) and not is_chain_row(record)}
+def sidecar_heads(path, sidecar):
+    """The heads named by the evidence rows of `path`, a sidecar of kind
+    `sidecar` ("anchors", "stamps" or "memo"), a row with no kind among
+    them (ADR-0038), for scheduling and display only. An attempt, a
+    chain row, a kind unknown there or an unreadable line names none,
+    so a head only such a row names is still asked about, as `publish`
+    would ask. The keeper asks it of the memo alone: whether a head is
+    already anchored or stamped, `anchor` and `stamp` say (#366)."""
+    evidence = SIDECAR_KINDS[sidecar][0]
+    return {record["head"] for record in sidecar_records(path)
+            if row_kind(sidecar, record) == evidence
+            and isinstance(record.get("head"), str)}
 
 
 # Computed here only to compare with the memo's chain rows: the
 # fingerprint is never printed, served or written down by the supervisor.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def remote_id(url):
     """Which remote a chain row went to, without the URL (#263): the
     first 16 hex characters of the SHA-256 of the URL exactly as it was
@@ -966,22 +1088,49 @@ def remote_id(url):
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
-def chain_cursor(memo, remote=None):
-    """The last entry number the remote at `remote` acknowledged by the
-    chain route, from the memo's chain rows that name it (#263); -1 when
-    none does, so the recorder's next send there starts at genesis. The
-    recorder's rule, twice over: a row that names no remote was written
-    before rows named one and counts for none, so the keeper and the
-    recorder agree that each chain goes once more from genesis after
-    the upgrade. With no `remote` there is no remote to read against,
-    and every chain row counts. For scheduling only: the memo is
-    writer-reachable and proves nothing."""
-    mine = remote_id(remote) if remote is not None else None
-    return max((record["last"] for record in sidecar_records(memo)
-                if is_chain_row(record)
-                and isinstance(record.get("last"), int)
-                and (mine is None or record.get("remote_id") == mine)),
-               default=-1)
+# The keeper sends the chain only when this cursor, the recorder's own,
+# is behind the chain's end. For scheduling only: the memo is
+# writer-reachable and proves nothing.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def chain_cursor(log, url):
+    """The last entry number the remote at `url` acknowledged, from the
+    memo's chain rows that name it (#263); -1 when none does, so the
+    send starts at genesis. A row that names no remote predates remote
+    ids and counts for none: that chain goes once more from genesis, and
+    the receiver drops each line as an exact duplicate. A row of any
+    other kind, a head, a note or a kind unknown here, counts for none
+    either (ADR-0038). A torn memo line is read past (a resend the
+    receiver drops, never a stuck keeper), and so is a line past the
+    digit or recursion limit, which no reader here takes apart either;
+    a memo that cannot be read at all is raised, not guessed at, since
+    -1 would send the whole chain again at every session end. The two
+    differ on purpose (#344): a line past a limit is still text in the
+    memo's format, one line this parser declines, while a byte that is
+    not UTF-8 means the file is not text in that format at all, so the
+    memo holding it is the unreadable one, as it was before #299."""
+    try:
+        lines = read_log(published_path(log))
+    except FileNotFoundError:
+        return -1
+    mine = remote_id(url)
+    cursor = -1
+    for line in lines:
+        # A byte that is not UTF-8 arrives from `read_log` as a lone
+        # surrogate. The memo holding it cannot be read, and is raised
+        # as such (UnicodeEncodeError is a ValueError), as it was before
+        # `read_log` read such bytes at all (#299).
+        line.encode("utf-8")
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            # One appended line must not stop the chain route at every
+            # session end and keeper turn (#331, #344): at worst a chain
+            # row is missed and a batch the receiver drops goes again.
+            continue
+        if is_chain_record(record) and isinstance(record.get("last"), int) \
+                and record.get("remote_id") == mine:
+            cursor = max(cursor, record["last"])
+    return cursor
 
 
 def ripe_head(entries, now, cadence):
@@ -1004,14 +1153,14 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     --upgrade` (the record's own calendar; judgment stays with verify),
     and, only when the operator opted in with a cadence, a fresh head
     that has aged past it is anchored, and stamped by the authority the
-    marker names, on this same turn (ADR-0032 ruling 3). A head that
-    already holds a token is not asked about again: this guard saves the
-    process, and the recorder's own dedupe makes it safe to get wrong.
-    `failed` stays the anchor's; a refused stamp is already written down
-    in the stamps sidecar by the verb itself. Returns (attempted, note,
-    failed)."""
+    marker names, on this same turn (ADR-0032 ruling 3). Whether the
+    head already holds a proof or a token is the recorder's to say, not
+    this reader's (ADR-0005, #366): `anchor` and `stamp` each answer a
+    head they already hold with exit 0 and ask nobody, which is neither
+    a failure nor a departure. `failed` stays the anchor's; a refused
+    stamp is already written down in the stamps sidecar by the verb
+    itself. Returns (attempted, note, failed)."""
     sidecar = Path(str(log) + ".anchors.jsonl")
-    stamps = Path(str(log) + ".stamps.jsonl")
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
@@ -1029,7 +1178,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                          "proofs stay pending and the keeper will try again")
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
-        if head and head not in sidecar_heads(sidecar):
+        if head:
             command = [sys.executable, str(LOXODONTA), "anchor",
                        f"--log={log}"]
             for calendar in calendars:
@@ -1042,7 +1191,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
                              "keeper will try again")
-        if head and authority and head not in sidecar_heads(stamps):
+        if head and authority:
             finished = subprocess.run(
                 [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
                  "--authority", authority],
@@ -1062,10 +1211,12 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
 # was published or anchored. Same throttle, same ripeness test, same
 # posture as the anchor keeper: off by default, staleness quiet.
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 PUBLISH_SCHEMES = ("http", "https")
 SHELL_HAZARDS = "\"'`$\\"   # a quote, a backtick, a dollar sign, a backslash
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def publish_url(value):
     """argparse validator for a URL the tools send to: where a head or
     the chain is published, or the authority asked to stamp a head. A
@@ -1109,14 +1260,24 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     attempted = False
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
-    if url and head not in sidecar_heads(memo):
+    if url and head not in sidecar_heads(memo, "memo"):
         attempted = True
         note = publish_through_recorder(log, url, "head")
         if note:
             notes.append(note)
             failed = True
-    if chain_url and isinstance(entries[-1].get("n"), int) \
-            and entries[-1]["n"] > chain_cursor(memo, chain_url):
+    behind = False
+    if chain_url and isinstance(entries[-1].get("n"), int):
+        try:
+            behind = entries[-1]["n"] > chain_cursor(str(log), chain_url)
+        except (OSError, ValueError):
+            # The recorder's answer too: with no cursor there is no
+            # send, since -1 would send the whole chain again (#344).
+            notes.append("publishing the chain skipped — the memo could "
+                         "not be read, so where the remote left off is "
+                         "unknown; the entries stay unsent until it can be")
+            failed = True
+    if behind:
         attempted = True
         note = publish_through_recorder(log, chain_url, "chain")
         if note:
@@ -1170,32 +1331,38 @@ def last_departure(log):
     evidence the reader ages, never an alarm or the exit: both files
     are writer-reachable, so a fresh reading proves nothing."""
     departures = []   # (when, ts, via)
+    doors = {HEAD_KIND: "published", CHAIN_KIND: "published-chain"}
     for record in sidecar_records(Path(str(log) + ".published.jsonl")):
-        when = parse_when(record.get("ts"))
         # A head row is a head that left and a chain row a batch of
         # entries that left; an attempt row is a note that a step was
-        # tried (#240), and a refused POST never left.
-        if when is not None and not is_attempt(record):
-            departures.append((when, record["ts"],
-                               "published-chain" if is_chain_row(record)
-                               else "published"))
+        # tried (#240), and a refused POST never left. A kind unknown
+        # here, or a line that is not a row, is no departure (ADR-0038).
+        kind = row_kind("memo", record)
+        when = row_when(record) if kind in doors else None
+        if when is not None:
+            departures.append((when, record["ts"], doors[kind]))
     # An upgrade appends a second record for the same head, stamped
     # when the proof completed, so a head's departure is its first
     # record: the newest record would make an idle chain read fresh
     # every time a calendar answered a poll.
     first = {}
     for record in sidecar_records(Path(str(log) + ".anchors.jsonl")):
-        when = parse_when(record.get("ts"))
-        head = record.get("head")
-        if when is not None and head is not None and not is_attempt(record) \
+        if row_kind("anchors", record) != ANCHOR_KIND:
+            continue
+        when, head = row_when(record), record.get("head")
+        # A head that is not a string is no departure, and verify names
+        # the row (#348).
+        if when is not None and isinstance(head, str) \
                 and (head not in first or when < first[head][0]):
             first[head] = (when, record["ts"])
     departures += [(when, ts, "anchored") for when, ts in first.values()]
     # A stamp record is a token the authority granted for a head that
     # reached it (ADR-0032): the third door, read like the memo's rows.
     for record in sidecar_records(Path(str(log) + ".stamps.jsonl")):
-        when = parse_when(record.get("ts"))
-        if when is not None and not is_attempt(record):
+        if row_kind("stamps", record) != STAMP_KIND:
+            continue
+        when = row_when(record)
+        if when is not None:
             departures.append((when, record["ts"], "stamped"))
     if not departures:
         return {"ts": None, "via": None}
@@ -1218,7 +1385,7 @@ def last_failed(log):
             if not is_attempt(record) \
                     or record.get("outcome") in SENT_OUTCOMES:
                 continue
-            when = parse_when(record.get("ts"))
+            when = row_when(record)
             if when is not None and (newest is None or when > newest[0]):
                 newest = (when, {"step": record.get("step"),
                                  "ts": record["ts"],
@@ -1239,7 +1406,7 @@ def head_published(log, entries):
         return None
     head = entries[-1].get("entry_hash")
     return bool(head) and head in sidecar_heads(
-        Path(str(log) + ".published.jsonl"))
+        Path(str(log) + ".published.jsonl"), "memo")
 
 
 def assess_anchors(detail, entries):
@@ -1251,11 +1418,10 @@ def assess_anchors(detail, entries):
     anchored = []
     pending = []
     for line in detail:
-        span = ANCHORED_LINE.match(line)
+        span = anchored_span(line)
         if span:
-            anchored.append({"upto": int(span.group(1)),
-                             "height": int(span.group(2))})
-        wait = PENDING_LINE.match(line)
+            anchored.append({"upto": span[0], "height": span[1]})
+        wait = PENDING_LINE.fullmatch(line)
         if wait:
             pending.append({"head": wait.group(1),
                             "submitted": wait.group(2),
@@ -1296,6 +1462,7 @@ TAIL_KEEPER = os.environ.get("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
 # What the recorder writes down about the coverage it wired (ADR-0030).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 COVERAGE_NAME = "coverage.json"
 
 WATCH_WORDS = {
@@ -1376,12 +1543,14 @@ def read_settings(settings_file):
 # as the recorder's SessionEnd (#303). Only the recorder's `hook` entries
 # are read here: the supervisor's own digest entry wires no receipt.
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 RECORDER_NAMES = ("loxodonta.py", "receipts.py")
 DIGEST_NAMES = ("supervisor.py",)
 WIRED_VERB = {"loxodonta.py": "hook", "receipts.py": "hook",
               "supervisor.py": "digest"}
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def command_words(command):
     """A hook command split into words as a shell would, or None when
     it cannot be. A backslash is an ordinary character here, not an
@@ -1400,12 +1569,14 @@ def command_words(command):
         return None
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def file_name(path):
     """The last part of a path written with either separator, on any
     platform: a settings file can hold a Windows path read elsewhere."""
     return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def is_interpreter(word):
     """A Python interpreter: this one exactly as the installer writes
     it, or any whose file name says python (python3, python.exe,
@@ -1418,6 +1589,7 @@ def is_interpreter(word):
     return "python" in name or name.startswith("pypy")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def owned_script(command, names):
     """The script path in `command` when the installer wrote it for one
     of `names`, else None: an interpreter, then a script with one of
@@ -1435,6 +1607,7 @@ def owned_script(command, names):
     return script
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def beside_a_recorder(script):
     """Whether a supervisor.py is this project's, as far as the disk
     can say. The name is common enough that a user's own script can
@@ -1542,6 +1715,23 @@ def sessionend_chain_remote(witness):
     return None
 
 
+def chain_landed(log, remote):
+    """Whether the memo beside `log` holds a chain row for a batch the
+    remote at `remote` acknowledged, naming it as the recorder's cursor
+    does (#263); with no `remote` wired, any chain row counts. Read row
+    by row, so a line that cannot be read counts for nothing and never
+    hides a row that can. This is a reading for the report, not the
+    keeper's schedule: `chain_cursor` still raises on such a memo, since
+    a send guessed from it could resend the whole chain."""
+    mine = remote_id(remote) if remote is not None else None
+    return any(is_chain_record(record)
+               and isinstance(record.get("last"), int)
+               and record["last"] >= 0
+               and (mine is None or record.get("remote_id") == mine)
+               for record in sidecar_records(
+                   Path(str(log) + ".published.jsonl")))
+
+
 def published_reading(witness, logs):
     """#240 part 3: whether the wired SessionEnd command publishes,
     whether any chain here holds a row saying something was sent, and
@@ -1554,10 +1744,9 @@ def published_reading(witness, logs):
     Never the URL, and never the exit."""
     routes = sessionend_publishes(witness)
     remote = sessionend_chain_remote(witness)
-    memos = [Path(str(log) + ".published.jsonl") for log in logs]
-    landed = {"head": any(sidecar_heads(memo) for memo in memos),
-              "chain": any(chain_cursor(memo, remote) >= 0
-                           for memo in memos)}
+    landed = {"head": any(sidecar_heads(Path(str(log) + ".published.jsonl"),
+                                        "memo") for log in logs),
+              "chain": any(chain_landed(log, remote) for log in logs)}
     wired = any(routes.values())
     sent = any(landed.values())
     silent = [route for route in ("head", "chain")
@@ -2798,6 +2987,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         verdict, code, detail = verify(log)
         exit_code = scan_exit(code)
         stood_down = exit_code != 0 and superseded(log, detail)
+        anchors = assess_anchors(detail, entries)
         chain = {
             "log": log.as_posix(),
             # Stranded in a worktree: still this repo's history, but pruning
@@ -2809,11 +2999,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             "verdict": verdict,
             "exit": exit_code,
             # VALID says the chain agrees with itself; ANCHORED says it
-            # agrees with a Bitcoin block. Different claims, kept apart.
-            "anchored": any(line.startswith("ANCHORED") for line in detail),
+            # agrees with a Bitcoin block. Different claims, kept apart,
+            # and only verify's own ANCHORED line earns this (#349).
+            "anchored": bool(anchors["anchored"]),
             "superseded": stood_down,
             "detail": detail,
-            "anchors": assess_anchors(detail, entries),
+            "anchors": anchors,
             # When a head last left the machine, published or anchored
             # (ADR-0025): staleness evidence beside the anchor panel,
             # aged by the reader, never raising the exit.
@@ -3643,6 +3834,7 @@ def invoking_repo(args):
     return main_repo_of(Path(os.path.abspath(str(spoken))))
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def store_home():
     """The machine-wide home of hook-written chains (ADR-0011):
     ~/.loxodonta, or wherever LOXODONTA_HOME points."""
@@ -3650,6 +3842,7 @@ def store_home():
             or os.path.join(os.path.expanduser("~"), ".loxodonta"))
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def project_slug(project):
     """The store drawer name for a project: its basename plus 8 hex of
     the normalized full path's SHA256 — readable at a glance, and two
@@ -3834,10 +4027,12 @@ def legacy_recall_scope(args, repo):
 # exact bytes. Twin of loxodonta.py's `visible`; the files never import
 # each other (ADR-0035), and tools/twin_check.py holds the two copies
 # equal.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 STEERING_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def visible(text):
     """`text` with every steering character written as its escape: `\\n`,
     `\\x1b`, `\\u202e`, `\\U000e0041`. One line in, one line out,
@@ -4940,6 +5135,7 @@ def send_export(data, out, archive):
 # builds and the recorder judges (ADR-0005, ADR-0009), so the recipient
 # downloads the one file that already verifies a bare chain.
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
 # The seals a package can declare (ADR-0007's declared seal set), in the
 # order they are declared and applied: the anchor (--anchor) says when,
@@ -4953,9 +5149,11 @@ MANIFEST_SIGNATURE = "manifest.json.sig"   # ssh-keygen's detached signature
 MANIFEST_PUBLIC_KEY = "manifest.json.pub"  # the key that made it: testimony
 # The ssh-keygen signature namespace, the verifier's and the signer's
 # both, so a signature made for anything else never verifies here.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 SIGNATURE_NAMESPACE = "loxodonta-package"
 # The verifier's allowed-signers principal, twice over: the packer runs
 # the recipient's check on what it ships before anything is written.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 SIGNATURE_PRINCIPAL = "issuer"
 # The completeness row travels with these fields only: no judge command,
 # no transcript path, no home. Paths the recipient cannot follow are
@@ -5040,15 +5238,85 @@ def artifact_listing(path):
     return {"path": path.name, "sha256": digest.hexdigest(), "bytes": size}
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 PACKAGE_MAX_BYTES = 1 << 30   # the verifier's cap, twice over
 
 
-def bare_file_name(value):
-    """The verifier's rule for a packaged name, twice over: a bare file
-    name, nothing a path could be, since the layout is flat."""
-    return (isinstance(value, str) and value not in ("", ".", "..")
-            and "/" not in value and "\\" not in value
-            and value == os.path.basename(value))
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+WINDOWS_REFUSED_CHARACTERS = ':<>|"?*'
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+WINDOWS_UNZIP_UNDERSCORES = str.maketrans(
+    WINDOWS_REFUSED_CHARACTERS, "_" * len(WINDOWS_REFUSED_CHARACTERS))
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def landing_name(name):
+    """The file a zip member's name unpacks to, folded so that two names
+    landing on one file on any system compare equal: a drive or a
+    `\\\\server\\share` prefix dropped and either slash a separator
+    (Windows), empty, `.` and `..` segments dropped (every unzip), a
+    segment's trailing dots and spaces dropped and `:<>|"?*` read as `_`
+    (Windows), one Unicode normal form (macOS), and case folded (Windows
+    and macOS). The fold is the union of those systems' rules, applied on
+    every system, so a package's verdict never depends on where the
+    recipient unpacks it; it folds a little more than any one system
+    does, and a package the supervisor wrote, flat and plainly named,
+    never comes near it (#299)."""
+    import ntpath  # Windows's own path rules, the same on every system
+    _, rest = ntpath.splitdrive(name.replace("/", "\\"))
+    segments = (segment.rstrip(". ") for segment in rest.split("\\"))
+    landed = "/".join(segment for segment in segments if segment)
+    landed = landed.translate(WINDOWS_UNZIP_UNDERSCORES)
+    return unicodedata.normalize("NFC", landed).casefold()
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def one_file_twice(names):
+    """The first two of a zip's member names that unpack to one file, or
+    None. Unpacking writes both and keeps the last, while `unzip -p` and
+    a zip reader that stops at the first show the first: a tampered
+    chain ahead of the original verified SELF-CONSISTENT (#299)."""
+    seen = {}
+    for name in names:
+        landed = landing_name(name)
+        if landed in seen:
+            return seen[landed], name
+        seen[landed] = name
+    return None
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def bare_name(value):
+    """A manifest path is accepted only as a bare file name: the layout is
+    flat, and a name that could leave the package, or that one system
+    opens as another file than the rest do, is refused, never followed.
+    Judged by its characters alone, the same on every system, so one
+    package gets one verdict wherever it is read: not empty, not `.` or
+    `..`, at most 255 bytes in UTF-8 (the longest file name Linux and
+    macOS take); no `/` or `\\` (a folder), none of `:<>|"?*`, which
+    Windows refuses in a name (`C:x` is a drive there, `a?b` lands as
+    `a_b`), no control character, below U+0020, and no lone surrogate;
+    no `~`, since Windows also opens a file by its 8.3 short name
+    (`LONGFI~1.TXT` for `longfilename.txt`), which no listing shows and
+    no other system has; no trailing dot or space, which Windows strips, so `project.json.`
+    would open `project.json` there and nothing elsewhere; and not a
+    Windows device name, in any case, alone or before a dot and with
+    any spaces before that dot (`NUL`, `con.txt`, `nul .txt`, `CONIN$`,
+    `CONOUT$`, `PRN`, `AUX`, `COM1` to `COM9` and `LPT1` to `LPT9`, and
+    `COM¹`, `COM²`, `COM³`, `LPT¹`, `LPT²`, `LPT³`)."""
+    if not isinstance(value, str) or value in ("", ".", ".."):
+        return False
+    if any(c in "/\\~" + WINDOWS_REFUSED_CHARACTERS or c < " "
+           or "\ud800" <= c <= "\udfff" for c in value):
+        return False
+    if len(value.encode("utf-8")) > 255 or value[-1] in ". ":
+        return False
+    device = value.split(".")[0].rstrip(" ").upper()
+    return not (device in ("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$")
+                or (len(device) == 4 and device[:3] in ("COM", "LPT")
+                    and device[3] in "123456789¹²³"))
 
 
 def package_too_large(stage, written):
@@ -5395,6 +5663,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     return written
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def key_fingerprint(public_key):
     """The SHA256 fingerprint of a public key file, as ssh-keygen prints
     it (`ssh-keygen -lf`), or None when the file is not a key it reads.
@@ -5559,6 +5828,40 @@ def split_refusal(session, chains):
     return True
 
 
+def unpackageable(sessions, with_transcripts):
+    """Why a package of these sessions would never verify, or None. The
+    verifier refuses a manifest naming anything but a bare name, a chain
+    whose name leaves no room for its sidecars', and two names some
+    system opens as one file (#358), so none of them is written. The
+    hook names no chain so: it keeps a session id's letters, digits,
+    `-`, `_` and `.` between `receipts-` and `.jsonl`, so no `:`, no
+    `~`, no device name and no trailing dot. A chain put in the store by hand,
+    where a `:` is allowed, or two sessions whose ids differ only in
+    case, can be."""
+    names = ["manifest.json", "project.json", "witness.json", "README.md"]
+    for session, chains in sessions.items():
+        for log in chains:
+            if not (bare_name(log.name) and bare_name(log.name
+                                                      + ".anchors.jsonl")):
+                return (f"chain {log.name!r} cannot be packaged: its name "
+                        "is not a bare file name on every system, and the "
+                        "package layout is flat")
+            names += [log.name, log.name + ".anchors.jsonl",
+                      log.name + ".stamps.jsonl"]
+        if with_transcripts:
+            transcript = f"transcript-{session}.jsonl"
+            if not bare_name(transcript):
+                return (f"session {session!r} cannot carry a transcript: its "
+                        "name is not a bare file name, and the package "
+                        "layout is flat")
+            names.append(transcript)
+    twice = one_file_twice(list(dict.fromkeys(names)))
+    if twice is not None:
+        return (f"{twice[0]!r} and {twice[1]!r} cannot be packaged together: "
+                "some systems open the two names as one file")
+    return None
+
+
 def cmd_package(args):
     """Build one package (ADR-0026 ruling 1): of a session, selected by
     id or by an entry address inside it, siblings included; or, with
@@ -5641,15 +5944,10 @@ def cmd_package(args):
             row["session"]: Path(row["transcript"])
             for row in report.get("completeness", {}).get("sessions", [])
             if row.get("session") in sessions and row.get("transcript")}
-    if transcripts is not None:
-        for session in sessions:
-            if not bare_file_name(f"transcript-{session}.jsonl"):
-                # The verifier refuses a manifest naming anything but a
-                # bare file name, so such a package would never verify.
-                print(f"error: session {session!r} cannot carry a transcript: "
-                      "its name is not a bare file name, and the package "
-                      "layout is flat", file=sys.stderr)
-                return 1
+    problem = unpackageable(sessions, transcripts is not None)
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
     out.parent.mkdir(parents=True, exist_ok=True)
     if args.folder:
         out.mkdir()
@@ -7292,8 +7590,12 @@ function chainRow(chain) {
   drill.type = "button";
   drill.addEventListener("click", () => runDrill(chain.log));
   row.appendChild(drill);
-  const anchoredLine =
-    chain.detail.find(line => line.startsWith("ANCHORED"));
+  // The line shown is one the scan read as an anchor, by its span; a
+  // line that only starts "ANCHORED" is not taken for one (#349).
+  const spans = (chain.anchors ? chain.anchors.anchored : [])
+    .map(span => "ANCHORED: entries 0.." + span.upto);
+  const anchoredLine = chain.detail.find(line => spans.some(span =>
+    line.startsWith(span + ": ")));
   row.appendChild(el("p", "claim",
     rung === "anchored" && anchoredLine ? anchoredLine : CLAIM[rung]));
   if (chain.detail.length) {
@@ -8868,6 +9170,7 @@ setInterval(loadActivity, 30000);
 """
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
@@ -8882,12 +9185,14 @@ def checkout_commit(home):
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def version_line(prog, home):
     """Three identities on one line: tool, format, commit (ADR-0022)."""
     return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
             f"commit {checkout_commit(home)})")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class VersionAction(argparse.Action):
     """`--version`, answered only when asked: the commit is one git
     question, and no other command pays for it."""
@@ -8901,10 +9206,12 @@ class VersionAction(argparse.Action):
         parser.exit()
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: `verify` found no chain to judge
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def speak_utf8():
     """Write stdout and stderr in UTF-8, whatever the console dealt
     (#294): Windows hands a pipe cp1252, where one CJK character or
@@ -8918,6 +9225,7 @@ def speak_utf8():
             reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's

@@ -2,7 +2,9 @@
 
 `loxodonta.py`, `supervisor.py` and `receiver.py` never import each other (ADR-0035): each is one file a reader can check alone, run from its own source. So a rule two of them need is written in each. This page lists every such rule, a twin: the names it covers, the files it lives in, and why it is written more than once.
 
-The original of every twin is the recorder, `loxodonta.py`. To change a twin, change the recorder's text, then make each copy the same text, docstring included, since the check compares source. `python tools/twin_check.py --check` fails when a copy differs from its original, when a file no longer defines a name listed here, when this page is stale, when a top-level name is defined in two of the files without being listed here, and when an import binds a name one of the files defines. The suite runs it.
+The original of every twin is the recorder, `loxodonta.py`, and each copy carries one comment line directly above it that says so. A run of adjacent copies with nothing else in its block shares one line, over its first; any other copy has its own, so a statement without one is not a copy. To change a twin, edit the original in `loxodonta.py`, run `python tools/twin_check.py --write`, which copies it over each copy in place, then `python tools/twin_check.py --check`. When the original lies inside the verifier region, `--write` says so, and `python tools/build_verifier.py` carries it into `verifier.py`. `--write` never adds a copy a file lacks, and never rewrites a copy whose place holds other code (a second statement on its first line, say): it names each and exits 1, leaving that file as it was.
+
+`python tools/twin_check.py --check` fails when a copy differs from its original, when a copy has no line naming its original, when a file no longer defines a name listed here, when this page is stale, when a top-level name is defined in two of the files without being listed here, and when an import binds a name one of the files defines. The suite runs it.
 
 A top-level definition is a function or class, from its first decorator, or an assignment to a name (plain, annotated or augmented, or to an item or attribute of it), at the top of a file or inside a top-level `if`, `try`, `with`, `for`, `while` or `match` block. The check compares the definition's text, not the condition or loop around it, and does not see a name bound as a loop variable, by `with ... as` or `except ... as`, or by `global` inside a function.
 
@@ -84,11 +86,11 @@ Every file can print text a Windows console's code page cannot hold, and none of
 
 ### The package
 
-Names: `PACKAGE_FORMAT`, `PACKAGE_MAX_BYTES`, `SIGNATURE_NAMESPACE`, `SIGNATURE_PRINCIPAL`, `key_fingerprint`.
+Names: `PACKAGE_FORMAT`, `PACKAGE_MAX_BYTES`, `SIGNATURE_NAMESPACE`, `SIGNATURE_PRINCIPAL`, `key_fingerprint`, `bare_name`, `WINDOWS_REFUSED_CHARACTERS`, `WINDOWS_UNZIP_UNDERSCORES`, `landing_name`, `one_file_twice`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-The supervisor writes a package and the recorder, and the verifier cut from it, judge one: the format it names, the size it may unpack to, the namespace and principal its issuer signature is made and checked under, and the key fingerprint both print (ADR-0026).
+The supervisor writes a package and the recorder, and the verifier cut from it, judge one: the format it names, the size it may unpack to, the namespace and principal its issuer signature is made and checked under, the key fingerprint both print, the bare names its manifest may list, and which two names some system opens as one file (ADR-0026, #358).
 
 ### Attempt rows
 
@@ -97,6 +99,30 @@ Names: `ATTEMPT_KIND`, `is_attempt`.
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 The recorder notes how a session-end step went in a row of kind `attempt`, and every reader that judges or schedules skips it, the recorder's and the supervisor's alike (#240).
+
+### Reading a sidecar
+
+Names: `read_log`, `sidecar_path`, `published_path`, `read_sidecar_records`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+Where each sidecar lives beside its chain, and how its lines are read: a line that is not a JSON object, past the digit or recursion limit, or not UTF-8, reads as unreadable and never stops the reader. The recorder judges by it; the supervisor's scan and keeper report and schedule by it (#299, #331, #344).
+
+### What a sidecar row is
+
+Names: `CHAIN_KIND`, `ANCHOR_KIND`, `STAMP_KIND`, `HEAD_KIND`, `SIDECAR_KINDS`, `UNREADABLE_ROW`, `UNKNOWN_ROW`, `row_kind`, `is_chain_record`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+A row names its kind, a row with none reads as its sidecar's evidence, and a kind unknown there counts for nothing (ADR-0038). The recorder's judges and the supervisor's scan and keeper ask the one answer, so the scan never counts a proof, a token or a sent head that `verify` or `publish` would not (#344).
+
+### Where the chain route left off
+
+Names: `chain_cursor`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+The keeper runs the recorder's `publish --chain` only when the recorder's cursor for that remote is behind the chain's end, so both read the memo alike, and a memo neither can read leaves a note rather than a send from genesis (#263, #344).
 
 ### Naming a remote
 
@@ -139,4 +165,3 @@ These names are defined in more than one file, and each file means its own thing
 | `main` | `loxodonta.py`, `supervisor.py`, `receiver.py` | Each file's own command line. |
 | `cmd_verify` | `loxodonta.py`, `supervisor.py` | The recorder's `verify` judges the chain at a path; the supervisor's finds the chain holding an entry address, then prints the recorder's verdict on it. |
 | `cmd_serve` | `supervisor.py`, `receiver.py` | The supervisor serves its dashboard and recall; the receiver serves the URL published chains are sent to. |
-| `chain_cursor` | `loxodonta.py`, `supervisor.py` | Both find where the chain route left off, in different shapes; a twin once #344 gives the supervisor the recorder's. |
