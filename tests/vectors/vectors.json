@@ -808,6 +808,16 @@
       "last_line": "UNSUPPORTED-FORMAT: manifest.json names 'A.txt' and 'a.txt', which some systems open as one file; which one is read would depend on where the package is verified"
     },
     {
+      "name": "package-entries-boolean",
+      "about": "The manifest lists its chain with \"entries\": true: a count is an integer, never a boolean, so the manifest is refused unread.",
+      "args": [
+        "verify-package",
+        "package-entries-boolean"
+      ],
+      "exit": 4,
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists a chain whose entries is true or false, not an integer"
+    },
+    {
       "name": "package-anchored",
       "about": "The manifest's sha256 anchored by a completed proof, and the header of the block its attestation claims given: the rung, the block named by the header's hash.",
       "args": [
