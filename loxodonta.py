@@ -1060,6 +1060,93 @@ def read_stamp_records(log):
     return read_sidecar_records(stamps_path(log))
 
 
+# A stamp row keeps the authority's whole reply, an RFC 3161
+# TimeStampResp: a status saying whether the request was granted, then,
+# only when it was, the token, which is the part the authority signed.
+# This file reads the status and whether a token follows it, never what
+# the token holds. The status is signed by nobody, so a granted one
+# proves nothing alone, and a reply that was not granted, or holds no
+# token, holds nothing to judge: invalid on its face, with no tool.
+
+# PKIStatus (RFC 3161 §2.4.2), in order: the first two come with a token.
+STAMP_STATUS_WORDS = ("granted", "granted with modifications", "rejection",
+                      "waiting", "revocation warning",
+                      "revocation notification")
+STAMP_GRANTED = (0, 1)
+
+
+def der_element(data, at=0):
+    """The DER element that starts at `data[at]`: (tag, content, the
+    offset after it). Definite lengths only, which is all DER has; a
+    reply cut short or shaped some other way is a ValueError, since
+    bytes that are not DER are not a timestamp response."""
+    if at + 2 > len(data):
+        raise ValueError("the reply is cut short")
+    tag, length = data[at], data[at + 1]
+    at += 2
+    if length & 0x80:
+        size = length & 0x7F
+        if not 0 < size <= 4 or at + size > len(data):
+            raise ValueError("a length is not definite")
+        length = int.from_bytes(data[at:at + size], "big")
+        at += size
+    if at + length > len(data):
+        raise ValueError("the reply is cut short")
+    return tag, data[at:at + length], at + length
+
+
+def der_expect(data, tag, what):
+    """The content of the first element in `data`, which must carry `tag`."""
+    found, content, _ = der_element(data)
+    if found != tag:
+        raise ValueError(f"{what} is not the element RFC 3161 puts there")
+    return content
+
+
+def stamp_status(reply):
+    """The PKIStatus of a TimeStampResp, and whether a token follows it:
+    (status, holds_token). The status is the first INTEGER of the first
+    SEQUENCE of the outer SEQUENCE; a token is the SEQUENCE after that
+    first one, read for its tag and length and nothing inside it. Bytes
+    that are not this shape are a ValueError."""
+    response = der_expect(reply, 0x30, "the response")
+    tag, info, after = der_element(response)
+    if tag != 0x30:
+        raise ValueError("its status is not the element RFC 3161 puts there")
+    status = der_expect(info, 0x02, "the status code")
+    if not 0 < len(status) <= 4:
+        raise ValueError("the status code is not a small integer")
+    holds_token = after < len(response)
+    if holds_token:
+        der_expect(response[after:], 0x30, "the token")
+    return int.from_bytes(status, "big", signed=True), holds_token
+
+
+def status_word(status):
+    """A PKIStatus in RFC 3161's words, or `unknown`."""
+    if 0 <= status < len(STAMP_STATUS_WORDS):
+        return STAMP_STATUS_WORDS[status]
+    return "unknown"
+
+
+def stamp_reply_problem(reply):
+    """Why the bytes `reply` hold no token, in one line of this file's
+    own words, never the reply's; None for a reply whose status says
+    granted with a token after it. RFC 3161 puts a token in every
+    granted reply and none in any other, so a granted status with no
+    token holds none either. Offline, and never raises."""
+    try:
+        status, holds_token = stamp_status(reply)
+    except ValueError as e:
+        return f"the reply is not a timestamp response: {e}"
+    said = f"the reply's status is {status} ({status_word(status)})"
+    if status not in STAMP_GRANTED:
+        return f"{said}, so it holds no token"
+    if not holds_token:
+        return f"{said} and it holds no token"
+    return None
+
+
 def openssl_reason(stderr):
     """Why openssl refused, in its own words and on one line. Its error
     lines are colon-separated fields (an id, `error`, a code, a library,
@@ -1245,6 +1332,14 @@ def check_stamps(log, entries, chain_file):
             bad = True
             print(f"STAMP-INVALID: {label}: the response is not base64 — "
                   "evidence that does not verify is not evidence")
+            continue
+        # Read before any tool, so a reply holding no token is never
+        # "present, not judged" on a machine without one.
+        problem = stamp_reply_problem(reply)
+        if problem is not None:
+            bad = True
+            print(f"STAMP-INVALID: {label}: {problem} — evidence that does "
+                  "not verify is not evidence")
             continue
         verdict, detail = judge_stamp(head, reply, chain_file)
         if verdict == "stamped":
@@ -1922,7 +2017,8 @@ def judge_manifest_stamp(folder, chain_file):
     is earned, and why nobody judged the seal when nobody did. A token
     this machine cannot judge, or whose certificate expired after it was
     issued (#264), is a note and never a verdict: the rung is neither
-    earned nor failed. Only the manifest's own token can earn the
+    earned nor failed; a reply holding no token is none to judge, and
+    invalid with no tool. Only the manifest's own token can earn the
     package rung; the chains' tokens stamp a different object."""
     manifest = os.path.join(folder, "manifest.json")
     digest = sha256_file(manifest)
@@ -1957,6 +2053,8 @@ def judge_manifest_stamp(folder, chain_file):
             except ValueError:
                 reason = "the response is not base64"
             else:
+                reason = stamp_reply_problem(reply)
+            if reason is None:
                 verdict, detail = judge_stamp(head, reply, chain_file)
                 if verdict == "stamped":
                     # The signer is the key the recipient's chain file
@@ -3272,6 +3370,19 @@ def proof_replays(record):
     return True
 
 
+def anchored_heads(target):
+    """The heads `target`'s anchor sidecar holds a proof for that
+    replays, pending or complete (`proof_replays`): the dedupe of the
+    session end and of `anchor`. A sidecar that cannot be opened at all
+    answers "none known", so the head is submitted rather than skipped
+    on an unreadable file. Never raises."""
+    try:
+        records = read_anchor_records(target) or []
+    except OSError:
+        return set()
+    return {record["head"] for record in records if proof_replays(record)}
+
+
 def anchor_and_upgrade(log, calendars, budget):
     deadline = time.monotonic() + budget
 
@@ -3286,11 +3397,10 @@ def anchor_and_upgrade(log, calendars, budget):
         return  # a damaged tail cannot be anchored
     head, n = last["entry_hash"], last["n"]
     # Only a proof that replays anchors a head: a row the writer shaped
-    # wrong, or whose proof verify would call invalid, never stops the
-    # head being submitted (#348).
-    anchored = {r["head"] for r in (read_anchor_records(log) or [])
-                if proof_replays(r)}
-    if head not in anchored:
+    # wrong, or whose proof verify would call invalid, does not stop the
+    # head being submitted (#348). One that replays does, planted or not
+    # (SPEC 9.4).
+    if head not in anchored_heads(log):
         submitted = False
         for calendar in calendars:
             if remaining() <= 0:
@@ -4010,9 +4120,10 @@ def cmd_publish(args):
 # is somebody's signed word where an anchor's proof is nobody's product,
 # so the sidecar, the verb, the verdict and every message say stamp, and
 # never anchor. The recorder encodes the request, reads only whether it
-# was granted, and keeps the reply verbatim in `<log>.stamps.jsonl`; it
-# never parses the token. Judging is `verify --stamps`, through openssl
-# (check_stamps), or an honest note that nobody judged it.
+# was granted, by the verifier's own reader (stamp_status), and keeps the
+# reply verbatim in `<log>.stamps.jsonl`; it never parses the token.
+# Judging is `verify --stamps`, through openssl (check_stamps), or an
+# honest note that nobody judged it.
 
 STEP_STAMP = "stamp"
 STAMP_TIMEOUT = 15.0   # seconds; an operator's turn, like `publish`
@@ -4020,11 +4131,6 @@ STAMP_QUERY_TYPE = "application/timestamp-query"
 # The one hash algorithm the request names, as DER writes its object
 # identifier: 2.16.840.1.101.3.4.2.1 is sha256, the chain's own digest.
 SHA256_OID = bytes.fromhex("608648016503040201")
-# PKIStatus (RFC 3161 §2.4.2), in order: the first two come with a token.
-STAMP_STATUS_WORDS = ("granted", "granted with modifications", "rejection",
-                      "waiting", "revocation warning",
-                      "revocation notification")
-STAMP_GRANTED = (0, 1)
 
 
 def der(tag, content):
@@ -4058,46 +4164,6 @@ def stamp_request(head_hex, nonce):
                + der(0x01, b"\xff"))
 
 
-def der_element(data, at=0):
-    """The DER element that starts at `data[at]`: (tag, content, the
-    offset after it). Definite lengths only, which is all DER has; a
-    reply cut short or shaped some other way is a ValueError, since
-    bytes that are not DER are not a timestamp response."""
-    if at + 2 > len(data):
-        raise ValueError("the reply is cut short")
-    tag, length = data[at], data[at + 1]
-    at += 2
-    if length & 0x80:
-        size = length & 0x7F
-        if not 0 < size <= 4 or at + size > len(data):
-            raise ValueError("a length is not definite")
-        length = int.from_bytes(data[at:at + size], "big")
-        at += size
-    if at + length > len(data):
-        raise ValueError("the reply is cut short")
-    return tag, data[at:at + length], at + length
-
-
-def der_expect(data, tag, what):
-    """The content of the first element in `data`, which must carry `tag`."""
-    found, content, _ = der_element(data)
-    if found != tag:
-        raise ValueError(f"{what} is not the element RFC 3161 puts there")
-    return content
-
-
-def stamp_status(reply):
-    """The PKIStatus of a TimeStampResp, and nothing else of it: the
-    first INTEGER of the first SEQUENCE of the outer SEQUENCE. Whatever
-    follows, the token, is kept verbatim and read by nobody here."""
-    response = der_expect(reply, 0x30, "the response")
-    info = der_expect(response, 0x30, "its status")
-    status = der_expect(info, 0x02, "the status code")
-    if not 0 < len(status) <= 4:
-        raise ValueError("the status code is not a small integer")
-    return int.from_bytes(status, "big", signed=True)
-
-
 def append_stamp_record(log, head, n, authority, reply):
     """One stamp record beside `log`: the head, its entry number, the
     time asked, the authority's URL, and the authority's whole reply in
@@ -4116,23 +4182,42 @@ def append_stamp_record(log, head, n, authority, reply):
     append_sidecar_record(stamps_path(log), record)
 
 
+def token_granted(record):
+    """True for a token row whose head is a string and whose response
+    is base64 of a reply whose status says granted, with a token after
+    it: the reply read as `verify --stamps` reads it offline
+    (`stamp_reply_problem`), and the token itself not at all (judging it
+    is openssl's). Never raises. The sidecar is in the writer's reach: a
+    row of the wrong shape, or a reply holding no token, is never a
+    token, but the status sits outside the token's signature, so a reply
+    forged with a granted status, or copied from another head's row,
+    passes, and nothing offline can tell it apart (SPEC 9.7)."""
+    if row_kind("stamps", record) != STAMP_KIND \
+            or not isinstance(record.get("head"), str) \
+            or not isinstance(record.get("response"), str):
+        return False
+    try:
+        reply = base64.b64decode(record["response"], validate=True)
+    except ValueError:
+        return False
+    return stamp_reply_problem(reply) is None
+
+
 def stamped_heads(log):
     """The heads this log's sidecar already holds a token for; an
-    attempt row, or a row of a kind unknown here, is never a token. A
-    sidecar that cannot be opened at all answers "none known", so the
-    dedupe asks the authority again rather than skip a head on an
-    unreadable file, and the write that follows reports the real
-    trouble. Never raises: the session-end step
-    promises the same."""
+    attempt row, a row of a kind unknown here, or a row holding no
+    granted reply is never a token. A sidecar that cannot be opened at
+    all answers "none known", so the dedupe asks the authority again
+    rather than skip a head on an unreadable file, and the write that
+    follows reports the real trouble. Never raises: the session-end
+    step promises the same."""
     try:
         records = read_stamp_records(log) or []
     except OSError:
         return set()
-    # A head that is not a string names no head, and a list would not
-    # even hash: the row is skipped, and the head is asked about.
-    return {record["head"] for record in records
-            if row_kind("stamps", record) == STAMP_KIND
-            and isinstance(record.get("head"), str)}
+    # A row holding no granted reply does not stop the head being asked
+    # about (#366); a forged or copied granted reply does (SPEC 9.7).
+    return {record["head"] for record in records if token_granted(record)}
 
 
 def ask_authority(url, head, timeout):
@@ -4154,13 +4239,16 @@ def ask_authority(url, head, timeout):
     if failure:
         return None, failure
     try:
-        status = stamp_status(reply)
+        status, holds_token = stamp_status(reply)
     except ValueError as e:
         return None, f"the reply is not a timestamp response: {e}"
+    word = status_word(status)
+    answered = f"the authority answered status {status} ({word})"
     if status not in STAMP_GRANTED:
-        word = (STAMP_STATUS_WORDS[status]
-                if 0 <= status < len(STAMP_STATUS_WORDS) else "unknown")
-        return None, f"the authority answered status {status} ({word})"
+        return None, answered
+    if not holds_token:
+        # Kept, it would be a row `verify --stamps` calls STAMP-INVALID.
+        return None, f"{answered} and sent no token"
     return reply, None
 
 
@@ -4280,6 +4368,10 @@ def stamp_digest(target, head, n, url):
 
 
 def cmd_anchor(args):
+    if args.upgrade and args.force:
+        print("error: --force submits a head again, and --upgrade submits "
+              "nothing; give one of them", file=sys.stderr)
+        return EX_USAGE
     if args.upgrade:
         return upgrade_anchors(args)
     if args.manifest and args.log != DEFAULT_LOG:
@@ -4296,7 +4388,8 @@ def cmd_anchor(args):
             print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
             return EX_NOINPUT
         return submit_digest(args.manifest, head, None, args.calendar,
-                             f"--upgrade --manifest={args.manifest}")
+                             f"--upgrade --manifest={args.manifest}",
+                             args.force)
     try:
         lines = read_log(args.log)
     except FileNotFoundError:
@@ -4313,15 +4406,23 @@ def cmd_anchor(args):
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
     return submit_digest(args.log, last["entry_hash"], last["n"],
-                         args.calendar, "--upgrade")
+                         args.calendar, "--upgrade", args.force)
 
 
-def submit_digest(target, head, n, calendars, upgrade_flags):
+def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
     """POST the digest `head` to each calendar and append one record
     beside `target` per calendar that answered: a chain (`n` is the
     entry number) or a package manifest (`n` is None). Success is one
     record or more; `upgrade_flags` is how the operator completes the
-    proof later."""
+    proof later. A head the sidecar already holds a proof for that
+    replays is not submitted again unless `force` says so."""
+    if not force and head in anchored_heads(target):
+        # The session end's rule, and `stamp`'s: the keeper runs this
+        # verb on every turn a head is ripe (#366), and a cadence that
+        # submitted an anchored head every turn would fill the sidecar
+        # with proofs of it. Nothing to do is exit 0, and no row.
+        print(f"already anchored {record_label(head, n)}")
+        return 0
     digest = bytes.fromhex(head)
     written = 0
     for calendar in (calendars or DEFAULT_CALENDARS):
@@ -5888,6 +5989,11 @@ def main(argv=None):
                                     "--upgrade, complete that proof "
                                     "(ADR-0026 ruling 4; `supervisor "
                                     "package --anchor` drives this)")
+    anchor_parser.add_argument("--force", action="store_true",
+                               help="submit the head even when the sidecar "
+                                    "already holds a proof for it that "
+                                    "replays, which is otherwise `already "
+                                    "anchored` and asks no calendar")
     anchor_parser.set_defaults(func=cmd_anchor)
     publish_parser = sub.add_parser(
         "publish", parents=[common],
