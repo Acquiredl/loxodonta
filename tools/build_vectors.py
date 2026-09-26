@@ -204,10 +204,13 @@ def entries_of(lines):
 
 # --- Packages (SPEC section 10), assembled as the supervisor lays one out ------
 
-def package_files(chain_lines, seals=(), format_tag=PACKAGE_FORMAT):
+def package_files(chain_lines, seals=(), format_tag=PACKAGE_FORMAT,
+                  change=None):
     """A package of one chain and the project record, as {name: bytes},
     with the manifest written last listing them: the chain by its head
-    and line count, the record by its sha256 and byte count."""
+    and line count, the record by its sha256 and byte count. `change`,
+    when given, edits the manifest before it is written, for a vector
+    whose manifest no supervisor writes."""
     chain = "".join(line + "\n" for line in chain_lines).encode("utf-8")
     manifest = {
         "format": format_tag,
@@ -223,6 +226,8 @@ def package_files(chain_lines, seals=(), format_tag=PACKAGE_FORMAT):
                        "bytes": len(PROJECT_RECORD)}],
         "seals": list(seals),
     }
+    if change is not None:
+        change(manifest)
     return {PACKAGE_CHAIN: chain, "project.json": PROJECT_RECORD,
             "manifest.json": (json.dumps(manifest, indent=2) + "\n").encode()}
 
@@ -753,6 +758,61 @@ def build(workdir):
                 "judged.", 4, 'UNSUPPORTED-FORMAT: package is format '
                 '"loxodonta-package/2"; this verifier speaks '
                 '"loxodonta-package/1"')
+
+    # A bare name is judged by its characters, the same on every system
+    # (#358): Windows alone reads `C:x` as a drive, `a\b` as a folder,
+    # `project.json.` as `project.json` and `NUL` as a device, and the
+    # manifest naming any of them is refused wherever it is verified.
+    for name, listed, reads in (
+            ("package-name-drive", "C:x", "a drive only on Windows"),
+            ("package-name-backslash", "a\\b", "a folder only on Windows"),
+            ("package-name-trailing-dot", "project.json.",
+             "which Windows opens as project.json, stripping the dot, and "
+             "no other system does"),
+            ("package-name-device", "NUL", "a device on Windows"),
+            ("package-name-refused-character", "a?b",
+             "which a Windows unzip lands as a_b"),
+            ("package-name-short", "LONGFI~1.TXT",
+             "an 8.3 short name Windows opens for a long one")):
+        package(name, package_files(
+            base, change=lambda m, listed=listed:
+            m["artifacts"][0].update(path=listed)))
+        package_row(name, f"The manifest lists its artifact as {listed}, "
+                    f"{reads}: a name is judged by its characters, so it is "
+                    "refused on every system, unread.", 4,
+                    "UNSUPPORTED-FORMAT: manifest.json lists an artifact "
+                    "without a bare file name, a sha256, and a byte count")
+
+    # A name is read only when a file holds exactly it (#358): Windows
+    # and macOS open PROJECT.JSON for project.json, and Linux does not.
+    spelled = package_files(base)
+    spelled["PROJECT.JSON"] = spelled.pop("project.json")
+    package("package-name-case", spelled)
+    package_row("package-name-case", "The manifest lists project.json and "
+                "the package holds PROJECT.JSON: some systems open it for "
+                "the name and others do not, so it is refused on every "
+                "system.", 4, "UNSUPPORTED-FORMAT: this package holds "
+                "'PROJECT.JSON', which some systems open as 'project.json', "
+                "a name the verifier reads, and others do not; which file is "
+                "judged would depend on where it is verified, so this "
+                "verifier refuses it")
+
+    # Two listed names some systems open as one file (#358): with one
+    # hash and only a.txt present, Windows judged both as matching and
+    # Linux found A.txt missing.
+    one = {"sha256": hashlib.sha256(PROJECT_RECORD).hexdigest(),
+           "bytes": len(PROJECT_RECORD)}
+    package("package-names-one-file", {
+        **package_files(base, change=lambda m: m["artifacts"].extend(
+            [{"path": "A.txt", **one}, {"path": "a.txt", **one}])),
+        "a.txt": PROJECT_RECORD})
+    package_row("package-names-one-file", "The manifest lists A.txt and "
+                "a.txt with one hash, and only a.txt is in the package: one "
+                "file on Windows and macOS, two names elsewhere, so it is "
+                "refused on every system.", 4, "UNSUPPORTED-FORMAT: "
+                "manifest.json names 'A.txt' and 'a.txt', which some systems "
+                "open as one file; which one is read would depend on where "
+                "the package is verified")
 
     anchored = package_files(base, seals=["anchor"])
     digest = hashlib.sha256(anchored["manifest.json"]).hexdigest()
