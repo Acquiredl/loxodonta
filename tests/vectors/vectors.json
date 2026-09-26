@@ -586,6 +586,51 @@
       ]
     },
     {
+      "name": "anchor-key-twice",
+      "about": "A completed proof of the head in a row that gives head twice, another chain's first: a reader keeping the first would say ANCHOR-MISMATCH and one keeping the last ANCHORED, so no reading of the line is the row, and it is unreadable.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-key-twice.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "anchor-nan",
+      "about": "A completed proof of the head in a row that also holds NaN, which JSON does not have: a strict parser cannot read the line, so it is unreadable (Infinity and -Infinity are refused alike).",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-nan.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
+      "name": "anchor-trailing-bytes",
+      "about": "A completed proof of the head with one byte after its timestamp tree: a proof is its tree and nothing after it.",
+      "args": [
+        "verify",
+        "--anchors",
+        "--log",
+        "anchor-trailing-bytes.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "ANCHOR-INVALID: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "ANCHOR-INVALID: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence"
+      ]
+    },
+    {
       "name": "stamp-kindless",
       "about": "A stamp row of the head written with no kind member: it reads as a stamp, and with no --authority-chain its token is present and not judged, a note that moves no exit.",
       "args": [

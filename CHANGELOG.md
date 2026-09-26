@@ -33,6 +33,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A row holding no granted reply no longer stops `stamp` or the session end stamping its head. The keeper now asks `anchor` and `stamp`; `anchor` says `already anchored` for a replaying proof (`--force` resubmits). Forged rows stay a limit (#366).
 - `verify-package` refuses a manifest whose `entries` or `bytes` is `true` or `false`, named by its field: Python counted a boolean as an integer, so a one-line chain listed with `"entries": true` passed (#359).
 - The verifier prints sidecar, manifest and file-name text escaped, and `head` refuses a tail hash that is not a head, so a crafted row can no longer forge an `ANCHORED` line `supervisor scan` believed. Sidecars are named bare (#349).
+- A sidecar row giving a key twice, or holding `NaN`, `Infinity` or `-Infinity`, is an unreadable line (`ANCHOR-INVALID`, `STAMP-INVALID`), as a strict parser reads it. A proof with bytes after its timestamp tree is `ANCHOR-INVALID` (#365).
 
 ## [0.9.0] - 2026-09-23
 

@@ -669,6 +669,35 @@ def build(workdir):
                 [unknown("anchor-misplaced-chain", "anchors",
                          'of kind "chain"'), "VALID"])
 
+    # A row a strict JSON parser refuses is no row (#365), and a proof
+    # ends where its tree does.
+    not_a_record = ("ANCHOR-INVALID: sidecar line is not a record — "
+                    "evidence that does not verify is not evidence")
+    proof_row = stored(anchor(head, completed_proof(), 3))
+    sidecar("anchor-key-twice", "anchors",
+            [proof_row.replace(f'"head":"{head}"',
+                               f'"head":"{other}","head":"{head}"')])
+    sidecar_row("anchor-key-twice", "anchors", "A completed proof of the "
+                "head in a row that gives head twice, another chain's "
+                "first: a reader keeping the first would say ANCHOR-MISMATCH "
+                "and one keeping the last ANCHORED, so no reading of the "
+                "line is the row, and it is unreadable.", 3, [not_a_record])
+
+    sidecar("anchor-nan", "anchors", [proof_row[:-1] + ',"x":NaN}'])
+    sidecar_row("anchor-nan", "anchors", "A completed proof of the head "
+                "in a row that also holds NaN, which JSON does not have: a "
+                "strict parser cannot read the line, so it is unreadable "
+                "(Infinity and -Infinity are refused alike).", 3,
+                [not_a_record])
+
+    sidecar("anchor-trailing-bytes", "anchors",
+            [anchor(head, completed_proof() + b"\x00", 3)])
+    sidecar_row("anchor-trailing-bytes", "anchors", "A completed proof of "
+                "the head with one byte after its timestamp tree: a proof "
+                "is its tree and nothing after it.", 3,
+                ["ANCHOR-INVALID: proof holds bytes after its timestamp tree "
+                 "— evidence that does not verify is not evidence"])
+
     sidecar("stamp-kindless", "stamps",
             [{"authority": "https://authority.example/tsr", "head": head,
               "n": 3, "response":
