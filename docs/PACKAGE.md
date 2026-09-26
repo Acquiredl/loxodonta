@@ -173,7 +173,7 @@ packed: 2026-09-09T04:11:33Z by loxodonta supervisor 0.4.0 (testimony)
 unit: kind session, session b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907, project todo
 contents: 1 chain(s), 3 artifact(s), seals: none declared
 chain: receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl (manifest: head 751d054dfeff…, 6 entries)
-NO-ANCHORS: loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907/receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl.anchors.jsonl not found — anchoring is optional; run `loxodonta anchor` to add one
+NO-ANCHORS: receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl.anchors.jsonl not found — anchoring is optional; run `loxodonta anchor` to add one
 VALID
 file references: 1 recorded, not checkable off the machine
 project.json: matches the manifest (sha256 3076b53b4813…, 148 bytes)
