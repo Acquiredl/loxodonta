@@ -12,6 +12,7 @@ would and reads what they wrote and printed. No internals are imported.
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -398,6 +399,128 @@ class DemoStorePackageTest(PackageCase):
             self.assertTrue(lines[-1].startswith("UNSUPPORTED-FORMAT"), lines)
             self.assertNotIn("outside-secret", result.stdout)
             self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_bare_name_is_judged_by_its_characters_on_every_system(self):
+        # #358: `C:x` read as a drive only on Windows, so one manifest
+        # was refused there and judged elsewhere. A name is refused by
+        # its characters wherever the recipient runs this, on a chain
+        # row and on an artifact row: a character Windows refuses in a
+        # name, a control character, a lone surrogate, more than 255
+        # bytes, a trailing dot or space (Windows strips them), a
+        # device name.
+        folder = self.folder_package()
+        written = (folder / "manifest.json").read_bytes()
+        for bad in ("C:x", "C:", "project.json:stream", "a<b", "a>b", "a|b",
+                    'a"b', "a?b", "a*b", "a\x00b", "a\tb", "line\nbreak",
+                    "\x1f", "a\udce9b", "é" * 130, "project.json.",
+                    "project.json ", "NUL", "nul.txt", "Con", "prn.tar.gz",
+                    "com1.log", "LPT9", "COM¹", "lpt³.txt", "nul .txt",
+                    "con .log", "CONIN$", "conout$.txt", "LONGFI~1.TXT",
+                    "RECEIP~1.JSO", "a~b"):
+            for row in ("chains", "artifacts"):
+                with self.subTest(name=bad, row=row):
+                    (folder / "manifest.json").write_bytes(written)
+                    self.rewrite_manifest(
+                        folder, lambda m, bad=bad, row=row: m[row].__setitem__(
+                            0, {**m[row][0], "path": bad}))
+
+                    result = self.verify_package(folder)
+
+                    self.assertEqual(result.returncode, 4, result.stdout)
+                    lines = result.stdout.strip().splitlines()
+                    self.assertEqual(len(lines), 1, "refused unread")
+                    self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"),
+                                    lines[0])
+                    self.assertIn("bare file name", lines[0])
+                    self.assertNotIn("Traceback", result.stderr)
+        # A name that only looks like one of them is bare: judged, and
+        # missing, since no such file is in the package.
+        for fine in ("CONSOLE.txt", "com10", "nul-ish.txt", "LPT0",
+                     "é" * 127):
+            with self.subTest(name=fine):
+                (folder / "manifest.json").write_bytes(written)
+                self.rewrite_manifest(
+                    folder, lambda m, fine=fine: m["artifacts"].__setitem__(
+                        0, {**m["artifacts"][0], "path": fine}))
+
+                result = self.verify_package(folder)
+
+                self.assertEqual(result.returncode, 2, result.stdout)
+                lines = result.stdout.strip().splitlines()
+                self.assertTrue(lines[-1].startswith("ARTIFACT-DIVERGED"),
+                                lines[-1])
+
+    def refused(self, package, words):
+        """`package` refused unread, exit 4, the one line saying `words`."""
+        result = self.verify_package(package)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"), lines[0])
+        self.assertIn(words, lines[0])
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_chain_name_leaving_no_room_for_its_sidecars_is_refused(self):
+        # A chain's sidecars are found by its name plus `.anchors.jsonl`:
+        # a 250-byte name is bare, and its sidecar's is not.
+        folder = self.folder_package()
+        self.rewrite_manifest(folder, lambda m: m["chains"][0].update(
+            path="a" * 250))
+        self.refused(folder, "sidecars' names past 255 bytes")
+
+    def test_two_listed_names_one_system_opens_as_one_file_are_refused(self):
+        # #358: `A.txt` and `a.txt` listed with one hash, only `a.txt`
+        # present, verified on Windows (one file, both match) and was
+        # missing on Linux. So were two Unicode forms of one name.
+        folder = self.folder_package()
+        written = (folder / "manifest.json").read_bytes()
+        (folder / "a.txt").write_bytes(b"one\n")
+        (folder / "é.txt").write_bytes(b"one\n")
+        listing = {"sha256": hashlib.sha256(b"one\n").hexdigest(), "bytes": 4}
+        for pair in (("A.txt", "a.txt"), ("é.txt", "é.txt")):
+            with self.subTest(pair=pair):
+                (folder / "manifest.json").write_bytes(written)
+                self.rewrite_manifest(folder, lambda m, pair=pair: m[
+                    "artifacts"].extend({**listing, "path": name}
+                                        for name in pair))
+                self.refused(folder, "some systems open as one file")
+
+    def test_a_file_under_another_spelling_of_a_listed_name_is_refused(self):
+        # #358: the manifest lists `project.json` and the package holds
+        # `PROJECT.JSON`: Windows and macOS opened it for the name and
+        # Linux found nothing. A name is read only when a file holds
+        # exactly it, judged from the folder's listing; the manifest too.
+        for listed, held in (("project.json", "PROJECT.JSON"),
+                             ("project.json", "Project.json"),
+                             ("manifest.json", "MANIFEST.JSON")):
+            with self.subTest(held=held):
+                folder = self.folder_package()
+                (folder / listed).rename(folder / (held + ".tmp"))
+                (folder / (held + ".tmp")).rename(folder / held)
+                self.assertIn(held, os.listdir(folder))
+                self.refused(folder, "manifest.json" if listed ==
+                             "manifest.json" else f"holds '{held}'")
+                shutil.rmtree(folder)
+        # Another Unicode form of a listed name, the same way.
+        folder = self.folder_package()
+        self.rewrite_manifest(folder, lambda m: m["artifacts"].append(
+            {"path": "é.txt", "sha256": "0" * 64, "bytes": 0}))
+        (folder / "é.txt").write_bytes(b"")
+        if "é.txt" in os.listdir(folder):   # kept as it was written
+            self.refused(folder, "which some systems open as")
+
+    def test_a_zip_member_not_named_as_a_bare_name_is_refused(self):
+        # #358: a Windows unzip lands `project.json.` as `project.json`
+        # and `a?b` as `a_b`, which no other does, so the member's name,
+        # listed or not, decides nothing: the zip is refused unopened.
+        self.assertEqual(self.package(BAD_DAY_SESSION).returncode, 0)
+        with zipfile.ZipFile(next(self.work.glob("*.zip"))) as package:
+            members = [(n, package.read(n)) for n in package.namelist()]
+        for name in ("a?b", "notes.txt.", "sub/a.txt", "NUL",
+                     "LONGFI~1.TXT"):
+            with self.subTest(name=name):
+                self.refused(self.crafted_zip(members + [(name, b"x")]),
+                             "not a bare file name")
 
     def crafted_zip(self, members):
         """A zip of `members`, (name, bytes) pairs in the order given.
@@ -806,6 +929,39 @@ class HookStorePackageTest(PackageCase):
         self.assertEqual([c["path"] for c in manifest["chains"]],
                          [self.chain.name, self.sibling.name])
         self.assertNotIn(SUB_SESSION, (folder / "README.md").read_text("utf-8"))
+
+    @unittest.skipIf(os.name == "nt", "a `:` in a file name is a stream "
+                     "on Windows, so no such chain can sit in its store")
+    def test_a_chain_whose_name_is_not_bare_everywhere_is_not_packaged(self):
+        # #358: the verifier refuses a manifest listing `a:b`, so the
+        # packer refuses to write one. The hook never names a chain so;
+        # a chain copied into the drawer by hand, on a system that takes
+        # a `:` in a file name, can be.
+        stray = self.chain.with_name("receipts-a:b.jsonl")
+        stray.write_bytes(self.chain.read_bytes())
+
+        result = self.package("--repo", str(self.project))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("'receipts-a:b.jsonl' cannot be packaged", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
+
+    def test_two_chains_one_system_opens_as_one_file_are_not_packaged(self):
+        # #358: the verifier refuses a manifest naming two chains whose
+        # names differ only in case, so the packer refuses to write one.
+        # Two session ids differing in case can reach one drawer where
+        # the file system tells the names apart.
+        twin = self.chain.with_name("receipts-" + SESSION.upper() + ".jsonl")
+        twin.write_bytes(self.chain.read_bytes())
+        if len({p.name for p in self.chain.parent.iterdir()
+                if p.name.lower() == self.chain.name.lower()}) < 2:
+            self.skipTest("this file system opens the two names as one")
+
+        result = self.package("--repo", str(self.project))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("cannot be packaged together", result.stderr)
+        self.assertFalse(list(self.work.iterdir()))
 
     def test_the_drawer_package_is_named_for_the_drawer_folder(self):
         # The slug is safe on every filesystem and hash-suffixed; the
