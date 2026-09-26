@@ -587,7 +587,7 @@
     },
     {
       "name": "stamp-kindless",
-      "about": "A stamp row of the head written with no kind member: it reads as a stamp, and with no --authority-chain its token is present and not judged, a note that moves no exit.",
+      "about": "A stamp row of the head written with no kind member: it reads as a stamp, its reply is granted and holds a token, and with no --authority-chain that token is present and not judged, a note that moves no exit.",
       "args": [
         "verify",
         "--stamps",
@@ -599,6 +599,21 @@
       "stdout": [
         "stamp not judged: no --authority-chain FILE given \u2014 head fab3462eec00\u2026 (entry 3) holds a token, present and not judged here (ADR-0032)",
         "VALID"
+      ]
+    },
+    {
+      "name": "stamp-rejected",
+      "about": "A stamp row of the head whose reply is the authority's rejection, status 2 and no token: it holds nothing to judge, so it is invalid evidence with no tool, never a token present and not judged.",
+      "args": [
+        "verify",
+        "--stamps",
+        "--log",
+        "stamp-rejected.jsonl"
+      ],
+      "exit": 3,
+      "last_line": "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence",
+      "stdout": [
+        "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence"
       ]
     },
     {

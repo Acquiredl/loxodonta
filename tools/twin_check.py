@@ -154,6 +154,26 @@ TWINS = (
          "keeper ask the one answer, so the scan never counts a proof, a "
          "token or a sent head that `verify` or `publish` would not "
          "(#344)."),
+    Twin("An anchor row's shape",
+         ("JSON_TYPE_WORDS", "json_type", "anchor_row_problem"),
+         ORIGINAL, SUPERVISOR,
+         "Every reader asks it of an anchor row before acting on it: the "
+         "recorder's judges call a row that fails it invalid, and the "
+         "supervisor's scan counts an anchor row as a departure only when "
+         "it passes, so the panel never says a head left by a row of the "
+         "wrong shape (#348, #370)."),
+    Twin("A stamp reply's status",
+         ("STAMP_STATUS_WORDS", "STAMP_GRANTED", "der_element",
+          "der_expect", "stamp_status", "status_word",
+          "stamp_reply_problem", "token_granted"),
+         ORIGINAL, SUPERVISOR,
+         "Whether a stamp row's reply says granted with a token after it, "
+         "read offline and the token never parsed: `verify --stamps` calls "
+         "a reply that does not STAMP-INVALID, `stamp` asks about its head "
+         "again, and the supervisor's scan counts only a granted reply as "
+         "a departure, so none of them counts a row the others would not "
+         "(#366, #370). A shape and status reader, not proof replay: "
+         "judging stays with verify."),
     Twin("Where the chain route left off", ("chain_cursor",),
          ORIGINAL, SUPERVISOR,
          "The keeper runs the recorder's `publish --chain` only when the "

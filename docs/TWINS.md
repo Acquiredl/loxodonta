@@ -116,6 +116,22 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 A row names its kind, a row with none reads as its sidecar's evidence, and a kind unknown there counts for nothing (ADR-0038). The recorder's judges and the supervisor's scan and keeper ask the one answer, so the scan never counts a proof, a token or a sent head that `verify` or `publish` would not (#344).
 
+### An anchor row's shape
+
+Names: `JSON_TYPE_WORDS`, `json_type`, `anchor_row_problem`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+Every reader asks it of an anchor row before acting on it: the recorder's judges call a row that fails it invalid, and the supervisor's scan counts an anchor row as a departure only when it passes, so the panel never says a head left by a row of the wrong shape (#348, #370).
+
+### A stamp reply's status
+
+Names: `STAMP_STATUS_WORDS`, `STAMP_GRANTED`, `der_element`, `der_expect`, `stamp_status`, `status_word`, `stamp_reply_problem`, `token_granted`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+Whether a stamp row's reply says granted with a token after it, read offline and the token never parsed: `verify --stamps` calls a reply that does not STAMP-INVALID, `stamp` asks about its head again, and the supervisor's scan counts only a granted reply as a departure, so none of them counts a row the others would not (#366, #370). A shape and status reader, not proof replay: judging stays with verify.
+
 ### Where the chain route left off
 
 Names: `chain_cursor`.

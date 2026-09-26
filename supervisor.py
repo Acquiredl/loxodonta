@@ -44,6 +44,7 @@ Nothing is ever offered off-machine.
 """
 
 import argparse
+import base64
 import contextlib
 import hashlib
 import io
@@ -1098,6 +1099,159 @@ def is_chain_record(record):
     return isinstance(record, dict) and row_kind("memo", record) == CHAIN_KIND
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+JSON_TYPE_WORDS = ((bool, "true or false"), (int, "a number"),
+                   (float, "a number"), (str, "a string"),
+                   (list, "an array"), (dict, "an object"),
+                   (type(None), "null"))
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def json_type(value):
+    """What JSON type `value` is, in words: how a message names a field
+    the writer filled with the wrong type, without printing the value."""
+    return next((words for types, words in JSON_TYPE_WORDS
+                 if isinstance(value, types)), "a value")
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def anchor_row_problem(record):
+    """The first way an anchor row is not the shape of one, named by its
+    field and the JSON type the field holds, never its value; None for a
+    row every reader can act on. A proof needs its head and its proof,
+    each a string, the proof base64. The calendar and the time may be
+    left out, and the entry number is left out of a package manifest's
+    row, but each is of its type when present: a judge prints them and
+    keys on them. The sidecar is in the writer's reach, so this is asked
+    of every row before anything reads it: a judge calls a row that
+    fails it invalid evidence, and the recorder skips it, since it is no
+    proof it can act on."""
+    for field in ("head", "proof"):
+        if field not in record:
+            return f"record has no {field}"
+        if not isinstance(record[field], str):
+            return (f"record's {field} is {json_type(record[field])}, "
+                    "not a string")
+    try:
+        base64.b64decode(record["proof"], validate=True)
+    except ValueError:
+        return "record's proof is not base64"
+    for field in ("calendar", "ts"):
+        if field in record and not isinstance(record[field], str):
+            return (f"record's {field} is {json_type(record[field])}, "
+                    "not a string")
+    n = record.get("n")
+    if "n" in record and (isinstance(n, bool) or not isinstance(n, int)):
+        return f"record's n is {json_type(n)}, not an integer"
+    return None
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+STAMP_STATUS_WORDS = ("granted", "granted with modifications", "rejection",
+                      "waiting", "revocation warning",
+                      "revocation notification")
+STAMP_GRANTED = (0, 1)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def der_element(data, at=0):
+    """The DER element that starts at `data[at]`: (tag, content, the
+    offset after it). Definite lengths only, which is all DER has; a
+    reply cut short or shaped some other way is a ValueError, since
+    bytes that are not DER are not a timestamp response."""
+    if at + 2 > len(data):
+        raise ValueError("the reply is cut short")
+    tag, length = data[at], data[at + 1]
+    at += 2
+    if length & 0x80:
+        size = length & 0x7F
+        if not 0 < size <= 4 or at + size > len(data):
+            raise ValueError("a length is not definite")
+        length = int.from_bytes(data[at:at + size], "big")
+        at += size
+    if at + length > len(data):
+        raise ValueError("the reply is cut short")
+    return tag, data[at:at + length], at + length
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def der_expect(data, tag, what):
+    """The content of the first element in `data`, which must carry `tag`."""
+    found, content, _ = der_element(data)
+    if found != tag:
+        raise ValueError(f"{what} is not the element RFC 3161 puts there")
+    return content
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def stamp_status(reply):
+    """The PKIStatus of a TimeStampResp, and whether a token follows it:
+    (status, holds_token). The status is the first INTEGER of the first
+    SEQUENCE of the outer SEQUENCE; a token is the SEQUENCE after that
+    first one, read for its tag and length and nothing inside it. Bytes
+    that are not this shape are a ValueError."""
+    response = der_expect(reply, 0x30, "the response")
+    tag, info, after = der_element(response)
+    if tag != 0x30:
+        raise ValueError("its status is not the element RFC 3161 puts there")
+    status = der_expect(info, 0x02, "the status code")
+    if not 0 < len(status) <= 4:
+        raise ValueError("the status code is not a small integer")
+    holds_token = after < len(response)
+    if holds_token:
+        der_expect(response[after:], 0x30, "the token")
+    return int.from_bytes(status, "big", signed=True), holds_token
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def status_word(status):
+    """A PKIStatus in RFC 3161's words, or `unknown`."""
+    if 0 <= status < len(STAMP_STATUS_WORDS):
+        return STAMP_STATUS_WORDS[status]
+    return "unknown"
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def stamp_reply_problem(reply):
+    """Why the bytes `reply` hold no token, in one line of this file's
+    own words, never the reply's; None for a reply whose status says
+    granted with a token after it. RFC 3161 puts a token in every
+    granted reply and none in any other, so a granted status with no
+    token holds none either. Offline, and never raises."""
+    try:
+        status, holds_token = stamp_status(reply)
+    except ValueError as e:
+        return f"the reply is not a timestamp response: {e}"
+    said = f"the reply's status is {status} ({status_word(status)})"
+    if status not in STAMP_GRANTED:
+        return f"{said}, so it holds no token"
+    if not holds_token:
+        return f"{said} and it holds no token"
+    return None
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def token_granted(record):
+    """True for a token row whose head is a string and whose response
+    is base64 of a reply whose status says granted, with a token after
+    it: the reply read as `verify --stamps` reads it offline
+    (`stamp_reply_problem`), and the token itself not at all (judging it
+    is openssl's). Never raises. The sidecar is in the writer's reach: a
+    row of the wrong shape, or a reply holding no token, is never a
+    token, but the status sits outside the token's signature, so a reply
+    forged with a granted status, or copied from another head's row,
+    passes, and nothing offline can tell it apart (SPEC 9.7)."""
+    if row_kind("stamps", record) != STAMP_KIND \
+            or not isinstance(record.get("head"), str) \
+            or not isinstance(record.get("response"), str):
+        return False
+    try:
+        reply = base64.b64decode(record["response"], validate=True)
+    except ValueError:
+        return False
+    return stamp_reply_problem(reply) is None
+
+
 def sidecar_records(path):
     """The rows of a file beside a chain, as `read_sidecar_records`
     gives them, for scheduling and display only: judging stays with
@@ -1458,19 +1612,22 @@ def last_departure(log):
     # every time a calendar answered a poll.
     first = {}
     for record in sidecar_records(Path(str(log) + ".anchors.jsonl")):
-        if row_kind("anchors", record) != ANCHOR_KIND:
+        # A row not of an anchor's shape is no departure, and verify
+        # names it (#348, #370); whether its proof holds is verify's.
+        if row_kind("anchors", record) != ANCHOR_KIND \
+                or anchor_row_problem(record) is not None:
             continue
-        when, head = row_when(record), record.get("head")
-        # A head that is not a string is no departure, and verify names
-        # the row (#348).
-        if when is not None and isinstance(head, str) \
+        when, head = row_when(record), record["head"]
+        if when is not None \
                 and (head not in first or when < first[head][0]):
             first[head] = (when, record["ts"])
     departures += [(when, ts, "anchored") for when, ts in first.values()]
     # A stamp record is a token the authority granted for a head that
     # reached it (ADR-0032): the third door, read like the memo's rows.
+    # A row whose reply holds no token is none, as `stamp` and verify
+    # read it (#370).
     for record in sidecar_records(Path(str(log) + ".stamps.jsonl")):
-        if row_kind("stamps", record) != STAMP_KIND:
+        if not token_granted(record):
             continue
         when = row_when(record)
         if when is not None:
