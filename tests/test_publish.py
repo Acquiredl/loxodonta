@@ -411,7 +411,7 @@ class PublishAtSessionEndTest(PublishBase):
         # is left behind on the hook's own clock, and the calendar is
         # still asked.
         calendar = self.calendar()
-        self.receiver.delay = 4  # seconds; just past the three the hook waits
+        self.receiver.delay = 6  # seconds; well past the three the hook waits
         self.transcript.write_bytes(b"page one\n")
         self.tool_call()
 
