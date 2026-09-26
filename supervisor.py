@@ -602,14 +602,38 @@ def fortnight(days, now):
 UPGRADE_EVERY_SECONDS = int(
     os.environ.get("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600))
 
-# Both of verify's ANCHORED lines: the block an attestation claims, not
-# checked, and the block a --block-header checked (ruling 3 on #299). The
-# span is the same either way; the height is the attestation's word in
-# both, which is all the panel shows it as.
-ANCHORED_LINE = re.compile(
-    r"^ANCHORED: entries 0\.\.(\d+)\b.*?Bitcoin block (\d+)")
+# verify's ANCHORED line as the scan meets it: the block an attestation
+# claims, not checked (ruling 3 on #299), since the scan runs verify
+# without --block-header and so never meets the checked sentence. The
+# height is the attestation's word, which is all the panel shows it as.
+# The line is matched whole, word for word as the recorder's
+# `attestation_words` writes it (#349): a line that only starts the same
+# way is not the recorder's verdict, whatever it says after, so a
+# sidecar row whose text reached verify's output as a line of its own
+# could never read as an anchor. A change to that sentence changes the
+# pattern here, and the scan's anchor tests fail until it does. If the
+# scan ever passes --block-header, add the checked sentence beside it.
+ANCHORED_LINES = (
+    re.compile(r"ANCHORED: entries 0\.\.(\d+): the attestation claims "
+               r"Bitcoin block (\d+), and the block was not checked; that "
+               r"block's merkle root must read [0-9a-f]{64}, which "
+               r"--block-header with its header checks"),
+)
+# verify's pending line, whole: the time and the calendar are the row's,
+# printed escaped, so neither holds a space an honest row would write.
 PENDING_LINE = re.compile(
-    r"^ANCHOR-PENDING: head (\S+) submitted (\S+) via (\S+)")
+    r"ANCHOR-PENDING: head ([0-9a-f]{12}…) submitted (\S+) via (\S+) — "
+    r"run `loxodonta anchor --upgrade`")
+
+
+def anchored_span(line):
+    """(entries up to, block height) when `line` is one of the ANCHORED
+    lines above, whole and word for word; None for any other line."""
+    for pattern in ANCHORED_LINES:
+        found = pattern.fullmatch(line)
+        if found:
+            return int(found.group(1)), int(found.group(2))
+    return None
 
 
 def parse_cadence(text):
@@ -1394,11 +1418,10 @@ def assess_anchors(detail, entries):
     anchored = []
     pending = []
     for line in detail:
-        span = ANCHORED_LINE.match(line)
+        span = anchored_span(line)
         if span:
-            anchored.append({"upto": int(span.group(1)),
-                             "height": int(span.group(2))})
-        wait = PENDING_LINE.match(line)
+            anchored.append({"upto": span[0], "height": span[1]})
+        wait = PENDING_LINE.fullmatch(line)
         if wait:
             pending.append({"head": wait.group(1),
                             "submitted": wait.group(2),
@@ -2964,6 +2987,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         verdict, code, detail = verify(log)
         exit_code = scan_exit(code)
         stood_down = exit_code != 0 and superseded(log, detail)
+        anchors = assess_anchors(detail, entries)
         chain = {
             "log": log.as_posix(),
             # Stranded in a worktree: still this repo's history, but pruning
@@ -2975,11 +2999,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             "verdict": verdict,
             "exit": exit_code,
             # VALID says the chain agrees with itself; ANCHORED says it
-            # agrees with a Bitcoin block. Different claims, kept apart.
-            "anchored": any(line.startswith("ANCHORED") for line in detail),
+            # agrees with a Bitcoin block. Different claims, kept apart,
+            # and only verify's own ANCHORED line earns this (#349).
+            "anchored": bool(anchors["anchored"]),
             "superseded": stood_down,
             "detail": detail,
-            "anchors": assess_anchors(detail, entries),
+            "anchors": anchors,
             # When a head last left the machine, published or anchored
             # (ADR-0025): staleness evidence beside the anchor panel,
             # aged by the reader, never raising the exit.
@@ -7565,8 +7590,12 @@ function chainRow(chain) {
   drill.type = "button";
   drill.addEventListener("click", () => runDrill(chain.log));
   row.appendChild(drill);
-  const anchoredLine =
-    chain.detail.find(line => line.startsWith("ANCHORED"));
+  // The line shown is one the scan read as an anchor, by its span; a
+  // line that only starts "ANCHORED" is not taken for one (#349).
+  const spans = (chain.anchors ? chain.anchors.anchored : [])
+    .map(span => "ANCHORED: entries 0.." + span.upto);
+  const anchoredLine = chain.detail.find(line => spans.some(span =>
+    line.startsWith(span + ": ")));
   row.appendChild(el("p", "claim",
     rung === "anchored" && anchoredLine ? anchoredLine : CLAIM[rung]));
   if (chain.detail.length) {

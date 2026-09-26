@@ -1544,5 +1544,122 @@ class AnchorDedupeTest(unittest.TestCase):
         self.assertNotIn("existed by the block", judged.stdout)
 
 
+# A sidecar field as a writer bent on fooling the reader would fill it
+# (#349): an escape sequence that turns the terminal red, a newline and
+# a forged verdict line, and a bidi override that reorders what follows.
+# HOSTILE is a whole field; HOSTILE_HEAD puts all three in the first 12
+# characters, which is as much of a head as most lines print. SHOWN and
+# SHOWN_HEAD are how each must read: every steering character written as
+# its escape (#295), so none of them reaches the terminal.
+FORGED_LINE = "ANCHORED: entries 0..99 in Bitcoin block 777"
+HOSTILE = "2026-09-25T10:00:00Z\x1b[31m\n" + FORGED_LINE + "‮"
+SHOWN = "2026-09-25T10:00:00Z\\x1b[31m\\n" + FORGED_LINE + "\\u202e"
+HOSTILE_HEAD = "\x1b[31m‮\n" + FORGED_LINE
+SHOWN_HEAD = "\\x1b[31m\\u202e\\n" + FORGED_LINE
+SHOWN_HEAD_12 = "\\x1b[31m\\u202e\\nANCHO"
+
+
+def assert_printed_escaped(case, stdout, shown):
+    """`shown` is in `stdout`, and nothing a hostile field held reached it
+    raw: no escape character, no bidi override, and no line the forged
+    verdict starts."""
+    case.assertIn(shown, stdout)
+    case.assertNotIn("\x1b", stdout)
+    case.assertNotIn("‮", stdout)
+    forged = [line for line in stdout.splitlines()
+              if line.lstrip().startswith(FORGED_LINE)]
+    case.assertEqual(forged, [], stdout)
+
+
+def completed_row(head, calendar="https://calendar.example.test"):
+    """A completed proof of `head`, as one sidecar line: one sha256 op,
+    then a Bitcoin attestation at block 850000."""
+    proof = b"\x08" + b"\x00" + TAG_BITCOIN + ots_varbytes(ots_varint(850000))
+    return json.dumps({"kind": "anchor", "head": head, "n": 1,
+                       "ts": "2026-09-24T09:00:00Z", "calendar": calendar,
+                       "proof": base64.b64encode(proof).decode()},
+                      sort_keys=True, separators=(",", ":"))
+
+
+class AnchorFieldEscapeTest(unittest.TestCase):
+    """#349: every field of an anchor row that `verify --anchors` prints
+    is the writer's text, and is printed escaped (#295), so no row can
+    paint a verdict of its own. The fixture is AnchorRowKindTest's."""
+
+    setUp = AnchorRowKindTest.setUp
+    pending_row = AnchorRowKindTest.pending_row
+    write_sidecar = AnchorRowKindTest.write_sidecar
+    verify = AnchorRowKindTest.verify
+
+    def test_a_pending_rows_time_and_calendar_print_escaped(self):
+        for field in ("ts", "calendar"):
+            with self.subTest(field=field):
+                self.write_sidecar(self.pending_row(**{field: HOSTILE}))
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                assert_printed_escaped(self, result.stdout, SHOWN)
+                (pending,) = [line for line in result.stdout.splitlines()
+                              if line.startswith("ANCHOR-PENDING")]
+                self.assertIn(SHOWN, pending)
+                self.assertEqual(result.stdout.splitlines()[-1], "VALID")
+
+    def test_an_unanswered_rows_time_and_calendar_print_escaped(self):
+        for field in ("ts", "calendar"):
+            with self.subTest(field=field):
+                self.write_sidecar(completed_row(self.head),
+                                   self.pending_row(**{field: HOSTILE}))
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                assert_printed_escaped(self, result.stdout, SHOWN)
+                (unanswered,) = [line for line in result.stdout.splitlines()
+                                 if line.startswith("ANCHOR-UNANSWERED")]
+                self.assertIn(SHOWN, unanswered)
+                anchored = [line for line in result.stdout.splitlines()
+                            if line.startswith("ANCHORED")]
+                self.assertEqual(len(anchored), 1)
+                self.assertTrue(anchored[0].startswith(
+                    "ANCHORED: entries 0..1: "), anchored)
+
+    def test_a_head_that_appears_nowhere_prints_escaped(self):
+        self.write_sidecar(self.pending_row(head=HOSTILE_HEAD))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        assert_printed_escaped(self, result.stdout,
+                               f"ANCHOR-MISMATCH: anchored head {SHOWN_HEAD} "
+                               "appears nowhere in this log")
+
+    def test_no_sidecar_is_named_by_its_bare_name(self):
+        log = self.workdir / "receipts.jsonl"
+
+        result = run_receipts("verify", "--anchors", "--log", str(log),
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NO-ANCHORS: receipts.jsonl.anchors.jsonl not found — ",
+                      result.stdout)
+        self.assertNotIn(str(self.workdir), result.stdout)
+
+    def test_upgrade_prints_a_settled_heads_calendar_escaped(self):
+        # Nothing is asked of a calendar whose head another calendar
+        # settled, so its URL reaches the line as the row wrote it.
+        self.write_sidecar(completed_row(self.head),
+                           self.pending_row(calendar=HOSTILE))
+
+        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        assert_printed_escaped(self, result.stdout + result.stderr, SHOWN)
+        self.assertIn(f"at {SHOWN}: another calendar already settled",
+                      result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

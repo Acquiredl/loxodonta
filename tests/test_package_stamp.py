@@ -982,6 +982,20 @@ class PackageStampRowKindTest(StampedStoreCase):
                          before.stdout.splitlines()[-1])
 
 
+def bare_sidecars(stdout):
+    """The released verifier's lines, with each NO-ANCHORS line naming
+    its sidecar bare, as this one does (#349): v0.9.0 named it by its
+    path in the package's folder, a wording that changed and no verdict."""
+    lines = []
+    for line in stdout.splitlines():
+        if line.startswith("NO-ANCHORS: "):
+            path, found, rest = line[len("NO-ANCHORS: "):].partition(
+                " not found")
+            line = f"NO-ANCHORS: {os.path.basename(path)}{found}{rest}"
+        lines.append(line)
+    return lines
+
+
 class ReleasedVerifierTest(StampedStoreCase):
     """ADR-0038's compatibility promise for the stamps sidecar, held
     against the bytes a recipient already has: a package this recorder
@@ -1011,7 +1025,7 @@ class ReleasedVerifierTest(StampedStoreCase):
              str(folder), *extra], capture_output=True, cwd=str(self.work),
             env=self.env)
         then_out = then.stdout.decode("utf-8", "replace")
-        self.assertEqual((then.returncode, then_out.splitlines()),
+        self.assertEqual((then.returncode, bare_sidecars(then_out)),
                          (now.returncode, now.stdout.splitlines()))
         return now
 

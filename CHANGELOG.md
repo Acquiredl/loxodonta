@@ -31,6 +31,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The supervisor reads sidecar rows as the recorder does, so an unknown kind no longer stops the keeper posting, stamping or anchoring a head. A memo line nested too deep no longer stops `publish --chain` (#344).
 - Malformed anchor and stamp rows (a field missing or of the wrong type) no longer crash `verify`, `verify-package`, `anchor`, `stamp`, `supervisor scan` or the session end. An anchor row reads `ANCHOR-INVALID`, a package manifest's `SEAL-INVALID`, naming the field (#348).
 - A row holding no granted reply no longer stops `stamp` or the session end stamping its head. The keeper now asks `anchor` and `stamp`; `anchor` says `already anchored` for a replaying proof (`--force` resubmits). Forged rows stay a limit (#366).
+- The verifier prints sidecar, manifest and file-name text escaped, and `head` refuses a tail hash that is not a head, so a crafted row can no longer forge an `ANCHORED` line `supervisor scan` believed. Sidecars are named bare (#349).
 
 ## [0.9.0] - 2026-09-23
 
