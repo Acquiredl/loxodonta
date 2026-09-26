@@ -140,12 +140,10 @@ repository. What the dashboard has, it keeps.
 
 ## 7. What it can and cannot claim
 
-In the published work's own terms, with the sources:
-[GROUNDING.md](GROUNDING.md) section 2. The short form: tamper-evidence
-for the part of a chain covered by a commitment held off the machine, and
-a bound on when it existed. Never forward integrity, never resistance to
-a cut tail without a published head, never protection at the moment of
-the call, never who wrote it, and never that anything is prevented.
+The list of what it cannot claim is
+[SPEC section 8.1](SPEC.md#81-what-the-design-cannot-claim). What it can
+claim, and the published work behind both, is
+[GROUNDING.md](GROUNDING.md) section 2.
 
 ## 8. How it names things
 

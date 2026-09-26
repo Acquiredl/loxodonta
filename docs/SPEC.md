@@ -1,7 +1,19 @@
-# receipts format specification
+# loxodonta format specification
 
-**Version:** 0.1.3
-**Status:** accepted 2026-08-10 (ADR-0001, ADR-0002 both `accepted`) — v0.1 is **frozen**; any format change requires a new version and a new chain (§2.1). Amendment 0.1.1 (2026-08-29, ADR-0012) changes only what a file-reference path resolves *against* (§3) — no byte of any entry, canonical form, or hash moves, so chains keep `v: "0.1"` and verify identically. Amendment 0.1.2 (2026-08-31, ADR-0017) names the bookkeeping-entry class and pins the transcript-commitment grammar (§2.2) — additive vocabulary over ordinary entries; again no byte moves and chains keep `v: "0.1"`. Amendment 0.1.3 (2026-09-23, ADR-0036, ADR-0037) freezes the hash chain across format versions (§4), so a verifier walks the hashes before it refuses a version (§2.1), and gives exit 1 to `BROKEN` alone (§6): verifier behavior, and a promise about later versions; no byte moves and chains keep `v: "0.1"`.
+This document specifies three parts, and each has its own version:
+
+- **The chain format:** `0.1`, sections 1 to 8, amended through 0.1.4.
+- **The sidecars:** every row names its kind (ADR-0038), section 9.
+- **The package format:** `loxodonta-package/1`, section 10.
+
+A revision of this document is not a format version: each part changes only under its own tag.
+
+**The chain format's status:** accepted 2026-08-10 (ADR-0001, ADR-0002 both `accepted`) — v0.1 is **frozen**; any format change requires a new version and a new chain (§2.1). No amendment below moves a byte of any entry, canonical form, or hash, so chains keep `v: "0.1"` and verify identically.
+
+- **0.1.1** (2026-08-29, ADR-0012) changes only what a file-reference path resolves *against* (§3).
+- **0.1.2** (2026-08-31, ADR-0017) names the bookkeeping-entry class and pins the transcript-commitment grammar (§2.2) — additive vocabulary over ordinary entries.
+- **0.1.3** (2026-09-23, ADR-0036, ADR-0037) freezes the hash chain across format versions (§4), so a verifier walks the hashes before it refuses a version (§2.1), and gives exit 1 to `BROKEN` alone (§6): verifier behavior, and a promise about later versions.
+- **0.1.4** (2026-09-24, #332, #336) changes words only: §5 says the head commits to canonical form, not to the file's bytes, and §8 splits into what the design cannot claim (§8.1) and the format's non-goals (§8.2), stating whole-chain regeneration as closed only for what a commitment held off the machine covers.
 
 This document defines the receipt log format precisely enough that an independent implementation, in any language, produces byte-identical hashes. That reproducibility is the whole game: a hash chain is only as trustworthy as the serialization rules underneath it.
 
@@ -147,11 +159,26 @@ Runs the command, waits for it to exit, then appends exactly one entry: `action`
 
 What is not receipted is the wrapper's own death by a signal it cannot catch: SIGKILL, or on Windows a TerminateProcess (which is what a SIGTERM sent there becomes). A command running with the operator's privileges can kill its wrapper that way, and then no receipt is written. `run` introduces no new schema fields; it is sugar over `log` with the invocation moved outside the writer's volition.
 
-## 8. Explicit non-goals (v0.1)
+## 8. Limits
 
-- **No history completeness.** The chain proves nothing was removed *from what was logged*; it cannot prove that everything got logged — a writer that simply never calls `log` leaves no break to detect. Completeness comes from placing the `log` call outside the writer's volition: pipeline gate scripts, the `loxodonta run` wrapper (§7), or a harness hook that fires on every action (Stage C). **Integrity is the tool's job; completeness is the integration's job.**
+What a verdict does not mean (§8.1), and what the format leaves out on purpose (§8.2).
+
+### 8.1 What the design cannot claim
+
+No verdict, `VALID` and `ANCHORED` included, claims any of the following. A *commitment held off the machine* is a chain head kept where the writer cannot change it: an anchor, an authority timestamp (trusted as far as its authority, ADR-0032), a published head, or a head record.
+
+- **Forward integrity for entries after the last commitment.** Nothing in the chain is secret, so whoever can write the log can rewrite every entry after the last commitment held off the machine and recompute their hashes, and the result verifies `VALID`.
+- **Resistance to a cut tail where no published head exists.** A chain with its last entries cut off is still a whole chain, and verifies `VALID`. Only a commitment held off the machine, made after those entries were written, shows that the chain was once longer.
+- **Protection at the moment of the call.** The receipt is written after the call it records has run. The chain holds nothing about a call until then, and it prevents nothing.
+- **Who wrote it.** There are no keys and no signatures (ADR-0001). A verdict says the entries are unchanged, never who wrote them; `actor` is what the writer said.
+- **Completeness from the chain alone.** The chain shows that nothing was removed from what was logged, never that everything was logged: a writer that never logs leaves no break. Integrity is the tool's job; completeness is the integration's, through a log call placed outside the writer's volition (§7) and the witness, which counts the calls that owed a receipt.
+- **Anything about entries written after a compromise.** An entry is what the writer said when it wrote it. A compromised writer's entries are chained as faithfully as an honest one's, and verify the same.
+- **Whole-chain regeneration past the last commitment.** Anyone who can write the log, the writer included, can build a new chain from genesis that verifies `VALID` on its own. Regeneration is closed for the prefix a commitment held off the machine covers, since the new chain does not hold that head and a verifier given it says so (`HEAD-MISMATCH`, `ANCHOR-MISMATCH`), and open for every entry after the last such commitment. *(Amended v0.1.4, 2026-09-24, #336: before, this section said anchoring closed regeneration outright, which holds only for the prefix an anchor covers. Not a format change: v0.1 hashes are unaffected.)*
+
+### 8.2 Non-goals of the format
+
 - **No keys, no signatures.** The chain proves internal consistency, not authorship. (ADR-0001.)
-- **No prevention of whole-chain regeneration by anyone with write access to the log** — which includes the writer itself (in the target use case, an AI agent has the same filesystem access as the operator). Partially mitigated in v0.1 by `loxodonta head` + `verify --expect-head` against an operator-held head record; fully closed by anchoring in Stage B. The spec reserves no fields for anchoring — anchor proofs live beside the log, not inside it.
+- **No fields for anchoring.** The spec reserves no fields for anchoring — anchor proofs live beside the log, not inside it.
 - **No concurrency *in the format*.** One writer per log, where a writer is a **process**, not a session or a person. Two processes appending simultaneously is corruption — a torn line, or two entries claiming the same `n` — not a supported mode. Parallelism is handled by giving each writer its **own** log (sibling chains, e.g. `receipts-<session>.jsonl`), never by sharing one — each chain verifies independently; interleaving them by timestamp is a display concern for `report`, not an integrity concern.
 
   Where a shared chain is unavoidable, **the integration must serialize its writers** — the format offers no help. The Stage C hook is the case in point: a harness runs tool calls in parallel and fires one hook process per call, so a session-keyed chain has many writers by construction. The hook therefore takes an exclusive lock across read-tail-then-append (ADR-0004). A session may consequently span **sibling chains** (`receipts-<session>-002.jsonl`, …) — created when a chain's tail is already damaged, since recording must not stop and damage must not be repaired (ADR-0002). Each sibling is a complete, independent chain: it has its own genesis, its own head, and anchors separately. The lock judges staleness by age, so a writer paused past the window (a machine asleep mid-append) can have its lock taken; where the operating system lets the lock file go, the result is two well-formed entries claiming one `n`: a **forked tail**, the second shape of tail damage beside the torn one. A chain whose final entry's `n` is not its line number therefore cannot be extended either: the hook starts a sibling and the writing verbs refuse, so an innocent race stays at the tail rather than being buried under later entries until it reads as tampering mid-file. The bound is one damaged tail and one sibling. `verify` reports the fork as `BROKEN` at the second entry, as it always did. *(Stated 2026-09-21, ADR-0004 addendum; writer behavior, not a format change.)*
@@ -394,7 +421,7 @@ The findings are ranked, and the gravest sets the verdict and the exit; within o
 | 5 | `ARTIFACT-DIVERGED` | 2 | A listed file is missing or differs from its listing, or a chain walks to another head or length. |
 | — | `SELF-CONSISTENT` | 0 | No finding. |
 
-`SELF-CONSISTENT` is the ceiling of a package with no seal, and it is printed with its limit: a wholesale regeneration, packed afresh, verifies the same. Each seal that holds adds its rung, in this order whatever the order declared: `+ ANCHORED` (the manifest's anchor completed), `+ STAMPED` (a token over the manifest was accepted), `+ SIGNED (key: <fingerprint>)` (the signature verified). The rungs are the manifest's seals alone: a chain's own anchor or token is printed under that chain and earns the package nothing, since it seals another object (ADR-0026 ruling 6). The verdict words name the mechanism, never a conclusion (ADR-0007 ruling 5). The line of residual trust before it states what rests on the issuer's word alone: that the record inside is true and complete, in every case, and whatever no seal earned. A seal of a known kind that no tool could judge (§10.8) is said so in both lines, and changes the exit in nothing; a seal of a kind the verifier does not know (§10.6) is named on its seal line only.
+`SELF-CONSISTENT` is the ceiling of a package with no seal, and it is printed with its limit: a wholesale regeneration, packed afresh, verifies the same (§8.1). Each seal that holds adds its rung, in this order whatever the order declared: `+ ANCHORED` (the manifest's anchor completed), `+ STAMPED` (a token over the manifest was accepted), `+ SIGNED (key: <fingerprint>)` (the signature verified). The rungs are the manifest's seals alone: a chain's own anchor or token is printed under that chain and earns the package nothing, since it seals another object (ADR-0026 ruling 6). The verdict words name the mechanism, never a conclusion (ADR-0007 ruling 5). The line of residual trust before it states what rests on the issuer's word alone: that the record inside is true and complete, in every case (§8.1), and whatever no seal earned. A seal of a known kind that no tool could judge (§10.8) is said so in both lines, and changes the exit in nothing; a seal of a kind the verifier does not know (§10.6) is named on its seal line only.
 
 Outside the ladder, as for `verify` (ADR-0037): 64 for a usage error, 66 when the package path is not there, 70 when the verifier itself fails. Exit 1 is `CHAIN-BROKEN` and nothing else.
 
