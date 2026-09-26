@@ -16,6 +16,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `tools/twin_check.py --write` copies each twin's original from `loxodonta.py` over its copies in place, and each copy now carries a line naming its original. `--check` fails on a copy without one (#342).
 - SPEC section 10 states every rule `verify-package` applies, and `docs/PACKAGE.md` points at it. Six package vectors join `tests/vectors/`: unsealed, an altered artifact, a name twice in a zip, a missing seal, an unknown format, an anchored manifest (#341).
 - SPEC section 9 states every rule `verify --anchors` and `verify --stamps` apply to a sidecar row, and `docs/ANCHORING.md` points at it. Fourteen anchor and stamp sidecar vectors join `tests/vectors/`, none needing a network or `openssl` (#343).
+- `docs/CONTROLS.md`: each mechanism mapped to the NIST SP 800-53, PCI DSS, OWASP T8, AIUC-1 and WIMSE controls it bears on, in NIST IR 8477's vocabulary, as a mapping and never an attestation; `house_check` refuses attestation words there (#338).
 
 ### Changed
 

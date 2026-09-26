@@ -6,6 +6,8 @@ The [OWASP Top 10 for LLM Applications 2026](https://genai.owasp.org/resource/ow
 
 The honesty frame comes first, because every claim below sits inside it. loxodonta is a tamper-evident receipt log with a watching layer: a tripwire with a memory. Its claim is detection latency, never prevention. Nothing here is a security boundary. The one hard boundary in the whole design is the anchor, because that lives in a Bitcoin block no rewrite on the machine can reach. Everything else detects fast and says so.
 
+The controls a security reviewer checks (NIST SP 800-53, PCI DSS, OWASP's agentic threat T8, AIUC-1, the IETF's WIMSE draft) are mapped on a page of their own, in NIST's mapping vocabulary: [CONTROLS.md](CONTROLS.md).
+
 ## Summary
 
 | OWASP 2026 entry | Relationship |
