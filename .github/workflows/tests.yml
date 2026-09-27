@@ -10,19 +10,30 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A new push to a pull request cancels that pull request's older run, which
+# nobody will read. Runs on main and dev are never cancelled.
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Each platform runs the suite in three shards on three machines at once:
+  # one serial run took 20 to 34 minutes, nearly all of it Python starting
+  # the CLI. Separate machines, never parallel processes on one: the
+  # suite's timing tests miss their windows on a loaded machine.
   suite:
-    name: ${{ matrix.os }} / py${{ matrix.python }}
-    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.target.os }} / py${{ matrix.target.python }} / shard ${{ matrix.shard }}
+    runs-on: ${{ matrix.target.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
+        target:
           - {os: ubuntu-latest, python: "3.9"}
           - {os: ubuntu-latest, python: "3.11"}
           - {os: ubuntu-latest, python: "3.13"}
           - {os: windows-latest, python: "3.13"}
           - {os: macos-latest, python: "3.13"}
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,11 +42,59 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: ${{ matrix.target.python }}
       - name: unit tests through the public CLI
         env:
           PYTHONIOENCODING: utf-8
-        run: python -m unittest discover -s tests -v
+          SHARD: ${{ matrix.shard }}
+          SHARDS: 3  # the length of the shard list above; the two must agree
+        shell: python
+        run: |
+          import os, subprocess, sys, unittest
+          from pathlib import Path
+
+          # This script runs from a temporary file, so the checkout is not
+          # on the import path until it is put there.
+          sys.path.insert(0, os.getcwd())
+          shard, shards = int(os.environ["SHARD"]), int(os.environ["SHARDS"])
+          assert 1 <= shard <= shards, (shard, shards)
+          # Heaviest module first, each to the lightest shard so far, so the
+          # shards finish together; a module's test count stands in for its
+          # time. Every machine computes the same split from the same tree.
+          names = sorted(p.stem for p in Path("tests").glob("test_*.py"))
+          weight = {n: unittest.defaultTestLoader.loadTestsFromName(
+              "tests." + n).countTestCases() for n in names}
+          shelves, totals = [[] for _ in range(shards)], [0] * shards
+          for n in sorted(names, key=lambda n: (-weight[n], n)):
+              lightest = totals.index(min(totals))
+              shelves[lightest].append(n)
+              totals[lightest] += weight[n]
+          mine = sorted(shelves[shard - 1])
+          print(f"shard {shard} of {shards}, {totals[shard - 1]} tests:",
+                ", ".join(mine), flush=True)
+          sys.exit(subprocess.call([sys.executable, "-m", "unittest", "-v",
+                                    *("tests." + n for n in mine)]))
+
+  # The names branch protection requires, one per platform: each passes only
+  # when every shard of every platform passed. The shard jobs above say which
+  # one failed. These names, the target list above and the protection's
+  # required checks are one list kept three times.
+  platform:
+    name: ${{ matrix.name }}
+    needs: suite
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        name:
+          - ubuntu-latest / py3.9
+          - ubuntu-latest / py3.11
+          - ubuntu-latest / py3.13
+          - windows-latest / py3.13
+          - macos-latest / py3.13
+    steps:
+      - name: every shard passed
+        run: test "${{ needs.suite.result }}" = success
 
   # The house checker: the repo's own vocabulary (GLOSSARY anti-terms, the
   # front door's no-em-dash and no-overclaim rules, the tool's old name
