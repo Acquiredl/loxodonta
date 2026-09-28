@@ -793,8 +793,9 @@ def note_unmatched_headers(headers, used):
 
 
 def sidecar_path(log, suffix):
-    """A file beside a chain that is not a chain: the anchor sidecar,
-    the publish memo. Named after the chain so the two travel together."""
+    """A file beside a chain that is not a chain: the anchor and stamp
+    sidecars, the publish memo. Named after the chain so they travel
+    together."""
     return log + suffix
 
 
@@ -935,13 +936,6 @@ ATTEMPT_KIND = "attempt"
 CHAIN_KIND = "chain"
 
 
-def is_attempt(record):
-    """True for a row of kind `attempt`: a note on how a session-end
-    step went, never a proof and never a sent head. Readers that judge
-    skip these rows; readers that report use them."""
-    return isinstance(record, dict) and record.get("kind") == ATTEMPT_KIND
-
-
 # --- What a sidecar row is (ADR-0038) -----------------------------------------
 # Every sidecar row names its kind. The first rows of each sidecar were
 # written before rows named one, so a row with no `kind` reads as its
@@ -1006,9 +1000,9 @@ def rows_to_judge(sidecar, records, prefix, name):
     judge names. Attempt rows and the memo's chain rows are left out
     silently. A row of a kind unknown here is left out after one line
     that names it, headed `prefix`, with its line number in the sidecar
-    file `name`: a bare file name, never a path of this machine. The kind is the writer's text, so it is printed escaped, and
-    a kind that is not a string is named by its JSON type, never its
-    value."""
+    file `name`: a bare file name, never a path of this machine. The
+    kind is the writer's text, so it is printed escaped, and a kind
+    that is not a string is named by its JSON type, never its value."""
     judged = []
     evidence = SIDECAR_KINDS[sidecar][0]
     for number, record in enumerate(records, 1):

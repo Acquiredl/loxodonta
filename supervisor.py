@@ -97,7 +97,10 @@ BOOKKEEPING_ACTOR = "receipts"
 # stamps sidecar (the authority's tokens, ADR-0032). All end in .jsonl
 # and share the chain's name, so every census that globs for chains must
 # set them aside by suffix.
-SIDECAR_SUFFIXES = (".anchors.jsonl", ".published.jsonl", ".stamps.jsonl")
+# Each sidecar's suffix, and the name `row_kind` knows it by.
+SIDECARS = {".anchors.jsonl": "anchors", ".published.jsonl": "memo",
+            ".stamps.jsonl": "stamps"}
+SIDECAR_SUFFIXES = tuple(SIDECARS)
 
 
 def find_chains(root):
@@ -951,8 +954,9 @@ def read_log(path):
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def sidecar_path(log, suffix):
-    """A file beside a chain that is not a chain: the anchor sidecar,
-    the publish memo. Named after the chain so the two travel together."""
+    """A file beside a chain that is not a chain: the anchor and stamp
+    sidecars, the publish memo. Named after the chain so they travel
+    together."""
     return log + suffix
 
 
@@ -1104,14 +1108,6 @@ def read_sidecar_records(path):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 ATTEMPT_KIND = "attempt"
 CHAIN_KIND = "chain"
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def is_attempt(record):
-    """True for a row of kind `attempt`: a note on how a session-end
-    step went, never a proof and never a sent head. Readers that judge
-    skip these rows; readers that report use them."""
-    return isinstance(record, dict) and record.get("kind") == ATTEMPT_KIND
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
@@ -1722,9 +1718,9 @@ def last_failed(log):
     visible within a session rather than a week. Testimony like the rows
     themselves: a reason to look, never the exit."""
     newest = None
-    for suffix in SIDECAR_SUFFIXES:
+    for suffix, sidecar in SIDECARS.items():
         for record in sidecar_records(Path(str(log) + suffix)):
-            if not is_attempt(record) \
+            if row_kind(sidecar, record) != ATTEMPT_KIND \
                     or record.get("outcome") in SENT_OUTCOMES:
                 continue
             when = row_when(record)

@@ -266,13 +266,14 @@ class TwinCheckTest(unittest.TestCase):
 
     def test_a_copy_that_differs_from_its_original_fails_by_name(self):
         self.edit("supervisor.py",
-                  'record.get("kind") == ATTEMPT_KIND',
-                  'record.get("kind") == "attempt"')
+                  'row_kind("memo", record) == CHAIN_KIND',
+                  'row_kind("memo", record) == "chain"')
         done = self.check()
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("Attempt rows: is_attempt in supervisor.py differs "
-                      "from loxodonta.py, its original: run python "
-                      "tools/twin_check.py --write", done.stderr)
+        self.assertIn("What a sidecar row is: is_chain_record in "
+                      "supervisor.py differs from loxodonta.py, its "
+                      "original: run python tools/twin_check.py --write",
+                      done.stderr)
 
     def test_a_name_a_file_no_longer_defines_fails(self):
         self.edit("receiver.py", "def checkout_commit(home):",
@@ -376,16 +377,16 @@ class TwinCheckTest(unittest.TestCase):
 
     def test_a_missing_pointer_fails_and_write_puts_it_back(self):
         before = self.snapshot()
-        self.edit("supervisor.py", POINTER + "\ndef is_attempt(",
-                  "def is_attempt(")
+        self.edit("supervisor.py", POINTER + "\ndef is_chain_record(",
+                  "def is_chain_record(")
         done = self.check()
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("is_attempt in supervisor.py has no pointer to "
+        self.assertIn("is_chain_record in supervisor.py has no pointer to "
                       "loxodonta.py above it", done.stderr)
 
         written = self.write()
         self.assertEqual(written.returncode, 0, written.stderr)
-        self.assertIn("added the pointer above is_attempt in supervisor.py",
+        self.assertIn("added the pointer above is_chain_record in supervisor.py",
                       written.stdout)
         self.assertEqual(self.snapshot(), before)
 
@@ -460,10 +461,10 @@ class TwinCheckTest(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
 
     def test_a_pointer_never_lands_inside_a_string(self):
-        self.edit("supervisor.py", POINTER + "\ndef is_attempt(",
-                  '_NOTE = """\n# not a comment"""\ndef is_attempt(')
+        self.edit("supervisor.py", POINTER + "\ndef is_chain_record(",
+                  '_NOTE = """\n# not a comment"""\ndef is_chain_record(')
         expected = self.text("supervisor.py").replace(
-            '"""\ndef is_attempt(', '"""\n' + POINTER + "\ndef is_attempt(")
+            '"""\ndef is_chain_record(', '"""\n' + POINTER + "\ndef is_chain_record(")
         done = self.write()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(self.text("supervisor.py"), expected)
@@ -511,10 +512,10 @@ class TwinCheckTest(unittest.TestCase):
 
     def test_write_keeps_crlf_line_endings(self):
         old, new = "reader keeps (SPEC §1, #299)", "reader keeps (SPEC 1)"
-        self.edit("supervisor.py", POINTER + "\ndef is_attempt(",
-                  "def is_attempt(")
+        self.edit("supervisor.py", POINTER + "\ndef is_chain_record(",
+                  "def is_chain_record(")
         expected = {name: self.text(name).replace(old, new).replace(
-                        "def is_attempt(", POINTER + "\ndef is_attempt(")
+                        "def is_chain_record(", POINTER + "\ndef is_chain_record(")
                     for name in ("supervisor.py", "receiver.py")}
         self.edit("loxodonta.py", old, new)
         for name in SCRIPTS:
