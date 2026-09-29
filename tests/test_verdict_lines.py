@@ -45,8 +45,9 @@ def vector_row(name):
 
 
 def write_lines(path, lines):
-    Path(path).write_text("".join(line + "\n" for line in lines),
-                          encoding="utf-8", newline="\n")
+    # Bytes, not write_text(newline=), which 3.9 lacks: LF everywhere.
+    Path(path).write_bytes("".join(line + "\n" for line in lines)
+                           .encode("utf-8"))
 
 
 class Case(unittest.TestCase):
