@@ -958,6 +958,39 @@ class CalendarsDisagreeTest(unittest.TestCase):
         self.assertIn(self.lags.url, result.stdout)
         self.assertNotIn("still pending", result.stdout)
 
+    def test_the_session_end_stops_re_asking_for_a_settled_head(self):
+        # The session end upgrades every pending proof in the folder with
+        # what is left of its budget, so it asks what --upgrade asks: a
+        # head another calendar settled owes nothing, and a dead pool
+        # asked on every session end spends the budget a new head needs.
+        home = home_outside(self)
+
+        def hook(event, **fields):
+            return subprocess.run(
+                [sys.executable, str(LOXODONTA), "hook", "--anchor",
+                 "--calendar", self.settles.url],
+                cwd=self.workdir, capture_output=True,
+                env=isolated_env(home, PYTHONIOENCODING="utf-8"),
+                input=json.dumps({"session_id": "sess-settled",
+                                  "hook_event_name": event,
+                                  **fields}).encode("utf-8"))
+
+        hook("PostToolUse", tool_name="Bash", tool_input={"command": "ls"},
+             tool_response={})
+        self.lags.polled.clear()
+
+        result = hook("SessionEnd")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.settles.submitted[-1:],
+                         [bytes.fromhex(run_receipts(
+                             "head", "--log",
+                             "receipts-sess-settled.jsonl",
+                             cwd=self.workdir).stdout.strip())],
+                         "the session's own head was not anchored")
+        self.assertEqual(self.lags.polled, [],
+                         "the dead pool was asked again at session end")
+
     def test_a_head_no_calendar_settled_still_advises_the_upgrade(self):
         run_receipts("log", "--actor", "agent", "--action", "step 2",
                      cwd=self.workdir)

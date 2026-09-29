@@ -3539,6 +3539,33 @@ def anchored_heads(target):
     return {record["head"] for record in records if proof_replays(record)}
 
 
+def pending_upgrades(records):
+    """What an upgrade of one anchors sidecar starts from, asked alike by
+    the session end and `anchor --upgrade`: the pending proofs a calendar
+    may still complete, in file order, each with the commitment its
+    calendar is asked about; the (head, calendar) pairs a completed proof
+    holds; and the heads one settles. A row not of an anchor's shape, or
+    whose proof does not replay, counts for none of them, and a pending
+    proof with no calendar has nobody to ask (#348). Once any calendar
+    settles a head, the others owe it nothing (#199)."""
+    pending, completed, settled = [], set(), set()
+    for record in records:
+        if row_kind("anchors", record) != ANCHOR_KIND \
+                or anchor_row_problem(record) is not None:
+            continue
+        try:
+            verdict = judge_proof(record["head"],
+                                  base64.b64decode(record["proof"]))
+        except (ProofError, ValueError):
+            continue
+        if verdict[0] == "bitcoin":
+            completed.add((record["head"], record.get("calendar")))
+            settled.add(record["head"])
+        elif "calendar" in record:
+            pending.append((record, verdict[1]))
+    return pending, completed, settled
+
+
 def anchor_and_upgrade(log, calendars, budget):
     deadline = time.monotonic() + budget
 
@@ -3583,31 +3610,17 @@ def anchor_and_upgrade(log, calendars, budget):
 
 def upgrade_pending_proofs(folder, remaining, deadline):
     """Every pending proof in the folder's sidecars, oldest first, one
-    request each, until the deadline. Completed pairs are skipped."""
+    request each, until the deadline. A settled head is skipped."""
     for name in sorted(os.listdir(folder)):
         if not name.endswith(".anchors.jsonl"):
             continue
         chain = os.path.join(folder, name[:-len(".anchors.jsonl")])
-        completed, pending = set(), []
-        for record in (read_anchor_records(chain) or []):
-            if row_kind("anchors", record) != ANCHOR_KIND \
-                    or anchor_row_problem(record) is not None:
-                continue
-            try:
-                verdict = judge_proof(record["head"],
-                                      base64.b64decode(record["proof"]))
-            except (ProofError, ValueError):
-                continue
-            key = (record["head"], record.get("calendar"))
-            if verdict[0] == "bitcoin":
-                completed.add(key)
-            elif "calendar" in record:   # with none, there is no one to ask
-                pending.append((record, verdict[1]))
+        pending, _, settled = pending_upgrades(
+            read_anchor_records(chain) or [])
         for record, commitment_hex in pending:
             if time.monotonic() >= deadline:
                 return
-            key = (record["head"], record["calendar"])
-            if key in completed:
+            if record["head"] in settled:
                 continue
             url = record["calendar"].rstrip("/")
             try:
@@ -3620,7 +3633,7 @@ def upgrade_pending_proofs(folder, remaining, deadline):
                 continue
             append_anchor_record(chain, record["head"], record.get("n"), url,
                                  upgraded)
-            completed.add(key)
+            settled.add(record["head"])
 
 
 # --- The published head (ADR-0025) -------------------------------------------
@@ -4636,30 +4649,8 @@ def upgrade_anchors(args):
         print(f"error: no anchors found at {anchors_path(target)} — "
               "run `loxodonta anchor` first", file=sys.stderr)
         return EX_NOINPUT
-    # A head+calendar pair that already has a completed record needs
-    # nothing, and neither does any pair whose head another calendar has
-    # already settled (#199): the anchor's claim is about the head.
-    completed = set()
-    settled_heads = set()
-    pending = []
-    for record in records:
-        if row_kind("anchors", record) != ANCHOR_KIND:
-            continue  # unreadable, a note, or a kind unknown here
-        # verify --anchors reports these; upgrade just skips
-        if anchor_row_problem(record) is not None:
-            continue
-        try:
-            verdict = judge_proof(record["head"],
-                                  base64.b64decode(record["proof"]))
-        except (ProofError, ValueError):
-            continue
-        key = (record["head"], record.get("calendar"))
-        if verdict[0] == "bitcoin":
-            completed.add(key)
-            settled_heads.add(record["head"])
-        elif "calendar" in record:   # with none, there is no one to ask
-            pending.append((record, verdict[1]))
-
+    # verify --anchors reports the rows this leaves out; upgrade skips them.
+    pending, completed, settled_heads = pending_upgrades(records)
     failures = 0
     for record, commitment_hex in pending:
         key = (record["head"], record["calendar"])
@@ -4709,7 +4700,7 @@ def upgrade_anchors(args):
             append_anchor_record(target, record["head"], record.get("n"),
                                  url, upgraded)
         except OSError as e:
-            print(f"error: the completion from {url} could not be written "
+            print(f"error: the completion from {shown} could not be written "
                   f"to {anchors_path(target)}: "
                   f"{unwritable_why(anchors_path(target), e)}",
                   file=sys.stderr)

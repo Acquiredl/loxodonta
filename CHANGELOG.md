@@ -36,6 +36,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `verify --stamps` and `verify-package` read a stamp reply's status offline: a rejection, non-DER bytes, or a granted status with no token is `STAMP-INVALID` (`SEAL-INVALID`), holds no token for `stamp`, and is no departure in `supervisor scan` (#370).
 - A folder or a pipe named like a sidecar no longer stops `supervisor scan`, `verify`, `verify-package` or the recorder's writing verbs. `verify` calls it `ANCHOR-INVALID` or `STAMP-INVALID`, exit 3; `anchor`, `stamp` and `publish` say why, exit 73 (#364).
 - A sidecar row giving a key twice, or holding `NaN`, `Infinity` or `-Infinity`, is an unreadable line (`ANCHOR-INVALID`, `STAMP-INVALID`), as a strict parser reads it. A proof with bytes after its timestamp tree is `ANCHOR-INVALID` (#365).
+- The session end no longer asks a calendar again for a head another calendar has settled, as `anchor --upgrade` already did not. A calendar that never answers no longer spends the time a new head's upgrade needs (#199).
 
 ## [0.9.0] - 2026-09-23
 
