@@ -86,11 +86,30 @@ PROOF_HEIGHT = 850123
 CALENDAR = "https://calendar.example/"
 
 # The sidecar rows (SPEC section 9), written as the recorder writes them.
-# A stamp row's response is never read here: no row gives an
-# --authority-chain, so the token is present and not judged, and these
-# bytes stand in for one (no openssl is needed to run the vectors).
+# A stamp row's token is never read here: no row gives an
+# --authority-chain, so a token is present and not judged (no openssl is
+# needed to run the vectors). A verifier reads the reply around it, an
+# RFC 3161 TimeStampResp, for its status and whether a token follows
+# (SPEC section 9.7), so the stand-in is a granted reply holding a
+# placeholder token, and the refused one a rejection with no token.
 SIDECAR_TS = "2026-09-23T12:05:00Z"
-STAND_IN_TOKEN = b"a stand-in for a TimeStampResp, which nothing here reads"
+
+
+def der(tag, content):
+    """One DER element with a short-form length, all these need."""
+    assert len(content) < 0x80
+    return bytes([tag, len(content)]) + content
+
+
+def ts_reply(status, token=b""):
+    """A TimeStampResp: SEQUENCE { PKIStatusInfo SEQUENCE { INTEGER
+    status }, then the token, if any }."""
+    return der(0x30, der(0x30, der(0x02, bytes([status]))) + token)
+
+
+STAND_IN_TOKEN = der(0x30, b"a stand-in for a token, which nothing reads")
+GRANTED_REPLY = ts_reply(0, STAND_IN_TOKEN)
+REJECTED_REPLY = ts_reply(2)
 
 
 # --- SPEC section 4, written out again ----------------------------------------
@@ -204,10 +223,13 @@ def entries_of(lines):
 
 # --- Packages (SPEC section 10), assembled as the supervisor lays one out ------
 
-def package_files(chain_lines, seals=(), format_tag=PACKAGE_FORMAT):
+def package_files(chain_lines, seals=(), format_tag=PACKAGE_FORMAT,
+                  change=None):
     """A package of one chain and the project record, as {name: bytes},
     with the manifest written last listing them: the chain by its head
-    and line count, the record by its sha256 and byte count."""
+    and line count, the record by its sha256 and byte count. `change`,
+    when given, edits the manifest before it is written, for a vector
+    whose manifest no supervisor writes."""
     chain = "".join(line + "\n" for line in chain_lines).encode("utf-8")
     manifest = {
         "format": format_tag,
@@ -223,6 +245,8 @@ def package_files(chain_lines, seals=(), format_tag=PACKAGE_FORMAT):
                        "bytes": len(PROJECT_RECORD)}],
         "seals": list(seals),
     }
+    if change is not None:
+        change(manifest)
     return {PACKAGE_CHAIN: chain, "project.json": PROJECT_RECORD,
             "manifest.json": (json.dumps(manifest, indent=2) + "\n").encode()}
 
@@ -552,6 +576,10 @@ def build(workdir):
                 "n": n, "proof": base64.b64encode(proof_bytes).decode("ascii"),
                 "ts": SIDECAR_TS, **fields}
 
+    def line_1(name, kind):
+        """How a verdict about a vector's one sidecar row names it."""
+        return f"line 1 of {name}.jsonl.{kind}.jsonl"
+
     def unknown(name, kind, shown):
         return (f"{kind.upper()[:-1]}-UNKNOWN-KIND: line 1 of {name}.jsonl."
                 f"{kind}.jsonl is {shown} — this verifier does not know the "
@@ -598,23 +626,26 @@ def build(workdir):
     sidecar_row("anchor-mismatch", "anchors", "A completed proof of a head "
                 "that is no entry's hash in this chain: this log is not the "
                 "anchored history.", 3,
-                [f"ANCHOR-MISMATCH: anchored head {other} appears nowhere in "
-                 "this log — this log is not the anchored history"])
+                [f"ANCHOR-MISMATCH: {line_1('anchor-mismatch', 'anchors')}: "
+                 f"anchored head {other} appears nowhere in this log — this "
+                 "log is not the anchored history"])
 
     sidecar("anchor-invalid-proof", "anchors",
             [anchor(head, completed_proof()[:-2], 3)])
     sidecar_row("anchor-invalid-proof", "anchors", "A proof of the head cut "
                 "two bytes short, so it does not replay: evidence that does "
                 "not verify.", 3,
-                ["ANCHOR-INVALID: truncated proof — evidence that does not "
-                 "verify is not evidence"])
+                ["ANCHOR-INVALID: "
+                 f"{line_1('anchor-invalid-proof', 'anchors')}: truncated "
+                 "proof — evidence that does not verify is not evidence"])
 
     sidecar("anchor-unreadable-line", "anchors", ['["not","an","object"]'])
     sidecar_row("anchor-unreadable-line", "anchors", "A line that is JSON "
                 "but not an object: no row at all, so invalid evidence, never "
                 "skipped.", 3,
-                ["ANCHOR-INVALID: sidecar line is not a record — evidence "
-                 "that does not verify is not evidence"])
+                ["ANCHOR-INVALID: "
+                 f"{line_1('anchor-unreadable-line', 'anchors')} is not a "
+                 "record — evidence that does not verify is not evidence"])
 
     sidecar("anchor-attempt-only", "anchors",
             [{"budget": 12.0, "kind": "attempt",
@@ -664,18 +695,88 @@ def build(workdir):
                 [unknown("anchor-misplaced-chain", "anchors",
                          'of kind "chain"'), "VALID"])
 
+    # A row a strict JSON parser refuses is no row (#365), and a proof
+    # ends where its tree does.
+    def not_a_record(name):
+        return (f"ANCHOR-INVALID: {line_1(name, 'anchors')} is not a record "
+                "— evidence that does not verify is not evidence")
+    proof_row = stored(anchor(head, completed_proof(), 3))
+    sidecar("anchor-key-twice", "anchors",
+            [proof_row.replace(f'"head":"{head}"',
+                               f'"head":"{other}","head":"{head}"')])
+    sidecar_row("anchor-key-twice", "anchors", "A completed proof of the "
+                "head in a row that gives head twice, another chain's "
+                "first: a reader keeping the first would say ANCHOR-MISMATCH "
+                "and one keeping the last ANCHORED, so no reading of the "
+                "line is the row, and it is unreadable.", 3,
+                [not_a_record("anchor-key-twice")])
+
+    sidecar("anchor-nan", "anchors", [proof_row[:-1] + ',"x":NaN}'])
+    sidecar_row("anchor-nan", "anchors", "A completed proof of the head "
+                "in a row that also holds NaN, which JSON does not have: a "
+                "strict parser cannot read the line, so it is unreadable "
+                "(Infinity and -Infinity are refused alike).", 3,
+                [not_a_record("anchor-nan")])
+
+    sidecar("anchor-number-too-large", "anchors",
+            [proof_row[:-1] + ',"x":1e999}'])
+    sidecar_row("anchor-number-too-large", "anchors", "A completed proof of "
+                "the head in a row that also holds 1e999, a number too large "
+                "to be finite: Python reads it as infinity and a strict "
+                "parser refuses it, so the line is unreadable.", 3,
+                [not_a_record("anchor-number-too-large")])
+
+    sidecar("anchor-trailing-bytes", "anchors",
+            [anchor(head, completed_proof() + b"\x00", 3)])
+    sidecar_row("anchor-trailing-bytes", "anchors", "A completed proof of "
+                "the head with one byte after its timestamp tree: a proof "
+                "is its tree and nothing after it.", 3,
+                ["ANCHOR-INVALID: "
+                 f"{line_1('anchor-trailing-bytes', 'anchors')}: proof holds "
+                 "bytes after its timestamp tree — evidence that does not "
+                 "verify is not evidence"])
+
     sidecar("stamp-kindless", "stamps",
             [{"authority": "https://authority.example/tsr", "head": head,
               "n": 3, "response":
-              base64.b64encode(STAND_IN_TOKEN).decode("ascii"),
+              base64.b64encode(GRANTED_REPLY).decode("ascii"),
               "ts": SIDECAR_TS}])
     sidecar_row("stamp-kindless", "stamps", "A stamp row of the head written "
-                "with no kind member: it reads as a stamp, and with no "
-                "--authority-chain its token is present and not judged, a "
-                "note that moves no exit.", 0,
+                "with no kind member: it reads as a stamp, its reply is "
+                "granted and holds a token, and with no --authority-chain "
+                "that token is present and not judged, a note that moves no "
+                "exit.", 0,
                 [f"stamp not judged: no --authority-chain FILE given — head "
                  f"{head[:12]}… (entry 3) holds a token, present and not "
                  "judged here (ADR-0032)", "VALID"])
+
+    sidecar("stamp-rejected", "stamps",
+            [{"authority": "https://authority.example/tsr", "head": head,
+              "kind": "stamp", "n": 3, "response":
+              base64.b64encode(REJECTED_REPLY).decode("ascii"),
+              "ts": SIDECAR_TS}])
+    sidecar_row("stamp-rejected", "stamps", "A stamp row of the head whose "
+                "reply is the authority's rejection, status 2 and no token: "
+                "it holds nothing to judge, so it is invalid evidence with "
+                "no tool, never a token present and not judged.", 3,
+                [f"STAMP-INVALID: {line_1('stamp-rejected', 'stamps')}, head "
+                 f"{head[:12]}… (entry 3): the reply's status is 2 "
+                 "(rejection), so it holds no token — evidence that does not "
+                 "verify is not evidence"])
+
+    sidecar("stamp-trailing-bytes", "stamps",
+            [{"authority": "https://authority.example/tsr", "head": head,
+              "kind": "stamp", "n": 3, "response":
+              base64.b64encode(GRANTED_REPLY + bytes(1)).decode("ascii"),
+              "ts": SIDECAR_TS}])
+    sidecar_row("stamp-trailing-bytes", "stamps", "A stamp row of the head "
+                "whose granted reply has one byte after its outer SEQUENCE: "
+                "a reply ends where that SEQUENCE ends, so it is invalid "
+                "with no tool (#365).", 3,
+                [f"STAMP-INVALID: {line_1('stamp-trailing-bytes', 'stamps')}, "
+                 f"head {head[:12]}… (entry 3): the reply is not a timestamp "
+                 "response: bytes after the reply — evidence that does not "
+                 "verify is not evidence"])
 
     sidecar("stamp-attempt-only", "stamps",
             [{"budget": 3.0, "kind": "attempt",
@@ -753,6 +854,81 @@ def build(workdir):
                 "judged.", 4, 'UNSUPPORTED-FORMAT: package is format '
                 '"loxodonta-package/2"; this verifier speaks '
                 '"loxodonta-package/1"')
+
+    # A bare name is judged by its characters, the same on every system
+    # (#358): Windows alone reads `C:x` as a drive, `a\b` as a folder,
+    # `project.json.` as `project.json` and `NUL` as a device, and the
+    # manifest naming any of them is refused wherever it is verified.
+    for name, listed, reads in (
+            ("package-name-drive", "C:x", "a drive only on Windows"),
+            ("package-name-backslash", "a\\b", "a folder only on Windows"),
+            ("package-name-trailing-dot", "project.json.",
+             "which Windows opens as project.json, stripping the dot, and "
+             "no other system does"),
+            ("package-name-device", "NUL", "a device on Windows"),
+            ("package-name-refused-character", "a?b",
+             "which a Windows unzip lands as a_b"),
+            ("package-name-short", "LONGFI~1.TXT",
+             "an 8.3 short name Windows opens for a long one")):
+        package(name, package_files(
+            base, change=lambda m, listed=listed:
+            m["artifacts"][0].update(path=listed)))
+        package_row(name, f"The manifest lists its artifact as {listed}, "
+                    f"{reads}: a name is judged by its characters, so it is "
+                    "refused on every system, unread.", 4,
+                    "UNSUPPORTED-FORMAT: manifest.json lists an artifact "
+                    f"whose path {listed!r} is not a bare file name")
+
+    # A name is read only when a file holds exactly it (#358): Windows
+    # and macOS open PROJECT.JSON for project.json, and Linux does not.
+    spelled = package_files(base)
+    spelled["PROJECT.JSON"] = spelled.pop("project.json")
+    package("package-name-case", spelled)
+    package_row("package-name-case", "The manifest lists project.json and "
+                "the package holds PROJECT.JSON: some systems open it for "
+                "the name and others do not, so it is refused on every "
+                "system.", 4, "UNSUPPORTED-FORMAT: this package holds "
+                "'PROJECT.JSON', which some systems open as 'project.json', "
+                "a name the verifier reads, and others do not; which file is "
+                "judged would depend on where it is verified, so this "
+                "verifier refuses it")
+
+    # Two listed names some systems open as one file (#358): with one
+    # hash and only a.txt present, Windows judged both as matching and
+    # Linux found A.txt missing.
+    one = {"sha256": hashlib.sha256(PROJECT_RECORD).hexdigest(),
+           "bytes": len(PROJECT_RECORD)}
+    package("package-names-one-file", {
+        **package_files(base, change=lambda m: m["artifacts"].extend(
+            [{"path": "A.txt", **one}, {"path": "a.txt", **one}])),
+        "a.txt": PROJECT_RECORD})
+    package_row("package-names-one-file", "The manifest lists A.txt and "
+                "a.txt with one hash, and only a.txt is in the package: one "
+                "file on Windows and macOS, two names elsewhere, so it is "
+                "refused on every system.", 4, "UNSUPPORTED-FORMAT: "
+                "manifest.json names 'A.txt' and 'a.txt', which some systems "
+                "open as one file; which one is read would depend on where "
+                "the package is verified")
+
+    # A count is an integer and never a boolean (#359): Python reads
+    # true as 1, so a one-line chain listed with "entries": true passed.
+    package("package-entries-boolean", package_files(
+        base, change=lambda m: m["chains"][0].update(entries=True)))
+    package_row("package-entries-boolean", "The manifest lists its chain "
+                "with \"entries\": true: a count is an integer, never a "
+                "boolean, so the manifest is refused unread.", 4,
+                "UNSUPPORTED-FORMAT: manifest.json lists a chain whose "
+                "entries is true or false, not an integer")
+
+    # A manifest holding a spelling a strict parser refuses (#365), in
+    # testimony nobody judges: read by one verifier and not another.
+    package("package-tool-nan", package_files(
+        base, change=lambda m: m.update(tool=float("nan"))))
+    package_row("package-tool-nan", "The manifest's tool, testimony nobody "
+                "judges, is NaN, which JSON does not have: a strict JSON "
+                "reader cannot read the manifest, so it is refused unread.",
+                4, "UNSUPPORTED-FORMAT: manifest.json holds NaN, which is "
+                "not JSON; a strict JSON reader cannot read it")
 
     anchored = package_files(base, seals=["anchor"])
     digest = hashlib.sha256(anchored["manifest.json"]).hexdigest()

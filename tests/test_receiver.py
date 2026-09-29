@@ -705,7 +705,7 @@ class TlsTest(ReceiverFixture):
         # socket stops every honest sender behind it for as long as it
         # likes. The timeout is shortened through the suite's handle.
         proc = self.start("--cert", str(self.cert), "--key", str(self.key),
-                          env={"RECEIVER_TIMEOUT_SECONDS": "2"})
+                          env={"RECEIVER_TIMEOUT_SECONDS": "5"})
         parts = urllib.parse.urlsplit(proc.url)
         idle = socket.create_connection((parts.hostname, parts.port))
         self.addCleanup(idle.close)

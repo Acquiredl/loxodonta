@@ -363,6 +363,29 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertEqual(fake.received[-1]["headers"]["x-loxodonta-range"],
                          "2-2")
 
+    def test_a_memo_line_past_the_recursion_or_digit_limit_is_read_past(self):
+        # #344: such a line is one no reader here takes apart, so the
+        # cursor reads past it like a torn line. Raising it instead let
+        # one appended line stop the route with a traceback, exit 70.
+        fake = serve_fake(self)
+        make_chain(self.log, ["step 1"], epoch=1700000000)
+        self.assertEqual(self.publish_chain(fake.url).returncode, 0)
+        memo = Path(str(self.log) + ".published.jsonl")
+        for what, line in (("deep nesting", "[" * 100000 + "]" * 100000),
+                           ("an overlong integer",
+                            '{"kind":"chain","last":' + "1" * 5000 + "}")):
+            with self.subTest(line=what):
+                with open(memo, "a", encoding="utf-8") as out:
+                    out.write(line + "\n")
+
+                result = self.publish_chain(fake.url)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn("nothing to send: the remote has every entry "
+                              "through entry 1", result.stdout)
+                self.assertEqual(len(fake.received), 1)
+
     def test_a_refused_batch_leaves_no_chain_row_and_the_next_send_resumes(self):
         # The memo advances on a 2xx and on nothing else: a refused batch
         # is said on stderr, never with the URL, and the cursor stays
@@ -1270,6 +1293,54 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.assertNotEqual(note["outcome"], "sent")
         self.assertNotIn("127.0.0.1", json.dumps(memo_of(log)))
         self.assertEqual(chain["last_failed"]["step"], "publish-chain")
+
+    def test_the_keeper_reads_past_a_memo_line_past_the_recursion_limit(self):
+        # #344: the keeper's cursor is the recorder's, line for line: a
+        # line nested past the recursion limit is read past, so a chain
+        # already sent is not sent again and the scan goes on.
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-deep")
+        sent = run_recorder("publish", "--chain", "--log", log,
+                            self.receiver.url)
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+        memo = Path(str(log) + ".published.jsonl")
+        with open(memo, "a", encoding="utf-8") as out:
+            out.write("[" * 100000 + "]" * 100000 + "\n")
+        before = memo.read_bytes()
+
+        result = self.scan("--publish-every", "0s",
+                           "--publish-chain", self.receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.kinds(), [NDJSON], "a chain sent went again")
+        self.assertEqual(memo.read_bytes(), before)
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-deep")]
+        self.assertNotIn("note", chain["left"])
+
+    def test_a_memo_the_keeper_cannot_read_leaves_a_note_and_sends_nothing(self):
+        # #344: a byte that is not UTF-8 is a memo the recorder's cursor
+        # cannot read, and -1 would send the whole chain again. The
+        # keeper says so on the turn and runs no send, so the memo gains
+        # nothing and the receiver is not flooded.
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-garbled")
+        memo = Path(str(log) + ".published.jsonl")
+        memo.write_bytes(b"\xff\xfe not a memo\n")
+
+        result = self.scan("--publish-every", "0s",
+                           "--publish-chain", self.receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.receiver.received, [])
+        self.assertEqual(memo.read_bytes(), b"\xff\xfe not a memo\n",
+                         "no send ran, so no attempt row was written")
+        report = json.loads(result.stdout)
+        self.assertEqual(report["exit"], 0)
+        (chain,) = chains_by_session(report)[("alpha", "sess-garbled")]
+        self.assertTrue(chain["left"]["failed"])
+        self.assertIn("the memo could not be read", chain["left"]["note"])
+        self.assertIn("entries stay unsent", chain["left"]["note"])
 
     def test_a_url_without_a_cadence_is_a_usage_error(self):
         make_store_chain(self.root / "alpha" / "receipts", "sess-half")

@@ -24,11 +24,25 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - Publish memo head rows name their kind (`"kind": "head"`), and a row with none reads as a head. The chain cursor counts `chain` rows alone, so a row of an unknown kind moves nothing (ADR-0038, #340).
 - `docs/SPEC.md` §8.1 is now the one list of what the design cannot claim, and states whole-chain regeneration as closed only for what a commitment held off the machine covers. The header names each part's own version (#336).
 
+- A verdict about one sidecar row names its line (`ANCHOR-INVALID: line 3 of receipts.jsonl.anchors.jsonl is not a record`), and a malformed stamp row names its field, as an anchor row does. Verdict words and exit codes are unchanged.
+- A sidecar row missing its time, calendar or authority says so in words, never `None`, and a pending proof with no calendar no longer advises an upgrade that cannot complete it.
+- Inside a package, `NO-ANCHORS` and `NO-STAMPS` give no command, a folder where a chain belongs is named as one, and a refused manifest names the one field that fails.
+
 ### Fixed
 
 - `supervisor scan` no longer stops with a traceback on a sidecar or transcript line holding an integer past 4,300 digits or nesting past the recursion limit. The writer can reach those files, so one line could stop the audit (#331).
 - `loxodonta hook` answers a payload holding the same lines with exit 65, as for any payload it cannot read, not a traceback and exit 70 (#331).
+- `verify-package` no longer gives a verdict that depends on the recipient's system: it refuses a name Windows reads otherwise (`C:x`, `a?b`, `NUL`, `LONGFI~1.TXT`, a trailing dot), one past 255 bytes, and two names differing in case or Unicode form (#358).
+- The supervisor reads sidecar rows as the recorder does, so an unknown kind no longer stops the keeper posting, stamping or anchoring a head. A memo line nested too deep no longer stops `publish --chain` (#344).
 - Malformed anchor and stamp rows (a field missing or of the wrong type) no longer crash `verify`, `verify-package`, `anchor`, `stamp`, `supervisor scan` or the session end. An anchor row reads `ANCHOR-INVALID`, a package manifest's `SEAL-INVALID`, naming the field (#348).
+- A row holding no granted reply no longer stops `stamp` or the session end stamping its head. The keeper now asks `anchor` and `stamp`; `anchor` says `already anchored` for a replaying proof (`--force` resubmits). Forged rows stay a limit (#366).
+- `verify-package` refuses a manifest whose `entries` or `bytes` is `true` or `false`, named by its field: Python counted a boolean as an integer, so a one-line chain listed with `"entries": true` passed (#359).
+- The verifier prints sidecar, manifest and file-name text escaped, and `head` refuses a tail hash that is not a head, so a crafted row can no longer forge an `ANCHORED` line `supervisor scan` believed. Sidecars are named bare (#349).
+- `verify --stamps` and `verify-package` read a stamp reply's status offline: a rejection, non-DER bytes, or a granted status with no token is `STAMP-INVALID` (`SEAL-INVALID`), holds no token for `stamp`, and is no departure in `supervisor scan` (#370).
+- A folder or a pipe named like a sidecar no longer stops `supervisor scan`, `verify`, `verify-package` or the recorder's writing verbs. `verify` calls it `ANCHOR-INVALID` or `STAMP-INVALID`, exit 3; `anchor`, `stamp` and `publish` say why, exit 73 (#364).
+- A sidecar row giving a key twice, or holding `NaN`, `Infinity` or `-Infinity`, is an unreadable line (`ANCHOR-INVALID`, `STAMP-INVALID`), as a strict parser reads it. A proof with bytes after its timestamp tree is `ANCHOR-INVALID` (#365).
+- `verify-package` refuses a folder package whose `manifest.json` is a pipe (`UNSUPPORTED-FORMAT`), instead of waiting on it forever. A folder unpacked from a tar can hold one.
+- The session end no longer asks a calendar again for a head another calendar has settled, as `anchor --upgrade` already did not. A calendar that never answers no longer spends the time a new head's upgrade needs (#199).
 
 ## [0.9.0] - 2026-09-23
 
