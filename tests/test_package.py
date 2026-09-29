@@ -1388,3 +1388,33 @@ class TranscriptPackageTest(PackageCase):
             self.assertTrue(lines[-1].startswith("UNSUPPORTED-FORMAT"), why)
             self.assertNotIn("chain:", result.stdout,
                              "refused unread; nothing is judged")
+
+
+class ManifestNotAFileTest(unittest.TestCase):
+    """A folder package's manifest.json that is not a regular file: a
+    folder, or a pipe, which a folder unpacked from a tar can hold. The
+    package is refused, UNSUPPORTED-FORMAT, never waited on: an ordinary
+    open of a pipe waits for a writer that never comes (#364's class)."""
+
+    def refused(self, make):
+        with tempfile.TemporaryDirectory() as folder:
+            make(os.path.join(folder, "manifest.json"))
+            for script in (LOXODONTA, REPO_ROOT / "verifier.py"):
+                with self.subTest(script=script.name):
+                    result = subprocess.run(
+                        [sys.executable, "-I", str(script), "verify-package",
+                         folder],
+                        capture_output=True, encoding="utf-8",
+                        errors="replace", timeout=60)
+                    self.assertEqual(result.returncode, 4,
+                                     result.stdout + result.stderr)
+                    self.assertIn("UNSUPPORTED-FORMAT: no readable "
+                                  "manifest.json", result.stdout)
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_folder_named_manifest_json_is_refused(self):
+        self.refused(os.mkdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+    def test_a_pipe_named_manifest_json_is_refused_not_waited_on(self):
+        self.refused(os.mkfifo)

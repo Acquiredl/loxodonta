@@ -1685,13 +1685,13 @@ def cmd_head(args):
 
 # --- Package verification (ADR-0026, applying ADR-0007) -----------------------
 #
-# A package is a session's chains with their anchor sidecars, the project
-# record, a witness snapshot, and a README, listed by a manifest written
-# last (`supervisor package` builds it). The recorder judges it here,
-# layer by layer: its own verify output per chain, verbatim; each artifact
-# against the manifest; then the package verdict in ADR-0007's words. The
-# manifest's hash is the only sealing surface, and this package format
-# declares no seals yet, so the ceiling is SELF-CONSISTENT.
+# A package is chains and the files written after them, listed by a
+# manifest written last (`supervisor package` builds it; SPEC section 10
+# states every rule). It is judged here layer by layer: each chain by
+# verify's own output, verbatim; each file against the manifest; each
+# declared seal; then the package verdict in ADR-0007's words. The
+# manifest's bytes are the only sealing surface: with no seal the ceiling
+# is SELF-CONSISTENT, and each seal that holds adds its rung.
 
 PACKAGE_FORMAT = "loxodonta-package/1"   # the receipt format stays 0.1
 PACKAGE_MAX_BYTES = 1 << 30   # a zip declaring more unpacked is refused unopened
@@ -1701,9 +1701,9 @@ PACKAGE_MAX_BYTES = 1 << 30   # a zip declaring more unpacked is refused unopene
 # order: a refusal, a broken chain, a seal or an anchor that is not this
 # history, a transcript that no longer holds, an artifact off its manifest.
 # Every finding names its mechanism, and the verdict line is the gravest
-# finding's word (ADR-0007 ruling 5); the seal rungs (`+ ANCHORED`, then
-# `+ SIGNED (key: ...)`) join the ceiling by adding words, and never by
-# hiding a finding.
+# finding's word (ADR-0007 ruling 5); the seal rungs (`+ ANCHORED`,
+# `+ STAMPED`, then `+ SIGNED (key: ...)`) join the ceiling by adding
+# words, and never by hiding a finding.
 PACKAGE_GRAVITY = (4, 1, 3, 5, 2)
 PACKAGE_WORDS = {
     "UNSUPPORTED-FORMAT": "a chain in this package is a format this verifier "
@@ -1891,10 +1891,13 @@ def read_manifest(folder):
         # So is a spelling a strict parser refuses (#365): `NaN` in the
         # testimony a verifier prints and never judges still makes a
         # manifest one verifier reads and another cannot.
-        with open(os.path.join(folder, "manifest.json"), encoding="utf-8") as f:
-            manifest = json.load(f, object_pairs_hook=object_with_each_key_once,
-                                 parse_constant=not_json,
-                                 parse_float=finite_float)
+        # Opened by `open_regular`, so a pipe named manifest.json, which a
+        # folder unpacked from a tar can hold, is refused, never waited on.
+        with open_regular(os.path.join(folder, "manifest.json")) as f:
+            manifest = json.loads(f.read().decode("utf-8"),
+                                  object_pairs_hook=object_with_each_key_once,
+                                  parse_constant=not_json,
+                                  parse_float=finite_float)
     except KeyGivenTwice as twice:
         return None, (f"UNSUPPORTED-FORMAT: manifest.json has key "
                       f"{visible(repr(twice.key))} given twice; no reading "

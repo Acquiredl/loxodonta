@@ -1660,11 +1660,11 @@ def last_departure(log):
     and the stamps sidecar, or {"ts": None, "via": None} when nothing has
     left. The door is the route, not the file (#248): `published` a
     head, `published-chain` a batch of the entries, `anchored` a digest,
-    `stamped` a head an authority granted a token for. A
-    batch counts, but not as the head route's departure, so a dead head
-    route beside a live chain route reads as what it is. Staleness
-    evidence the reader ages, never an alarm or the exit: both files
-    are writer-reachable, so a fresh reading proves nothing."""
+    `stamped` a head an authority granted a token for. A batch counts,
+    but not as the head route's departure, so a dead head route beside a
+    live chain route reads as what it is. Staleness evidence the reader
+    ages, never an alarm or the exit: all three files are
+    writer-reachable, so a fresh reading proves nothing."""
     departures = []   # (when, ts, via)
     doors = {HEAD_KIND: "published", CHAIN_KIND: "published-chain"}
     for record in sidecar_records(Path(str(log) + ".published.jsonl")):
