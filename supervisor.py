@@ -626,10 +626,15 @@ ANCHORED_LINES = (
                r"--block-header with its header checks"),
 )
 # verify's pending line, whole: the time and the calendar are the row's,
-# printed escaped, so neither holds a space an honest row would write.
+# printed escaped, so neither holds a space an honest row would write,
+# or verify's words for a row that records neither (UNRECORDED).
+UNRECORDED = {"at an unrecorded time", "no recorded calendar"}
 PENDING_LINE = re.compile(
-    r"ANCHOR-PENDING: head ([0-9a-f]{12}…) submitted (\S+) via (\S+) — "
-    r"run `loxodonta anchor --upgrade`")
+    r"ANCHOR-PENDING: head ([0-9a-f]{12}…) "
+    r"submitted (at an unrecorded time|\S+) "
+    r"via (no recorded calendar|\S+) — "
+    r"(?:run `loxodonta anchor --upgrade`|`loxodonta anchor --upgrade` "
+    r"cannot complete it; `loxodonta anchor --force` submits the head again)")
 
 
 def anchored_span(line):
@@ -1761,9 +1766,10 @@ def assess_anchors(detail, entries):
             anchored.append({"upto": span[0], "height": span[1]})
         wait = PENDING_LINE.fullmatch(line)
         if wait:
-            pending.append({"head": wait.group(1),
-                            "submitted": wait.group(2),
-                            "calendar": wait.group(3)})
+            submitted, calendar = (None if said in UNRECORDED else said
+                                   for said in wait.group(2, 3))
+            pending.append({"head": wait.group(1), "submitted": submitted,
+                            "calendar": calendar})
     head = None
     if entries:
         n = entries[-1].get("n")

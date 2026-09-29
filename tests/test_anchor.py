@@ -1181,8 +1181,8 @@ class AnchorRowKindTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 3,
                                  result.stdout + result.stderr)
-                self.assertIn("ANCHOR-INVALID: sidecar line is not a record",
-                              result.stdout)
+                self.assertIn("ANCHOR-INVALID: line 2 of receipts.jsonl."
+                              "anchors.jsonl is not a record", result.stdout)
                 self.assertNotIn(self.UNKNOWN, result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 
@@ -1193,8 +1193,8 @@ class AnchorRowKindTest(unittest.TestCase):
         result = self.verify()
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn("ANCHOR-INVALID: sidecar line is not a record",
-                      result.stdout)
+        self.assertIn("ANCHOR-INVALID: line 2 of receipts.jsonl.anchors.jsonl "
+                      "is not a record", result.stdout)
 
     def test_upgrade_asks_about_no_row_of_an_unknown_kind(self):
         # A row of a kind the recorder does not know is not a proof, so
@@ -1285,8 +1285,9 @@ class MalformedAnchorRowTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 3,
                                  result.stdout + result.stderr)
-                self.assertIn(f"ANCHOR-INVALID: {reason} — evidence that "
-                              "does not verify is not evidence", result.stdout)
+                self.assertIn("ANCHOR-INVALID: line 2 of receipts.jsonl."
+                              f"anchors.jsonl: {reason} — evidence that does "
+                              "not verify is not evidence", result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
                 # The good row beside it is still judged.
                 self.assertIn("ANCHOR-PENDING", result.stdout)
@@ -1666,7 +1667,8 @@ class AnchorFieldEscapeTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         assert_printed_escaped(self, result.stdout,
-                               f"ANCHOR-MISMATCH: anchored head {SHOWN_HEAD} "
+                               "ANCHOR-MISMATCH: line 1 of receipts.jsonl."
+                               f"anchors.jsonl: anchored head {SHOWN_HEAD} "
                                "appears nowhere in this log")
 
     def test_no_sidecar_is_named_by_its_bare_name(self):

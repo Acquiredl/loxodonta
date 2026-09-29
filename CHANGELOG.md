@@ -23,6 +23,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - Stamp rows name their kind (`"kind": "stamp"`), and a row with none reads as a stamp. A row of an unknown kind is named by its line (`STAMP-UNKNOWN-KIND`), never judged, and moves no exit code (ADR-0038, #339).
 - Publish memo head rows name their kind (`"kind": "head"`), and a row with none reads as a head. The chain cursor counts `chain` rows alone, so a row of an unknown kind moves nothing (ADR-0038, #340).
 
+- A verdict about one sidecar row names its line (`ANCHOR-INVALID: line 3 of receipts.jsonl.anchors.jsonl is not a record`), and a malformed stamp row names its field, as an anchor row does. Verdict words and exit codes are unchanged.
+- A sidecar row missing its time, calendar or authority says so in words, never `None`, and a pending proof with no calendar no longer advises an upgrade that cannot complete it.
+- Inside a package, `NO-ANCHORS` and `NO-STAMPS` give no command, a folder where a chain belongs is named as one, and a refused manifest names the one field that fails.
+
 ### Fixed
 
 - `supervisor scan` no longer stops with a traceback on a sidecar or transcript line holding an integer past 4,300 digits or nesting past the recursion limit. The writer can reach those files, so one line could stop the audit (#331).

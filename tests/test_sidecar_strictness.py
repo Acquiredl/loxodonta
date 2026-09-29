@@ -35,10 +35,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
-NOT_A_RECORD = ("ANCHOR-INVALID: sidecar line is not a record — evidence "
-                "that does not verify is not evidence")
-NOT_A_STAMP = ("STAMP-INVALID: sidecar line is not a stamp record — "
-               "evidence that does not verify is not evidence")
+NOT_A_RECORD = ("ANCHOR-INVALID: line 1 of receipts.jsonl.anchors.jsonl is "
+                "not a record — evidence that does not verify is not evidence")
+NOT_A_STAMP = ("STAMP-INVALID: line 1 of receipts.jsonl.stamps.jsonl is not "
+               "a record — evidence that does not verify is not evidence")
 # The spellings a strict parser refuses and Python reads as numbers:
 # the three words, and numbers too large to be finite.
 WORDS = ("NaN", "Infinity", "-Infinity", "1e999", "-1e999")
@@ -239,7 +239,8 @@ class StrictRowTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 3,
                                  result.stdout + result.stderr)
                 self.assertEqual(result.stdout.strip().splitlines(),
-                                 ["ANCHOR-INVALID: proof holds bytes after "
+                                 ["ANCHOR-INVALID: line 1 of receipts.jsonl."
+                                  "anchors.jsonl: proof holds bytes after "
                                   "its timestamp tree — evidence that does "
                                   "not verify is not evidence"])
 
@@ -280,7 +281,9 @@ class StrictReadersTest(unittest.TestCase):
             ("alpha", "sess-aaaa")]
         # The row is still judged, beside the pending proof the keeper
         # just added: invalid evidence, exit 3, and no anchor.
-        self.assertIn(NOT_A_RECORD, chain["detail"])
+        self.assertIn(NOT_A_RECORD.replace("receipts.jsonl",
+                                           "receipts-sess-aaaa.jsonl"),
+                      chain["detail"])
         self.assertEqual(chain["exit"], 3)
         self.assertFalse(chain["anchored"])
         self.assertEqual(calendar.submitted, [bytes.fromhex(head)])

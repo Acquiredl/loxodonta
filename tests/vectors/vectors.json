@@ -471,9 +471,9 @@
         "anchor-mismatch.jsonl"
       ],
       "exit": 3,
-      "last_line": "ANCHOR-MISMATCH: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history",
+      "last_line": "ANCHOR-MISMATCH: line 1 of anchor-mismatch.jsonl.anchors.jsonl: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history",
       "stdout": [
-        "ANCHOR-MISMATCH: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history"
+        "ANCHOR-MISMATCH: line 1 of anchor-mismatch.jsonl.anchors.jsonl: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history"
       ]
     },
     {
@@ -486,9 +486,9 @@
         "anchor-invalid-proof.jsonl"
       ],
       "exit": 3,
-      "last_line": "ANCHOR-INVALID: truncated proof \u2014 evidence that does not verify is not evidence",
+      "last_line": "ANCHOR-INVALID: line 1 of anchor-invalid-proof.jsonl.anchors.jsonl: truncated proof \u2014 evidence that does not verify is not evidence",
       "stdout": [
-        "ANCHOR-INVALID: truncated proof \u2014 evidence that does not verify is not evidence"
+        "ANCHOR-INVALID: line 1 of anchor-invalid-proof.jsonl.anchors.jsonl: truncated proof \u2014 evidence that does not verify is not evidence"
       ]
     },
     {
@@ -501,9 +501,9 @@
         "anchor-unreadable-line.jsonl"
       ],
       "exit": 3,
-      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "last_line": "ANCHOR-INVALID: line 1 of anchor-unreadable-line.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence",
       "stdout": [
-        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+        "ANCHOR-INVALID: line 1 of anchor-unreadable-line.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence"
       ]
     },
     {
@@ -595,9 +595,9 @@
         "anchor-key-twice.jsonl"
       ],
       "exit": 3,
-      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "last_line": "ANCHOR-INVALID: line 1 of anchor-key-twice.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence",
       "stdout": [
-        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+        "ANCHOR-INVALID: line 1 of anchor-key-twice.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence"
       ]
     },
     {
@@ -610,9 +610,9 @@
         "anchor-nan.jsonl"
       ],
       "exit": 3,
-      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "last_line": "ANCHOR-INVALID: line 1 of anchor-nan.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence",
       "stdout": [
-        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+        "ANCHOR-INVALID: line 1 of anchor-nan.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence"
       ]
     },
     {
@@ -625,9 +625,9 @@
         "anchor-number-too-large.jsonl"
       ],
       "exit": 3,
-      "last_line": "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence",
+      "last_line": "ANCHOR-INVALID: line 1 of anchor-number-too-large.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence",
       "stdout": [
-        "ANCHOR-INVALID: sidecar line is not a record \u2014 evidence that does not verify is not evidence"
+        "ANCHOR-INVALID: line 1 of anchor-number-too-large.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence"
       ]
     },
     {
@@ -640,9 +640,9 @@
         "anchor-trailing-bytes.jsonl"
       ],
       "exit": 3,
-      "last_line": "ANCHOR-INVALID: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence",
+      "last_line": "ANCHOR-INVALID: line 1 of anchor-trailing-bytes.jsonl.anchors.jsonl: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence",
       "stdout": [
-        "ANCHOR-INVALID: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence"
+        "ANCHOR-INVALID: line 1 of anchor-trailing-bytes.jsonl.anchors.jsonl: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence"
       ]
     },
     {
@@ -671,9 +671,9 @@
         "stamp-rejected.jsonl"
       ],
       "exit": 3,
-      "last_line": "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence",
+      "last_line": "STAMP-INVALID: line 1 of stamp-rejected.jsonl.stamps.jsonl, head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence",
       "stdout": [
-        "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence"
+        "STAMP-INVALID: line 1 of stamp-rejected.jsonl.stamps.jsonl, head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence"
       ]
     },
     {
@@ -686,9 +686,9 @@
         "stamp-trailing-bytes.jsonl"
       ],
       "exit": 3,
-      "last_line": "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply is not a timestamp response: bytes after the reply \u2014 evidence that does not verify is not evidence",
+      "last_line": "STAMP-INVALID: line 1 of stamp-trailing-bytes.jsonl.stamps.jsonl, head fab3462eec00\u2026 (entry 3): the reply is not a timestamp response: bytes after the reply \u2014 evidence that does not verify is not evidence",
       "stdout": [
-        "STAMP-INVALID: head fab3462eec00\u2026 (entry 3): the reply is not a timestamp response: bytes after the reply \u2014 evidence that does not verify is not evidence"
+        "STAMP-INVALID: line 1 of stamp-trailing-bytes.jsonl.stamps.jsonl, head fab3462eec00\u2026 (entry 3): the reply is not a timestamp response: bytes after the reply \u2014 evidence that does not verify is not evidence"
       ]
     },
     {
@@ -780,7 +780,7 @@
         "package-name-drive"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'C:x' is not a bare file name"
     },
     {
       "name": "package-name-backslash",
@@ -790,7 +790,7 @@
         "package-name-backslash"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'a\\\\b' is not a bare file name"
     },
     {
       "name": "package-name-trailing-dot",
@@ -800,7 +800,7 @@
         "package-name-trailing-dot"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'project.json.' is not a bare file name"
     },
     {
       "name": "package-name-device",
@@ -810,7 +810,7 @@
         "package-name-device"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'NUL' is not a bare file name"
     },
     {
       "name": "package-name-refused-character",
@@ -820,7 +820,7 @@
         "package-name-refused-character"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'a?b' is not a bare file name"
     },
     {
       "name": "package-name-short",
@@ -830,7 +830,7 @@
         "package-name-short"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact without a bare file name, a sha256, and a byte count"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'LONGFI~1.TXT' is not a bare file name"
     },
     {
       "name": "package-name-case",

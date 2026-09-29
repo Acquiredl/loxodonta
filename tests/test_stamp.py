@@ -57,6 +57,11 @@ QUERY_TYPE = "application/timestamp-query"
 SIDECARS = (".anchors.jsonl", ".published.jsonl", ".stamps.jsonl")
 
 
+# How a verdict about the one row of a test's stamps sidecar begins: the
+# row by its line, then the head it names.
+INVALID_ROW_1 = "STAMP-INVALID: line 1 of receipts.jsonl.stamps.jsonl, "
+
+
 def run_receipts(*args, cwd, env=None):
     return subprocess.run(
         [sys.executable, str(LOXODONTA), *args],
@@ -583,8 +588,8 @@ class StampCommandTest(unittest.TestCase):
         result = self.verify()
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn("STAMP-INVALID: sidecar line is not a stamp record",
-                      result.stdout)
+        self.assertIn("STAMP-INVALID: line 1 of receipts.jsonl.stamps.jsonl: "
+                      "record has no head", result.stdout)
         self.assertIn("the response is not base64", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
@@ -700,7 +705,8 @@ class StampRowKindTest(unittest.TestCase):
         result = self.verify()
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn("STAMP-INVALID: stamped head", result.stdout)
+        self.assertIn("STAMP-INVALID: line 1 of receipts.jsonl.stamps.jsonl: "
+                      "stamped head", result.stdout)
         self.assertIn("appears nowhere in this log", result.stdout)
 
     def test_an_unknown_kind_is_named_by_its_line_and_not_judged(self):
@@ -806,8 +812,8 @@ class StampRowKindTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 3,
                                  result.stdout + result.stderr)
-                self.assertIn("STAMP-INVALID: sidecar line is not a stamp "
-                              "record", result.stdout)
+                self.assertIn("STAMP-INVALID: line 2 of receipts.jsonl."
+                              "stamps.jsonl is not a record", result.stdout)
                 self.assertNotIn(self.UNKNOWN, result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 
@@ -818,8 +824,8 @@ class StampRowKindTest(unittest.TestCase):
         result = self.verify()
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn("STAMP-INVALID: sidecar line is not a stamp record",
-                      result.stdout)
+        self.assertIn("STAMP-INVALID: line 2 of receipts.jsonl.stamps.jsonl "
+                      "is not a record", result.stdout)
 
     def test_a_kindless_or_a_named_token_row_is_already_stamped(self):
         # The dedupe asks the reader too: a token row from before rows
@@ -981,7 +987,7 @@ class StampReplyStatusTest(unittest.TestCase):
                 with self.subTest(reply=name, way=way):
                     self.assertEqual(result.returncode, 3,
                                      result.stdout + result.stderr)
-                    self.assertIn(f"STAMP-INVALID: head {self.head[:12]}… "
+                    self.assertIn(f"{INVALID_ROW_1}head {self.head[:12]}… "
                                   f"(entry 1): {why}", result.stdout)
                     self.assertNotIn("holds a token", result.stdout)
                     self.assertNotIn("not judged", result.stdout)
@@ -1058,7 +1064,8 @@ class StampFieldEscapeTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         assert_printed_escaped(self, result.stdout,
-                               f"STAMP-INVALID: stamped head {SHOWN_HEAD} "
+                               "STAMP-INVALID: line 1 of receipts.jsonl."
+                               f"stamps.jsonl: stamped head {SHOWN_HEAD} "
                                "appears nowhere in this log")
 
     def test_no_sidecar_is_named_by_its_bare_name(self):
@@ -1696,7 +1703,7 @@ class JudgedStampTest(unittest.TestCase):
         result = self.verify()
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)",
+        self.assertIn(f"{INVALID_ROW_1}head {newer[:12]}… (entry 3)",
                       result.stdout)
         self.assertNotRegex(result.stdout, r"(?m)^VALID$")
 
@@ -1728,7 +1735,7 @@ class JudgedStampTest(unittest.TestCase):
                 self.assertEqual(self.queries, asked)
                 self.assertEqual(judged.returncode, 3,
                                  judged.stdout + judged.stderr)
-                self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)",
+                self.assertIn(f"{INVALID_ROW_1}head {newer[:12]}… (entry 3)",
                               judged.stdout)
                 self.assertNotIn("STAMPED", judged.stdout)
 
@@ -1775,6 +1782,19 @@ class JudgedStampTest(unittest.TestCase):
         assert_printed_escaped(self, result.stdout,
                                f"(the record names {SHOWN}, testimony)")
         self.assertEqual(result.stdout.splitlines()[-1], "VALID")
+
+    def test_a_row_naming_no_authority_says_so_in_words(self):
+        self.stamp()
+        (row,) = rows_of(self.sidecar)
+        del row["authority"]
+        self.sidecar.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("signed this head under its own clock (the record "
+                      "names no authority) — the time inside", result.stdout)
+        self.assertNotIn("None", result.stdout)
 
     def test_the_stored_reply_is_what_the_authority_sent(self):
         # Verbatim: the bytes in the sidecar are the bytes openssl wrote,
@@ -2075,7 +2095,8 @@ class OutlivedCertificateTest(unittest.TestCase):
 
         out = result.stdout
         self.assertEqual(result.returncode, 3, out + result.stderr)
-        self.assertIn(f"STAMP-INVALID: head {self.head[:12]}… (entry 2)", out)
+        self.assertIn(f"{INVALID_ROW_1}head {self.head[:12]}… (entry 2)",
+                      out)
         self.assertIn("as of the time the token states", out)
         self.assertNotIn("not judged", out)
         self.assertNotRegex(out, r"(?m)^VALID$")
@@ -2098,7 +2119,8 @@ class OutlivedCertificateTest(unittest.TestCase):
 
         out = result.stdout
         self.assertEqual(result.returncode, 3, out + result.stderr)
-        self.assertIn(f"STAMP-INVALID: head {self.head[:12]}… (entry 2)", out)
+        self.assertIn(f"{INVALID_ROW_1}head {self.head[:12]}… (entry 2)",
+                      out)
         self.assertIn("the time the token states could not be read", out)
         self.assertNotIn("not judged", out)
         self.assertNotRegex(out, r"(?m)^VALID$")
@@ -2116,7 +2138,7 @@ class OutlivedCertificateTest(unittest.TestCase):
 
         out = result.stdout
         self.assertEqual(result.returncode, 3, out + result.stderr)
-        self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)", out)
+        self.assertIn(f"{INVALID_ROW_1}head {newer[:12]}… (entry 3)", out)
         self.assertNotIn("not judged", out)
         self.assertNotRegex(out, r"(?m)^VALID$")
 
