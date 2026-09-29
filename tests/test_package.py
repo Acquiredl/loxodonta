@@ -384,10 +384,13 @@ class DemoStorePackageTest(PackageCase):
     def test_a_manifest_path_that_leaves_the_package_is_refused(self):
         # The layout is flat: a listed path is a bare file name or the
         # package is refused unopened, so a stranger's manifest can never
-        # make the verifier read, hash, or hang on a file outside it.
+        # make the verifier read, hash, or hang on a file outside it. The
+        # refusal quotes the path the manifest lists, its own text, and
+        # nothing the file outside holds.
         folder = self.folder_package()
         outside = folder.parent / "outside-secret.txt"
         outside.write_text("not yours to hash\n", "utf-8")
+        outside_hash = hashlib.sha256(outside.read_bytes()).hexdigest()
         for bad in ("../outside-secret.txt", str(outside), "a/b.jsonl",
                     "a\\b.jsonl", "..", ""):
             self.rewrite_manifest(
@@ -396,8 +399,10 @@ class DemoStorePackageTest(PackageCase):
             result = self.verify_package(folder)
             self.assertEqual(result.returncode, 4, bad + ": " + result.stdout)
             lines = result.stdout.strip().splitlines()
-            self.assertTrue(lines[-1].startswith("UNSUPPORTED-FORMAT"), lines)
-            self.assertNotIn("outside-secret", result.stdout)
+            self.assertEqual(len(lines), 1, lines)
+            self.assertTrue(lines[0].startswith("UNSUPPORTED-FORMAT"), lines)
+            self.assertNotIn("not yours to hash", result.stdout)
+            self.assertNotIn(outside_hash[:12], result.stdout)
             self.assertNotIn("Traceback", result.stderr)
 
     def test_a_bare_name_is_judged_by_its_characters_on_every_system(self):
@@ -1388,3 +1393,33 @@ class TranscriptPackageTest(PackageCase):
             self.assertTrue(lines[-1].startswith("UNSUPPORTED-FORMAT"), why)
             self.assertNotIn("chain:", result.stdout,
                              "refused unread; nothing is judged")
+
+
+class ManifestNotAFileTest(unittest.TestCase):
+    """A folder package's manifest.json that is not a regular file: a
+    folder, or a pipe, which a folder unpacked from a tar can hold. The
+    package is refused, UNSUPPORTED-FORMAT, never waited on: an ordinary
+    open of a pipe waits for a writer that never comes (#364's class)."""
+
+    def refused(self, make):
+        with tempfile.TemporaryDirectory() as folder:
+            make(os.path.join(folder, "manifest.json"))
+            for script in (LOXODONTA, REPO_ROOT / "verifier.py"):
+                with self.subTest(script=script.name):
+                    result = subprocess.run(
+                        [sys.executable, "-I", str(script), "verify-package",
+                         folder],
+                        capture_output=True, encoding="utf-8",
+                        errors="replace", timeout=60)
+                    self.assertEqual(result.returncode, 4,
+                                     result.stdout + result.stderr)
+                    self.assertIn("UNSUPPORTED-FORMAT: no readable "
+                                  "manifest.json", result.stdout)
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_folder_named_manifest_json_is_refused(self):
+        self.refused(os.mkdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+    def test_a_pipe_named_manifest_json_is_refused_not_waited_on(self):
+        self.refused(os.mkfifo)

@@ -42,10 +42,10 @@ from test_anchor import start_calendar
 from test_package_anchor import released_verifier
 from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run
 from test_stamp import (GRANTED, MISSING_AUTHORITY_TOOLING,
-                        MISSING_EXPIRY_TOOLING, REQ_CONFIG, TSA_CONFIG,
-                        answering, dated_authority, openssl_print_time,
-                        openssl_without_attime, outlive, start_authority,
-                        with_status_text)
+                        MISSING_EXPIRY_TOOLING, NO_TOKEN, REQ_CONFIG,
+                        TSA_CONFIG, answering, dated_authority,
+                        openssl_print_time, openssl_without_attime, outlive,
+                        start_authority, with_status_text)
 
 SESSION = "d0d0d0d0-aaaa-bbbb-cccc-000000000002"
 SIDECAR = "manifest.json.stamps.jsonl"
@@ -585,7 +585,8 @@ class JudgedPackageStampTest(StampedStoreCase):
         out = judged.stdout
         self.assertEqual(judged.returncode, 3, out + judged.stderr)
         lines = out.strip().splitlines()
-        findings = [l for l in lines if l.startswith("STAMP-INVALID: head ")]
+        findings = [l for l in lines if l.startswith("STAMP-INVALID: line ")
+                    and ", head " in l]
         self.assertEqual(len(findings), 1, out)
         self.assertTrue(lines[-1].startswith("STAMP-INVALID:"), lines[-1])
         self.assertIn("is not evidence for that chain", lines[-1])
@@ -982,16 +983,92 @@ class PackageStampRowKindTest(StampedStoreCase):
                          before.stdout.splitlines()[-1])
 
 
+class PackageStampReplyStatusTest(StampedStoreCase):
+    """#370 in a package: the manifest's token and each chain's are read
+    for their reply's status offline, as `verify --stamps` reads them. A
+    reply holding no token is SEAL-INVALID for the manifest and
+    STAMP-INVALID under its chain, named by why, with or without openssl
+    and a chain file, and never a token present and not judged."""
+
+    def verdicts(self, folder):
+        """verify-package three ways: with no chain file; with one and no
+        openssl on PATH; with one and whatever PATH this machine has."""
+        chain_file = self.root / "authority.pem"
+        chain_file.write_text("not a certificate\n", encoding="utf-8")
+        nowhere = self.root / "empty-path"
+        nowhere.mkdir(exist_ok=True)
+        chain = ("--authority-chain", str(chain_file))
+        return {
+            "no chain file": run(LOXODONTA, "verify-package", str(folder),
+                                 env=self.env, cwd=str(self.work)),
+            "no openssl": run(LOXODONTA, "verify-package", str(folder),
+                              *chain, env={**self.env, "PATH": str(nowhere)},
+                              cwd=str(self.work)),
+            "this machine": run(LOXODONTA, "verify-package", str(folder),
+                                *chain, env=self.env, cwd=str(self.work)),
+        }
+
+    def test_a_manifest_reply_holding_no_token_is_seal_invalid_offline(self):
+        folder = self.stamped_folder()
+        (record,) = self.sidecar_records(folder)
+        for name, response, why in NO_TOKEN:
+            (folder / SIDECAR).write_text(
+                json.dumps(dict(record, response=response)) + "\n", "utf-8")
+            for way, judged in self.verdicts(folder).items():
+                with self.subTest(reply=name, way=way):
+                    out = judged.stdout
+                    self.assertEqual(judged.returncode, 3,
+                                     out + judged.stderr)
+                    self.assertIn("seal stamp: SEAL-INVALID: line 1 of "
+                                  f"manifest.json.stamps.jsonl: {why}", out)
+                    self.assertTrue(out.strip().splitlines()[-1]
+                                    .startswith("SEAL-INVALID:"), out)
+                    self.assertNotIn("not judged", out)
+                    self.assertNotIn("Traceback", judged.stderr)
+
+    def test_a_chains_reply_holding_no_token_is_stamp_invalid_offline(self):
+        self.stamp_chain()
+        sidecar = Path(str(self.chain) + ".stamps.jsonl")
+        (record,) = [json.loads(line) for line in
+                     sidecar.read_text("utf-8").splitlines()]
+        for number, (name, response, why) in enumerate(NO_TOKEN):
+            sidecar.write_text(
+                json.dumps(dict(record, response=response)) + "\n", "utf-8")
+            folder = self.work / f"chain-{number}"
+            built = self.package(SESSION, "--folder", "--out", str(folder))
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            for way, judged in self.verdicts(folder).items():
+                with self.subTest(reply=name, way=way):
+                    out = judged.stdout
+                    self.assertEqual(judged.returncode, 3,
+                                     out + judged.stderr)
+                    self.assertIn(f"STAMP-INVALID: line 1 of {sidecar.name}, "
+                                  f"head {record['head'][:12]}… (entry "
+                                  f"{record['n']}): {why}", out)
+                    self.assertTrue(out.strip().splitlines()[-1]
+                                    .startswith("STAMP-INVALID:"), out)
+                    self.assertNotIn("holds a token", out)
+
+
+# What v0.9.0 printed after a missing sidecar's name, and what this
+# verifier prints inside a package, where the recipient has no recorder
+# to anchor with: a wording that changed, and no verdict.
+RELEASED_NO_ANCHORS = (" not found — anchoring is optional; run `loxodonta "
+                       "anchor` to add one")
+PACKAGED_NO_ANCHORS = " is not in this package — anchoring is optional"
+
+
 def bare_sidecars(stdout):
     """The released verifier's lines, with each NO-ANCHORS line naming
     its sidecar bare, as this one does (#349): v0.9.0 named it by its
-    path in the package's folder, a wording that changed and no verdict."""
+    path in the package's folder, and advised a command the recipient
+    does not hold. Wordings that changed, and no verdict."""
     lines = []
     for line in stdout.splitlines():
-        if line.startswith("NO-ANCHORS: "):
-            path, found, rest = line[len("NO-ANCHORS: "):].partition(
-                " not found")
-            line = f"NO-ANCHORS: {os.path.basename(path)}{found}{rest}"
+        if line.startswith("NO-ANCHORS: ") \
+                and line.endswith(RELEASED_NO_ANCHORS):
+            path = line[len("NO-ANCHORS: "):-len(RELEASED_NO_ANCHORS)]
+            line = f"NO-ANCHORS: {os.path.basename(path)}{PACKAGED_NO_ANCHORS}"
         lines.append(line)
     return lines
 

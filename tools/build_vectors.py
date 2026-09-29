@@ -86,11 +86,30 @@ PROOF_HEIGHT = 850123
 CALENDAR = "https://calendar.example/"
 
 # The sidecar rows (SPEC section 9), written as the recorder writes them.
-# A stamp row's response is never read here: no row gives an
-# --authority-chain, so the token is present and not judged, and these
-# bytes stand in for one (no openssl is needed to run the vectors).
+# A stamp row's token is never read here: no row gives an
+# --authority-chain, so a token is present and not judged (no openssl is
+# needed to run the vectors). A verifier reads the reply around it, an
+# RFC 3161 TimeStampResp, for its status and whether a token follows
+# (SPEC section 9.7), so the stand-in is a granted reply holding a
+# placeholder token, and the refused one a rejection with no token.
 SIDECAR_TS = "2026-09-23T12:05:00Z"
-STAND_IN_TOKEN = b"a stand-in for a TimeStampResp, which nothing here reads"
+
+
+def der(tag, content):
+    """One DER element with a short-form length, all these need."""
+    assert len(content) < 0x80
+    return bytes([tag, len(content)]) + content
+
+
+def ts_reply(status, token=b""):
+    """A TimeStampResp: SEQUENCE { PKIStatusInfo SEQUENCE { INTEGER
+    status }, then the token, if any }."""
+    return der(0x30, der(0x30, der(0x02, bytes([status]))) + token)
+
+
+STAND_IN_TOKEN = der(0x30, b"a stand-in for a token, which nothing reads")
+GRANTED_REPLY = ts_reply(0, STAND_IN_TOKEN)
+REJECTED_REPLY = ts_reply(2)
 
 
 # --- SPEC section 4, written out again ----------------------------------------
@@ -557,6 +576,10 @@ def build(workdir):
                 "n": n, "proof": base64.b64encode(proof_bytes).decode("ascii"),
                 "ts": SIDECAR_TS, **fields}
 
+    def line_1(name, kind):
+        """How a verdict about a vector's one sidecar row names it."""
+        return f"line 1 of {name}.jsonl.{kind}.jsonl"
+
     def unknown(name, kind, shown):
         return (f"{kind.upper()[:-1]}-UNKNOWN-KIND: line 1 of {name}.jsonl."
                 f"{kind}.jsonl is {shown} — this verifier does not know the "
@@ -603,23 +626,26 @@ def build(workdir):
     sidecar_row("anchor-mismatch", "anchors", "A completed proof of a head "
                 "that is no entry's hash in this chain: this log is not the "
                 "anchored history.", 3,
-                [f"ANCHOR-MISMATCH: anchored head {other} appears nowhere in "
-                 "this log — this log is not the anchored history"])
+                [f"ANCHOR-MISMATCH: {line_1('anchor-mismatch', 'anchors')}: "
+                 f"anchored head {other} appears nowhere in this log — this "
+                 "log is not the anchored history"])
 
     sidecar("anchor-invalid-proof", "anchors",
             [anchor(head, completed_proof()[:-2], 3)])
     sidecar_row("anchor-invalid-proof", "anchors", "A proof of the head cut "
                 "two bytes short, so it does not replay: evidence that does "
                 "not verify.", 3,
-                ["ANCHOR-INVALID: truncated proof — evidence that does not "
-                 "verify is not evidence"])
+                ["ANCHOR-INVALID: "
+                 f"{line_1('anchor-invalid-proof', 'anchors')}: truncated "
+                 "proof — evidence that does not verify is not evidence"])
 
     sidecar("anchor-unreadable-line", "anchors", ['["not","an","object"]'])
     sidecar_row("anchor-unreadable-line", "anchors", "A line that is JSON "
                 "but not an object: no row at all, so invalid evidence, never "
                 "skipped.", 3,
-                ["ANCHOR-INVALID: sidecar line is not a record — evidence "
-                 "that does not verify is not evidence"])
+                ["ANCHOR-INVALID: "
+                 f"{line_1('anchor-unreadable-line', 'anchors')} is not a "
+                 "record — evidence that does not verify is not evidence"])
 
     sidecar("anchor-attempt-only", "anchors",
             [{"budget": 12.0, "kind": "attempt",
@@ -669,18 +695,88 @@ def build(workdir):
                 [unknown("anchor-misplaced-chain", "anchors",
                          'of kind "chain"'), "VALID"])
 
+    # A row a strict JSON parser refuses is no row (#365), and a proof
+    # ends where its tree does.
+    def not_a_record(name):
+        return (f"ANCHOR-INVALID: {line_1(name, 'anchors')} is not a record "
+                "— evidence that does not verify is not evidence")
+    proof_row = stored(anchor(head, completed_proof(), 3))
+    sidecar("anchor-key-twice", "anchors",
+            [proof_row.replace(f'"head":"{head}"',
+                               f'"head":"{other}","head":"{head}"')])
+    sidecar_row("anchor-key-twice", "anchors", "A completed proof of the "
+                "head in a row that gives head twice, another chain's "
+                "first: a reader keeping the first would say ANCHOR-MISMATCH "
+                "and one keeping the last ANCHORED, so no reading of the "
+                "line is the row, and it is unreadable.", 3,
+                [not_a_record("anchor-key-twice")])
+
+    sidecar("anchor-nan", "anchors", [proof_row[:-1] + ',"x":NaN}'])
+    sidecar_row("anchor-nan", "anchors", "A completed proof of the head "
+                "in a row that also holds NaN, which JSON does not have: a "
+                "strict parser cannot read the line, so it is unreadable "
+                "(Infinity and -Infinity are refused alike).", 3,
+                [not_a_record("anchor-nan")])
+
+    sidecar("anchor-number-too-large", "anchors",
+            [proof_row[:-1] + ',"x":1e999}'])
+    sidecar_row("anchor-number-too-large", "anchors", "A completed proof of "
+                "the head in a row that also holds 1e999, a number too large "
+                "to be finite: Python reads it as infinity and a strict "
+                "parser refuses it, so the line is unreadable.", 3,
+                [not_a_record("anchor-number-too-large")])
+
+    sidecar("anchor-trailing-bytes", "anchors",
+            [anchor(head, completed_proof() + b"\x00", 3)])
+    sidecar_row("anchor-trailing-bytes", "anchors", "A completed proof of "
+                "the head with one byte after its timestamp tree: a proof "
+                "is its tree and nothing after it.", 3,
+                ["ANCHOR-INVALID: "
+                 f"{line_1('anchor-trailing-bytes', 'anchors')}: proof holds "
+                 "bytes after its timestamp tree — evidence that does not "
+                 "verify is not evidence"])
+
     sidecar("stamp-kindless", "stamps",
             [{"authority": "https://authority.example/tsr", "head": head,
               "n": 3, "response":
-              base64.b64encode(STAND_IN_TOKEN).decode("ascii"),
+              base64.b64encode(GRANTED_REPLY).decode("ascii"),
               "ts": SIDECAR_TS}])
     sidecar_row("stamp-kindless", "stamps", "A stamp row of the head written "
-                "with no kind member: it reads as a stamp, and with no "
-                "--authority-chain its token is present and not judged, a "
-                "note that moves no exit.", 0,
+                "with no kind member: it reads as a stamp, its reply is "
+                "granted and holds a token, and with no --authority-chain "
+                "that token is present and not judged, a note that moves no "
+                "exit.", 0,
                 [f"stamp not judged: no --authority-chain FILE given — head "
                  f"{head[:12]}… (entry 3) holds a token, present and not "
                  "judged here (ADR-0032)", "VALID"])
+
+    sidecar("stamp-rejected", "stamps",
+            [{"authority": "https://authority.example/tsr", "head": head,
+              "kind": "stamp", "n": 3, "response":
+              base64.b64encode(REJECTED_REPLY).decode("ascii"),
+              "ts": SIDECAR_TS}])
+    sidecar_row("stamp-rejected", "stamps", "A stamp row of the head whose "
+                "reply is the authority's rejection, status 2 and no token: "
+                "it holds nothing to judge, so it is invalid evidence with "
+                "no tool, never a token present and not judged.", 3,
+                [f"STAMP-INVALID: {line_1('stamp-rejected', 'stamps')}, head "
+                 f"{head[:12]}… (entry 3): the reply's status is 2 "
+                 "(rejection), so it holds no token — evidence that does not "
+                 "verify is not evidence"])
+
+    sidecar("stamp-trailing-bytes", "stamps",
+            [{"authority": "https://authority.example/tsr", "head": head,
+              "kind": "stamp", "n": 3, "response":
+              base64.b64encode(GRANTED_REPLY + bytes(1)).decode("ascii"),
+              "ts": SIDECAR_TS}])
+    sidecar_row("stamp-trailing-bytes", "stamps", "A stamp row of the head "
+                "whose granted reply has one byte after its outer SEQUENCE: "
+                "a reply ends where that SEQUENCE ends, so it is invalid "
+                "with no tool (#365).", 3,
+                [f"STAMP-INVALID: {line_1('stamp-trailing-bytes', 'stamps')}, "
+                 f"head {head[:12]}… (entry 3): the reply is not a timestamp "
+                 "response: bytes after the reply — evidence that does not "
+                 "verify is not evidence"])
 
     sidecar("stamp-attempt-only", "stamps",
             [{"budget": 3.0, "kind": "attempt",
@@ -781,7 +877,7 @@ def build(workdir):
                     f"{reads}: a name is judged by its characters, so it is "
                     "refused on every system, unread.", 4,
                     "UNSUPPORTED-FORMAT: manifest.json lists an artifact "
-                    "without a bare file name, a sha256, and a byte count")
+                    f"whose path {listed!r} is not a bare file name")
 
     # A name is read only when a file holds exactly it (#358): Windows
     # and macOS open PROJECT.JSON for project.json, and Linux does not.
@@ -823,6 +919,16 @@ def build(workdir):
                 "boolean, so the manifest is refused unread.", 4,
                 "UNSUPPORTED-FORMAT: manifest.json lists a chain whose "
                 "entries is true or false, not an integer")
+
+    # A manifest holding a spelling a strict parser refuses (#365), in
+    # testimony nobody judges: read by one verifier and not another.
+    package("package-tool-nan", package_files(
+        base, change=lambda m: m.update(tool=float("nan"))))
+    package_row("package-tool-nan", "The manifest's tool, testimony nobody "
+                "judges, is NaN, which JSON does not have: a strict JSON "
+                "reader cannot read the manifest, so it is refused unread.",
+                4, "UNSUPPORTED-FORMAT: manifest.json holds NaN, which is "
+                "not JSON; a strict JSON reader cannot read it")
 
     anchored = package_files(base, seals=["anchor"])
     digest = hashlib.sha256(anchored["manifest.json"]).hexdigest()

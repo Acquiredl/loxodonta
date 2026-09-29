@@ -958,6 +958,39 @@ class CalendarsDisagreeTest(unittest.TestCase):
         self.assertIn(self.lags.url, result.stdout)
         self.assertNotIn("still pending", result.stdout)
 
+    def test_the_session_end_stops_re_asking_for_a_settled_head(self):
+        # The session end upgrades every pending proof in the folder with
+        # what is left of its budget, so it asks what --upgrade asks: a
+        # head another calendar settled owes nothing, and a dead pool
+        # asked on every session end spends the budget a new head needs.
+        home = home_outside(self)
+
+        def hook(event, **fields):
+            return subprocess.run(
+                [sys.executable, str(LOXODONTA), "hook", "--anchor",
+                 "--calendar", self.settles.url],
+                cwd=self.workdir, capture_output=True,
+                env=isolated_env(home, PYTHONIOENCODING="utf-8"),
+                input=json.dumps({"session_id": "sess-settled",
+                                  "hook_event_name": event,
+                                  **fields}).encode("utf-8"))
+
+        hook("PostToolUse", tool_name="Bash", tool_input={"command": "ls"},
+             tool_response={})
+        self.lags.polled.clear()
+
+        result = hook("SessionEnd")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.settles.submitted[-1:],
+                         [bytes.fromhex(run_receipts(
+                             "head", "--log",
+                             "receipts-sess-settled.jsonl",
+                             cwd=self.workdir).stdout.strip())],
+                         "the session's own head was not anchored")
+        self.assertEqual(self.lags.polled, [],
+                         "the dead pool was asked again at session end")
+
     def test_a_head_no_calendar_settled_still_advises_the_upgrade(self):
         run_receipts("log", "--actor", "agent", "--action", "step 2",
                      cwd=self.workdir)
@@ -1148,8 +1181,8 @@ class AnchorRowKindTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 3,
                                  result.stdout + result.stderr)
-                self.assertIn("ANCHOR-INVALID: sidecar line is not a record",
-                              result.stdout)
+                self.assertIn("ANCHOR-INVALID: line 2 of receipts.jsonl."
+                              "anchors.jsonl is not a record", result.stdout)
                 self.assertNotIn(self.UNKNOWN, result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 
@@ -1160,8 +1193,8 @@ class AnchorRowKindTest(unittest.TestCase):
         result = self.verify()
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn("ANCHOR-INVALID: sidecar line is not a record",
-                      result.stdout)
+        self.assertIn("ANCHOR-INVALID: line 2 of receipts.jsonl.anchors.jsonl "
+                      "is not a record", result.stdout)
 
     def test_upgrade_asks_about_no_row_of_an_unknown_kind(self):
         # A row of a kind the recorder does not know is not a proof, so
@@ -1252,8 +1285,9 @@ class MalformedAnchorRowTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 3,
                                  result.stdout + result.stderr)
-                self.assertIn(f"ANCHOR-INVALID: {reason} — evidence that "
-                              "does not verify is not evidence", result.stdout)
+                self.assertIn("ANCHOR-INVALID: line 2 of receipts.jsonl."
+                              f"anchors.jsonl: {reason} — evidence that does "
+                              "not verify is not evidence", result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
                 # The good row beside it is still judged.
                 self.assertIn("ANCHOR-PENDING", result.stdout)
@@ -1633,7 +1667,8 @@ class AnchorFieldEscapeTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         assert_printed_escaped(self, result.stdout,
-                               f"ANCHOR-MISMATCH: anchored head {SHOWN_HEAD} "
+                               "ANCHOR-MISMATCH: line 1 of receipts.jsonl."
+                               f"anchors.jsonl: anchored head {SHOWN_HEAD} "
                                "appears nowhere in this log")
 
     def test_no_sidecar_is_named_by_its_bare_name(self):

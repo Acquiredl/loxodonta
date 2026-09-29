@@ -92,29 +92,37 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 The supervisor writes a package and the recorder, and the verifier cut from it, judge one: the format it names, the size it may unpack to, the namespace and principal its issuer signature is made and checked under, the key fingerprint both print, the bare names its manifest may list, and which two names some system opens as one file (ADR-0026, #358).
 
-### Attempt rows
-
-Names: `ATTEMPT_KIND`, `is_attempt`.
-
-Original: `loxodonta.py`. Copies: `supervisor.py`.
-
-The recorder notes how a session-end step went in a row of kind `attempt`, and every reader that judges or schedules skips it, the recorder's and the supervisor's alike (#240).
-
 ### Reading a sidecar
 
-Names: `read_log`, `sidecar_path`, `published_path`, `read_sidecar_records`.
+Names: `read_log`, `sidecar_path`, `published_path`, `NOT_A_FOLDER`, `NOT_REGULAR`, `open_regular`, `file_problem`, `sidecar_lines`, `KeyGivenTwice`, `object_with_each_key_once`, `NotStrictJson`, `not_json`, `finite_float`, `read_sidecar_records`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-Where each sidecar lives beside its chain, and how its lines are read: a line that is not a JSON object, past the digit or recursion limit, or not UTF-8, reads as unreadable and never stops the reader. The recorder judges by it; the supervisor's scan and keeper report and schedule by it (#299, #331, #344).
+Where each sidecar lives beside its chain, and how its lines are read: a line that is not a JSON object, past the digit or recursion limit, or not UTF-8, or that a strict parser refuses (a key given twice, NaN, Infinity or 1e999), reads as unreadable and never stops the reader, and so does a sidecar that is not a file, a folder or a pipe in its place. The recorder judges by it; the supervisor's scan and keeper report and schedule by it (#299, #331, #344, #364, #365).
 
 ### What a sidecar row is
 
-Names: `CHAIN_KIND`, `ANCHOR_KIND`, `STAMP_KIND`, `HEAD_KIND`, `SIDECAR_KINDS`, `UNREADABLE_ROW`, `UNKNOWN_ROW`, `row_kind`, `is_chain_record`.
+Names: `ATTEMPT_KIND`, `CHAIN_KIND`, `ANCHOR_KIND`, `STAMP_KIND`, `HEAD_KIND`, `SIDECAR_KINDS`, `UNREADABLE_ROW`, `UNKNOWN_ROW`, `row_kind`, `is_chain_record`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-A row names its kind, a row with none reads as its sidecar's evidence, and a kind unknown there counts for nothing (ADR-0038). The recorder's judges and the supervisor's scan and keeper ask the one answer, so the scan never counts a proof, a token or a sent head that `verify` or `publish` would not (#344).
+A row names its kind, a row with none reads as its sidecar's evidence, and a kind unknown there counts for nothing (ADR-0038). The recorder's judges and the supervisor's scan and keeper ask the one answer, so the scan never counts a proof, a token or a sent head that `verify` or `publish` would not, and every judge and scheduler skips an `attempt` row alike (#240, #344).
+
+### An anchor row's shape
+
+Names: `JSON_TYPE_WORDS`, `json_type`, `anchor_row_problem`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+Every reader asks it of an anchor row before acting on it: the recorder's judges call a row that fails it invalid, and the supervisor's scan counts an anchor row as a departure only when it passes, so the panel never says a head left by a row of the wrong shape (#348, #370).
+
+### A stamp reply's status
+
+Names: `STAMP_STATUS_WORDS`, `STAMP_GRANTED`, `der_element`, `der_expect`, `stamp_status`, `status_word`, `stamp_reply_problem`, `token_granted`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+Whether a stamp row's reply says granted with a token after it, read offline and the token never parsed: `verify --stamps` calls a reply that does not STAMP-INVALID, `stamp` asks about its head again, and the supervisor's scan counts only a granted reply as a departure, so none of them counts a row the others would not (#366, #370). A shape and status reader, not proof replay: judging stays with verify.
 
 ### Where the chain route left off
 

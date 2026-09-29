@@ -580,7 +580,8 @@ class MalformedPackageRowTest(AnchoredStoreCase):
 
                 self.assertEqual(judged.returncode, 3,
                                  judged.stdout + judged.stderr)
-                self.assertIn(f"seal anchor: SEAL-INVALID: {reason} — "
+                self.assertIn("seal anchor: SEAL-INVALID: line 2 of "
+                              f"manifest.json.anchors.jsonl: {reason} — "
                               "evidence that does not verify is not evidence",
                               judged.stdout)
                 self.assertIn("seal anchor: ANCHOR-PENDING", judged.stdout)
@@ -604,8 +605,9 @@ class MalformedPackageRowTest(AnchoredStoreCase):
 
                 self.assertEqual(judged.returncode, 3,
                                  judged.stdout + judged.stderr)
-                self.assertIn(f"ANCHOR-INVALID: {reason} — evidence that "
-                              "does not verify is not evidence", judged.stdout)
+                self.assertIn(f"ANCHOR-INVALID: line 2 of {chain_sidecar.name}"
+                              f": {reason} — evidence that does not verify is "
+                              "not evidence", judged.stdout)
                 self.assertIn(SealedPackageTest.CHAIN_DETAIL, judged.stdout)
                 self.assertNotIn("Traceback", judged.stderr)
                 self.assertNotIn("sneaky", judged.stdout)
@@ -685,8 +687,8 @@ class PackageFieldEscapeTest(AnchoredStoreCase):
                              judged.stdout + judged.stderr)
             assert_printed_escaped(
                 self, judged.stdout,
-                f"seal anchor: SEAL-INVALID: the proof is for digest "
-                f"{SHOWN_HEAD_12}…")
+                "seal anchor: SEAL-INVALID: line 1 of manifest.json.anchors."
+                f"jsonl: the proof is for digest {SHOWN_HEAD_12}…")
 
     def test_a_chain_anchors_time_prints_escaped_and_its_sidecar_bare(self):
         sidecar = self.chain.with_name(self.chain.name + ".anchors.jsonl")
@@ -711,8 +713,8 @@ class PackageFieldEscapeTest(AnchoredStoreCase):
                                f"ANCHOR-PENDING: head {head[:12]}… "
                                f"submitted {SHOWN} via")
         self.assertEqual(bare.returncode, 0, bare.stdout + bare.stderr)
-        self.assertIn(f"NO-ANCHORS: {sidecar.name} not found — anchoring is "
-                      "optional", bare.stdout)
+        self.assertIn(f"NO-ANCHORS: {sidecar.name} is not in this package — "
+                      "anchoring is optional", bare.stdout)
 
     def test_the_manifests_own_words_print_escaped(self):
         # The summary's testimony, the unit and the seal kinds are the
