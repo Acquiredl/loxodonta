@@ -2,8 +2,9 @@
 
 Each vector is a small chain file, or a package (a folder or a zip), and
 one row of tests/vectors/vectors.json: the arguments to run, the exit
-expected, and the last line of stdout expected (or how it starts). The same rows are what a second
-implementation checks itself against (tests/vectors/README.md). Here each
+expected, and the last line of stdout expected (or how it starts). The
+same rows are what a second implementation checks itself against
+(tests/vectors/README.md). Here each
 row runs against loxodonta.py and against verifier.py, as a recipient
 would run them, and the two files must also agree with each other, exit
 and output alike.
