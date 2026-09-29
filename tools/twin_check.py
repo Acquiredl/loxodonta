@@ -126,11 +126,6 @@ TWINS = (
          "signature is made and checked under, the key fingerprint "
          "both print, the bare names its manifest may list, and which "
          "two names some system opens as one file (ADR-0026, #358)."),
-    Twin("Attempt rows", ("ATTEMPT_KIND", "is_attempt"),
-         ORIGINAL, SUPERVISOR,
-         "The recorder notes how a session-end step went in a row of kind "
-         "`attempt`, and every reader that judges or schedules skips it, "
-         "the recorder's and the supervisor's alike (#240)."),
     Twin("Reading a sidecar",
          ("read_log", "sidecar_path", "published_path", "NOT_A_FOLDER",
           "NOT_REGULAR", "open_regular", "file_problem", "sidecar_lines",
@@ -146,7 +141,8 @@ TWINS = (
          "it; the supervisor's scan and keeper report and schedule by it "
          "(#299, #331, #344, #364, #365)."),
     Twin("What a sidecar row is",
-         ("CHAIN_KIND", "ANCHOR_KIND", "STAMP_KIND", "HEAD_KIND",
+         ("ATTEMPT_KIND", "CHAIN_KIND", "ANCHOR_KIND", "STAMP_KIND",
+          "HEAD_KIND",
           "SIDECAR_KINDS", "UNREADABLE_ROW", "UNKNOWN_ROW", "row_kind",
           "is_chain_record"),
          ORIGINAL, SUPERVISOR,
@@ -154,8 +150,9 @@ TWINS = (
          "evidence, and a kind unknown there counts for nothing "
          "(ADR-0038). The recorder's judges and the supervisor's scan and "
          "keeper ask the one answer, so the scan never counts a proof, a "
-         "token or a sent head that `verify` or `publish` would not "
-         "(#344)."),
+         "token or a sent head that `verify` or `publish` would not, and "
+         "every judge and scheduler skips an `attempt` row alike (#240, "
+         "#344)."),
     Twin("An anchor row's shape",
          ("JSON_TYPE_WORDS", "json_type", "anchor_row_problem"),
          ORIGINAL, SUPERVISOR,

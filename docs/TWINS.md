@@ -92,14 +92,6 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 The supervisor writes a package and the recorder, and the verifier cut from it, judge one: the format it names, the size it may unpack to, the namespace and principal its issuer signature is made and checked under, the key fingerprint both print, the bare names its manifest may list, and which two names some system opens as one file (ADR-0026, #358).
 
-### Attempt rows
-
-Names: `ATTEMPT_KIND`, `is_attempt`.
-
-Original: `loxodonta.py`. Copies: `supervisor.py`.
-
-The recorder notes how a session-end step went in a row of kind `attempt`, and every reader that judges or schedules skips it, the recorder's and the supervisor's alike (#240).
-
 ### Reading a sidecar
 
 Names: `read_log`, `sidecar_path`, `published_path`, `NOT_A_FOLDER`, `NOT_REGULAR`, `open_regular`, `file_problem`, `sidecar_lines`, `KeyGivenTwice`, `object_with_each_key_once`, `NotStrictJson`, `not_json`, `finite_float`, `read_sidecar_records`.
@@ -110,11 +102,11 @@ Where each sidecar lives beside its chain, and how its lines are read: a line th
 
 ### What a sidecar row is
 
-Names: `CHAIN_KIND`, `ANCHOR_KIND`, `STAMP_KIND`, `HEAD_KIND`, `SIDECAR_KINDS`, `UNREADABLE_ROW`, `UNKNOWN_ROW`, `row_kind`, `is_chain_record`.
+Names: `ATTEMPT_KIND`, `CHAIN_KIND`, `ANCHOR_KIND`, `STAMP_KIND`, `HEAD_KIND`, `SIDECAR_KINDS`, `UNREADABLE_ROW`, `UNKNOWN_ROW`, `row_kind`, `is_chain_record`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-A row names its kind, a row with none reads as its sidecar's evidence, and a kind unknown there counts for nothing (ADR-0038). The recorder's judges and the supervisor's scan and keeper ask the one answer, so the scan never counts a proof, a token or a sent head that `verify` or `publish` would not (#344).
+A row names its kind, a row with none reads as its sidecar's evidence, and a kind unknown there counts for nothing (ADR-0038). The recorder's judges and the supervisor's scan and keeper ask the one answer, so the scan never counts a proof, a token or a sent head that `verify` or `publish` would not, and every judge and scheduler skips an `attempt` row alike (#240, #344).
 
 ### An anchor row's shape
 

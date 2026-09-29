@@ -78,11 +78,13 @@ jobs:
   # The names branch protection requires, one per platform: each passes only
   # when every shard of every platform passed. The shard jobs above say which
   # one failed. These names, the target list above and the protection's
-  # required checks are one list kept three times.
+  # required checks are one list kept three times. `always()`, never
+  # `!cancelled()`: a required check that is skipped counts as passed, so a
+  # cancelled run would leave these green with the suite unrun.
   platform:
     name: ${{ matrix.name }}
     needs: suite
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
