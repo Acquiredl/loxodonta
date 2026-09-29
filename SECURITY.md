@@ -33,7 +33,7 @@ These are the design, not vulnerabilities:
   file, and whoever can write the file can rewrite it; the format states
   that as a non-goal on purpose. Head records and anchors are how loxodonta
   deals with the write access risk
-  ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
+  ([SPEC §8](docs/SPEC.md#8-limits)).
 - A compromised writer lying at write time is chained faithfully. Receipts
   are testimony.
 - A tool call that never fired the hook leaves no break. Completeness is the
@@ -42,7 +42,7 @@ These are the design, not vulnerabilities:
   readable on purpose: in the forensic case the artifact is the evidence,
   and a log the operator cannot read is not evidence. A report that "the log
   is readable" or "the log contains command lines" is not a vulnerability
-  ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
+  ([SPEC §8](docs/SPEC.md#82-non-goals-of-the-format)).
 
 These are vulnerabilities, and reports of them are wanted:
 
@@ -54,7 +54,7 @@ These are vulnerabilities, and reports of them are wanted:
 - A path by which a secret or file content reaches a receipt, an export, or
   the digest. A receipt holds a one-line action summary and file
   fingerprints, never file contents, so a secret in one is a bug in whatever
-  wrote it ([SPEC §8](docs/SPEC.md#8-explicit-non-goals-v01)).
+  wrote it ([SPEC §8](docs/SPEC.md#82-non-goals-of-the-format)).
 - `serve`, its dashboard or its `/metrics` route, reachable from off the
   machine, or `mcp` gaining a write path.
 - The receiver answering anything but a POST at its token's path, a header

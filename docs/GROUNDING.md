@@ -48,8 +48,11 @@ it can claim none of what that secret buys.
 
 **It cannot claim**
 
-- **Forward integrity, or forward-secure stream integrity, for entries
-  after the last commitment.** With no erased secret the writer can
+The list itself is [SPEC section 8.1](SPEC.md#81-what-the-design-cannot-claim).
+Its sources follow, under the same names and in the same order.
+
+- **Forward integrity for entries after the last commitment**, or
+  forward-secure stream integrity. With no erased secret the writer can
   recompute everything since (Bellare and Yee, section 1; Ma and Tsudik,
   section 1).
 - **Resistance to a cut tail where no published head exists.** Bellare
@@ -71,8 +74,13 @@ it can claim none of what that secret buys.
   project declines before 1.0 ([DIRECTION.md](DIRECTION.md) section 6).
 - **Who wrote it.** A time-stamp shows when and that nothing changed, and
   not who asked for it (Buldas and others, 2014, section 5.1).
+- **Completeness from the chain alone.** Section 3 holds its sources.
 - **Anything about entries written after a compromise** (Schneier and
   Kelsey, section 1).
+- **Whole-chain regeneration past the last commitment.** The first claim
+  above, turned around: tamper-evidence holds for the part of a chain a
+  commitment held off the machine covers, and after the last commitment
+  the writer can recompute everything, as forward integrity says.
 
 **On how often to commit.** No source gives a number. Ma and Tsudik make
 security a function of how often the logger reaches its verifier. Buldas
