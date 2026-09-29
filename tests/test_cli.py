@@ -2408,4 +2408,5 @@ class NotUtf8LogTest(ReceiptsCliTest):
         result = run_receipts("verify", "--anchors", cwd=self.workdir)
 
         self.assertNotIn("Traceback", result.stderr)
-        self.assertIn("sidecar line is not a record", result.stdout)
+        self.assertIn("line 1 of receipts.jsonl.anchors.jsonl is not a record",
+                      result.stdout)

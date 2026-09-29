@@ -3056,6 +3056,25 @@ class AnchorKeeperTest(unittest.TestCase):
             (repo, session)]
         return chain
 
+    def test_a_pending_row_with_no_time_or_calendar_is_still_listed(self):
+        # verify says an unrecorded time and calendar in words, and the
+        # panel reads that line (ADR-0005's seam), so the proof is listed
+        # with neither, never dropped and never "None".
+        log = make_chain(self.root / "alpha" / "receipts", "sess-bare-row")
+        write_pending_anchor(log, chain_head(log), submitted=ago(100))
+        sidecar = Path(str(log) + ".anchors.jsonl")
+        row = json.loads(sidecar.read_text(encoding="utf-8"))
+        del row["ts"], row["calendar"]
+        sidecar.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pend = self.chain_report(result, "alpha", "sess-bare-row")["anchors"]
+        (proof,) = pend["pending"]
+        self.assertIsNone(proof["submitted"])
+        self.assertIsNone(proof["calendar"])
+
     def test_the_panel_data_lists_heights_pending_and_fresh_heads(self):
         anchored_log = make_chain(self.root / "alpha" / "receipts",
                                   "sess-anch")
