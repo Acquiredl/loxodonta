@@ -1,4 +1,4 @@
-"""A sidecar path that is not a file (#364), and a chain path (#374).
+"""A sidecar path that is not a file (#364), and a chain path (#374, #385).
 
 The sidecars sit beside their chain, in the writer's reach, and
 `mkdir <log>.anchors.jsonl` is one command. Every reader and every
@@ -10,7 +10,9 @@ traceback, never a stopped scan, never a hang.
 
 The chain itself is in the same reach. `verify` and `head` call a chain
 path that is not a regular file no input, the scan names it and goes on,
-and `package` and `export` never copy it (SPEC section 6).
+and `package` and `export` never copy it (SPEC section 6). The hook
+reads it as damage and keeps its receipt in a sibling, and the other
+writers refuse it as `verify` does (#385).
 
 Every test drives the public CLI: the recorder's verbs, its hook at
 SessionEnd, the supervisor's scan and keeper, against the fake calendar,
@@ -199,6 +201,135 @@ class ChainNotAFileTest(unittest.TestCase):
         os.symlink("/dev/zero", self.log)
 
         self.assert_no_input(PIPE)
+
+
+class WrittenChainNotAFileTest(unittest.TestCase):
+    """The writers with a folder where the chain belongs (#385). The hook
+    reads it as damage, as it reads a torn tail, and keeps the receipt in
+    a sibling (ADR-0004); `log`, `run`, `anchor`, `publish` and `stamp`
+    refuse it in `verify`'s words, exit 66, and `run` before its command
+    runs. What stands there is left as it lies, and no lock is left
+    beside it. Every run is bounded, so a writer that waited would fail,
+    not hang."""
+
+    WHY = FOLDER
+    HOOKED = "sess-1234abcd"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.log = self.workdir / "receipts.jsonl"
+
+    def put(self, path):
+        """What stands where the chain belongs: a folder here."""
+        path.mkdir()
+
+    def still_there(self, path):
+        return path.is_dir()
+
+    def assert_no_lock(self):
+        self.assertEqual(list(self.workdir.glob("*.lock")), [])
+
+    def test_the_hook_keeps_the_receipt_in_a_sibling(self):
+        chain = self.workdir / f"receipts-{self.HOOKED}.jsonl"
+        self.put(chain)
+        payload = json.dumps({"session_id": self.HOOKED,
+                              "hook_event_name": "PostToolUse",
+                              "tool_name": "Bash",
+                              "tool_input": {"command": "echo kept"}})
+
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook",
+             "--log-dir", str(self.workdir)],
+            input=payload, capture_output=True, encoding="utf-8",
+            cwd=str(self.workdir), timeout=BOUND,
+            env=isolated_env(home_outside(self), PYTHONIOENCODING="utf-8"))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        sibling = self.workdir / f"receipts-{self.HOOKED}-002.jsonl"
+        entries = [json.loads(line) for line
+                   in sibling.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([e["action"] for e in entries],
+                         ["genesis", "Bash: echo kept"])
+        self.assertTrue(self.still_there(chain))
+        self.assert_no_lock()
+
+    def test_the_operators_verbs_refuse_it_as_verify_does(self):
+        self.put(self.log)
+        calendar = start_calendar(self)
+        authority = start_authority(self)
+        receiver = serve_posts(self)
+        remote = f"http://127.0.0.1:{receiver.server_address[1]}"
+        verbs = {
+            "log": ["log", "--actor", "agent", "--action", "x"],
+            "anchor": ["anchor", "--calendar", calendar.url],
+            "publish": ["publish", remote + "/hook"],
+            "publish --chain": ["publish", "--chain", remote + "/chain"],
+            "stamp": ["stamp", "--authority", authority.url],
+        }
+        for verb, args in verbs.items():
+            with self.subTest(verb=verb):
+                result = run_receipts(*args, cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 66,
+                                 result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn(f"receipts.jsonl {NO_CHAIN}: {self.WHY}",
+                              result.stderr)
+                self.assertTrue(self.still_there(self.log))
+                self.assert_no_lock()
+        self.assertEqual(calendar.submitted, [])
+        self.assertEqual(authority.received, [])
+        self.assertEqual(receiver.received, [])
+
+    def test_run_refuses_it_before_its_command_runs(self):
+        # No receipt can be written, so the command must not run: the
+        # wrapper would execute work it cannot record.
+        self.put(self.log)
+
+        result = run_receipts(
+            "run", "--actor", "agent", "--",
+            sys.executable, "-c", "open('side-effect.txt', 'w').write('ran')",
+            cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(f"receipts.jsonl {NO_CHAIN}: {self.WHY}", result.stderr)
+        self.assertFalse((self.workdir / "side-effect.txt").exists())
+        self.assertTrue(self.still_there(self.log))
+        self.assert_no_lock()
+
+
+@unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+class WrittenChainPipeTest(WrittenChainNotAFileTest):
+    """The same writers with a pipe, and no reader, where the chain
+    belongs. An ordinary open of it for writing never returns, so the
+    hook waited there for ever with the lock held (#385)."""
+
+    WHY = PIPE
+
+    def put(self, path):
+        os.mkfifo(path)
+
+    def still_there(self, path):
+        return stat.S_ISFIFO(os.lstat(path).st_mode)
+
+
+@unittest.skipUnless(hasattr(os, "symlink")
+                     and os.path.exists("/dev/zero"), "no /dev/zero here")
+class WrittenChainDeviceTest(WrittenChainNotAFileTest):
+    """The same writers with a link to a device where the chain belongs:
+    followed, as every file is, and never written."""
+
+    WHY = PIPE
+
+    def put(self, path):
+        os.symlink("/dev/zero", path)
+
+    def still_there(self, path):
+        return os.path.islink(path)
 
 
 class PackagedNotAFileTest(AnchoredStoreCase):

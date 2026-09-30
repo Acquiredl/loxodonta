@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- A pipe where a chain belongs no longer hangs the hook with its lock held: a pipe, folder or device there is damage, and the hook records in a sibling; `run` refuses before its command runs (#385).
+
 ## [0.10.1] - 2026-09-30
 
 Three fixes from the round that followed 0.10.0, each found in a review of that round's own pull requests. A pipe or a folder where a chain belongs is named and never waited on, the witness reads a shell refusal without an `Exit code N` line as one that may owe a receipt, and `twin_check --write` handles four unusual layouts. The receipt format is untouched; `verifier.py` moves because the recorder's read of a chain did.
