@@ -80,7 +80,9 @@ def main(argv):
         print("verifier.py is stale: run python tools/build_verifier.py "
               "and commit the result", file=sys.stderr)
         return 1
-    VERIFIER.write_text(text, encoding="utf-8", newline="\n")
+    # Path.write_text takes no newline before Python 3.10.
+    with VERIFIER.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
     print(f"wrote {VERIFIER.name}")
     return 0
 
