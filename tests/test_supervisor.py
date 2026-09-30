@@ -2258,11 +2258,11 @@ class FailedCallWitnessTest(unittest.TestCase):
     Once install-hook wires the event, the witness moves with it. A
     failed call whose result begins `Exit code N` is owed like a
     completed one, from the epoch that wired the event and never before.
-    A rejected input, a marked denial, and a shell failure without that
-    line owe nothing. Any other tool's failure may owe (`may_owe`), and
-    receipts are reconciled tool by tool, going to a tool's `may_owe`
-    calls first, so a receipt a failed call may have left never pays for
-    one an owed call lost."""
+    A rejected input and a marked denial owe nothing. Any other failure
+    may owe (`may_owe`), a shell failure without that line among them
+    (#379), and receipts are reconciled tool by tool, going to a tool's
+    `may_owe` calls first, so a receipt a failed call may have left never
+    pays for one an owed call lost."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -2468,11 +2468,11 @@ class FailedCallWitnessTest(unittest.TestCase):
                           name)
 
     def test_a_call_that_never_ran_owes_nothing_and_excuses_nothing(self):
-        # A rejected input, a marked denial, and a shell call with no
-        # `Exit code N` line (blocked, or denied unmarked) fire no hook,
-        # so they owe nothing and may owe nothing either: a receipt
-        # planted under the tool's name reads as the surplus it is,
-        # rather than as a slot the failure opened.
+        # A rejected input and a marked denial say in their own words
+        # that the call never ran, and fire no hook, so they owe nothing
+        # and may owe nothing either: a receipt planted under the tool's
+        # name reads as the surplus it is, rather than as a slot the
+        # failure opened.
         self.session("sess-denied", ["Bash: a", "Bash: b"],
                      [ago(6000), ago(5990)], [ago(5980)],
                      failure="Permission to use Bash has been denied.",
@@ -2481,22 +2481,94 @@ class FailedCallWitnessTest(unittest.TestCase):
                      [ago(5000), ago(4990)], [ago(4980)], tool="Edit",
                      failure="<tool_use_error>String to replace not found "
                              "in file.</tool_use_error>")
-        self.session("sess-blocked", ["Bash: a", "Bash: b", "Bash: planted"],
-                     [ago(4000), ago(3990)], [ago(3980)],
-                     failure="PreToolUse:Bash hook error: blocked by policy")
 
         rows = self.states(self.scan())
 
         denied, rejected = rows["sess-denied"], rows["sess-rejected"]
-        blocked = rows["sess-blocked"]
         self.assertEqual((denied["tools"], denied["state"]),
                          (2, "ENDED-CLEAN"))
         self.assertEqual((rejected["tools"], rejected["state"]),
                          (2, "ENDED-SURPLUS"))
-        self.assertEqual((blocked["tools"], blocked["state"]),
-                         (2, "ENDED-SURPLUS"))
-        for row in (denied, rejected, blocked):
+        for row in (denied, rejected):
             self.assertNotIn("may_owe", row)
+
+    def test_a_shell_failure_without_its_line_may_owe_like_any_other(self):
+        # #379, ADR-0034's addendum of 2026-09-30: a shell failure with
+        # no `Exit code N` line was read as a call that never ran, but
+        # some of them fire a hook. It may owe, as any other tool's
+        # failure does, and its tool's receipts pay it first. One that
+        # fired nothing, beside other calls of the shell, reads one
+        # short: ruling 2's price, now for the shell too.
+        blocked = "PreToolUse:Bash hook error: blocked by policy"
+        self.session("sess-blocked-paid", ["Bash: a", "Bash: b", "Bash: c"],
+                     [ago(4000), ago(3990)], [ago(3980)], failure=blocked)
+        self.session("sess-blocked-unfired", ["Bash: a", "Bash: b"],
+                     [ago(3000), ago(2990)], [ago(2980)], failure=blocked)
+
+        rows = self.states(self.scan())
+
+        paid, unfired = rows["sess-blocked-paid"], rows["sess-blocked-unfired"]
+        self.assertEqual((paid["tools"], paid["state"],
+                          paid.get("may_owe")), (2, "ENDED-CLEAN", 1))
+        self.assertEqual((unfired["tools"], unfired["state"],
+                          unfired["deficit"], unfired.get("may_owe")),
+                         (2, "ENDED-DEFICIT", 1, 1))
+
+    def refusal(self, name, agent, completed, refused):
+        """A subagent's Bash calls, `refused` of them refused by the
+        desktop app's worktree guard and written as the harness writes
+        that: a failed tool_result with no `Exit code N` line, no
+        `<tool_use_error>` and no `toolDenialKind` (#379)."""
+        write_subagent_transcript(
+            self.witness, self.root / "alpha", name, agent,
+            event_times=completed, error_times=refused, tool="Bash",
+            failure="This agent is isolated in the worktree "
+                    "C:\\repo\\.claude\\worktrees\\agent-a1, but this "
+                    "command is too complex to verify that it stays "
+                    "inside the worktree. Refusing to run it.")
+
+    def test_a_worktree_guard_refusal_is_paid_by_its_receipt(self):
+        # #379: the guard's refusal fires a hook, and the chain holds a
+        # receipt for it. Read as a command that never ran, that receipt
+        # paid no call and the session ended surplus.
+        make_chain(self.root / "alpha" / "receipts", "sess-refused",
+                   actions=["Agent: delegate", "Bash: a", "Bash: b",
+                            "Bash: cd elsewhere && git log"])
+        write_transcript(self.witness, self.root / "alpha", "sess-refused",
+                         event_times=[ago(6000)], tool="Agent")
+        self.refusal("sess-refused", "aaa", [ago(5990), ago(5980)],
+                     [ago(5970)])
+
+        judged = self.states(self.scan())["sess-refused"]
+
+        self.assertEqual((judged["state"], judged["tools"],
+                          judged["receipts"], judged.get("may_owe")),
+                         ("ENDED-CLEAN", 3, 4, 1))
+
+    def test_refusals_never_cover_a_receipt_the_shell_lost(self):
+        # #379, in the shape of the session that found it: subagents
+        # whose refusals left receipts, beside one whose owed command
+        # lost its receipt because the machine could not spawn a
+        # process, so the hook could not run either. Read as commands
+        # that never ran, the refusals' receipts covered the lost one
+        # inside the tool, and the session ended surplus.
+        refused = [ago(5960), ago(5950), ago(5940)]
+        make_chain(self.root / "alpha" / "receipts", "sess-lost",
+                   actions=["Agent: delegate", "Bash: a", "Bash: b",
+                            "Bash: c"]
+                   + ["Bash: cd elsewhere && git log"] * len(refused))
+        write_transcript(self.witness, self.root / "alpha", "sess-lost",
+                         event_times=[ago(6000)], tool="Agent")
+        self.refusal("sess-lost", "aaa", [ago(5990), ago(5980)],
+                     refused[:2])
+        self.refusal("sess-lost", "bbb", [ago(5970)], refused[2:])
+        self.refusal("sess-lost", "ccc", [ago(5935)], [])
+
+        judged = self.states(self.scan())["sess-lost"]
+
+        self.assertEqual((judged["state"], judged["tools"],
+                          judged["deficit"], judged.get("may_owe")),
+                         ("ENDED-DEFICIT", 5, 1, 3))
 
     def test_a_failed_call_that_may_have_run_is_paid_first(self):
         # A fetch that started and failed fired the event; one a
@@ -2572,21 +2644,24 @@ class FailedCallWitnessTest(unittest.TestCase):
         self.assertIn("in force at its time", self.words(result))
 
     def test_a_harness_that_rewords_its_failures_is_named(self):
-        # The canary (ADR-0034): the witness leans on one wording, and
-        # a harness that stopped opening a failed command with
-        # `Exit code N` would turn every owed failure into one that owes
-        # nothing. One sentence says so, and the exit stays where it was.
-        self.session("sess-reworded", ["Bash: a"], [ago(6000)],
+        # The canary (ADR-0034 ruling 6, and its addendum of 2026-09-30):
+        # the witness leans on one wording, and a harness that stopped
+        # opening a failed command with `Exit code N` would turn every
+        # owed failure into one that may owe, whose starved receipt
+        # nothing names when it is alone in its tool. One sentence says
+        # so, and the exit stays where it was.
+        self.session("sess-reworded", ["Bash: a", "Bash: b"], [ago(6000)],
                      [ago(5990)], failure="Command failed with status 3")
 
         result = self.scan()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         judged = self.states(result)["sess-reworded"]
-        self.assertEqual((judged["tools"], judged["state"]),
-                         (1, "ENDED-CLEAN"))
-        self.assertNotIn("may_owe", judged)
+        self.assertEqual((judged["tools"], judged["state"],
+                          judged.get("may_owe")), (1, "ENDED-CLEAN", 1))
+        self.assertIn("1 failed shell call(s)", self.words(result))
         self.assertIn("Exit code N", self.words(result))
+        self.assertIn("may owe", self.words(result))
 
 
 class BeforeMemoryTest(unittest.TestCase):

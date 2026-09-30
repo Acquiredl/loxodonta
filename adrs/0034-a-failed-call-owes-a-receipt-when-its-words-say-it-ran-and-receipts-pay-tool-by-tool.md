@@ -1,6 +1,6 @@
 # ADR-0034: A failed call owes a receipt when its words say it ran, and receipts pay tool by tool (ADR-0016 ruling 1 amended)
 
-**Status:** accepted 2026-09-18, built (#239, PR #280)
+**Status:** accepted 2026-09-18, built (#239, PR #280); ruling 1's shell clause, ruling 2's price, ruling 6, one limit and two consequences amended 2026-09-30 (#379; see the addendum)
 **Deciders:** Acquiredl
 
 ## Context
@@ -87,7 +87,9 @@ skipped the grace window every receipt gets.
      or a record carrying `toolDenialKind`. Owes nothing where a Bash or
      PowerShell failure lacks the `Exit code N` line: the command did not
      run, because it was denied or blocked, or, rarely, the shell never
-     started. A cancelled call leaves no result and was never counted.
+     started. *(Amended 2026-09-30, #379: such a failure may owe. See
+     the addendum below.)* A cancelled call leaves no result and was
+     never counted.
    - **Owed** where the result opens `Exit code N`: a command that ran.
      The check is on the words, not the tool's name.
    - **`may_owe`**, any other tool's failure: one that started and
@@ -122,7 +124,9 @@ skipped the grace window every receipt gets.
    `ENDED-DEFICIT` after. The ruling takes that price: an alarm on a
    blocked call over a mask on a starved one, the choice ADR-0029 ruling
    5 made, because a harness that fired no hook and a hook an attacker
-   killed leave the same evidence.
+   killed leave the same evidence. *(Amended 2026-09-30, #379: a shell
+   call so blocked or denied now pays the same price. See the addendum
+   below.)*
 3. **A receipt whose line names no tool the transcript shows keeps the
    pooled reading.** A line written by hand with `loxodonta log`, a
    `run` line, another writer's line: it pays the earliest unpaid call
@@ -145,7 +149,8 @@ skipped the grace window every receipt gets.
    harness's words. When failed shell calls under the event carried no
    `Exit code N` line and not one failure in the scan read as owed, the
    calibration words say so in one sentence. Context, never an alarm,
-   because an unmarked denial reads the same way.
+   because an unmarked denial reads the same way. *(Amended 2026-09-30,
+   #379: it counts those calls as `may_owe`. See the addendum below.)*
 7. **Held: the hook's own record.** The transcript records each hook run
    as an attachment keyed by the tool call's id (`hook_success`,
    `hook_non_blocking_error`; #239's measurement used them, and #212
@@ -182,7 +187,8 @@ skipped the grace window every receipt gets.
   for a Bash call that never ran its command, with no `Exit code N`
   line. That call owes nothing (ruling 1), and the receipt it left is
   read as its tool's, where it can cover a lost receipt of another
-  command.
+  command. *(Amended 2026-09-30, #379: that call now may owe, and its
+  receipt pays it first. See the addendum below.)*
 - **A writer that shapes both the transcript and the chain.** The
   witness compares two writer-reachable files; a writer that rewrites
   both is beyond this alarm, as ADR-0002 says of every completeness
@@ -239,11 +245,14 @@ skipped the grace window every receipt gets.
 - **One wording carries the owed class.** `Exit code N` is documented
   for the event's `error` and only "generally the same text" in the
   transcript. If the harness rewords it, owed failures owe nothing
-  without a sound; the canary is what says so.
+  without a sound; the canary is what says so. *(Amended 2026-09-30,
+  #379: owed failures then may owe, and are paid first. See the
+  addendum below.)*
 - **`toolDenialKind` is not documented.** It only moves a call from
   `may_owe` to owing nothing. If the harness stops writing it, a
   non-shell denial becomes `may_owe`, and ruling 2 then reads it as a
-  false deficit in a session that used that tool.
+  false deficit in a session that used that tool. *(Amended 2026-09-30,
+  #379: any denial, the shell's included. See the addendum below.)*
 - **A session that spans the re-install.** The calibration dates the
   change by the settings file's mtime, clamped between the last
   observation and now (ADR-0016). The harness normally picks up a hook
@@ -296,6 +305,87 @@ skipped the grace window every receipt gets.
   one a starved fetch lost.
 - **Read the hook's attachments now.** Held, not rejected (ruling 7).
 
+## Addendum, 2026-09-30: a shell failure without `Exit code N` may owe, like any other
+
+Ruling 1 read a Bash or PowerShell failure without the `Exit code N`
+line as a command that never ran, owing nothing. The survey above found
+66 of them, all one message from the desktop app's worktree guard, and
+read each as a denial written without its marker, which fires nothing.
+The guard's refusal does fire. When it refuses a command in a
+worktree-isolated subagent, a hook runs and the chain holds a receipt
+for the refusal: on the author's store, 97 refusals across four
+sessions, each paired with its receipt by the recorder's own action
+line within the same minute (#379). Owing nothing, those receipts paid
+no call, and all four sessions ended `ENDED-SURPLUS`.
+
+The surplus hid a loss. Receipts pay tool by tool, by count (ruling 2),
+so inside one tool a receipt that pays no witnessed call pays for one a
+call lost. In one of the four sessions, 29 refusals stood beside four
+owed `Bash` calls whose receipts were never written: three subagents
+within two seconds, on a machine that could not spawn a process, so the
+hook could not run either. The session read `ENDED-SURPLUS` 25, and
+four receipts lost for good, the loss the witness exists to name, went
+unnamed.
+
+> **A Bash or PowerShell failure whose result does not open with
+> `Exit code N` may owe a receipt, like any other tool's failure, and is
+> paid first (ruling 2).**
+
+What it amends:
+
+- **Ruling 1, the shell clause.** "Owes nothing where a Bash or
+  PowerShell failure lacks the `Exit code N` line" is withdrawn, and
+  `may_owe` is any failure the other two classes leave, whatever the
+  tool. A refusal by the guard fired a hook, a shell that failed to
+  start fired the event, and a block or an unmarked denial fired
+  nothing, and their words do not tell them apart. Owing nothing is
+  otherwise unchanged: an epoch that never wired the event, a
+  `<tool_use_error>`, a `toolDenialKind`. A result that opens
+  `Exit code N` is owed as before.
+- **Ruling 6, the canary.** It counts the shell failures read as
+  `may_owe`, and speaks as before: when failed shell calls under the
+  event carried no `Exit code N` line and not one failure in the scan
+  read as owed, the calibration words say so in one sentence, and that
+  each of them may owe a receipt and none is owed one. A rewording
+  costs less than it did, and still something: a failed command that
+  ran would be paid first rather than owed, so its lost receipt would
+  read as a deficit only beside other calls of the shell, and never
+  alone in its tool.
+- **A shell that failed to start**, under *What none of this
+  survives*. That call now may owe, and the receipt it left pays it
+  first, so it no longer covers a lost receipt of another command.
+  Alone in its tool with its own hook starved, it leaves a clean
+  reading: the first limit there, which now reaches the shell.
+
+**The price** is ruling 2's, now for the shell too. A shell call denied
+or blocked without its marker fired nothing, and now reads as
+`may_owe`; in a session that used the shell otherwise it reads as a
+deficit, `ALARM-DEFICIT` while the session runs and `ENDED-DEFICIT`
+after. The ruling takes it for ruling 2's reason, an alarm on a blocked
+call over a mask on a starved one. On this store no such call is known:
+the only blocks in the data are the guard's, and those fire. The grace
+floor reaches the shell with it, so a stream of refusals whose receipts
+land dates one unpaid shell call per refusal forward, the second limit
+under *What none of this survives*, now for `Bash` as for a fetch.
+
+**What it does not close.** Receipts still pay by count within a tool,
+so a receipt the witness saw no call for still covers a lost one of the
+same tool. The refusals were one source of such receipts, and they are
+now calls that may owe; any other source still masks. Pairing each
+receipt with its call by action line would close the class (#379's
+option (c)): it needs the recorder's one-line rule as a twin in the
+supervisor and a ruling on how a receipt from another writer is paired,
+and it is held for its own grill. Reading the guard's own sentence as
+owed, the way `Exit code N` is read (option (a)), was the smaller
+change, and one more harness wording for the witness to lean on.
+
+Measured on a copy of the author's store on 2026-09-30, against the
+real transcripts: the session above reads `ENDED-DEFICIT`, 4 missing,
+with 29 calls that may owe; the other three read `ENDED-CLEAN`, with
+22, 4 and 43 that may owe (the 43 are 42 refusals and one failed call
+of another tool). No other of the 117 rows moved, and the canary stayed
+quiet.
+
 ## References
 
 - Related ADRs: `0002-writer-as-adversary.md` (the writer as adversary,
@@ -313,4 +403,6 @@ skipped the grace window every receipt gets.
 - Glossary terms **sharpened**: *Coverage*, *Coverage marker*.
 - Raised: issue #239 (the gap, and the ruling to wire the event); the
   spec and standards reviews of its first three cuts, 2026-09-18 and
-  2026-09-19; #212 holds ruling 7.
+  2026-09-19; #212 holds ruling 7; #379 (the worktree guard's
+  refusal, ruled 2026-09-30, the addendum above; its option (c) held
+  for its own grill).

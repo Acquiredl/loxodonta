@@ -2551,7 +2551,12 @@ def witness_files(transcript):
 # for a Bash or PowerShell command that ran and exited, in the event's
 # `error`, which is "generally the same text" the transcript records.
 # `<tool_use_error>` wraps an input rejected before it ran, documented to
-# fire neither PreToolUse nor the failed-call event.
+# fire neither PreToolUse nor the failed-call event. A shell failure
+# without `Exit code N` is not thereby a call that never ran: the desktop
+# app's worktree guard refuses a command in words of its own, and a hook
+# fires for the refusal (#379, the addendum of 2026-09-30). So it may
+# owe, like any other tool's failure; SHELL_TOOLS only names the calls
+# the canary in watch_completeness() counts.
 RAN_AND_FAILED = re.compile(r"Exit code -?\d+")
 REJECTED = "<tool_use_error>"
 SHELL_TOOLS = ("Bash", "PowerShell")
@@ -2570,15 +2575,14 @@ def result_text(block):
 
 def failed_call_owes(record, block, name, epoch):
     """What one failed call owes under the coverage in force at its time
-    (ADR-0034): "owed", "may_owe", "unworded", or None. Only "owed" is
-    owed; "unworded" owes nothing and is counted for the canary. None
-    where the failed-call event was not wired for its tool (#239), or
-    where the transcript says the call never ran (`toolDenialKind`).
-    "owed" where the result begins `Exit code N`, whatever the tool; a
-    Bash or PowerShell failure without that line ran no command
-    ("unworded"); any other tool's failure may owe, since the
-    transcript words one that fired the event and one a PreToolUse hook
-    blocked alike."""
+    (ADR-0034): "owed", "may_owe", or None. None where the failed-call
+    event was not wired for its tool (#239), or where the transcript
+    says the call never ran (`<tool_use_error>`, `toolDenialKind`).
+    "owed" where the result begins `Exit code N`, whatever the tool: a
+    command that ran. Any other failure may owe, a Bash or PowerShell
+    failure without that line among them (#379), since the transcript
+    words one that fired the event and one a PreToolUse hook blocked
+    alike."""
     if not owes_receipt(name, failures_of(epoch)):
         return None
     text = result_text(block)
@@ -2586,7 +2590,7 @@ def failed_call_owes(record, block, name, epoch):
         return None
     if RAN_AND_FAILED.match(text):
         return "owed"
-    return "unworded" if name in SHELL_TOOLS else "may_owe"
+    return "may_owe"
 
 
 def read_witness(transcript, calibration):
@@ -2603,9 +2607,11 @@ def read_witness(transcript, calibration):
     timestamp-less metadata records never do, or an old deficit comes
     back as an immortal live alarm (#85). `first` is the earliest
     working call, read before the coverage filter (ADR-0029 asks when
-    the session started working). `worded` and `unworded` count the
-    failed calls read as owed and the failed shell calls with no `Exit
-    code N` line, for the canary in watch_completeness()."""
+    the session started working). `worded` counts the failed calls read
+    as owed, and `unworded` the failed Bash and PowerShell calls read as
+    `may_owe` because no `Exit code N` line opened them (#379); both are
+    counted for the canary in watch_completeness(), and neither moves
+    the reading."""
     names = {}
     owed = []
     may_owe = {}
@@ -2663,8 +2669,8 @@ def read_witness(transcript, calibration):
                     owes = failed_call_owes(record, found, name, epoch)
                     if owes == "may_owe":
                         may_owe.setdefault(name, []).append(when)
-                    elif owes == "unworded":
-                        unworded += 1
+                        if name in SHELL_TOOLS:
+                            unworded += 1
                     if owes != "owed":
                         continue
                     worded += 1
@@ -2685,12 +2691,15 @@ def read_witness(transcript, calibration):
 def reconcile(owed, may_owe, receipts, witnessed):
     """Pair the witness with the chain tool by tool (ADR-0034). `owed`
     is [(timestamp, tool)] in time order; `may_owe` holds by tool the
-    timestamps of the failed calls that may owe; `receipts` counts by
-    tool, as tool_of names it. A receipt pays only calls of its own
-    tool, the calls that may owe first and then the owed ones, earliest
-    first, so a receipt that may be a failed call's never covers one an
-    owed call lost. The false deficit that costs is dated and bounded by
-    the floor of ADR-0034 ruling 2. A receipt naming no tool the
+    timestamps of the failed calls that may owe, a shell failure with no
+    `Exit code N` line among them (#379); `receipts` counts by tool, as
+    tool_of names it. A receipt pays only calls of its own tool, the
+    calls that may owe first and then the owed ones, earliest first, so
+    a receipt that may be a failed call's never covers one an owed call
+    lost. The false deficit that costs is dated and bounded by the floor
+    of ADR-0034 ruling 2. Pairing is by count, not by action line, so
+    within one tool a receipt the witness saw no call for still covers a
+    lost one (#379, and classify()). A receipt naming no tool the
     transcript shows (a hand-written `loxodonta log` line) pays the
     earliest unpaid call of any tool. Returns (deficit, surplus, the
     timestamp the deficit dates from, or None)."""
@@ -2731,8 +2740,12 @@ def classify(tools, deficit, surplus, ended, idle, deficit_age, silent):
     lost receipts never arrive later, so a session keeps its scar until
     end-of-session reconciliation reports it as evidence. Reconciled
     tool by tool (ADR-0034), one session can hold a deficit in one tool
-    and a surplus in another, and the deficit wins: a surplus never
-    stands a missing receipt down."""
+    and a surplus in another, and the deficit wins: a surplus in one
+    tool never stands a missing receipt in another down. Within one tool
+    it still can: receipts pay by count, so a receipt the witness saw no
+    call for covers a lost one of the same tool, and the tool reads only
+    the difference. Pairing by action line would close that class
+    (#379, option (c)); it is not built."""
     if ended:
         if deficit:
             return "ENDED-DEFICIT"
@@ -3087,17 +3100,21 @@ def watch_completeness(root, witness, families, everywhere=False,
 
     # The canary for the one wording the witness leans on (ADR-0034): a
     # harness that stopped opening a failed command with `Exit code N`
-    # would turn every owed failure into one that owes nothing, silently.
-    # When failed shell calls carried no such line and not one failure
-    # read as owed, one sentence says so. Context, never an alarm: a
-    # denial without its marker reads the same way.
+    # would turn every owed failure into one that may owe, silently, and
+    # a failed command's lost receipt would then be named only beside
+    # other calls of the shell. When failed shell calls carried no such
+    # line and not one failure read as owed, one sentence says so.
+    # Context, never an alarm: a denial or a refusal without its marker
+    # reads the same way (#379).
     unworded = sum(reading["unworded"] for reading in canary)
     if unworded and not sum(reading["worded"] for reading in canary):
         said.append(f"{unworded} failed shell call(s) under the failed-call "
                     "event carried no `Exit code N` line, and no failure "
-                    "here did: a denial or a blocked call reads that way, "
-                    "and so would a harness that reworded its failures, so "
-                    "none of them is owed a receipt (ADR-0034)")
+                    "here did: a denial, a blocked call or the worktree "
+                    "guard's refusal reads that way, and so would a "
+                    "harness that reworded its failures, so "
+                    "each may owe a receipt and none is owed one "
+                    "(ADR-0034)")
     if said:
         watch["calibration"] = {"epochs": calibration,
                                 "words": "; ".join(said)}

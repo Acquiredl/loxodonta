@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Fixed
 
 - A pipe where a chain belongs no longer hangs `verify`, `head`, `supervisor scan`, `package` or `export`, and `log --file` names a folder as one on every platform (#374, #270's directory half).
+- The witness reads a shell failure without an `Exit code N` line as one that may owe a receipt, so a worktree-guard refusal's receipt no longer reads as surplus or hides a lost one (ADR-0034, #379).
 
 ## [0.10.0] - 2026-09-29
 
