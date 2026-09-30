@@ -190,19 +190,21 @@ an input the harness rejects before it runs, or a call a `PreToolUse`
 hook blocks, and the transcript flags all of them with the same
 `is_error`; only the words tell some apart. `failed_call_owes` reads
 them under the epoch in force, which the calibration and the marker
-now carry as `failures`: nothing where the event was not wired, where
-the result is a `<tool_use_error>` or the record a marked denial, or
-where a shell failure has no `Exit code N` line; owed where the result
-opens with that line, a command that ran; and `may_owe` for any other
-tool's failure. Then `reconcile` pairs receipts with calls tool by tool
+now carry as `failures`: nothing where the event was not wired, or
+where the result is a `<tool_use_error>` or the record a marked denial;
+owed where the result opens with `Exit code N`, a command that ran; and
+`may_owe` for any other failure. That includes a shell failure without
+the line, since the desktop app's worktree guard refuses a command in
+words of its own and a hook still fires for the refusal (#379). Then
+`reconcile` pairs receipts with calls tool by tool
 rather than as two totals, and within a tool gives its `may_owe` calls
 their receipts first, so a receipt a failed call may have left never
 pays for one an owed call lost, in another tool or its own. The first
 two cuts of this let the writer do exactly that on purpose. The unpaid
 call is then an earlier one, so its deficit is dated no earlier than
 the tool's newest `may_owe` call, and a receipt still on its way gets
-its grace. The price is a live deficit for a non-shell call a hook
-blocked, in a session that used that tool otherwise.
+its grace. The price is a live deficit for a call a hook blocked, in a
+session that used that tool otherwise.
 
 `classify` is the ratified state machine — a pure reading of the
 evidence: OK / QUIET / LAGGING (a 30-second grace, because an honest
