@@ -6219,6 +6219,17 @@ def split_refusal(session, chains):
     return True
 
 
+def swapped_out(error):
+    """The refusal when a file `package` checked stopped being one before
+    it was copied: a chain swapped for a pipe or a folder in that window
+    (#374). Named as the check names it, and nothing written."""
+    name = os.path.basename(str(error.filename)) if error.filename \
+        else "a file"
+    print(f"error: {name} cannot be packed: {error.strerror or error}; "
+          "nothing written", file=sys.stderr)
+    return 1
+
+
 def unpackageable(sessions, with_transcripts):
     """Why a package of these sessions would never verify, or None. The
     verifier refuses a manifest naming anything but a bare name, a chain
@@ -6359,8 +6370,13 @@ def cmd_package(args):
     out.parent.mkdir(parents=True, exist_ok=True)
     if args.folder:
         out.mkdir()
-        written = write_package(unit, sessions, drawer, report, out, packed,
-                                seals, transcripts)
+        try:
+            written = write_package(unit, sessions, drawer, report, out,
+                                    packed, seals, transcripts)
+        except OSError as error:
+            # Swapped after the check above (#374): no half-written folder.
+            shutil.rmtree(out)
+            return swapped_out(error)
         if package_too_large(out, written):
             shutil.rmtree(out)
             return 1
@@ -6372,8 +6388,12 @@ def cmd_package(args):
             shutil.rmtree(out)
     else:
         with tempfile.TemporaryDirectory() as staging:
-            written = write_package(unit, sessions, drawer, report,
-                                    Path(staging), packed, seals, transcripts)
+            try:
+                written = write_package(unit, sessions, drawer, report,
+                                        Path(staging), packed, seals,
+                                        transcripts)
+            except OSError as error:
+                return swapped_out(error)
             if package_too_large(Path(staging), written):
                 return 1
             sealed, fingerprint, problem = seal_package(
