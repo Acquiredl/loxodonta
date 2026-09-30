@@ -47,7 +47,7 @@ Download what you need from the [releases page](https://github.com/Acquiredl/lox
 
 ```
 sha256sum -c --ignore-missing SHA256SUMS   # Windows: certutil -hashfile loxodonta.py SHA256, then compare
-python loxodonta.py --version   # loxodonta 0.9.0 (format 0.1, commit unknown)
+python loxodonta.py --version   # loxodonta 0.10.0 (format 0.1, commit unknown)
 ```
 
 No harness? `run` wraps any command and writes its receipt after it exits:
@@ -149,7 +149,7 @@ python supervisor.py drill --root docs/demo --log docs/demo/bad-day-session.json
 ## Read more
 
 - [docs/](docs/README.md): every page, sorted into using it, what it guarantees, and how it was decided.
-- [docs/SPEC.md](docs/SPEC.md): the receipt format, frozen at 0.1. [ADR-0001](adrs/0001-hash-chain-not-signatures.md): why a hash chain and no keys.
+- [docs/SPEC.md](docs/SPEC.md): the receipt format in three parts, each with its own version: the chain (frozen at 0.1), the sidecar rows, and the package. [ADR-0001](adrs/0001-hash-chain-not-signatures.md): why a hash chain and no keys.
 - [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md): what was measured, including fresh agents quizzed on real history with and without the chain.
 - [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md).
 

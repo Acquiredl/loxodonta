@@ -10,6 +10,44 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-29
+
+The 0.9.x foundation. Every sidecar row now names its kind, and a row of a kind the verifier does not know is named and never judged (ADR-0038). The SPEC states every rule the verifier applies, the sidecars in section 9 and the package in section 10, beside one list of what the design cannot claim. Every rule written in more than one script is declared in `docs/TWINS.md` and held equal by `tools/twin_check.py`, and the conformance vectors grow from 35 to 72. `docs/CONTROLS.md` maps the mechanisms to the controls they bear on, as a mapping and never an attestation. The fixes came out of the round's reviews and a code walk, most of them one line in a sidecar or a manifest that could stop a scan or paint a verdict. Two verdict words are new, `ANCHOR-UNKNOWN-KIND` and `STAMP-UNKNOWN-KIND`, and move no exit code; the existing words and exit codes are unchanged, and a line about one sidecar row now names the row. The receipt format stays at `0.1`.
+
+### Added
+
+- `docs/TWINS.md` lists every rule written in more than one script, and `tools/twin_check.py --check` fails the suite when a copy drifts from the recorder's or a shared name goes undeclared (#337).
+- `tools/twin_check.py --write` copies each twin's original from `loxodonta.py` over its copies in place, and each copy now carries a line naming its original. `--check` fails on a copy without one (#342).
+- SPEC section 10 states every rule `verify-package` applies, and `docs/PACKAGE.md` points at it. Six package vectors join `tests/vectors/`: unsealed, an altered artifact, a name twice in a zip, a missing seal, an unknown format, an anchored manifest (#341).
+- SPEC section 9 states every rule `verify --anchors` and `verify --stamps` apply to a sidecar row, and `docs/ANCHORING.md` points at it. Fourteen anchor and stamp sidecar vectors join `tests/vectors/`, none needing a network or `openssl` (#343).
+- `docs/CONTROLS.md`: each mechanism mapped to the NIST SP 800-53, PCI DSS, OWASP T8, AIUC-1 and WIMSE controls it bears on, in NIST IR 8477's vocabulary, as a mapping and never an attestation; `house_check` refuses attestation words there (#338).
+
+### Changed
+
+- Anchor rows name their kind (`"kind": "anchor"`), and a row with none reads as an anchor. A row of an unknown kind is named by its line (`ANCHOR-UNKNOWN-KIND`), never judged, and moves no exit code (ADR-0038, #335).
+- Stamp rows name their kind (`"kind": "stamp"`), and a row with none reads as a stamp. A row of an unknown kind is named by its line (`STAMP-UNKNOWN-KIND`), never judged, and moves no exit code (ADR-0038, #339).
+- Publish memo head rows name their kind (`"kind": "head"`), and a row with none reads as a head. The chain cursor counts `chain` rows alone, so a row of an unknown kind moves nothing (ADR-0038, #340).
+- `docs/SPEC.md` §8.1 is now the one list of what the design cannot claim, and states whole-chain regeneration as closed only for what a commitment held off the machine covers. The header names each part's own version (#336).
+- A verdict about one sidecar row names its line (`ANCHOR-INVALID: line 3 of receipts.jsonl.anchors.jsonl is not a record`), and a malformed stamp row names its field, as an anchor row does. Verdict words and exit codes are unchanged.
+- A sidecar row missing its time, calendar or authority says so in words, never `None`, and a pending proof with no calendar no longer advises an upgrade that cannot complete it.
+- Inside a package, `NO-ANCHORS` and `NO-STAMPS` give no command, a folder where a chain belongs is named as one, and a refused manifest names the one field that fails.
+
+### Fixed
+
+- `supervisor scan` no longer stops with a traceback on a sidecar or transcript line holding an integer past 4,300 digits or nesting past the recursion limit. The writer can reach those files, so one line could stop the audit (#331).
+- `loxodonta hook` answers a payload holding the same lines with exit 65, as for any payload it cannot read, not a traceback and exit 70 (#331).
+- `verify-package` no longer gives a verdict that depends on the recipient's system: it refuses a name Windows reads otherwise (`C:x`, `a?b`, `NUL`, `LONGFI~1.TXT`, a trailing dot), one past 255 bytes, and two names differing in case or Unicode form (#358).
+- The supervisor reads sidecar rows as the recorder does, so an unknown kind no longer stops the keeper posting, stamping or anchoring a head. A memo line nested too deep no longer stops `publish --chain` (#344).
+- Malformed anchor and stamp rows (a field missing or of the wrong type) no longer crash `verify`, `verify-package`, `anchor`, `stamp`, `supervisor scan` or the session end. An anchor row reads `ANCHOR-INVALID`, a package manifest's `SEAL-INVALID`, naming the field (#348).
+- A row holding no granted reply no longer stops `stamp` or the session end stamping its head. The keeper now asks `anchor` and `stamp`; `anchor` says `already anchored` for a replaying proof (`--force` resubmits). Forged rows stay a limit (#366).
+- `verify-package` refuses a manifest whose `entries` or `bytes` is `true` or `false`, named by its field: Python counted a boolean as an integer, so a one-line chain listed with `"entries": true` passed (#359).
+- The verifier prints sidecar, manifest and file-name text escaped, and `head` refuses a tail hash that is not a head, so a crafted row can no longer forge an `ANCHORED` line `supervisor scan` believed. Sidecars are named bare (#349).
+- `verify --stamps` and `verify-package` read a stamp reply's status offline: a rejection, non-DER bytes, or a granted status with no token is `STAMP-INVALID` (`SEAL-INVALID`), holds no token for `stamp`, and is no departure in `supervisor scan` (#370).
+- A folder or a pipe named like a sidecar no longer stops `supervisor scan`, `verify`, `verify-package` or the recorder's writing verbs. `verify` calls it `ANCHOR-INVALID` or `STAMP-INVALID`, exit 3; `anchor`, `stamp` and `publish` say why, exit 73 (#364).
+- A sidecar row giving a key twice, or holding `NaN`, `Infinity` or `-Infinity`, is an unreadable line (`ANCHOR-INVALID`, `STAMP-INVALID`), as a strict parser reads it. A proof with bytes after its timestamp tree is `ANCHOR-INVALID` (#365).
+- `verify-package` refuses a folder package whose `manifest.json` is a pipe (`UNSUPPORTED-FORMAT`), instead of waiting on it forever. A folder unpacked from a tar can hold one.
+- The session end no longer asks a calendar again for a head another calendar has settled, as `anchor --upgrade` already did not. A calendar that never answers no longer spends the time a new head's upgrade needs (#199).
+
 ## [0.9.0] - 2026-09-23
 
 The recipient's verifier. `verifier.py` is the recorder's verify side on its own, copied from the same source, never edited by hand, and held to a set of conformance vectors that both files must pass. The verdicts were tightened where an outside review found them saying more than they knew: a relabeled format no longer hides an edit, an anchor no longer claims a block nobody checked, and exit 1 now means `BROKEN` and nothing else. Scripts that read exit codes should read the new ones. The receipt format is untouched, and its hashing is now frozen across versions.
@@ -220,7 +258,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.9.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.10.0...dev
+[0.10.0]: https://github.com/Acquiredl/loxodonta/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Acquiredl/loxodonta/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Acquiredl/loxodonta/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Acquiredl/loxodonta/compare/v0.7.0...v0.8.0

@@ -41,3 +41,4 @@ Each ADR records a decision that is hard to reverse and why it was made; filenam
 | 0035 | [The verifier is copied out, never imported](0035-the-recipients-verifier-is-copied-out-of-the-recorder-never-imported-by-it.md) | accepted |
 | 0036 | [The hashing is frozen across format versions](0036-the-hashing-is-frozen-across-format-versions.md) | accepted |
 | 0037 | [Exit 1 means BROKEN and nothing else](0037-exit-1-means-broken-and-nothing-else.md) | accepted |
+| 0038 | [Every sidecar row names its kind](0038-every-sidecar-row-names-its-kind.md) | accepted |

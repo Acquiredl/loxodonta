@@ -242,9 +242,11 @@ class PublishAtSessionEndTest(PublishBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         memo = self.chain().with_name(self.chain().name + ".published.jsonl")
         self.assertTrue(memo.exists(), list(self.chain().parent.iterdir()))
+        # The row names its kind (ADR-0038), and nothing else changed.
         (record,) = self.memo_heads()
-        self.assertEqual(record["head"], self.body()["head"])
-        self.assertEqual(record["event"], "session-end")
+        self.assertEqual(record, {"kind": "head", "head": self.body()["head"],
+                                  "n": self.body()["n"], "ts": record["ts"],
+                                  "event": "session-end"})
         self.assertNotIn(self.receiver.url, memo.read_text("utf-8"))
 
     def test_a_sent_head_leaves_an_attempt_row_beside_the_head_row(self):
@@ -409,7 +411,7 @@ class PublishAtSessionEndTest(PublishBase):
         # is left behind on the hook's own clock, and the calendar is
         # still asked.
         calendar = self.calendar()
-        self.receiver.delay = 4  # seconds; just past the three the hook waits
+        self.receiver.delay = 6  # seconds; well past the three the hook waits
         self.transcript.write_bytes(b"page one\n")
         self.tool_call()
 

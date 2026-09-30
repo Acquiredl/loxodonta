@@ -1,0 +1,29 @@
+{
+  "format": "loxodonta-package/1",
+  "packed": "2026-09-23T12:10:00Z",
+  "tool": "loxodonta supervisor 0.9.0",
+  "unit": {
+    "kind": "session",
+    "session": "vector",
+    "project": "vector-project"
+  },
+  "chains": [
+    {
+      "path": "receipts-vector.jsonl",
+      "head": "fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35",
+      "entries": 4,
+      "anchors": null,
+      "stamps": null
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "project.json",
+      "sha256": "4f42958f3f4e856649f9134eed72bb13a0cc32e82409aa5540bcfb15070e815b",
+      "bytes": 42
+    }
+  ],
+  "seals": [
+    "anchor"
+  ]
+}

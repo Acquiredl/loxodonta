@@ -16,15 +16,13 @@ these tests hold it to refusing the six home-reading supervisor verbs and
 the four home-writing verbs (#274) when any one home is the machine's,
 and to naming the line that made the start.
 
-Two rules are written twice, once in the recorder and once in the
-supervisor, because neither file imports the other (ADR-0035): the
-escaping of receipt text (#295) and which hook entries are the
-recorder's (#293, #303). A third, where a line of a chain ends (#299),
-is written three times, the receiver's copy beside those two. A test
-here holds each set of copies equal.
+The rules written in more than one of the three scripts, which never
+import each other (ADR-0035), are listed in tools/twin_check.py and
+docs/TWINS.md. The suite runs the tool's `--check` on the tree, and on
+a spoiled copy of the scripts to see it fail, then its `--write` on the
+copy to see it mend only what was spoiled.
 """
 
-import ast
 import os
 import re
 import subprocess
@@ -206,89 +204,331 @@ class WriterHomeGuardTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
 
 
-# The escaping rule for receipt text (#295) lives twice: in the recorder,
-# for report, explain and verify's messages, and in the supervisor, for
-# every recall surface.
-ESCAPING_NAMES = ("NAMED_ESCAPES", "STEERING_CATEGORIES", "visible")
-
-# The rule for which hook entries are the recorder's (#293) lives twice:
-# in the recorder, where install-hook and uninstall-hook claim entries by
-# it, and in the supervisor, where the scan reads the wired matchers, the
-# SessionEnd wiring and the recorder's path by it (#303).
-OWNERSHIP_NAMES = ("RECORDER_NAMES", "DIGEST_NAMES", "WIRED_VERB",
-                   "command_words", "file_name", "is_interpreter",
-                   "owned_script", "beside_a_recorder")
-
-# The line rule (SPEC section 1, #299) lives three times: in the
-# recorder, whose verify side the recipient's verifier.py is copied
-# from, in the supervisor, which lists and displays chains, and in the
-# receiver, which counts the lines of a batch and of the file it keeps.
-LINE_RULE_NAMES = ("split_lines",)
-RECEIVER = REPO_ROOT / "receiver.py"
-
-# The files never import each other (ADR-0035), so nothing but these
-# tests keeps each set of copies saying the same thing.
+TWIN_CHECK = REPO_ROOT / "tools" / "twin_check.py"
+SCRIPTS = ("loxodonta.py", "supervisor.py", "receiver.py")
+POINTER = ("# Copy of loxodonta.py's; edit there, then run "
+           "tools/twin_check.py --write.")
 
 
-def top_level_source(path, names):
-    """{name: source} for the top-level functions and assignments in
-    `path` carrying one of `names`, read as text, never imported."""
-    text = path.read_text(encoding="utf-8")
-    found = {}
-    for node in ast.parse(text).body:
-        if isinstance(node, ast.FunctionDef):
-            named = [node.name]
-        elif isinstance(node, ast.Assign):
-            named = [t.id for t in node.targets if isinstance(t, ast.Name)]
-        else:
-            continue
-        for name in named:
-            if name in names:
-                found[name] = ast.get_source_segment(text, node)
-    return found
+def twin_check(*args):
+    return subprocess.run([sys.executable, str(TWIN_CHECK), *args],
+                          capture_output=True, encoding="utf-8",
+                          env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
 
-class TwinEscapingTest(unittest.TestCase):
+class TwinCheckTest(unittest.TestCase):
+    """The rules written in more than one file (ADR-0035) are listed in
+    tools/twin_check.py and held by its `--check`: on the tree, and on a
+    copy of the three scripts and the page that each test spoils."""
 
-    def test_the_recorder_and_the_supervisor_escape_alike(self):
-        recorder = top_level_source(RECORDER, ESCAPING_NAMES)
-        supervisor = top_level_source(SUPERVISOR, ESCAPING_NAMES)
-        self.assertEqual(sorted(recorder), sorted(ESCAPING_NAMES))
-        for name in ESCAPING_NAMES:
-            with self.subTest(name=name):
-                self.assertEqual(
-                    recorder[name], supervisor.get(name),
-                    f"{name} differs between loxodonta.py and "
-                    "supervisor.py: change both (#295)")
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        (self.root / "docs").mkdir()
+        # Bytes, with LF endings: write_text takes no newline before 3.10.
+        for name in SCRIPTS + ("docs/TWINS.md",):
+            (self.root / name).write_bytes(
+                (REPO_ROOT / name).read_text(encoding="utf-8").encode())
 
+    def edit(self, name, old, new):
+        path = self.root / name
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text.count(old), 1, f"{old!r} in {name}")
+        path.write_bytes(text.replace(old, new).encode())
 
-class TwinOwnershipTest(unittest.TestCase):
+    def append(self, name, text):
+        with (self.root / name).open("a", encoding="utf-8",
+                                     newline="\n") as script:
+            script.write(text)
 
-    def test_the_recorder_and_the_supervisor_claim_hooks_alike(self):
-        recorder = top_level_source(RECORDER, OWNERSHIP_NAMES)
-        supervisor = top_level_source(SUPERVISOR, OWNERSHIP_NAMES)
-        self.assertEqual(sorted(recorder), sorted(OWNERSHIP_NAMES))
-        for name in OWNERSHIP_NAMES:
-            with self.subTest(name=name):
-                self.assertEqual(
-                    recorder[name], supervisor.get(name),
-                    f"{name} differs between loxodonta.py and "
-                    "supervisor.py: change both (#303)")
+    def check(self):
+        return twin_check("--check", "--root", str(self.root))
 
+    def write(self):
+        return twin_check("--write", "--root", str(self.root))
 
-class TwinLineRuleTest(unittest.TestCase):
+    def snapshot(self):
+        """Every file of the copy, as bytes."""
+        return {name: (self.root / name).read_bytes()
+                for name in SCRIPTS + ("docs/TWINS.md",)}
 
-    def test_the_three_files_split_lines_alike(self):
-        recorder = top_level_source(RECORDER, LINE_RULE_NAMES)
-        self.assertEqual(sorted(recorder), sorted(LINE_RULE_NAMES))
-        for other in (SUPERVISOR, RECEIVER):
-            copy = top_level_source(other, LINE_RULE_NAMES)
-            for name in LINE_RULE_NAMES:
-                with self.subTest(file=other.name, name=name):
-                    self.assertEqual(
-                        recorder[name], copy.get(name),
-                        f"{name} differs between loxodonta.py and "
-                        f"{other.name}: change all three (#299)")
+    def text(self, name):
+        return (self.root / name).read_bytes().decode("utf-8")
+
+    def test_the_tree_holds_its_twins(self):
+        done = twin_check("--check")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_the_copy_holds_its_twins_before_it_is_spoiled(self):
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_copy_that_differs_from_its_original_fails_by_name(self):
+        self.edit("supervisor.py",
+                  'row_kind("memo", record) == CHAIN_KIND',
+                  'row_kind("memo", record) == "chain"')
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("What a sidecar row is: is_chain_record in "
+                      "supervisor.py differs from loxodonta.py, its "
+                      "original: run python tools/twin_check.py --write",
+                      done.stderr)
+
+    def test_a_name_a_file_no_longer_defines_fails(self):
+        self.edit("receiver.py", "def checkout_commit(home):",
+                  "def commit_of(home):")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("receiver.py no longer defines checkout_commit",
+                      done.stderr)
+
+    def test_a_decorator_added_to_a_copy_fails_by_name(self):
+        before = self.snapshot()
+        self.edit("supervisor.py", "\ndef visible(",
+                  "\n@functools.lru_cache(maxsize=None)\ndef visible(")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("visible in supervisor.py differs from loxodonta.py",
+                      done.stderr)
+
+        written = self.write()
+        self.assertEqual(written.returncode, 0, written.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_copy_changed_by_an_augmented_assignment_fails(self):
+        self.append("receiver.py", "\nEX_USAGE += 1\n")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("EX_USAGE in receiver.py differs from loxodonta.py",
+                      done.stderr)
+
+    def test_an_import_that_shadows_a_twin_fails(self):
+        self.append("supervisor.py", "\nfrom json import dumps as visible\n")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("visible is bound by an import in supervisor.py",
+                      done.stderr)
+
+    def test_an_undeclared_name_in_two_scripts_fails(self):
+        for name in ("supervisor.py", "receiver.py"):
+            self.append(name, "\n\ndef twin_probe():\n    return 1\n")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("twin_probe is defined in supervisor.py and "
+                      "receiver.py and declared neither", done.stderr)
+
+    def test_a_stale_page_fails_and_page_rewrites_it(self):
+        self.append("docs/TWINS.md", "\nA line the list does not hold.\n")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("docs/TWINS.md is stale", done.stderr)
+
+        rewritten = twin_check("--page", "--root", str(self.root))
+        self.assertEqual(rewritten.returncode, 0, rewritten.stderr)
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(
+            (self.root / "docs" / "TWINS.md").read_text(encoding="utf-8"),
+            (REPO_ROOT / "docs" / "TWINS.md").read_text(encoding="utf-8"))
+
+    def test_write_on_a_clean_tree_changes_no_byte(self):
+        before = self.snapshot()
+        done = self.write()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("every copy already holds", done.stdout)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_write_copies_an_edited_original_over_each_copy_alone(self):
+        # split_lines lives in all three scripts, inside the verifier
+        # region of the recorder.
+        old, new = "reader keeps (SPEC §1, #299)", "reader keeps (SPEC 1)"
+        copies = {name: self.text(name).replace(old, new)
+                  for name in ("supervisor.py", "receiver.py")}
+        self.edit("loxodonta.py", old, new)
+        recorder = self.text("loxodonta.py")
+        failed = self.check()
+        self.assertEqual(failed.returncode, 1, failed.stdout)
+        self.assertIn("split_lines in receiver.py differs", failed.stderr)
+
+        done = self.write()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("wrote split_lines in supervisor.py", done.stdout)
+        self.assertIn("wrote split_lines in receiver.py", done.stdout)
+        self.assertIn("tools/build_verifier.py", done.stdout)
+        # Each copy differs from what it was by the one edit and nothing
+        # else, and the original is untouched.
+        for name, expected in copies.items():
+            self.assertEqual(self.text(name), expected, name)
+        self.assertEqual(self.text("loxodonta.py"), recorder)
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_write_copies_a_decorated_original_from_its_decorator(self):
+        decorated = "\n@functools.lru_cache(maxsize=None)\ndef visible("
+        self.edit("loxodonta.py", "\ndef visible(", decorated)
+        expected = self.text("supervisor.py").replace(
+            POINTER + "\ndef visible(", POINTER + decorated)
+        done = self.write()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.text("supervisor.py"), expected)
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_missing_pointer_fails_and_write_puts_it_back(self):
+        before = self.snapshot()
+        self.edit("supervisor.py", POINTER + "\ndef is_chain_record(",
+                  "def is_chain_record(")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("is_chain_record in supervisor.py has no pointer to "
+                      "loxodonta.py above it", done.stderr)
+
+        written = self.write()
+        self.assertEqual(written.returncode, 0, written.stderr)
+        self.assertIn("added the pointer above is_chain_record in supervisor.py",
+                      written.stdout)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_copy_directly_below_another_shares_its_pointer(self):
+        self.edit("supervisor.py", POINTER + "\nRECORDER_NAMES = ",
+                  "RECORDER_NAMES = ")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("RECORDER_NAMES in supervisor.py has no pointer",
+                      done.stderr)
+        self.assertNotIn("DIGEST_NAMES", done.stderr)
+
+    def test_a_copy_that_went_missing_is_named_and_never_added(self):
+        self.edit("receiver.py", "def checkout_commit(home):",
+                  "def commit_of(home):")
+        before = self.snapshot()
+        done = self.write()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("receiver.py no longer defines checkout_commit, and "
+                      "--write never adds a copy", done.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def assert_refused(self, done, *said):
+        """`--write` exited 1, named each of `said`, and raised nothing."""
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        for words in said:
+            self.assertIn(words, done.stderr)
+
+    def test_a_copy_sharing_its_first_line_is_refused(self):
+        self.edit("supervisor.py", '\nATTEMPT_KIND = "attempt"\n',
+                  '\n_Z = 1; ATTEMPT_KIND = "attempt"\n')
+        before = self.snapshot()
+        self.assert_refused(self.write(),
+                            "ATTEMPT_KIND in supervisor.py shares its first "
+                            "line with other code",
+                            "supervisor.py is left as it was")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_an_original_sharing_its_first_line_is_refused(self):
+        self.edit("loxodonta.py", '\nATTEMPT_KIND = "attempt"\n',
+                  '\nif True: ATTEMPT_KIND = "attempt"\n')
+        before = self.snapshot()
+        self.assert_refused(self.write(),
+                            "ATTEMPT_KIND in loxodonta.py shares its first "
+                            "line with other code")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_two_copies_on_one_line_are_refused_and_that_file_kept(self):
+        self.edit("loxodonta.py", "EX_USAGE = 64     #", "EX_USAGE = 65     #")
+        self.edit("loxodonta.py", "EX_NOINPUT = 66   #", "EX_NOINPUT = 67   #")
+        self.edit("supervisor.py",
+                  "EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was "
+                  "spoken wrong\nEX_NOINPUT = 66  #",
+                  "EX_USAGE = 64; EX_NOINPUT = 66  #")
+        supervisor = self.text("supervisor.py")
+        self.assert_refused(self.write(), "supervisor.py is left as it was")
+        self.assertEqual(self.text("supervisor.py"), supervisor)
+        # The receiver's copy has a line of its own, and is written.
+        self.assertIn("\nEX_USAGE = 65  #", self.text("receiver.py"))
+
+    def test_a_statement_binding_other_names_is_refused_whole(self):
+        self.edit("supervisor.py",
+                  "EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was "
+                  "spoken wrong\nEX_NOINPUT = 66  #",
+                  "EX_USAGE, EX_NOINPUT = 64, 66  #")
+        before = self.snapshot()
+        self.assert_refused(self.write(),
+                            "is bound by a statement binding EX_USAGE, "
+                            "EX_NOINPUT",
+                            "supervisor.py is left as it was")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_pointer_never_lands_inside_a_string(self):
+        self.edit("supervisor.py", POINTER + "\ndef is_chain_record(",
+                  '_NOTE = """\n# not a comment"""\ndef is_chain_record(')
+        expected = self.text("supervisor.py").replace(
+            '"""\ndef is_chain_record(', '"""\n' + POINTER + "\ndef is_chain_record(")
+        done = self.write()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.text("supervisor.py"), expected)
+
+    def test_a_string_line_is_not_a_comment_that_leaves_a_run_alone(self):
+        # A string whose last line starts with # sits between the run
+        # and the blank line above it: the run is not alone in its block.
+        self.edit("supervisor.py", POINTER + "\nRECORDER_NAMES = ",
+                  '_NOTE = """\n\n# x"""\n' + POINTER + "\nRECORDER_NAMES = ")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("DIGEST_NAMES in supervisor.py has no pointer",
+                      done.stderr)
+
+    def test_a_copy_beside_other_code_has_a_pointer_of_its_own(self):
+        hazards = "# a quote, a backtick, a dollar sign, a backslash\n"
+        self.edit("supervisor.py", hazards, hazards + "_OTHER = 1\n")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("SHELL_HAZARDS in supervisor.py has no pointer",
+                      done.stderr)
+        written = self.write()
+        self.assertEqual(written.returncode, 0, written.stderr)
+        self.assertIn(POINTER + "\nSHELL_HAZARDS = ",
+                      self.text("supervisor.py"))
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_byte_order_mark_is_named_and_nothing_written(self):
+        path = self.root / "supervisor.py"
+        path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+        before = self.snapshot()
+        for done in (self.check(), self.write()):
+            self.assert_refused(done, "supervisor.py starts with a byte "
+                                      "order mark")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_an_original_that_does_not_parse_is_named_and_nothing_written(self):
+        self.append("loxodonta.py", "\ndef (\n")
+        before = self.snapshot()
+        for done in (self.check(), self.write()):
+            self.assert_refused(done, "loxodonta.py is not readable as "
+                                      "Python")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_write_keeps_crlf_line_endings(self):
+        old, new = "reader keeps (SPEC §1, #299)", "reader keeps (SPEC 1)"
+        self.edit("supervisor.py", POINTER + "\ndef is_chain_record(",
+                  "def is_chain_record(")
+        expected = {name: self.text(name).replace(old, new).replace(
+                        "def is_chain_record(", POINTER + "\ndef is_chain_record(")
+                    for name in ("supervisor.py", "receiver.py")}
+        self.edit("loxodonta.py", old, new)
+        for name in SCRIPTS:
+            path = self.root / name
+            path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+
+        done = self.write()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for name, text in expected.items():
+            self.assertEqual(self.text(name), text.replace("\n", "\r\n"),
+                             name)
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
 if __name__ == "__main__":

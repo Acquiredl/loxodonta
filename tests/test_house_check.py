@@ -170,6 +170,66 @@ class RefutationTest(Fixture):
                 self.assertIn("README.md:1: ", result.stdout)
 
 
+class AttestationTest(Fixture):
+    # Issue #338: the controls page is a mapping, never an attestation, so
+    # the words a claim of achieving a control is made of fail there, and
+    # only there.
+    REFUSED = ["satisfies", "satisfied", "compliant", "compliance with",
+               "meets", "✓", "✔", "☑"]
+
+    def test_each_refused_word_fails_on_the_controls_page(self):
+        for word in self.REFUSED:
+            with self.subTest(word=word):
+                page = self.write("docs/CONTROLS.md",
+                                  f"# Controls\n\nThe anchor row {word} AU-9(2).\n")
+
+                result = run_checker(page)
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("CONTROLS.md:3: attestation: ", result.stdout)
+
+    def test_each_refused_word_passes_on_any_other_page(self):
+        for word in self.REFUSED:
+            with self.subTest(word=word):
+                doc = self.write("docs/NOTES.md",
+                                 f"# Notes\n\nThe anchor row {word} AU-9(2).\n")
+
+                result = run_checker(doc)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("attestation", result.stdout)
+
+    def test_refusing_the_word_does_not_escape_it_on_the_controls_page(self):
+        # "not compliant" on a mapping page still reads as a verdict
+        # about somebody's deployment.
+        page = self.write("docs/CONTROLS.md", "\n".join([
+            "No row says a deployment is compliant.",
+            'This page never "meets" a control.',
+        ]) + "\n")
+
+        result = run_checker(page)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONTROLS.md:1: attestation: ", result.stdout)
+        self.assertIn("CONTROLS.md:2: attestation: ", result.stdout)
+
+    def test_the_mapping_vocabulary_passes_on_the_controls_page(self):
+        page = self.write("docs/CONTROLS.md", "\n".join([
+            "This page is a mapping, never an attestation: whether a "
+            "deployment achieves a control is decided by that deployment "
+            "and its assessor.",
+            "| AU-5 | The completeness alarm | Supports, *Example of* | "
+            "Who is alerted. |",
+            "Whoever does meet an assessor brings the rest; a compliance "
+            "review reads the whole deployment.",
+        ]) + "\n")
+
+        result = run_checker(page)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+
 class OldNameTest(Fixture):
     # ADR-0010: the command is `loxodonta`; only the artifact keeps the
     # name `receipts` (issue #241). Only the forms that cannot be the

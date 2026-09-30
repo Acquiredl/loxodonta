@@ -26,10 +26,12 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package_anchor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import (GENESIS_HASH, GENESIS_HEADER, FakeCalendar,
-                         FakeCalendarHandler, block_header,
-                         expected_merkle_root, header_hash, replayed_root,
-                         start_calendar)
+from test_anchor import (DROP, GENESIS_HASH, GENESIS_HEADER, HOSTILE,
+                         HOSTILE_HEAD, MALFORMED_ROWS, SHOWN, SHOWN_HEAD_12,
+                         FakeCalendar, FakeCalendarHandler,
+                         assert_printed_escaped, block_header, completed_row,
+                         expected_merkle_root, header_hash, pending_proof,
+                         replayed_root, start_calendar)
 from test_package import (LOXODONTA, SUPERVISOR, PackageCase, completed_anchor,
                           neutral_env, run)
 
@@ -470,6 +472,402 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertNotIn("unlisted:", judged.stdout)
         self.assertTrue(judged.stdout.strip().splitlines()[-1]
                         .startswith("SELF-CONSISTENT:"))
+
+
+UNKNOWN_ROW = json.dumps({"kind": "witness-note", "ts": "2026-09-24T10:00:00Z"})
+
+
+class PackageRowKindTest(AnchoredStoreCase):
+    """ADR-0038 in a package: the manifest's proof row names its kind,
+    and a row of a kind this verifier does not know is named by its line
+    in either anchors sidecar, earning nothing and moving no exit code."""
+
+    def test_the_manifest_anchor_row_names_its_kind(self):
+        folder = self.anchored_folder()
+
+        (record,) = self.sidecar_records(folder)
+
+        self.assertEqual(record["kind"], "anchor")
+        self.assertEqual(set(record), {"kind", "head", "ts", "calendar",
+                                       "proof"})
+
+    def test_an_unknown_kind_beside_the_manifest_proof_is_named_not_judged(self):
+        folder = self.anchored_folder()
+        before = self.verify_package(folder)
+        with (folder / SIDECAR).open("a", encoding="utf-8") as out:
+            out.write(UNKNOWN_ROW + "\n")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, before.returncode,
+                         judged.stdout + judged.stderr)
+        note = (f'seal anchor: ANCHOR-UNKNOWN-KIND: line 2 of {SIDECAR} is of '
+                'kind "witness-note" — this verifier does not know the kind '
+                'in this sidecar, and does not judge it')
+        lines = judged.stdout.splitlines()
+        self.assertIn(note, lines)
+        self.assertEqual([l for l in lines if l != note],
+                         before.stdout.splitlines())
+
+    def test_a_manifest_sidecar_of_unknown_rows_only_is_seal_missing(self):
+        # A row of an unknown kind earns nothing, so a sidecar holding
+        # only that is a declared anchor the package does not carry.
+        folder = self.anchored_folder()
+        (folder / SIDECAR).write_text(UNKNOWN_ROW + "\n", encoding="utf-8")
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 3, judged.stdout + judged.stderr)
+        self.assertIn("seal anchor: ANCHOR-UNKNOWN-KIND: line 1", judged.stdout)
+        self.assertTrue(judged.stdout.strip().splitlines()[-1]
+                        .startswith("SEAL-MISSING:"), judged.stdout)
+
+    def test_an_unknown_kind_in_a_chain_sidecar_is_named_not_judged(self):
+        sidecar = self.chain.with_name(self.chain.name + ".anchors.jsonl")
+        folder = self.work / "plain"
+        self.package(SESSION, "--folder", "--out", str(folder))
+        before = self.verify_package(folder)
+        with sidecar.open("a", encoding="utf-8") as out:
+            out.write(UNKNOWN_ROW + "\n")
+        folder = self.work / "noted"
+        result = self.package(SESSION, "--folder", "--out", str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        judged = self.verify_package(folder)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(judged.returncode, before.returncode)
+        self.assertIn(SealedPackageTest.CHAIN_DETAIL, judged.stdout)
+        # The sidecar by its bare name, never the unpack folder's path.
+        self.assertIn(f"ANCHOR-UNKNOWN-KIND: line 2 of {sidecar.name} is of "
+                      "kind \"witness-note\"", judged.stdout)
+        self.assertNotIn(str(folder), "\n".join(
+            l for l in judged.stdout.splitlines() if "UNKNOWN-KIND" in l))
+        self.assertNotIn("INVALID", judged.stdout)
+        self.assertEqual(judged.stdout.splitlines()[-1],
+                         before.stdout.splitlines()[-1])
+
+
+def changed(row, change):
+    """`row` with `change` applied: a field replaced, or left out for
+    DROP, as one compact sidecar line."""
+    row = dict(row)
+    for field, value in change.items():
+        if value is DROP:
+            row.pop(field, None)
+        else:
+            row[field] = value
+    return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+
+class MalformedPackageRowTest(AnchoredStoreCase):
+    """#348 in a package: a row of either anchors sidecar that is a JSON
+    object but not the shape of an anchor row is evidence that does not
+    verify, exit 3, with a reason naming the field and never its value,
+    and never a traceback in the recipient's hands."""
+
+    def test_a_malformed_row_beside_the_manifest_proof_is_seal_invalid(self):
+        folder = self.anchored_folder()
+        sidecar = folder / SIDECAR
+        good = sidecar.read_text("utf-8")
+        (record,) = self.sidecar_records(folder)
+        for change, reason in MALFORMED_ROWS:
+            with self.subTest(change=change):
+                sidecar.write_text(good + changed(record, change) + "\n",
+                                   encoding="utf-8")
+
+                judged = self.verify_package(folder)
+
+                self.assertEqual(judged.returncode, 3,
+                                 judged.stdout + judged.stderr)
+                self.assertIn("seal anchor: SEAL-INVALID: line 2 of "
+                              f"manifest.json.anchors.jsonl: {reason} — "
+                              "evidence that does not verify is not evidence",
+                              judged.stdout)
+                self.assertIn("seal anchor: ANCHOR-PENDING", judged.stdout)
+                self.assertNotIn("Traceback", judged.stderr)
+                self.assertNotIn("sneaky", judged.stdout)
+
+    def test_a_malformed_row_in_a_chain_sidecar_is_anchor_invalid(self):
+        chain_sidecar = self.chain.with_name(self.chain.name + ".anchors.jsonl")
+        good = chain_sidecar.read_text("utf-8")
+        (record,) = [json.loads(line) for line in good.splitlines()]
+        for number, (change, reason) in enumerate(MALFORMED_ROWS):
+            with self.subTest(change=change):
+                chain_sidecar.write_text(good + changed(record, change) + "\n",
+                                         encoding="utf-8")
+                folder = self.work / f"malformed-{number}"
+                packed = self.package(SESSION, "--folder", "--out", str(folder))
+                self.assertEqual(packed.returncode, 0,
+                                 packed.stdout + packed.stderr)
+
+                judged = self.verify_package(folder)
+
+                self.assertEqual(judged.returncode, 3,
+                                 judged.stdout + judged.stderr)
+                self.assertIn(f"ANCHOR-INVALID: line 2 of {chain_sidecar.name}"
+                              f": {reason} — evidence that does not verify is "
+                              "not evidence", judged.stdout)
+                self.assertIn(SealedPackageTest.CHAIN_DETAIL, judged.stdout)
+                self.assertNotIn("Traceback", judged.stderr)
+                self.assertNotIn("sneaky", judged.stdout)
+
+
+def zipped(folder):
+    """`folder`'s files as a zip beside it, flat, as `supervisor package`
+    writes one: the same package in the form a recipient is sent."""
+    out = folder.with_name(folder.name + ".zip")
+    with zipfile.ZipFile(out, "w") as package:
+        for path in sorted(folder.iterdir()):
+            package.write(path, path.name)
+    return out
+
+
+# A bare file name holding a bidi override: a character a name can hold
+# on every system, and one that reorders what the eye reads after it.
+BIDI_NAME = "notes‮txt.exe"
+BIDI_SHOWN = "notes\\u202etxt.exe"
+
+
+class PackageFieldEscapeTest(AnchoredStoreCase):
+    """#349 in a package: every field `verify-package` prints from a
+    sidecar row, from the manifest, or from a file name in the package is
+    the writer's or the issuer's text, and is printed escaped (#295), in
+    a folder and in a zip alike, and a sidecar is named by its bare name,
+    never by the folder a zip was unpacked into."""
+
+    def judged_both_ways(self, folder):
+        """verify-package of `folder`, then of the same files zipped."""
+        return self.verify_package(folder), self.verify_package(zipped(folder))
+
+    def rewrite_seal_row(self, folder, *rows):
+        (folder / SIDECAR).write_text("".join(row + "\n" for row in rows),
+                                      encoding="utf-8")
+
+    def test_the_manifest_anchors_time_and_calendar_print_escaped(self):
+        for field in ("ts", "calendar"):
+            with self.subTest(field=field):
+                folder = self.anchored_folder(f"pending-{field}")
+                (record,) = self.sidecar_records(folder)
+                self.rewrite_seal_row(folder,
+                                      changed(record, {field: HOSTILE}))
+
+                for judged in self.judged_both_ways(folder):
+                    self.assertEqual(judged.returncode, 0,
+                                     judged.stdout + judged.stderr)
+                    assert_printed_escaped(self, judged.stdout, SHOWN)
+                    (pending,) = [line for line in judged.stdout.splitlines()
+                                  if line.startswith("seal anchor: "
+                                                     "ANCHOR-PENDING")]
+                    self.assertIn(SHOWN, pending)
+
+    def test_an_unanswered_manifest_anchor_prints_escaped(self):
+        for field in ("ts", "calendar"):
+            with self.subTest(field=field):
+                folder = self.anchored_folder(f"unanswered-{field}")
+                (record,) = self.sidecar_records(folder)
+                self.rewrite_seal_row(
+                    folder, completed_row(self.manifest_digest(folder)),
+                    changed(record, {field: HOSTILE}))
+
+                for judged in self.judged_both_ways(folder):
+                    self.assertEqual(judged.returncode, 0,
+                                     judged.stdout + judged.stderr)
+                    assert_printed_escaped(self, judged.stdout, SHOWN)
+                    self.assertIn("seal anchor: ANCHOR-UNANSWERED",
+                                  judged.stdout)
+
+    def test_a_proof_for_another_digest_prints_its_digest_escaped(self):
+        folder = self.anchored_folder()
+        (record,) = self.sidecar_records(folder)
+        self.rewrite_seal_row(folder, changed(record, {"head": HOSTILE_HEAD}))
+
+        for judged in self.judged_both_ways(folder):
+            self.assertEqual(judged.returncode, 3,
+                             judged.stdout + judged.stderr)
+            assert_printed_escaped(
+                self, judged.stdout,
+                "seal anchor: SEAL-INVALID: line 1 of manifest.json.anchors."
+                f"jsonl: the proof is for digest {SHOWN_HEAD_12}…")
+
+    def test_a_chain_anchors_time_prints_escaped_and_its_sidecar_bare(self):
+        sidecar = self.chain.with_name(self.chain.name + ".anchors.jsonl")
+        head = run(LOXODONTA, "head", "--log", str(self.chain)).stdout.strip()
+        sidecar.write_text(json.dumps({
+            "kind": "anchor", "head": head, "n": 2, "ts": HOSTILE,
+            "calendar": self.server.url,
+            "proof": base64.b64encode(pending_proof(
+                b"fake-nonce", self.server.url)).decode()}) + "\n",
+            encoding="utf-8")
+        pending = self.work / "pending.zip"
+        self.package(SESSION, "--out", str(pending))
+        sidecar.unlink()
+        unanchored = self.work / "unanchored.zip"
+        self.package(SESSION, "--out", str(unanchored))
+
+        judged = self.verify_package(pending)
+        bare = self.verify_package(unanchored)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        assert_printed_escaped(self, judged.stdout,
+                               f"ANCHOR-PENDING: head {head[:12]}… "
+                               f"submitted {SHOWN} via")
+        self.assertEqual(bare.returncode, 0, bare.stdout + bare.stderr)
+        self.assertIn(f"NO-ANCHORS: {sidecar.name} is not in this package — "
+                      "anchoring is optional", bare.stdout)
+
+    def test_the_manifests_own_words_print_escaped(self):
+        # The summary's testimony, the unit and the seal kinds are the
+        # issuer's words, printed as the manifest gives them; a seal of a
+        # kind this verifier does not know is named, and judged by nobody.
+        folder = self.work / "worded"
+        self.package(SESSION, "--folder", "--out", str(folder))
+
+        def reword(manifest):
+            manifest["packed"] = HOSTILE
+            manifest["tool"] = HOSTILE
+            manifest["unit"][HOSTILE] = HOSTILE
+            manifest["seals"].append(HOSTILE)
+        self.rewrite_manifest(folder, reword)
+
+        for judged in self.judged_both_ways(folder):
+            self.assertEqual(judged.returncode, 0,
+                             judged.stdout + judged.stderr)
+            out = judged.stdout
+            assert_printed_escaped(self, out, f"packed: {SHOWN} by {SHOWN} "
+                                              "(testimony)")
+            self.assertIn(f", {SHOWN} {SHOWN}", out)
+            self.assertIn(f"seals: {SHOWN}", out)
+            self.assertIn(f"seal {SHOWN}: declared; this verifier does not "
+                          "know the kind, and does not judge it", out)
+
+    def test_a_format_it_does_not_speak_prints_escaped(self):
+        folder = self.work / "foreign"
+        self.package(SESSION, "--folder", "--out", str(folder))
+        self.rewrite_manifest(folder,
+                              lambda manifest: manifest.update(format=HOSTILE))
+
+        for judged in self.judged_both_ways(folder):
+            self.assertEqual(judged.returncode, 4,
+                             judged.stdout + judged.stderr)
+            assert_printed_escaped(self, judged.stdout,
+                                   f'UNSUPPORTED-FORMAT: package is format '
+                                   f'"{SHOWN}"')
+
+    def test_listed_heads_and_digests_print_escaped(self):
+        folder = self.work / "listed"
+        self.package(SESSION, "--folder", "--out", str(folder))
+
+        def relist(manifest):
+            manifest["chains"][0]["head"] = HOSTILE_HEAD
+            manifest["artifacts"][0]["sha256"] = HOSTILE_HEAD
+        self.rewrite_manifest(folder, relist)
+
+        for judged in self.judged_both_ways(folder):
+            self.assertEqual(judged.returncode, 2,
+                             judged.stdout + judged.stderr)
+            out = judged.stdout
+            assert_printed_escaped(self, out,
+                                   f"(manifest: head {SHOWN_HEAD_12}…")
+            self.assertIn(f"listed as {SHOWN_HEAD_12}…", out)
+            self.assertIn(f"listed {SHOWN_HEAD_12}…", out)
+
+    def test_listed_and_unlisted_names_print_escaped(self):
+        folder = self.work / "named"
+        self.package(SESSION, "--folder", "--out", str(folder))
+
+        def rename(manifest):
+            manifest["chains"].append(dict(manifest["chains"][0],
+                                           path="chain" + BIDI_NAME))
+            manifest["artifacts"].append(dict(manifest["artifacts"][0],
+                                              path="artifact" + BIDI_NAME))
+        self.rewrite_manifest(folder, rename)
+        (folder / ("unlisted" + BIDI_NAME)).write_text("x", encoding="utf-8")
+
+        for judged in self.judged_both_ways(folder):
+            self.assertEqual(judged.returncode, 2,
+                             judged.stdout + judged.stderr)
+            out = judged.stdout
+            assert_printed_escaped(self, out, f"chain: chain{BIDI_SHOWN} "
+                                              "(manifest: head")
+            self.assertIn(f"chain{BIDI_SHOWN}: MISSING (listed in the "
+                          "manifest, not in the package)", out)
+            self.assertIn(f"artifact{BIDI_SHOWN}: MISSING (listed in the "
+                          "manifest, not in the package)", out)
+            self.assertIn(f"unlisted: unlisted{BIDI_SHOWN} (not in the "
+                          "manifest, not judged)", out)
+
+    def test_a_transcript_the_artifacts_do_not_list_prints_escaped(self):
+        folder = self.work / "untranscribed"
+        self.package(SESSION, "--folder", "--out", str(folder))
+        self.rewrite_manifest(
+            folder,
+            lambda manifest: manifest["chains"][0].update(transcript=BIDI_NAME))
+
+        for judged in self.judged_both_ways(folder):
+            self.assertEqual(judged.returncode, 4,
+                             judged.stdout + judged.stderr)
+            assert_printed_escaped(self, judged.stdout,
+                                   f"names transcript {BIDI_SHOWN} on a chain")
+
+
+RELEASE = "v0.9.0"
+
+
+def released_verifier(case, folder):
+    """The v0.9.0 `verifier.py`, from its tag's bytes, written into
+    `folder`; `case` skips when git or the tag is not there. The stamps
+    suite's compatibility test uses it too."""
+    try:
+        shown = subprocess.run(
+            ["git", "-C", str(LOXODONTA.parent), "show",
+             f"{RELEASE}:verifier.py"], capture_output=True)
+    except OSError:
+        case.skipTest("git is not on PATH, so the released verifier's "
+                      "bytes cannot be read")
+    if shown.returncode != 0:
+        case.skipTest(f"the {RELEASE} tag is not in this checkout "
+                      "(a shallow clone fetches no tags), so the released "
+                      "verifier's bytes cannot be read")
+    path = folder / f"verifier-{RELEASE}.py"
+    path.write_bytes(shown.stdout)
+    return path
+
+
+class ReleasedVerifierTest(AnchoredStoreCase):
+    """ADR-0038's compatibility promise, held against the bytes a
+    recipient already has: a package this recorder makes, its chain and
+    its manifest anchored with rows that name their kind, verifies the
+    same under the v0.9.0 verifier as under this one. That verifier
+    skips only `attempt` rows, so it judges an `anchor` row as it judged
+    a kind-less one."""
+
+    def test_a_package_anchored_by_this_recorder_verifies_the_same_under_it(self):
+        released = released_verifier(self, self.root)
+        # The chain anchored by the recorder, so its sidecar holds an
+        # `anchor` row beside the fixture's kind-less one.
+        anchored = run(LOXODONTA, "anchor", "--log", str(self.chain),
+                       "--calendar", self.server.url, env=self.env)
+        self.assertEqual(anchored.returncode, 0, anchored.stderr)
+        folder = self.anchored_folder()
+        self.server.mode = "complete"
+        upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
+                      str(folder / "manifest.json"), env=self.env)
+        self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
+        kinds = [r.get("kind") for r in self.sidecar_records(folder)]
+        self.assertEqual(kinds, ["anchor", "anchor"])
+
+        now = self.verify_package(folder)
+        then = subprocess.run(
+            [sys.executable, "-I", str(released), "verify-package",
+             str(folder)], capture_output=True, cwd=str(self.work))
+        then_out = then.stdout.decode("utf-8", "replace")
+
+        self.assertEqual(now.returncode, 0, now.stdout + now.stderr)
+        self.assertTrue(now.stdout.splitlines()[-1]
+                        .startswith("SELF-CONSISTENT + ANCHORED:"), now.stdout)
+        self.assertEqual((then.returncode, then_out.splitlines()),
+                         (now.returncode, now.stdout.splitlines()))
 
 
 if __name__ == "__main__":

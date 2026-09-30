@@ -41,7 +41,9 @@ from types import SimpleNamespace
 # when the module runs alone (`python -m unittest tests.test_stamp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
+from test_anchor import (HOSTILE, HOSTILE_HEAD, SHOWN, SHOWN_HEAD,
+                         FakeCalendar, FakeCalendarHandler,
+                         assert_printed_escaped, clean_env)
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
 from test_supervisor import (ago, chain_head, chains_by_session,
                              home_outside, isolated_env, make_chain,
@@ -53,6 +55,11 @@ LOXODONTA = REPO_ROOT / "loxodonta.py"
 SHA256_OID = "2.16.840.1.101.3.4.2.1"
 QUERY_TYPE = "application/timestamp-query"
 SIDECARS = (".anchors.jsonl", ".published.jsonl", ".stamps.jsonl")
+
+
+# How a verdict about the one row of a test's stamps sidecar begins: the
+# row by its line, then the head it names.
+INVALID_ROW_1 = "STAMP-INVALID: line 1 of receipts.jsonl.stamps.jsonl, "
 
 
 def run_receipts(*args, cwd, env=None):
@@ -136,6 +143,37 @@ def reply(status, token=b""):
 
 PLACEHOLDER_TOKEN = der(0x30, b"a placeholder token the recorder never reads")
 GRANTED = reply(0, PLACEHOLDER_TOKEN)
+
+# A granted status in seven bytes, made by nobody, with no token after
+# it: RFC 3161 §2.4.2 puts a token in every granted reply, so this one
+# holds none (#370).
+GRANTED_NO_TOKEN = "MAUwAwIBAA=="
+assert base64.b64decode(GRANTED_NO_TOKEN) == reply(0)
+
+# The `response` of a token row holding no reply the authority granted
+# (#366): not a string, not base64, base64 of bytes that are not a
+# TimeStampResp, base64 of a reply the authority refused, and a granted
+# status with no token (#370). None of them stamps the head it names.
+NO_GRANTED_REPLY = (
+    5, None, "not base64!",
+    base64.b64encode(b"no timestamp response").decode(),
+    base64.b64encode(reply(2)).decode(),
+    GRANTED_NO_TOKEN,
+)
+# A granted reply in nine bytes, made by nobody: status 0, and an empty
+# SEQUENCE where the token goes.
+FORGED_GRANTED = base64.b64encode(reply(0, der(0x30, b""))).decode()
+
+# #370: the rows `verify` reads offline as holding no token, whatever
+# tools the machine has, each with the reason it names.
+NO_TOKEN = (
+    ("rejected", base64.b64encode(reply(2)).decode(),
+     "the reply's status is 2 (rejection), so it holds no token"),
+    ("not a reply", base64.b64encode(b"no timestamp response").decode(),
+     "the reply is not a timestamp response"),
+    ("granted, no token", GRANTED_NO_TOKEN,
+     "the reply's status is 0 (granted) and it holds no token"),
+)
 
 
 # --- Fake authority -----------------------------------------------------------
@@ -257,7 +295,9 @@ class StampCommandTest(unittest.TestCase):
         (query,) = self.authority.received
         self.assertEqual(query["content_type"], QUERY_TYPE)
         (row,) = rows_of(self.sidecar)
-        self.assertEqual(set(row), {"head", "n", "ts", "authority", "response"})
+        self.assertEqual(set(row), {"kind", "head", "n", "ts", "authority",
+                                    "response"})
+        self.assertEqual(row["kind"], "stamp")
         self.assertEqual(row["head"], self.head)
         self.assertEqual(row["n"], 2)
         self.assertEqual(row["authority"], self.authority.url)
@@ -548,8 +588,8 @@ class StampCommandTest(unittest.TestCase):
         result = self.verify()
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn("STAMP-INVALID: sidecar line is not a stamp record",
-                      result.stdout)
+        self.assertIn("STAMP-INVALID: line 1 of receipts.jsonl.stamps.jsonl: "
+                      "record has no head", result.stdout)
         self.assertIn("the response is not base64", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
@@ -580,6 +620,464 @@ class StampCommandTest(unittest.TestCase):
                      self.sidecar.read_text(encoding="utf-8")):
             self.assertNotIn("anchor", text.lower())
         self.assertNotIn("anchor", self.sidecar.name)
+
+
+class StampRowKindTest(unittest.TestCase):
+    """ADR-0038: every row of the stamps sidecar names its kind. A new
+    token row is written `"kind": "stamp"`; a row with no kind reads as a
+    token, whenever it was written, so every sidecar already shipped
+    verifies as it did; and a row of a kind this verifier does not know,
+    or a kind that belongs in another sidecar, is named by its line and
+    never judged, so a newer recorder's row is never evidence against an
+    honest log. None of it needs openssl: with no chain file given, a
+    token is present and not judged, which is the same line for a
+    kind-less row as for a named one."""
+
+    UNKNOWN = "STAMP-UNKNOWN-KIND"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.sidecar = self.workdir / "receipts.jsonl.stamps.jsonl"
+        self.authority = start_authority(self)
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+
+    def token_row(self, **extra):
+        """A token row over the head, as the recorder writes one, keys
+        sorted and compact; `extra` adds fields (a kind) or replaces them."""
+        row = {"head": self.head, "n": 1, "ts": "2026-09-24T10:00:00Z",
+               "authority": self.authority.url,
+               "response": base64.b64encode(GRANTED).decode()}
+        row.update(extra)
+        return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+    def write_sidecar(self, *lines):
+        self.sidecar.write_text("".join(line + "\n" for line in lines),
+                                encoding="utf-8")
+
+    def stamp(self):
+        return run_receipts("stamp", "--authority", self.authority.url,
+                            cwd=self.workdir)
+
+    def verify(self):
+        return run_receipts("verify", "--stamps", cwd=self.workdir)
+
+    def without_notes(self, stdout):
+        return [line for line in stdout.splitlines()
+                if not line.startswith(self.UNKNOWN)]
+
+    def test_a_new_stamp_row_names_its_kind_and_nothing_else_changes(self):
+        result = self.stamp()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        lines = self.sidecar.read_text("utf-8").splitlines()
+        (line,) = [l for l in lines if '"kind":"attempt"' not in l]
+        row = json.loads(line)
+        self.assertEqual(row["kind"], "stamp")
+        self.assertEqual(set(row),
+                         {"kind", "head", "n", "ts", "authority", "response"})
+        # Written compact and key-sorted, as every sidecar row is.
+        self.assertEqual(line, json.dumps(row, sort_keys=True,
+                                          separators=(",", ":")))
+
+    def test_a_row_with_no_kind_reads_as_a_stamp(self):
+        self.write_sidecar(self.token_row())
+        kindless = self.verify()
+        self.write_sidecar(self.token_row(kind="stamp"))
+        named = self.verify()
+
+        self.assertEqual(kindless.returncode, 0,
+                         kindless.stdout + kindless.stderr)
+        self.assertIn("stamp not judged: no --authority-chain FILE given",
+                      kindless.stdout)
+        self.assertRegex(kindless.stdout, r"(?m)^VALID$")
+        self.assertEqual((named.returncode, named.stdout, named.stderr),
+                         (kindless.returncode, kindless.stdout,
+                          kindless.stderr))
+
+    def test_a_kindless_row_for_another_head_is_still_stamp_invalid(self):
+        self.write_sidecar(self.token_row(head="ab" * 32))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("STAMP-INVALID: line 1 of receipts.jsonl.stamps.jsonl: "
+                      "stamped head", result.stdout)
+        self.assertIn("appears nowhere in this log", result.stdout)
+
+    def test_an_unknown_kind_is_named_by_its_line_and_not_judged(self):
+        self.write_sidecar(self.token_row())
+        before = self.verify()
+        # Shaped like a token over another head: judged, it would be
+        # STAMP-INVALID, exit 3.
+        self.write_sidecar(self.token_row(),
+                           self.token_row(kind="witness-note",
+                                          head="ab" * 32))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, before.returncode,
+                         result.stdout + result.stderr)
+        self.assertIn(f'{self.UNKNOWN}: line 2 of {self.sidecar.name} is of '
+                      'kind "witness-note" — this verifier does not know the '
+                      'kind in this sidecar, and does not judge it',
+                      result.stdout)
+        self.assertEqual(result.stdout.count(self.UNKNOWN), 1)
+        self.assertNotIn("STAMP-INVALID", result.stdout)
+        self.assertEqual(self.without_notes(result.stdout),
+                         before.stdout.splitlines())
+
+    def test_a_head_or_anchor_row_in_the_stamps_sidecar_is_named_not_judged(self):
+        # Known kinds, but the memo's and the anchors sidecar's
+        # (ADR-0038), not this sidecar's.
+        for line, kind in ((1, "head"), (2, "anchor")):
+            with self.subTest(kind=kind):
+                misplaced = self.token_row(kind=kind, head="ab" * 32)
+                rows = [self.token_row()]
+                rows.insert(line - 1, misplaced)
+                self.write_sidecar(*rows)
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn(f'{self.UNKNOWN}: line {line} of '
+                              f'{self.sidecar.name} is of kind "{kind}"',
+                              result.stdout)
+                self.assertIn("stamp not judged", result.stdout)
+                self.assertNotIn("STAMP-INVALID", result.stdout)
+                self.assertRegex(result.stdout, r"(?m)^VALID$")
+
+    def test_an_unknown_kind_leaves_an_exit_3_as_it_was(self):
+        # Beside evidence against the log, the note moves nothing: the
+        # exit is 3, and the last line is still the finding's, which is
+        # where the supervisor's scan reads a verdict.
+        mismatch = self.token_row(head="ab" * 32)
+        self.write_sidecar(mismatch)
+        before = self.verify()
+        self.write_sidecar(mismatch, json.dumps({"kind": "later-kind"}))
+
+        result = self.verify()
+
+        self.assertEqual(before.returncode, 3, before.stdout + before.stderr)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1],
+                         before.stdout.splitlines()[-1])
+        self.assertIn(f"{self.UNKNOWN}: line 2 of", result.stdout)
+
+    def test_a_kind_that_is_not_a_string_is_named_by_its_type(self):
+        for kind, word in ((5, "a number"), (None, "null"),
+                           (True, "true or false"), (["stamp"], "an array"),
+                           ({"k": "stamp"}, "an object")):
+            with self.subTest(kind=kind):
+                self.write_sidecar(self.token_row(),
+                                   json.dumps({"kind": kind}))
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn(f"{self.UNKNOWN}: line 2 of {self.sidecar.name} "
+                              f"is of a kind that is {word}, not a string — "
+                              "this verifier does not know the kind in this "
+                              "sidecar, and does not judge it", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_kind_is_printed_escaped_never_raw(self):
+        # The kind is the writer's text, printed to a terminal: a newline
+        # in it could forge a verdict line, an escape repaint the screen.
+        self.write_sidecar(self.token_row(),
+                           json.dumps({"kind": "x\x1b[2J\nVALID‮"}))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('is of kind "x\\x1b[2J\\nVALID\\u202e"', result.stdout)
+        self.assertNotIn("\x1b", result.stdout)
+        self.assertNotIn("‮", result.stdout)
+        self.assertEqual(result.stdout.splitlines().count("VALID"), 1)
+
+    def test_an_unreadable_line_is_still_stamp_invalid(self):
+        too_long = '{"kind": ' + "9" * 5000 + "}"
+        too_deep = '{"kind": ' + "[" * 100000 + "]" * 100000 + "}"
+        for line in ("not a record", "[1, 2]", too_long, too_deep):
+            with self.subTest(line=line[:20]):
+                self.write_sidecar(self.token_row(), line)
+
+                result = self.verify()
+
+                self.assertEqual(result.returncode, 3,
+                                 result.stdout + result.stderr)
+                self.assertIn("STAMP-INVALID: line 2 of receipts.jsonl."
+                              "stamps.jsonl is not a record", result.stdout)
+                self.assertNotIn(self.UNKNOWN, result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_line_that_is_not_utf8_is_still_stamp_invalid(self):
+        self.sidecar.write_bytes(self.token_row().encode() + b"\n"
+                                 + b'{"kind": "\xff"}\n')
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("STAMP-INVALID: line 2 of receipts.jsonl.stamps.jsonl "
+                      "is not a record", result.stdout)
+
+    def test_a_kindless_or_a_named_token_row_is_already_stamped(self):
+        # The dedupe asks the reader too: a token row from before rows
+        # named their kind holds the head exactly as a named one does, so
+        # neither sends a second query.
+        for row in (self.token_row(), self.token_row(kind="stamp")):
+            with self.subTest(row=row[:30]):
+                self.write_sidecar(row)
+
+                result = self.stamp()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(),
+                                 f"already stamped head {self.head[:12]}… "
+                                 "(entry 1)")
+                self.assertEqual(self.authority.received, [])
+                self.assertEqual(self.sidecar.read_text("utf-8"), row + "\n")
+
+    def test_a_token_row_whose_head_is_not_a_string_does_not_stop_the_verb(self):
+        # A writer-reachable row, so it must not crash the dedupe: it
+        # names no head, holds no token, and the head is asked about.
+        malformed = json.dumps({"head": ["x"], "response": "AA=="})
+        self.write_sidecar(malformed)
+
+        result = self.stamp()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(self.authority.received), 1)
+        rows = rows_of(self.sidecar)
+        self.assertEqual(rows[0], json.loads(malformed))
+        self.assertEqual((rows[1]["head"], rows[1]["kind"]),
+                         (self.head, "stamp"))
+
+    def test_a_row_holding_no_granted_reply_is_not_the_heads_token(self):
+        # #366: a row naming the head and holding no granted reply is
+        # not its token. Only a reply whose status says granted stamps a
+        # head, read as the query reads it, so for each of these the
+        # verb still asks, and writes the token it is granted.
+        for response in NO_GRANTED_REPLY:
+            with self.subTest(response=response):
+                self.authority.received.clear()
+                planted = self.token_row(response=response)
+                self.write_sidecar(planted)
+
+                result = self.stamp()
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(),
+                                 f"stamped head {self.head[:12]}… (entry 1) "
+                                 f"via {self.authority.url}")
+                self.assertEqual(len(self.authority.received), 1)
+                rows = rows_of(self.sidecar)
+                self.assertEqual(rows[0], json.loads(planted))
+                self.assertEqual(
+                    (rows[1]["head"], rows[1]["kind"],
+                     base64.b64decode(rows[1]["response"])),
+                    (self.head, "stamp", GRANTED))
+
+    def test_the_limit_a_forged_or_copied_granted_reply_stops_a_new_stamp(self):
+        # #366, the limit SPEC 9.7 names, pinned so it stays visible: a
+        # granted status is not signed, so a reply forged in nine bytes,
+        # or a real one copied from another head's row, is taken for the
+        # head's token and nothing is asked. Without openssl verify says
+        # the token is not judged, never that it is stamped.
+        first = self.stamp()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        (token,) = [r for r in rows_of(self.sidecar)
+                    if r.get("kind") == "stamp"]
+        run_receipts("log", "--actor", "agent", "--action", "step 2",
+                     cwd=self.workdir)
+        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        for name, response in (("forged", FORGED_GRANTED),
+                               ("copied", token["response"])):
+            with self.subTest(row=name):
+                self.authority.received.clear()
+                self.write_sidecar(self.token_row(head=newer, n=2,
+                                                  response=response))
+
+                result = self.stamp()
+                judged = self.verify()
+
+                self.assertEqual(result.stdout.strip(),
+                                 f"already stamped head {newer[:12]}… "
+                                 "(entry 2)")
+                self.assertEqual(self.authority.received, [])
+                self.assertEqual(judged.returncode, 0,
+                                 judged.stdout + judged.stderr)
+                self.assertIn("stamp not judged: no --authority-chain FILE "
+                              "given", judged.stdout)
+                self.assertNotIn("STAMPED", judged.stdout)
+
+    def test_a_row_of_an_unknown_kind_naming_the_head_is_not_its_token(self):
+        # Only a token stamps a head. A row of a kind the recorder does
+        # not know is not one, whatever head it names, so the verb still
+        # asks, and the new row says it is a stamp.
+        foreign = self.token_row(kind="witness-note")
+        self.write_sidecar(foreign)
+
+        result = self.stamp()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.authority.received), 1)
+        rows = rows_of(self.sidecar)
+        self.assertEqual(rows[0], json.loads(foreign))
+        self.assertEqual((rows[1]["head"], rows[1]["kind"]),
+                         (self.head, "stamp"))
+
+
+class StampReplyStatusTest(unittest.TestCase):
+    """#370: `verify --stamps` reads each reply's status offline, as
+    `stamp` reads it, and whether a token follows the status, and never
+    what the token holds. A reply the authority refused, bytes that are
+    not a timestamp response, and a granted status with no token after
+    it hold no token, so each is STAMP-INVALID, named by why, with or
+    without openssl and a chain file: one file never says two things
+    about one row. An honest granted reply is judged as before."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.sidecar = self.workdir / "receipts.jsonl.stamps.jsonl"
+        self.authority = start_authority(self)
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.chain_file = self.workdir / "authority.pem"
+        self.chain_file.write_text("not a certificate\n", encoding="utf-8")
+        self.nowhere = self.workdir / "empty-path"
+        self.nowhere.mkdir()
+
+    def write_row(self, response):
+        self.sidecar.write_text(json.dumps(
+            {"kind": "stamp", "head": self.head, "n": 1,
+             "ts": "2026-09-26T10:00:00Z", "authority": self.authority.url,
+             "response": response}) + "\n", encoding="utf-8")
+
+    def verdicts(self):
+        """verify --stamps three ways: with no chain file; with one and
+        no openssl on PATH; with one and whatever PATH this machine has."""
+        chain = ("--authority-chain", str(self.chain_file))
+        return {
+            "no chain file": run_receipts("verify", "--stamps",
+                                          cwd=self.workdir),
+            "no openssl": run_receipts("verify", "--stamps", *chain,
+                                       cwd=self.workdir,
+                                       env={"PATH": str(self.nowhere)}),
+            "this machine": run_receipts("verify", "--stamps", *chain,
+                                         cwd=self.workdir),
+        }
+
+    def test_a_reply_holding_no_token_is_stamp_invalid_offline(self):
+        for name, response, why in NO_TOKEN:
+            self.write_row(response)
+            for way, result in self.verdicts().items():
+                with self.subTest(reply=name, way=way):
+                    self.assertEqual(result.returncode, 3,
+                                     result.stdout + result.stderr)
+                    self.assertIn(f"{INVALID_ROW_1}head {self.head[:12]}… "
+                                  f"(entry 1): {why}", result.stdout)
+                    self.assertNotIn("holds a token", result.stdout)
+                    self.assertNotIn("not judged", result.stdout)
+                    self.assertNotRegex(result.stdout, r"(?m)^VALID$")
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_an_honest_granted_reply_is_judged_as_before(self):
+        self.write_row(base64.b64encode(GRANTED).decode())
+
+        verdicts = self.verdicts()
+
+        self.assertEqual(
+            {way: (r.returncode, r.stdout) for way, r in verdicts.items()
+             if way != "this machine"},
+            {"no chain file": (0, "stamp not judged: no --authority-chain "
+                               f"FILE given — head {self.head[:12]}… "
+                               "(entry 1) holds a token, present and not "
+                               "judged here (ADR-0032)\nVALID\n"),
+             "no openssl": (0, "stamp not judged: openssl is not on PATH — "
+                            f"head {self.head[:12]}… (entry 1) holds a "
+                            "token, present and not judged here "
+                            "(ADR-0032)\nVALID\n")})
+
+    def test_stamp_asks_about_a_head_whose_row_holds_no_token(self):
+        # The other half of one answer: the verb reads the row as verify
+        # does, so a row verify calls STAMP-INVALID never stands it down.
+        for name, response, _ in NO_TOKEN:
+            with self.subTest(reply=name):
+                self.authority.received.clear()
+                self.write_row(response)
+
+                result = run_receipts("stamp", "--authority",
+                                      self.authority.url, cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(),
+                                 f"stamped head {self.head[:12]}… (entry 1) "
+                                 f"via {self.authority.url}")
+                self.assertEqual(len(self.authority.received), 1)
+
+    def test_an_authority_granting_no_token_is_refused_and_leaves_no_row(self):
+        # A reply verify would call STAMP-INVALID is never written as a
+        # token: the query reads it by the same rule.
+        self.authority.answer = reply(0)
+
+        result = run_receipts("stamp", "--authority", self.authority.url,
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 69, result.stdout + result.stderr)
+        self.assertIn("the head was not stamped: the authority answered "
+                      "status 0 (granted) and sent no token", result.stderr)
+        self.assertEqual(token_rows(self.sidecar), [])
+        (note,) = attempt_rows(self.sidecar)
+        self.assertEqual(note["outcome"], "the authority answered status 0 "
+                                          "(granted) and sent no token")
+
+
+class StampFieldEscapeTest(unittest.TestCase):
+    """#349: a field of a stamp row that `verify --stamps` prints is the
+    writer's text, and is printed escaped (#295). The row's authority is
+    printed only beside a token openssl accepted, so that one is
+    JudgedStampTest's. The fixture is StampRowKindTest's."""
+
+    setUp = StampRowKindTest.setUp
+    token_row = StampRowKindTest.token_row
+    write_sidecar = StampRowKindTest.write_sidecar
+    verify = StampRowKindTest.verify
+
+    def test_a_head_that_appears_nowhere_prints_escaped(self):
+        self.write_sidecar(self.token_row(head=HOSTILE_HEAD))
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        assert_printed_escaped(self, result.stdout,
+                               "STAMP-INVALID: line 1 of receipts.jsonl."
+                               f"stamps.jsonl: stamped head {SHOWN_HEAD} "
+                               "appears nowhere in this log")
+
+    def test_no_sidecar_is_named_by_its_bare_name(self):
+        log = self.workdir / "receipts.jsonl"
+
+        result = run_receipts("verify", "--stamps", "--log", str(log),
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NO-STAMPS: receipts.jsonl.stamps.jsonl not found — ",
+                      result.stdout)
+        self.assertNotIn(str(self.workdir), result.stdout)
 
 
 # --- Who waits for the reply's body ------------------------------------------
@@ -774,6 +1272,58 @@ class SessionEndStampTest(PublishBase):
         self.assertEqual(note["step"], "stamp")
         self.assertEqual(note["outcome"],
                          "the authority answered status 2 (rejection)")
+
+    def test_a_malformed_stamps_row_leaves_the_stamp_and_the_anchor_working(self):
+        # A row whose head is not a string sits in a file the writer can
+        # reach. The dedupe skips it, so the session end still stamps the
+        # sealed head and still reaches the anchor after it.
+        calendar = self.watched_calendar()
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        malformed = {"head": ["x"], "response": "AA=="}
+        self.stamps().write_text(json.dumps(malformed) + "\n", "utf-8")
+
+        result = self.session_end("--stamp", self.authority.url,
+                                  "--anchor", "--calendar", calendar.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(len(self.authority.received), 1)
+        self.assertEqual([d.hex() for d in calendar.submitted], [self.head()])
+        rows = rows_of(self.stamps())
+        self.assertEqual(rows[0], malformed)
+        (token,) = [r for r in rows if r.get("kind") == "stamp"]
+        self.assertEqual(token["head"], self.head())
+        (note,) = attempt_rows(self.stamps())
+        self.assertEqual(note["outcome"], "granted")
+
+    def test_a_row_holding_no_granted_reply_does_not_skip_the_stamp(self):
+        # #366: a row naming the sealed head with no granted reply in it
+        # is no token, so the session end still asks, and keeps the token.
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        # The commitment the session end seals comes first, and that
+        # entry is the head the planted row must name.
+        self.session_end()
+        head = self.head()
+        for response in NO_GRANTED_REPLY:
+            with self.subTest(response=response):
+                self.authority.received.clear()
+                planted = {"kind": "stamp", "head": head,
+                           "response": response}
+                self.stamps().write_text(json.dumps(planted) + "\n", "utf-8")
+
+                result = self.session_end("--stamp", self.authority.url)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(len(self.authority.received), 1)
+                rows = rows_of(self.stamps())
+                self.assertEqual(rows[0], planted)
+                (token,) = [r for r in rows[1:] if r.get("kind") == "stamp"]
+                self.assertEqual((token["head"], self.head()), (head, head))
+                (note,) = attempt_rows(self.stamps())
+                self.assertEqual(note["outcome"], "granted")
 
     def test_an_authority_that_never_answers_is_abandoned_on_the_hooks_clock(self):
         # The one query has a bounded timeout well inside the budget, and
@@ -1153,9 +1703,41 @@ class JudgedStampTest(unittest.TestCase):
         result = self.verify()
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)",
+        self.assertIn(f"{INVALID_ROW_1}head {newer[:12]}… (entry 3)",
                       result.stdout)
         self.assertNotRegex(result.stdout, r"(?m)^VALID$")
+
+    def test_the_limit_a_forged_or_copied_reply_stops_a_new_stamp(self):
+        # #366, the limit SPEC 9.7 names: a reply's status sits outside
+        # the token's signature, so a forged granted status, or a real
+        # token moved to another head, is taken for the head's token and
+        # no query is sent. With openssl and the chain file, verify calls
+        # either one STAMP-INVALID, never STAMPED.
+        self.stamp()
+        run_receipts("log", "--actor", "agent", "--action", "step 3",
+                     cwd=self.workdir)
+        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        (row,) = rows_of(self.sidecar)
+        for name, response in (("forged", FORGED_GRANTED),
+                               ("copied", row["response"])):
+            with self.subTest(row=name):
+                self.sidecar.write_text(json.dumps(
+                    {**row, "head": newer, "n": 3, "response": response})
+                    + "\n", encoding="utf-8")
+                asked = self.queries
+
+                again = self.stamp()
+                judged = self.verify()
+
+                self.assertEqual(again.stdout.strip(),
+                                 f"already stamped head {newer[:12]}… "
+                                 "(entry 3)")
+                self.assertEqual(self.queries, asked)
+                self.assertEqual(judged.returncode, 3,
+                                 judged.stdout + judged.stderr)
+                self.assertIn(f"{INVALID_ROW_1}head {newer[:12]}… (entry 3)",
+                              judged.stdout)
+                self.assertNotIn("STAMPED", judged.stdout)
 
     def test_a_token_from_an_authority_the_chain_file_does_not_name_is_invalid(self):
         # The chain file is whom the operator trusts: a token signed by
@@ -1187,6 +1769,32 @@ class JudgedStampTest(unittest.TestCase):
         self.assertIn("stamp not judged: no --authority-chain FILE given",
                       result.stdout)
         self.assertRegex(result.stdout, r"(?m)^VALID$")
+
+    def test_the_authority_a_row_names_prints_escaped(self):
+        # #349: the name is the writer's note, printed as testimony, and
+        # escaped like every other field of the row.
+        self.stamp()
+        self.rewrite_row(authority=HOSTILE)
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        assert_printed_escaped(self, result.stdout,
+                               f"(the record names {SHOWN}, testimony)")
+        self.assertEqual(result.stdout.splitlines()[-1], "VALID")
+
+    def test_a_row_naming_no_authority_says_so_in_words(self):
+        self.stamp()
+        (row,) = rows_of(self.sidecar)
+        del row["authority"]
+        self.sidecar.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("signed this head under its own clock (the record "
+                      "names no authority) — the time inside", result.stdout)
+        self.assertNotIn("None", result.stdout)
 
     def test_the_stored_reply_is_what_the_authority_sent(self):
         # Verbatim: the bytes in the sidecar are the bytes openssl wrote,
@@ -1487,7 +2095,8 @@ class OutlivedCertificateTest(unittest.TestCase):
 
         out = result.stdout
         self.assertEqual(result.returncode, 3, out + result.stderr)
-        self.assertIn(f"STAMP-INVALID: head {self.head[:12]}… (entry 2)", out)
+        self.assertIn(f"{INVALID_ROW_1}head {self.head[:12]}… (entry 2)",
+                      out)
         self.assertIn("as of the time the token states", out)
         self.assertNotIn("not judged", out)
         self.assertNotRegex(out, r"(?m)^VALID$")
@@ -1510,7 +2119,8 @@ class OutlivedCertificateTest(unittest.TestCase):
 
         out = result.stdout
         self.assertEqual(result.returncode, 3, out + result.stderr)
-        self.assertIn(f"STAMP-INVALID: head {self.head[:12]}… (entry 2)", out)
+        self.assertIn(f"{INVALID_ROW_1}head {self.head[:12]}… (entry 2)",
+                      out)
         self.assertIn("the time the token states could not be read", out)
         self.assertNotIn("not judged", out)
         self.assertNotRegex(out, r"(?m)^VALID$")
@@ -1528,7 +2138,7 @@ class OutlivedCertificateTest(unittest.TestCase):
 
         out = result.stdout
         self.assertEqual(result.returncode, 3, out + result.stderr)
-        self.assertIn(f"STAMP-INVALID: head {newer[:12]}… (entry 3)", out)
+        self.assertIn(f"{INVALID_ROW_1}head {newer[:12]}… (entry 3)", out)
         self.assertNotIn("not judged", out)
         self.assertNotRegex(out, r"(?m)^VALID$")
 
@@ -1911,6 +2521,41 @@ class ScanStampTest(unittest.TestCase):
                          {"step": "stamp", "ts": refused_at,
                           "outcome": "the authority answered status 2 "
                                      "(rejection)"})
+
+    def test_a_row_holding_no_token_or_no_proof_is_no_departure(self):
+        # #370: `left` counts a stamp row only when `stamp` would take it
+        # for a token, and an anchor row only when it is the shape of
+        # one, so the panel never says a head left by a row that holds
+        # nothing: {"kind":"stamp","head":H,"ts":...,"response":5} once
+        # read as "last left ... (stamped)".
+        planted = {}
+        for number, response in enumerate(NO_GRANTED_REPLY):
+            log = make_chain(self.root / "alpha" / "receipts",
+                             f"sess-token-{number}")
+            self.write_rows(log, [{"kind": "stamp", "head": chain_head(log),
+                                   "n": 2, "ts": ago(60),
+                                   "response": response}])
+            planted[f"sess-token-{number}"] = response
+        for number, fields in enumerate(({"proof": 5}, {},
+                                         {"proof": "not base64!"},
+                                         {"proof": "AAAA", "calendar": 7})):
+            log = make_chain(self.root / "alpha" / "receipts",
+                             f"sess-proof-{number}")
+            with open(str(log) + ".anchors.jsonl", "a",
+                      encoding="utf-8") as out:
+                out.write(json.dumps({"kind": "anchor",
+                                      "head": chain_head(log), "n": 2,
+                                      "ts": ago(60), **fields}) + "\n")
+            planted[f"sess-proof-{number}"] = fields
+
+        result = run_scan(self.root, env=isolated_env(home_outside(self)))
+
+        self.assertNotIn("Traceback", result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        for session, row in planted.items():
+            with self.subTest(session=session, row=row):
+                (chain,) = sessions[("alpha", session)]
+                self.assertEqual(chain["left"], {"ts": None, "via": None})
 
 
 if __name__ == "__main__":

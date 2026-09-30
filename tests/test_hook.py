@@ -417,13 +417,17 @@ class HookTest(unittest.TestCase):
         self.assertEqual(verify.stdout.strip(), "VALID")
 
     def test_malformed_stdin_errors_cleanly(self):
+        # The last two are JSON a reader cannot hold: an integer past
+        # the digit limit, and nesting past the recursion limit (#331).
         for bad in ("not json at all", '["a", "list"]', "",
-                    b"\xff\xfe not utf-8 \x80"):
+                    b"\xff\xfe not utf-8 \x80",
+                    '{"session_id": "s", "n": ' + "1" * 5000 + "}",
+                    "[" * 100000 + "]" * 100000):
             result = run_hook(bad, cwd=self.workdir)
 
             # EX_DATAERR (ADR-0037); never 2, which Claude Code reads as
             # "block the session" (docs/HOOK.md).
-            self.assertEqual(result.returncode, 65, repr(bad))
+            self.assertEqual(result.returncode, 65, repr(bad)[:40])
             self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(list(self.workdir.iterdir()), [])
 

@@ -51,7 +51,8 @@ from urllib.parse import urlsplit
 # supervisor.py — the three constants must agree (the suite says so).
 # FORMAT_VERSION is the frozen receipt format of the chain files it
 # keeps (SPEC §2.1).
-TOOL_VERSION = "0.9.0"
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+TOOL_VERSION = "0.10.0"
 FORMAT_VERSION = "0.1"
 
 DEFAULT_PORT = 8790
@@ -63,6 +64,7 @@ HEADS_FILE = "heads.jsonl"
 # delimited entries exactly as they sit in the chain file; the content
 # type says which. A chain batch names its file in one header.
 HEAD_TYPE = "application/json"
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 CHAIN_TYPE = "application/x-ndjson"
 CHAIN_HEADER = "X-Loxodonta-Chain"
 
@@ -104,6 +106,7 @@ DEADLINE_SECONDS = float(os.environ.get("RECEIVER_DEADLINE_SECONDS", 60))
 # hand-edited token file that would not make a clean URL is replaced.
 TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+")
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 
 
@@ -229,6 +232,7 @@ def receipt_of(line):
     return n, digest
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def split_lines(data):
     """The lines of a chain's or a sidecar's bytes, by the one rule every
     reader keeps (SPEC §1, #299): a line is the bytes before each `\\n`,
@@ -241,7 +245,7 @@ def split_lines(data):
     after the last `\\n`, when there are any, are a line too: the torn
     tail a crash leaves, which the walk names. Written the same way in
     loxodonta.py, supervisor.py and receiver.py, which never import one
-    another; tests/test_suite_shape.py holds the copies equal."""
+    another; tools/twin_check.py holds the copies equal."""
     lines = data.split(b"\n")
     if lines[-1] == b"":
         lines.pop()
@@ -497,17 +501,12 @@ class Door(BaseHTTPRequestHandler):
         """Put the lines on disk: None once they are there (nothing to
         write counts), else the (status, reason) refusing them. Called
         holding `appending`, and answering nothing itself, so a sender
-        slow to read its answer never holds the lock.
-
-        Past a cap is 507 Insufficient Storage, not 413. The request is
-        well formed and inside the body cap; it is this receiver's
-        storage that has no room for it, which is what 507 says (RFC
-        4918), and 413 stays the one answer for a body too large to take
-        at all, so the sender's failure line tells the two apart. A
-        refusal writes nothing and trims nothing: the receiver only adds.
-
-        A disk that refuses is a 500 with the reason. Either way the
-        sender's memo never advances over bytes that did not land."""
+        slow to read its answer never holds the lock. Past a cap is 507
+        Insufficient Storage (RFC 4918), not 413, which stays the answer
+        for a body too large to take at all, so the sender's failure
+        line tells the two apart; a disk that refuses is a 500. A
+        refusal writes nothing and trims nothing, so the sender's memo
+        never advances over bytes that did not land."""
         if not lines:
             return None
         server = self.server
@@ -623,11 +622,12 @@ def cmd_serve(args):
 
 # --- The command line ----------------------------------------------------------
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def checkout_commit(home):
-    """The short commit of the checkout `home` sits in, or "unknown" —
-    the recorder's own version fact (ADR-0015, ADR-0022). Local git
-    only: a version is a label on the file, never a channel to fetch a
-    newer one."""
+    """The short commit of the git checkout `home` sits in, or "unknown"
+    when git cannot say: no git on this machine, no checkout around the
+    file, or a question that failed. Local git only: a version is a
+    label on the file, never a channel to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
@@ -637,29 +637,35 @@ def checkout_commit(home):
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def version_line(prog, home):
+    """Three identities on one line: tool, format, commit (ADR-0022)."""
+    return (f"{prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
+            f"commit {checkout_commit(home)})")
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class VersionAction(argparse.Action):
-    """`--version`, answered only when asked: tool, format, commit."""
+    """`--version`, answered only when asked: the commit is one git
+    question, and no other command pays for it."""
 
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None):
         home = os.path.dirname(os.path.abspath(__file__))
-        print(f"{parser.prog} {TOOL_VERSION} (format {FORMAT_VERSION}, "
-              f"commit {checkout_commit(home)})")
+        print(version_line(parser.prog, home))
         parser.exit()
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def speak_utf8():
-    """Write stdout and stderr in UTF-8, whatever encoding the console
-    dealt (#294). Windows hands a piped stdout its ANSI code page, cp1252,
-    which has no CJK and no emoji: one such character in a receipt killed
-    the verb mid-output with UnicodeEncodeError, and a hook reading
-    through a pipe got nothing. The text printed is unchanged; only its
-    bytes are. UTF-8 carries every character but a lone surrogate (a file
-    name that did not decode), which backslashreplace prints as its
-    escape rather than crash on. A stream without `reconfigure` (None
-    under pythonw, or one an embedder swapped in) is left as it is."""
+    """Write stdout and stderr in UTF-8, whatever the console dealt
+    (#294): Windows hands a pipe cp1252, where one CJK character or
+    emoji in a receipt killed the verb mid-output. Only the bytes change,
+    never the text; a lone surrogate prints as its backslash escape. A
+    stream without `reconfigure` (None under pythonw, or one an embedder
+    swapped in) is left as it is."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
@@ -679,10 +685,14 @@ def mebibytes(text):
     return value
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class UsageParser(argparse.ArgumentParser):
-    """argparse, with usage errors on an exit of their own, as the other
-    two files have it: a wrong flag exits 64, never a number a script
-    could mistake for something the receiver said."""
+    """argparse, with usage errors on an exit of their own. A wrong flag, a
+    missing argument, or a malformed value exits 64 instead of argparse's
+    stock 2, so no exit a script reads as an answer is ever an argparse
+    error (ADR-0026 ruling 7). The message is argparse's, unchanged, on
+    stderr. Subparsers inherit this class, so every command speaks the
+    same number."""
 
     def error(self, message):
         self.print_usage(sys.stderr)

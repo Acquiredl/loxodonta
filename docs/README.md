@@ -19,6 +19,7 @@ Every page in this folder, sorted by what you came for: running loxodonta, check
 - [ANCHORING.md](ANCHORING.md): how a chain's latest hash is committed to Bitcoin through OpenTimestamps, and what that does and does not prove.
 - [TOPOLOGY.md](TOPOLOGY.md): where each piece runs, what each place holds, and what a verdict checked there is worth.
 - [OWASP.md](OWASP.md): a first draft walking the OWASP Top 10 for LLM Applications, entry by entry: where loxodonta helps, where not.
+- [CONTROLS.md](CONTROLS.md): the security controls a reviewer checks, each mapped to the mechanism that bears on it and to what is left to the deployment.
 - [GLOSSARY.md](GLOSSARY.md): the project's vocabulary, and the words it deliberately refuses to use.
 
 ## Project
@@ -29,4 +30,5 @@ Every page in this folder, sorted by what you came for: running loxodonta, check
 - [EXPERIMENTS.md](EXPERIMENTS.md): what was actually tested behind the README's claims about agents using the chain, with protocol and numbers.
 - [TOUR.md](TOUR.md): a guided reading of `loxodonta.py`, top to bottom, explaining what the code does and why.
 - [TOUR-SUPERVISOR.md](TOUR-SUPERVISOR.md): the same guided reading for `supervisor.py`, the tool that watches and reads the receipts.
+- [TWINS.md](TWINS.md): every rule written in more than one of the three scripts, which never import each other, with where each copy lives and why.
 - [The ADRs](../adrs/README.md): every decision that is hard to reverse, with its status.
