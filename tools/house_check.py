@@ -7,7 +7,8 @@ reads first. This script is where those rules live as code, next to the
 vocabulary they enforce, so the rules cannot drift from the documents
 that state them (issue #123, PRD #120). Issue #241 added three more: the
 tool's old name, the synonym table, and the code pass (each below).
-Stdlib only, like everything here.
+Issue #338 added the words the controls page refuses. Stdlib only, like
+everything here.
 
     python tools/house_check.py            # every tracked Markdown file,
                                            # and the tool files (below)
@@ -198,6 +199,23 @@ EM_DASH = "\u2014"
 # decisions made under the old name and are not rewritten.
 QUOTES_THE_PAST = {"HISTORY.md", "TOUR.md", "TOUR-SUPERVISOR.md"}
 
+# The controls page (issue #338): a mapping, never an attestation
+# (DIRECTION section 6). A word that says a control is achieved is a
+# conclusion about somebody's deployment, so on that page these fail with
+# no refutation form: "not compliant" there still reads as a verdict.
+# Matched by file name, like the front door.
+ATTESTATION_PAGES = {"CONTROLS.md"}
+ATTESTATION_WORDS = [
+    r"satisfies",
+    r"satisfied",
+    r"compliant",
+    r"compliance with",
+    r"meets",
+]
+CHECK_MARKS = "[✓✔☑]"     # a check mark, heavy or boxed
+ATTESTATION_NOTE = (" -> this page maps mechanisms to controls; whether a "
+                    "deployment achieves one is its assessor's to say")
+
 # A fenced code block opens and closes on a line of backticks or tildes.
 FENCE = r"\s*(?:```|~~~)"
 
@@ -255,6 +273,11 @@ def markdown_findings(path, line, fenced):
     if front_door:
         for match in re.finditer(EM_DASH, line):
             yield "em-dash", FAIL, match, ""
+    if path.name in ATTESTATION_PAGES:
+        for match in each_word(ATTESTATION_WORDS, line):
+            yield "attestation", FAIL, match, ATTESTATION_NOTE
+        for match in re.finditer(CHECK_MARKS, line):
+            yield "attestation", FAIL, match, ATTESTATION_NOTE
     if judged_for_old_name(path):
         spans = code_spans(line, fenced)
         for match in re.finditer(OLD_COMMAND, line):
