@@ -597,9 +597,10 @@ class TwinCheckTest(unittest.TestCase):
         self.edit("supervisor.py", POINTER + "\ndef is_chain_record(",
                   POINTER + "\n# A note.\n" + POINTER
                   + "\ndef is_chain_record(")
-        stale = self.text("supervisor.py").split("\n").index(POINTER) + 1
-        expected = self.text("supervisor.py").replace(
-            POINTER + "\n# A note.\n" + POINTER, "# A note.\n" + POINTER)
+        text = self.text("supervisor.py")
+        stale = text[:text.index(POINTER + "\n# A note.")].count("\n") + 1
+        expected = text.replace(POINTER + "\n# A note.\n" + POINTER,
+                                "# A note.\n" + POINTER)
         done = self.check()
         self.assertEqual(done.returncode, 1, done.stdout)
         self.assertIn(f"the pointer on line {stale} of supervisor.py is "
