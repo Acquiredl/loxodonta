@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- `tools/twin_check.py --write` no longer breaks a file where a line ending in a backslash runs on into a copy, or gives a traceback on a NUL byte under Python 3.9 to 3.11, and a rewritten copy keeps each line's own ending. A comment put in below a pointer no longer leaves two: `--write` moves it, and `--check` fails on a stale one (#354).
+
 ## [0.10.0] - 2026-09-29
 
 The 0.9.x foundation. Every sidecar row now names its kind, and a row of a kind the verifier does not know is named and never judged (ADR-0038). The SPEC states every rule the verifier applies, the sidecars in section 9 and the package in section 10, beside one list of what the design cannot claim. Every rule written in more than one script is declared in `docs/TWINS.md` and held equal by `tools/twin_check.py`, and the conformance vectors grow from 35 to 72. `docs/CONTROLS.md` maps the mechanisms to the controls they bear on, as a mapping and never an attestation. The fixes came out of the round's reviews and a code walk, most of them one line in a sidecar or a manifest that could stop a scan or paint a verdict. Two verdict words are new, `ANCHOR-UNKNOWN-KIND` and `STAMP-UNKNOWN-KIND`, and move no exit code; the existing words and exit codes are unchanged, and a line about one sidecar row now names the row. The receipt format stays at `0.1`.
