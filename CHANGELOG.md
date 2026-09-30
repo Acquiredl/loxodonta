@@ -12,7 +12,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
-- `tools/twin_check.py --write` no longer breaks a file where a line ending in a backslash runs on into a copy, or gives a traceback on a NUL byte under Python 3.9 to 3.11, and a rewritten copy keeps each line's own ending. A comment put in below a pointer no longer leaves two: `--write` moves it, and `--check` fails on a stale one (#354).
+- `tools/twin_check.py` no longer ends in a traceback on a NUL byte, and `--write` no longer breaks a file at a backslash continuation or changes a line's ending. `--check` fails on a stale pointer, which `--write` takes off (#354).
 
 ## [0.10.0] - 2026-09-29
 
