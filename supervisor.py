@@ -300,8 +300,18 @@ def write_whole(path, text):
     on every platform, like write_lf. A file that already exists keeps
     its permission bits; a new one keeps mkstemp's owner-only ones. A
     path that is a symbolic link is written through, so the link stays
-    a link."""
+    a link. A folder, a pipe or a device at the name is refused, an
+    OSError in `open_regular`'s words, and left as the writer put it,
+    for the next look to name again (#386)."""
     path = os.path.realpath(path)
+    try:
+        mode = os.stat(path).st_mode
+    except FileNotFoundError:
+        mode = stat.S_IFREG
+    if stat.S_ISDIR(mode):
+        raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+    if not stat.S_ISREG(mode):
+        raise OSError(errno.EINVAL, NOT_REGULAR, path)
     folder = os.path.dirname(path)
     fd, temp = tempfile.mkstemp(dir=folder, suffix=".tmp",
                                 prefix=os.path.basename(path) + ".")
@@ -337,6 +347,31 @@ def write_whole(path, text):
         raise
 
 
+def read_whole(path):
+    """The text of a file the supervisor reads whole, from the one file
+    `open_regular` opened: FileNotFoundError when there is none, and an
+    OSError naming why when what is there is not a file. Its own memory
+    and a drawer's project record sit in the writer's reach, and a pipe
+    at one's name would hold every look that read it (#386)."""
+    with open_regular(path) as f:
+        return f.read().decode("utf-8")
+
+
+def not_a_file(path):
+    """`open_regular`'s words when a folder, a pipe or a device stands at
+    `path`; None for a file, for nothing, and for a file this user may
+    not open, which each reader here answers as it always has."""
+    problem = file_problem(path)
+    return problem if problem in (NOT_A_FOLDER, NOT_REGULAR) else None
+
+
+def memory_unread(path, what, why):
+    """The note for a memory file that is not a file: read as absent,
+    and never written over, so it stays for the next look to name."""
+    return (f"{Path(path).name} cannot be read as {what}: {why} — nothing "
+            "is read from it, and nothing is written over it")
+
+
 # --- Baseline -----------------------------------------------------------------
 # The tripwire's memory (GLOSSARY: Baseline): every chain's last-seen
 # head, kept beside what it watches — the store's home in store mode
@@ -363,9 +398,10 @@ def read_baseline(path):
     """The remembered heads and the keeper's attempt times, plus a note
     when the file could not be read. An unreadable memory is reported
     and replaced, never repaired and never trusted — this look simply
-    remembers afresh."""
+    remembers afresh. A folder or a pipe at its name is named and left
+    as it is, since `write_whole` refuses to write over one (#386)."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_whole(path))
         chains = data["chains"]
         if not all(isinstance(known, dict) and "head" in known
                    and "n" in known for known in chains.values()):
@@ -381,7 +417,10 @@ def read_baseline(path):
     except FileNotFoundError:
         return {}, {}, [], {}, None  # cold start: seed silently
     except (ValueError, KeyError, TypeError, AttributeError,
-            json.JSONDecodeError, OSError):
+            json.JSONDecodeError, OSError) as error:
+        why = getattr(error, "strerror", None)
+        if why in (NOT_A_FOLDER, NOT_REGULAR):
+            return {}, {}, [], {}, memory_unread(path, "a baseline", why)
         return {}, {}, [], {}, ("the baseline could not be read — "
                                 "remembering afresh from this look; it "
                                 "was trusted for nothing either way")
@@ -426,7 +465,7 @@ def read_daybook(path):
     """The remembered days. An unreadable book is replaced, never
     repaired — the same posture the baseline takes."""
     try:
-        days = json.loads(path.read_text(encoding="utf-8"))["days"]
+        days = json.loads(read_whole(path))["days"]
         return days if isinstance(days, dict) else {}
     except (OSError, ValueError, KeyError, TypeError,
             json.JSONDecodeError):
@@ -532,7 +571,7 @@ def read_views(path):
     """The saved views. An unreadable file is replaced, never repaired
     — the same posture the baseline and the day book take."""
     try:
-        views = json.loads(path.read_text(encoding="utf-8"))["views"]
+        views = json.loads(read_whole(path))["views"]
     except (OSError, ValueError, KeyError, TypeError,
             json.JSONDecodeError):
         return []
@@ -2620,7 +2659,10 @@ def read_witness(transcript, calibration):
     first = None
     worded = unworded = 0
     for path in witness_files(transcript):
-        with open(path, encoding="utf-8", errors="replace") as lines:
+        # A transcript is in the writer's reach, so a pipe at its name is
+        # refused rather than waited on (#386).
+        with io.TextIOWrapper(open_regular(path), encoding="utf-8",
+                              errors="replace") as lines:
             for line in lines:
                 try:
                     record = json.loads(line)
@@ -3028,12 +3070,16 @@ def watch_completeness(root, witness, families, everywhere=False,
         try:
             reading = watch_session(transcript, group["by_tool"],
                                     group["last"], now, calibration)
-        except OSError:
+        except OSError as error:
             # A transcript that cannot be read (vanished mid-scan, or a
-            # path that is not a readable file) costs this one session
+            # folder or a pipe where it belongs) costs this one session
             # its watch, never the whole scan. UNWITNESSED says it
-            # honestly: completeness cannot be watched, nothing assumed.
-            add(repo, session, "UNWITNESSED", 0, receipts, spans)
+            # honestly, and why (#386): completeness cannot be watched,
+            # nothing assumed.
+            row = add(repo, session, "UNWITNESSED", 0, receipts, spans)
+            row["note"] = (f"{Path(error.filename or transcript).as_posix()}"
+                           " cannot be read as a transcript: "
+                           f"{error.strerror or error}")
             continue
         # The supervisor locates, verify judges (ADR-0017): a committed
         # session with a living transcript gets the exact ritual command.
@@ -3516,15 +3562,20 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                            "log": relpath, "change": "vanished",
                            "investigate": CHANGE_WORDS["vanished"]})
 
-    write_whole(baseline_path, json.dumps({
-        "purpose": "the supervisor's memory between looks — "
-                   "writer-reachable, trusted for nothing",
-        "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "chains": heads,
-        "keeper": keeper,
-        "calibration": calibration,
-        "sessionend": sessionend,
-    }, indent=2) + "\n")
+    try:
+        write_whole(baseline_path, json.dumps({
+            "purpose": "the supervisor's memory between looks — "
+                       "writer-reachable, trusted for nothing",
+            "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "chains": heads,
+            "keeper": keeper,
+            "calibration": calibration,
+            "sessionend": sessionend,
+        }, indent=2) + "\n")
+    except OSError as error:
+        if error.strerror not in (NOT_A_FOLDER, NOT_REGULAR):
+            raise
+        note = memory_unread(baseline_path, "a baseline", error.strerror)
     if events:
         worst = max(worst, 5)
 
@@ -3569,6 +3620,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     baseline = {"file": baseline_path.as_posix(), "events": events}
     if note:
         baseline["note"] = note
+    shelf = not_a_file(daybook)
     report_note = None
     if store and not repos:
         # An empty store has two unlike causes and this note named only
@@ -3600,6 +3652,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "exit": worst,
         "history": fortnight(days, now),
+        **({"history_note": memory_unread(daybook, "a day book", shelf)}
+           if shelf else {}),
         "baseline": baseline,
         "completeness": completeness,
         "consumption": consumption,
@@ -3684,7 +3738,14 @@ def cmd_adopt(args):
             else:
                 shutil.move(str(sidecar), str(drawer / sidecar.name))
         if marker.exists() and not (drawer / UNLISTED_NAME).exists():
-            shutil.copy2(str(marker), str(drawer / UNLISTED_NAME))
+            try:
+                copy_regular(marker, drawer / UNLISTED_NAME)
+            except OSError as error:
+                # A folder or a pipe in the marker's place is named and
+                # left, never waited on or copied (#386).
+                print(f"left marker {marker.relative_to(root).as_posix()}: "
+                      f"{error.strerror or error} — not copied, so "
+                      f"{drawer.name}/ is listed; unlist it by hand")
         print(f"adopted {line}")
     for log, drawer, _ in refused:
         print(f"refused {log.relative_to(root).as_posix()}: "
@@ -3749,7 +3810,7 @@ def cmd_calibrate(args):
     path = (Path(store_home()) / "baseline.json" if args.root is None
             else Path(args.root).resolve() / BASELINE_NAME)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_whole(path))
     except (OSError, ValueError):
         print(f"error: no readable baseline at {path.as_posix()} — run "
               "`supervisor scan` once so the supervisor stamps its own "
@@ -4090,8 +4151,15 @@ def walk_chain(root, asked):
     if path is None:
         return None
     relpath = path.relative_to(root.resolve()).as_posix()
+    try:
+        raws = read_lines(path)
+    except OSError as error:
+        # A folder or a pipe swapped in after the gate looked (#386).
+        return {"log": relpath, "testimony": TESTIMONY, "lines": [],
+                "refused": f"{relpath} cannot be read as a receipt log: "
+                           f"{error.strerror or error}"}
     lines = []
-    for raw in read_lines(path):
+    for raw in raws:
         try:
             entry = json.loads(raw)
         except (ValueError, RecursionError):
@@ -4251,8 +4319,7 @@ def drawer_name(drawer):
     drawer's own slug — a damaged or missing record degrades the label,
     never the census."""
     try:
-        record = json.loads((Path(drawer) / "project.json").read_text(
-            encoding="utf-8"))
+        record = json.loads(read_whole(Path(drawer) / "project.json"))
         base = os.path.basename(str(record.get("path", "")).rstrip("/\\"))
         return base or Path(drawer).name
     except (OSError, ValueError):
@@ -4296,8 +4363,8 @@ def worktree_drawers(repo):
         return found
     for drawer in drawers:
         try:
-            recorded = json.loads((drawer / "project.json").read_text(
-                encoding="utf-8")).get("path", "")
+            recorded = json.loads(read_whole(drawer / "project.json")).get(
+                "path", "")
         except (OSError, ValueError, AttributeError):
             continue
         spelled = os.path.normcase(str(recorded)).replace(os.sep, "/")
@@ -4551,7 +4618,7 @@ def scan_testimony(repo):
                (repo.parent / BASELINE_NAME, under_repo)]
     for path, covers in sources:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(read_whole(path))
         except (OSError, ValueError):
             continue
         scanned = data.get("scanned")
@@ -6491,7 +6558,12 @@ def run_drill(root, asked):
     log = resolve_chain(root, asked)
     if log is None:
         return None, 1
-    lines = read_lines(log, errors="strict")
+    try:
+        lines = read_lines(log, errors="strict")
+    except OSError as error:
+        # A folder or a pipe swapped in after the gate looked (#386).
+        return {"log": asked, "refused": f"{asked} cannot be read as a "
+                f"receipt log: {error.strerror or error}"}, 1
     if len(lines) < 3:
         return {"log": asked, "refused": "too short to drill — the "
                 "battery plays with middle entries; give it at least "
@@ -7022,9 +7094,14 @@ class Face(BaseHTTPRequestHandler):
             return None
 
     def reply_views(self, views):
-        self.reply(json.dumps({"purpose": VIEWS_PURPOSE,
-                               "views": views}).encode("utf-8"),
-                   "application/json")
+        body = {"purpose": VIEWS_PURPOSE, "views": views}
+        book = self.server.views_path()
+        shelf = not_a_file(book)
+        if shelf:
+            # Nothing was read from it and nothing saved over it (#386).
+            body.update(views=[], note=memory_unread(book, "the saved views",
+                                                     shelf))
+        self.reply(json.dumps(body).encode("utf-8"), "application/json")
 
     def do_POST(self):
         if self.refused_off_machine():
@@ -8877,6 +8954,11 @@ async function openWalker(logPath) {
     report = await response.json();
   } catch (error) {
     entries.textContent = "the walker could not read this chain: " + error;
+    return;
+  }
+  if (report.refused) {
+    entries.textContent = "the walker could not read this chain: " +
+      report.refused;
     return;
   }
   let prevHash = null;
