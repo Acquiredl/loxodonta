@@ -7,7 +7,7 @@ region, under a header of its own, and adds the two lines that run it.
 It understands nothing it copies: a rule lives in loxodonta.py and only
 there, and verifier.py is never edited by hand.
 
-    python tools/build_verifier.py           write verifier.py
+    python tools/build_verifier.py           write verifier.py, if stale
     python tools/build_verifier.py --check   exit 1 if verifier.py is stale
 
 CI runs the check, so a change to the region that did not rebuild the
@@ -63,21 +63,23 @@ def build():
 
 
 def main(argv):
+    if argv not in ([], ["--check"]):
+        print(__doc__, file=sys.stderr)
+        return 64
     text = build()
-    if argv == ["--check"]:
-        # Text mode on both sides, so a checkout's line endings are not
-        # a difference.
-        current = (VERIFIER.read_text(encoding="utf-8")
-                   if VERIFIER.exists() else None)
-        if current != text:
-            print("verifier.py is stale: run python tools/build_verifier.py "
-                  "and commit the result", file=sys.stderr)
-            return 1
+    # Text mode on both sides, so a checkout's line endings are not a
+    # difference. A current copy is left alone rather than rewritten: a
+    # Windows checkout holds it with CRLF, and the same text written back
+    # as LF reads as modified to git status with an empty diff (#389).
+    current = (VERIFIER.read_text(encoding="utf-8")
+               if VERIFIER.exists() else None)
+    if current == text:
         print("verifier.py is current")
         return 0
     if argv:
-        print(__doc__, file=sys.stderr)
-        return 64
+        print("verifier.py is stale: run python tools/build_verifier.py "
+              "and commit the result", file=sys.stderr)
+        return 1
     VERIFIER.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {VERIFIER.name}")
     return 0
