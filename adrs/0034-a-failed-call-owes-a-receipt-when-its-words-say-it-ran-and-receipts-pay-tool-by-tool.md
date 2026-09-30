@@ -1,6 +1,6 @@
 # ADR-0034: A failed call owes a receipt when its words say it ran, and receipts pay tool by tool (ADR-0016 ruling 1 amended)
 
-**Status:** accepted 2026-09-18, built (#239, PR #280); ruling 1's shell clause, ruling 6 and one limit amended 2026-09-30 (#379; see the addendum)
+**Status:** accepted 2026-09-18, built (#239, PR #280); ruling 1's shell clause, ruling 2's price, ruling 6, one limit and two consequences amended 2026-09-30 (#379; see the addendum)
 **Deciders:** Acquiredl
 
 ## Context
@@ -124,7 +124,9 @@ skipped the grace window every receipt gets.
    `ENDED-DEFICIT` after. The ruling takes that price: an alarm on a
    blocked call over a mask on a starved one, the choice ADR-0029 ruling
    5 made, because a harness that fired no hook and a hook an attacker
-   killed leave the same evidence.
+   killed leave the same evidence. *(Amended 2026-09-30, #379: a shell
+   call so blocked or denied now pays the same price. See the addendum
+   below.)*
 3. **A receipt whose line names no tool the transcript shows keeps the
    pooled reading.** A line written by hand with `loxodonta log`, a
    `run` line, another writer's line: it pays the earliest unpaid call
@@ -243,11 +245,14 @@ skipped the grace window every receipt gets.
 - **One wording carries the owed class.** `Exit code N` is documented
   for the event's `error` and only "generally the same text" in the
   transcript. If the harness rewords it, owed failures owe nothing
-  without a sound; the canary is what says so.
+  without a sound; the canary is what says so. *(Amended 2026-09-30,
+  #379: owed failures then may owe, and are paid first. See the
+  addendum below.)*
 - **`toolDenialKind` is not documented.** It only moves a call from
   `may_owe` to owing nothing. If the harness stops writing it, a
   non-shell denial becomes `may_owe`, and ruling 2 then reads it as a
-  false deficit in a session that used that tool.
+  false deficit in a session that used that tool. *(Amended 2026-09-30,
+  #379: any denial, the shell's included. See the addendum below.)*
 - **A session that spans the re-install.** The calibration dates the
   change by the settings file's mtime, clamped between the last
   observation and now (ADR-0016). The harness normally picks up a hook

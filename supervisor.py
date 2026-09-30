@@ -3095,8 +3095,9 @@ def watch_completeness(root, witness, families, everywhere=False,
     if unworded and not sum(reading["worded"] for reading in canary):
         said.append(f"{unworded} failed shell call(s) under the failed-call "
                     "event carried no `Exit code N` line, and no failure "
-                    "here did: a denial or a blocked call reads that way, "
-                    "and so would a harness that reworded its failures, so "
+                    "here did: a denial, a blocked call or the worktree "
+                    "guard's refusal reads that way, and so would a "
+                    "harness that reworded its failures, so "
                     "each may owe a receipt and none is owed one "
                     "(ADR-0034)")
     if said:

@@ -2508,10 +2508,10 @@ class FailedCallWitnessTest(unittest.TestCase):
         rows = self.states(self.scan())
 
         paid, unfired = rows["sess-blocked-paid"], rows["sess-blocked-unfired"]
-        self.assertEqual((paid["tools"], paid["state"], paid["may_owe"]),
-                         (2, "ENDED-CLEAN", 1))
+        self.assertEqual((paid["tools"], paid["state"],
+                          paid.get("may_owe")), (2, "ENDED-CLEAN", 1))
         self.assertEqual((unfired["tools"], unfired["state"],
-                          unfired["deficit"], unfired["may_owe"]),
+                          unfired["deficit"], unfired.get("may_owe")),
                          (2, "ENDED-DEFICIT", 1, 1))
 
     def refusal(self, name, agent, completed, refused):
@@ -2542,7 +2542,7 @@ class FailedCallWitnessTest(unittest.TestCase):
         judged = self.states(self.scan())["sess-refused"]
 
         self.assertEqual((judged["state"], judged["tools"],
-                          judged["receipts"], judged["may_owe"]),
+                          judged["receipts"], judged.get("may_owe")),
                          ("ENDED-CLEAN", 3, 4, 1))
 
     def test_refusals_never_cover_a_receipt_the_shell_lost(self):
@@ -2567,7 +2567,7 @@ class FailedCallWitnessTest(unittest.TestCase):
         judged = self.states(self.scan())["sess-lost"]
 
         self.assertEqual((judged["state"], judged["tools"],
-                          judged["deficit"], judged["may_owe"]),
+                          judged["deficit"], judged.get("may_owe")),
                          ("ENDED-DEFICIT", 5, 1, 3))
 
     def test_a_failed_call_that_may_have_run_is_paid_first(self):
@@ -2658,7 +2658,7 @@ class FailedCallWitnessTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         judged = self.states(result)["sess-reworded"]
         self.assertEqual((judged["tools"], judged["state"],
-                          judged["may_owe"]), (1, "ENDED-CLEAN", 1))
+                          judged.get("may_owe")), (1, "ENDED-CLEAN", 1))
         self.assertIn("1 failed shell call(s)", self.words(result))
         self.assertIn("Exit code N", self.words(result))
         self.assertIn("may owe", self.words(result))
