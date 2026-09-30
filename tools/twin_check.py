@@ -14,22 +14,24 @@ docstring included, under one comment line naming its original.
     ... --root DIR                       work on the files under DIR instead
 
 `--check` fails on a copy whose top-level source differs from its
-original, on a copy without its pointer line, on a name the list
-declares that a file no longer defines, on a stale docs/TWINS.md, on a
-top-level name defined in two of the files that the list does not
-declare, and on an import that binds a name one of the files defines or
-the list declares. The files are read as text, never imported. The
-suite runs the check.
+original, on a copy without its pointer line, on a pointer line not
+directly above a copy, on a name the list declares that a file no longer
+defines, on a stale docs/TWINS.md, on a top-level name defined in two of
+the files that the list does not declare, and on an import that binds a
+name one of the files defines or the list declares. The files are read
+as text, never imported. The suite runs the check.
 
 `--write` replaces each copy's top-level definition with its original's
-text and adds a missing pointer, leaving every other byte of the file as
-it was, line endings included. It never writes the original, and never
-adds a copy a file lacks: it names it and exits 1, since that is the
-list's problem, for a person. It also refuses, and leaves that file as
-it was, any copy whose text in place would take other code with it: a
-definition sharing its first line with other code, in the copy or the
-original; two copies on one line; one statement binding other names
-than its original's; an indent that differs from the original's.
+text, adds a missing pointer and takes off a stale one, leaving every
+other byte of the file as it was, line endings included. It never writes
+the original, and never adds a copy a file lacks: it names it and
+exits 1, since that is the list's problem, for a person. It also
+refuses, and leaves that file as it was, any copy whose text in place
+would take other code with it: a definition sharing its first line with
+other code, in the copy or the original; two copies on one line; one
+statement binding other names than its original's; an indent that
+differs from the original's. It writes no file that would no longer
+parse as Python.
 
 The pointer is the line directly above a copy, below any comment there.
 A run of adjacent copies with nothing else in its block (between blank
@@ -46,6 +48,7 @@ around it, and a name bound as a loop variable, a `with ... as` or an
 """
 
 import ast
+import difflib
 import io
 import re
 import sys
@@ -306,9 +309,13 @@ def top_level(lines, filename):
     text = "\n".join(lines)
     try:
         tree = ast.parse(text, filename=filename)
-    except SyntaxError as error:
-        raise Unreadable(f"{filename} is not readable as Python "
-                         f"({error.msg}, line {error.lineno})")
+    except (SyntaxError, ValueError) as error:
+        # A NUL byte raises ValueError before Python 3.12, and from 3.12
+        # a SyntaxError with no line (#354).
+        reason = getattr(error, "msg", None) or str(error)
+        if getattr(error, "lineno", None):
+            reason += f", line {error.lineno}"
+        raise Unreadable(f"{filename} is not readable as Python ({reason})")
     found, imported = {}, set()
     for node in statements(tree.body):
         if isinstance(node, DEFS):
@@ -394,13 +401,19 @@ def alone_in_its_block(run, lines, comments):
                for n in (above, below))
 
 
-def unpointed(lines, defined, file):
-    """[(twin, name, Definition)] for each copy in `file` whose line
-    directly above is not its pointer. A run of copies alone in its
-    block needs one pointer, over its first; any other copy its own."""
+def pointers(lines, defined, file):
+    """([(twin, name, Definition)] for each copy in `file` whose line
+    directly above is not its pointer, [the number (from 1) of each
+    pointer line that is not directly above a copy]). A run of copies
+    alone in its block needs one pointer, over its first; any other copy
+    its own. A comment put in below a pointer leaves it stale (#354)."""
     copies = copies_in(file)
+    # The original holds no copy and is never written, so a pointer
+    # there is not looked for.
+    if not copies:
+        return [], []
     comments = comment_lines(lines)
-    missing = []
+    missing, placed = [], set()
     for run in runs(defined, file):
         needing = (run[:1] if alone_in_its_block(run, lines, comments)
                    else run)
@@ -410,9 +423,14 @@ def unpointed(lines, defined, file):
                 continue
             seen.add(found)
             above = lines[found.first - 2] if found.first > 1 else ""
-            if above.strip() != pointer(copies[name]):
+            if above.strip() == pointer(copies[name]):
+                placed.add(found.first - 1)
+            else:
                 missing.append((copies[name], name, found))
-    return missing
+    texts = {pointer(twin) for twin in TWINS}
+    stale = [number for number in sorted(comments)
+             if lines[number - 1].strip() in texts and number not in placed]
+    return missing, stale
 
 
 # --- the page -------------------------------------------------------------
@@ -424,7 +442,7 @@ INTRO = """\
 
 The original of every twin is the recorder, `loxodonta.py`, and each copy carries one comment line directly above it that says so. A run of adjacent copies with nothing else in its block shares one line, over its first; any other copy has its own, so a statement without one is not a copy. To change a twin, edit the original in `loxodonta.py`, run `python tools/twin_check.py --write`, which copies it over each copy in place, then `python tools/twin_check.py --check`. When the original lies inside the verifier region, `--write` says so, and `python tools/build_verifier.py` carries it into `verifier.py`. `--write` never adds a copy a file lacks, and never rewrites a copy whose place holds other code (a second statement on its first line, say): it names each and exits 1, leaving that file as it was.
 
-`python tools/twin_check.py --check` fails when a copy differs from its original, when a copy has no line naming its original, when a file no longer defines a name listed here, when this page is stale, when a top-level name is defined in two of the files without being listed here, and when an import binds a name one of the files defines. The suite runs it.
+`python tools/twin_check.py --check` fails when a copy differs from its original, when a copy has no line naming its original, when such a line is not directly above a copy, when a file no longer defines a name listed here, when this page is stale, when a top-level name is defined in two of the files without being listed here, and when an import binds a name one of the files defines. The suite runs it.
 
 A top-level definition is a function or class, from its first decorator, or an assignment to a name (plain, annotated or augmented, or to an item or attribute of it), at the top of a file or inside a top-level `if`, `try`, `with`, `for`, `while` or `match` block. The check compares the definition's text, not the condition or loop around it, and does not see a name bound as a loop variable, by `with ... as` or `except ... as`, or by `global` inside a function.
 
@@ -498,9 +516,14 @@ def problems(root):
                                  f"from {twin.original}, its original: "
                                  f"run python tools/twin_check.py --write")
     for copy in FILES:
-        for twin, name, _ in unpointed(lines[copy], defined[copy], copy):
+        missing, stale = pointers(lines[copy], defined[copy], copy)
+        for twin, name, _ in missing:
             found.append(f"{twin.rule}: {name} in {copy} has no pointer "
                          f"to {twin.original} above it: run python "
+                         "tools/twin_check.py --write")
+        for number in stale:
+            found.append(f"the pointer on line {number} of {copy} is stale, "
+                         "not directly above a copy: run python "
                          "tools/twin_check.py --write")
     for different in DIFFERENT:
         for file in different.files:
@@ -580,12 +603,24 @@ def ending(endings, at):
 
 def replace(lines, endings, found, text):
     """Put `text` where the Definition `found` stands. Whatever followed
-    it on its last line stays, as does that line's ending."""
+    it on its last line stays, as does that line's ending. Every other
+    line takes the ending of the line it matches or replaces, and a line
+    added the ending of the line before it, so a file whose endings are
+    already mixed keeps each line's own (#354)."""
     tail = lines[found.last - 1].encode("utf-8")[found.end:].decode("utf-8")
     new = text.split("\n")
     new[-1] += tail
-    new_endings = ([ending(endings, found.first)] * (len(new) - 1)
-                   + [endings[found.last - 1]])
+    old = lines[found.first - 1:found.last]
+    old_endings = endings[found.first - 1:found.last]
+    new_endings = []
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    for _, i1, i2, j1, j2 in matcher.get_opcodes():
+        for j in range(j1, j2):
+            i = min(i1 + j - j1, i2 - 1) if i2 > i1 else max(i1 - 1, 0)
+            # Only the file's last line has no ending, and a line of the
+            # copy moved off it needs one.
+            new_endings.append(old_endings[i] or ending(endings, found.first))
+    new_endings[-1] = old_endings[-1]
     lines[found.first - 1:found.last] = new
     endings[found.first - 1:found.last] = new_endings
 
@@ -679,12 +714,31 @@ def write_copies(root):
         if refused:
             found += refused + [f"{copy} is left as it was"]
             continue
-        missing = unpointed(lines, here, copy)
-        for twin, name, at in reversed(missing):
-            add_pointer(lines, endings, twin, at)
+        missing, stale = pointers(lines, here, copy)
+        # From the bottom up again: a pointer goes in above each copy
+        # missing one, and each stale one comes out.
+        changes = [(at.first, twin, at) for twin, _, at in missing]
+        changes += [(number, None, None) for number in stale]
+        for number, twin, at in sorted(changes, key=lambda change: change[0],
+                                       reverse=True):
+            if twin:
+                add_pointer(lines, endings, twin, at)
+            else:
+                del lines[number - 1], endings[number - 1]
+        if missing:
+            # A line ending in a backslash runs on into the next, so a
+            # pointer put between it and a copy breaks the file (#354).
+            try:
+                top_level(lines, copy)
+            except Unreadable as error:
+                above = ", ".join(name for _, name, _ in missing)
+                found += [f"{error} once a pointer goes above {above}",
+                          f"{copy} is left as it was"]
+                continue
         done += [f"wrote {name} in {copy}" for name in names]
         done += [f"added the pointer above {name} in {copy}"
                  for _, name, _ in missing]
+        done += [f"took off a stale pointer in {copy}" for _ in stale]
         for name in names:
             twin = copies_in(copy)[name]
             if twin.original == ORIGINAL and in_the_fence(

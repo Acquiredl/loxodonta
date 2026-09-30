@@ -14,6 +14,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - A pipe where a chain belongs no longer hangs `verify`, `head`, `supervisor scan`, `package` or `export`, and `log --file` names a folder as one on every platform (#374, #270's directory half).
 - The witness reads a shell failure without an `Exit code N` line as one that may owe a receipt, so a worktree-guard refusal's receipt no longer reads as surplus or hides a lost one (ADR-0034, #379).
+- `tools/twin_check.py` no longer ends in a traceback on a NUL byte, and `--write` no longer breaks a file at a backslash continuation or changes a line's ending. `--check` fails on a stale pointer, which `--write` takes off (#354).
 
 ## [0.10.0] - 2026-09-29
 
