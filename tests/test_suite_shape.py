@@ -569,19 +569,20 @@ class TwinCheckTest(unittest.TestCase):
         split = '    lines = data.split(b"\\n")\n'
         added = "    # The bytes after the last newline are a line too.\n"
         self.edit("loxodonta.py", split, split + added)
-        first = ("    \"\"\"The lines of a chain's or a sidecar's bytes, by "
-                 "the one rule every")
-        popped = "        lines.pop()"
+        # The copy's first line ends LF and the line above the gained one
+        # CRLF, so the gained line's ending shows which it took.
+        above, popped = split[:-1], "        lines.pop()"
 
         def crlf(block):
-            for line in (first, popped):
+            for line in (above, popped):
                 block = block.replace(line + "\n", line + "\r\n")
             return block
 
         mixed = self.in_split_lines(self.text("supervisor.py"), crlf)
         self.assertEqual(mixed.count("\r\n"), 2)
         expected = self.in_split_lines(
-            mixed, lambda block: block.replace(split, split + added))
+            mixed, lambda block: block.replace(
+                above + "\r\n", above + "\r\n" + added[:-1] + "\r\n"))
         (self.root / "supervisor.py").write_bytes(mixed.encode("utf-8"))
 
         done = self.write()
