@@ -12,7 +12,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
-- The witness reads a Bash or PowerShell failure whose result does not open with `Exit code N` as a call that may owe a receipt, like any other tool's failure, where it read it as a command that never ran (ADR-0034, addendum of 2026-09-30). The desktop app's worktree guard refuses some commands in a worktree-isolated subagent in words of its own, and a hook still fires for the refusal, so each refusal's receipt paid no call and read as surplus, and inside one tool that surplus covered receipts lost for good. On the author's store four sessions ended `ENDED-SURPLUS`: three now read `ENDED-CLEAN`, and the fourth `ENDED-DEFICIT`, four `Bash` receipts missing from a moment the machine could not spawn a process. The price is ADR-0034 ruling 2's, now for the shell too: a shell call blocked or denied without its marker reads as a deficit in a session that used the shell otherwise. The canary on the `Exit code N` wording now counts those calls (#379).
+- The witness reads a shell failure without an `Exit code N` line as one that may owe a receipt, so a worktree-guard refusal's receipt no longer reads as surplus or hides a lost one (ADR-0034, #379).
 
 ## [0.10.0] - 2026-09-29
 
