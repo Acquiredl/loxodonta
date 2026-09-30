@@ -76,7 +76,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.10.0"
+TOOL_VERSION = "0.10.1"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -164,23 +164,31 @@ def split_lines(data):
 
 
 def read_lines(path, errors="replace"):
-    """A chain's lines as text, split by `split_lines`. A byte that is
-    not UTF-8 reads as U+FFFD by default: the readers here display and
-    count, and the verify walk is where such a line gets its name.
-    Sidecars are read by the copied `read_log` instead, which keeps the
-    bad byte so `read_sidecar_records` names the line unreadable; read
-    here, `{"head":"ab\\xff"}` would parse as a head."""
-    with open(path, "rb") as f:
+    """A chain's lines as text, split by `split_lines`, from the one file
+    `open_regular` opened, so a pipe where a chain belongs is refused
+    rather than waited on (#374). A byte that is not UTF-8 reads as
+    U+FFFD by default: the readers here display and count, and the
+    verify walk is where such a line gets its name. Sidecars are read by
+    the copied `sidecar_lines` instead, which keeps the bad byte so
+    `read_sidecar_records` names the line unreadable; read here,
+    `{"head":"ab\\xff"}` would parse as a head."""
+    with open_regular(path) as f:
         return [line.decode("utf-8", errors) for line in split_lines(f.read())]
 
 
 def read_entries(log):
     """Every line of a chain that still reads as an entry — the census's
     parsing half, display and diffing only (ADR-0005). Damage is not
-    judged here: a torn or garbled line is simply not remembered; the
-    verify walk is where damage gets its name."""
+    judged here: a torn or garbled line is simply not remembered, and a
+    chain that cannot be read as a file, a folder or a pipe in its
+    place, holds nothing to remember (#374); the verify walk is where
+    damage gets its name."""
+    try:
+        lines = read_lines(log)
+    except OSError:
+        return []
     entries = []
-    for line in read_lines(log):
+    for line in lines:
         try:
             entry = json.loads(line)
         except (ValueError, RecursionError):
@@ -946,13 +954,16 @@ def upgrade_due(last_attempt, now):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def read_log(path):
     """All lines of the receipt log, split by `split_lines`, for every
-    reader and writer here; FileNotFoundError if it doesn't exist. A
-    byte that is not UTF-8 arrives as a lone surrogate (surrogateescape)
-    instead of ending the whole read in a traceback: the walk refuses
-    the one line it sits on by name (SPEC §6), and `tail_entry` calls a
-    tail holding one damaged. The recorder only ever writes ASCII lines,
-    so no line it wrote is read any differently."""
-    with open(path, "rb") as f:
+    reader and writer here, read from the one file `open_regular`
+    opened: FileNotFoundError if it doesn't exist, and an OSError naming
+    why when what is there is not a file, so a pipe where the log
+    belongs is refused rather than waited on (#374). A byte that is not
+    UTF-8 arrives as a lone surrogate (surrogateescape) instead of
+    ending the whole read in a traceback: the walk refuses the one line
+    it sits on by name (SPEC §6), and `tail_entry` calls a tail holding
+    one damaged. The recorder only ever writes ASCII lines, so no line
+    it wrote is read any differently."""
+    with open_regular(path) as f:
         return [line.decode("utf-8", "surrogateescape")
                 for line in split_lines(f.read())]
 
@@ -1026,14 +1037,21 @@ NOT_REGULAR = "it is not a regular file"
 def open_regular(path):
     """`path` opened for reading, as a binary file, when it is a regular
     file; FileNotFoundError when nothing is there, and an OSError naming
-    why when something else is: a folder, a pipe or a device. A sidecar
-    is in the writer's reach, and `mkdir` or `mkfifo` puts one of those
-    where it belongs in one command (#364). The open never waits, since
-    an ordinary open of a pipe waits for a writer that may never come,
-    and the type is asked of the open file, so nothing can be swapped in
-    between the question and the read."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-                 | getattr(os, "O_BINARY", 0))
+    why when something else is: a folder, a pipe or a device. A chain
+    and its sidecars are in the writer's reach, and `mkdir` or `mkfifo`
+    puts one of those where they belong in one command (#364, #374). The
+    open never waits, since an ordinary open of a pipe waits for a
+    writer that may never come, and the type is asked of the open file,
+    so nothing can be swapped in between the question and the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_BINARY", 0))
+    except PermissionError:
+        # Windows refuses to open a folder at all, as a denied
+        # permission; it is named a folder here as everywhere else (#270).
+        if os.path.isdir(path):
+            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+        raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
@@ -1058,9 +1076,6 @@ def file_problem(path):
     except FileNotFoundError:
         return None
     except OSError as error:
-        # Windows refuses to open a folder at all, as a denied permission.
-        if os.path.isdir(path):
-            return NOT_A_FOLDER
         return error.strerror or str(error)
 
 
@@ -2536,7 +2551,12 @@ def witness_files(transcript):
 # for a Bash or PowerShell command that ran and exited, in the event's
 # `error`, which is "generally the same text" the transcript records.
 # `<tool_use_error>` wraps an input rejected before it ran, documented to
-# fire neither PreToolUse nor the failed-call event.
+# fire neither PreToolUse nor the failed-call event. A shell failure
+# without `Exit code N` is not thereby a call that never ran: the desktop
+# app's worktree guard refuses a command in words of its own, and a hook
+# fires for the refusal (#379, the addendum of 2026-09-30). So it may
+# owe, like any other tool's failure; SHELL_TOOLS only names the calls
+# the canary in watch_completeness() counts.
 RAN_AND_FAILED = re.compile(r"Exit code -?\d+")
 REJECTED = "<tool_use_error>"
 SHELL_TOOLS = ("Bash", "PowerShell")
@@ -2555,15 +2575,14 @@ def result_text(block):
 
 def failed_call_owes(record, block, name, epoch):
     """What one failed call owes under the coverage in force at its time
-    (ADR-0034): "owed", "may_owe", "unworded", or None. Only "owed" is
-    owed; "unworded" owes nothing and is counted for the canary. None
-    where the failed-call event was not wired for its tool (#239), or
-    where the transcript says the call never ran (`toolDenialKind`).
-    "owed" where the result begins `Exit code N`, whatever the tool; a
-    Bash or PowerShell failure without that line ran no command
-    ("unworded"); any other tool's failure may owe, since the
-    transcript words one that fired the event and one a PreToolUse hook
-    blocked alike."""
+    (ADR-0034): "owed", "may_owe", or None. None where the failed-call
+    event was not wired for its tool (#239), or where the transcript
+    says the call never ran (`<tool_use_error>`, `toolDenialKind`).
+    "owed" where the result begins `Exit code N`, whatever the tool: a
+    command that ran. Any other failure may owe, a Bash or PowerShell
+    failure without that line among them (#379), since the transcript
+    words one that fired the event and one a PreToolUse hook blocked
+    alike."""
     if not owes_receipt(name, failures_of(epoch)):
         return None
     text = result_text(block)
@@ -2571,7 +2590,7 @@ def failed_call_owes(record, block, name, epoch):
         return None
     if RAN_AND_FAILED.match(text):
         return "owed"
-    return "unworded" if name in SHELL_TOOLS else "may_owe"
+    return "may_owe"
 
 
 def read_witness(transcript, calibration):
@@ -2588,9 +2607,11 @@ def read_witness(transcript, calibration):
     timestamp-less metadata records never do, or an old deficit comes
     back as an immortal live alarm (#85). `first` is the earliest
     working call, read before the coverage filter (ADR-0029 asks when
-    the session started working). `worded` and `unworded` count the
-    failed calls read as owed and the failed shell calls with no `Exit
-    code N` line, for the canary in watch_completeness()."""
+    the session started working). `worded` counts the failed calls read
+    as owed, and `unworded` the failed Bash and PowerShell calls read as
+    `may_owe` because no `Exit code N` line opened them (#379); both are
+    counted for the canary in watch_completeness(), and neither moves
+    the reading."""
     names = {}
     owed = []
     may_owe = {}
@@ -2648,8 +2669,8 @@ def read_witness(transcript, calibration):
                     owes = failed_call_owes(record, found, name, epoch)
                     if owes == "may_owe":
                         may_owe.setdefault(name, []).append(when)
-                    elif owes == "unworded":
-                        unworded += 1
+                        if name in SHELL_TOOLS:
+                            unworded += 1
                     if owes != "owed":
                         continue
                     worded += 1
@@ -2670,12 +2691,15 @@ def read_witness(transcript, calibration):
 def reconcile(owed, may_owe, receipts, witnessed):
     """Pair the witness with the chain tool by tool (ADR-0034). `owed`
     is [(timestamp, tool)] in time order; `may_owe` holds by tool the
-    timestamps of the failed calls that may owe; `receipts` counts by
-    tool, as tool_of names it. A receipt pays only calls of its own
-    tool, the calls that may owe first and then the owed ones, earliest
-    first, so a receipt that may be a failed call's never covers one an
-    owed call lost. The false deficit that costs is dated and bounded by
-    the floor of ADR-0034 ruling 2. A receipt naming no tool the
+    timestamps of the failed calls that may owe, a shell failure with no
+    `Exit code N` line among them (#379); `receipts` counts by tool, as
+    tool_of names it. A receipt pays only calls of its own tool, the
+    calls that may owe first and then the owed ones, earliest first, so
+    a receipt that may be a failed call's never covers one an owed call
+    lost. The false deficit that costs is dated and bounded by the floor
+    of ADR-0034 ruling 2. Pairing is by count, not by action line, so
+    within one tool a receipt the witness saw no call for still covers a
+    lost one (#379, and classify()). A receipt naming no tool the
     transcript shows (a hand-written `loxodonta log` line) pays the
     earliest unpaid call of any tool. Returns (deficit, surplus, the
     timestamp the deficit dates from, or None)."""
@@ -2716,8 +2740,12 @@ def classify(tools, deficit, surplus, ended, idle, deficit_age, silent):
     lost receipts never arrive later, so a session keeps its scar until
     end-of-session reconciliation reports it as evidence. Reconciled
     tool by tool (ADR-0034), one session can hold a deficit in one tool
-    and a surplus in another, and the deficit wins: a surplus never
-    stands a missing receipt down."""
+    and a surplus in another, and the deficit wins: a surplus in one
+    tool never stands a missing receipt in another down. Within one tool
+    it still can: receipts pay by count, so a receipt the witness saw no
+    call for covers a lost one of the same tool, and the tool reads only
+    the difference. Pairing by action line would close that class
+    (#379, option (c)); it is not built."""
     if ended:
         if deficit:
             return "ENDED-DEFICIT"
@@ -3072,17 +3100,21 @@ def watch_completeness(root, witness, families, everywhere=False,
 
     # The canary for the one wording the witness leans on (ADR-0034): a
     # harness that stopped opening a failed command with `Exit code N`
-    # would turn every owed failure into one that owes nothing, silently.
-    # When failed shell calls carried no such line and not one failure
-    # read as owed, one sentence says so. Context, never an alarm: a
-    # denial without its marker reads the same way.
+    # would turn every owed failure into one that may owe, silently, and
+    # a failed command's lost receipt would then be named only beside
+    # other calls of the shell. When failed shell calls carried no such
+    # line and not one failure read as owed, one sentence says so.
+    # Context, never an alarm: a denial or a refusal without its marker
+    # reads the same way (#379).
     unworded = sum(reading["unworded"] for reading in canary)
     if unworded and not sum(reading["worded"] for reading in canary):
         said.append(f"{unworded} failed shell call(s) under the failed-call "
                     "event carried no `Exit code N` line, and no failure "
-                    "here did: a denial or a blocked call reads that way, "
-                    "and so would a harness that reworded its failures, so "
-                    "none of them is owed a receipt (ADR-0034)")
+                    "here did: a denial, a blocked call or the worktree "
+                    "guard's refusal reads that way, and so would a "
+                    "harness that reworded its failures, so "
+                    "each may owe a receipt and none is owed one "
+                    "(ADR-0034)")
     if said:
         watch["calibration"] = {"epochs": calibration,
                                 "words": "; ".join(said)}
@@ -5328,7 +5360,9 @@ def write_raw_archive(report, ordinal, path):
     ordinals, no project.json: the one export that carries command
     lines, written only after the sender said yes. A raw archive, not a
     package: no manifest, no witness, nothing a recipient verifies as a
-    set (ADR-0026 ruling 9 keeps the two names apart)."""
+    set (ADR-0026 ruling 9 keeps the two names apart). A chain or a
+    sidecar that is not a file, a pipe in its place say, is named on
+    stderr and left out (#374)."""
     import zipfile
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         for repo in report.get("repos", []):
@@ -5336,10 +5370,31 @@ def write_raw_archive(report, ordinal, path):
             for sess in repo.get("sessions", []):
                 for chain in sess.get("chains", []):
                     log = Path(chain["log"])
-                    archive.write(log, f"{label}/{log.name}")
                     sidecar = log.with_name(log.name + ".anchors.jsonl")
-                    if sidecar.is_file():
-                        archive.write(sidecar, f"{label}/{sidecar.name}")
+                    for one in (log, sidecar):
+                        name = f"{label}/{one.name}"
+                        try:
+                            archive_regular(archive, one, name)
+                        except OSError as error:
+                            if one is sidecar and isinstance(
+                                    error, FileNotFoundError):
+                                continue  # an anchors sidecar is optional
+                            print(f"not archived: {name}: "
+                                  f"{error.strerror or error}",
+                                  file=sys.stderr)
+
+
+def archive_regular(archive, path, name):
+    """The file at `path` into the zip `archive` as `name`, dated and
+    moded as `ZipFile.write` would, read from the one file
+    `open_regular` opened: a pipe checked and then read would wait, and
+    a device would be read without end (#374)."""
+    import zipfile
+    with open_regular(path) as f:
+        status = os.fstat(f.fileno())
+        info = zipfile.ZipInfo(name, time.localtime(status.st_mtime)[:6])
+        info.external_attr = (status.st_mode & 0xFFFF) << 16
+        archive.writestr(info, f.read(), zipfile.ZIP_DEFLATED)
 
 
 def issue_body(data, gist_url, raw):
@@ -5567,6 +5622,15 @@ def chain_listing(log):
             # (ADR-0032 ruling 4): both are evidence about this chain,
             # and `verify-package` judges each with the chain it names.
             "stamps": stamps.name if stamps.exists() else None}
+
+
+def copy_regular(source, target):
+    """`source`'s bytes into a new file at `target`, read from the one
+    file `open_regular` opened: every file a package copies is in the
+    writer's reach, and a device swapped in after the check would be
+    copied without end (#374)."""
+    with open_regular(source) as read, open(target, "wb") as written:
+        shutil.copyfileobj(read, written)
 
 
 def artifact_listing(path):
@@ -5935,13 +5999,13 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
             # for byte.
             listing = chain_listing(log)
             listings[session].append(listing)
-            shutil.copyfile(log, stage / log.name)
+            copy_regular(log, stage / log.name)
             written.append(log.name)
             for beside in ("anchors", "stamps"):
                 if not listing[beside]:
                     continue
-                shutil.copyfile(log.with_name(listing[beside]),
-                                stage / listing[beside])
+                copy_regular(log.with_name(listing[beside]),
+                             stage / listing[beside])
                 written.append(listing[beside])
                 artifacts.append(artifact_listing(stage / listing[beside]))
         if transcripts is not None:
@@ -5954,7 +6018,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
             name = f"transcript-{session}.jsonl"
             if session in transcripts:
                 try:
-                    shutil.copyfile(transcripts[session], stage / name)
+                    copy_regular(transcripts[session], stage / name)
                 except OSError:
                     # Named by the scan, unreadable now; nothing partial
                     # stays behind, and the README says which it was.
@@ -5978,7 +6042,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
                 + (", not to the path in `project.json`"
                    if record.exists() else ""))
     if record.exists():
-        shutil.copyfile(record, stage / "project.json")
+        copy_regular(record, stage / "project.json")
         written.append("project.json")
         artifacts.append(artifact_listing(stage / "project.json"))
     witness = witness_snapshot(report, unit, sessions)
@@ -6172,6 +6236,17 @@ def split_refusal(session, chains):
     return True
 
 
+def swapped_out(error):
+    """The refusal when a file `package` checked stopped being one before
+    it was copied: a chain swapped for a pipe or a folder in that window
+    (#374). Named as the check names it, and nothing written."""
+    name = os.path.basename(str(error.filename)) if error.filename \
+        else "a file"
+    print(f"error: {name} cannot be packed: {error.strerror or error}; "
+          "nothing written", file=sys.stderr)
+    return 1
+
+
 def unpackageable(sessions, with_transcripts):
     """Why a package of these sessions would never verify, or None. The
     verifier refuses a manifest naming anything but a bare name, a chain
@@ -6251,6 +6326,13 @@ def cmd_package(args):
         if split_refusal(session, everywhere.get(session, sessions[session])):
             return 1
     for log in (log for logs in sessions.values() for log in logs):
+        # A folder or a pipe where the chain belongs is no chain to
+        # carry (#374).
+        problem = file_problem(log)
+        if problem is not None:
+            print(f"error: {log.name} cannot be packed: {problem}; "
+                  "nothing written", file=sys.stderr)
+            return 1
         for suffix in (".anchors.jsonl", ".stamps.jsonl"):
             # A package carries a chain's sidecars as they stand, and a
             # folder or a pipe in one's place cannot be carried (#364).
@@ -6305,8 +6387,13 @@ def cmd_package(args):
     out.parent.mkdir(parents=True, exist_ok=True)
     if args.folder:
         out.mkdir()
-        written = write_package(unit, sessions, drawer, report, out, packed,
-                                seals, transcripts)
+        try:
+            written = write_package(unit, sessions, drawer, report, out,
+                                    packed, seals, transcripts)
+        except OSError as error:
+            # Swapped after the check above (#374): no half-written folder.
+            shutil.rmtree(out)
+            return swapped_out(error)
         if package_too_large(out, written):
             shutil.rmtree(out)
             return 1
@@ -6318,8 +6405,12 @@ def cmd_package(args):
             shutil.rmtree(out)
     else:
         with tempfile.TemporaryDirectory() as staging:
-            written = write_package(unit, sessions, drawer, report,
-                                    Path(staging), packed, seals, transcripts)
+            try:
+                written = write_package(unit, sessions, drawer, report,
+                                        Path(staging), packed, seals,
+                                        transcripts)
+            except OSError as error:
+                return swapped_out(error)
             if package_too_large(Path(staging), written):
                 return 1
             sealed, fingerprint, problem = seal_package(

@@ -1,4 +1,4 @@
-"""A sidecar path that is not a file (#364).
+"""A sidecar path that is not a file (#364), and a chain path (#374).
 
 The sidecars sit beside their chain, in the writer's reach, and
 `mkdir <log>.anchors.jsonl` is one command. Every reader and every
@@ -7,6 +7,10 @@ pipe, as a sidecar that cannot be read (SPEC section 9.1): a judge names
 it as evidence that does not verify, the scan goes on to the next chain,
 and a verb that would append to it says why it could not. Never a
 traceback, never a stopped scan, never a hang.
+
+The chain itself is in the same reach. `verify` and `head` call a chain
+path that is not a regular file no input, the scan names it and goes on,
+and `package` and `export` never copy it (SPEC section 6).
 
 Every test drives the public CLI: the recorder's verbs, its hook at
 SessionEnd, the supervisor's scan and keeper, against the fake calendar,
@@ -21,6 +25,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 
 # This folder on sys.path, so the sibling imports below also resolve
@@ -28,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env  # noqa: E402
+from test_export import OTHER_SESSION, ExportBase  # noqa: E402
 from test_package_anchor import SESSION, AnchoredStoreCase  # noqa: E402
 from test_publish import PublishBase  # noqa: E402
 from test_stamp import start_authority  # noqa: E402
@@ -36,11 +42,13 @@ from test_supervisor import (chains_by_session, home_outside,  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
+SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 SUFFIXES = (".anchors.jsonl", ".stamps.jsonl", ".published.jsonl")
 FOLDER = "it is a folder, not a file"
 PIPE = "it is not a regular file"
 NOT_EVIDENCE = "evidence that does not verify is not evidence"
+NO_CHAIN = "cannot be read as a receipt log"
 # A pipe opened for reading waits for a writer that never comes, so a
 # reader that opened one would hang: every run here is bounded.
 BOUND = 60
@@ -147,6 +155,52 @@ class JudgedNotAFileTest(unittest.TestCase):
                               f"read as a sidecar: {PIPE}", result.stdout)
 
 
+class ChainNotAFileTest(unittest.TestCase):
+    """`verify` and `head` with a folder, a pipe or a device where the
+    chain belongs (#374): no input, exit 66, the reason on stderr and
+    nothing on stdout, as for a missing chain (SPEC section 6). The chain
+    is in the writer's reach as its sidecars are, so a pipe there is
+    never waited on and a device never read."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.log = self.workdir / "receipts.jsonl"
+
+    def assert_no_input(self, why):
+        for verb in ("verify", "head"):
+            with self.subTest(verb=verb):
+                result = run_receipts(verb, cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 66,
+                                 result.stdout + result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"receipts.jsonl {NO_CHAIN}: {why}",
+                              result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_folder_where_the_chain_belongs_is_no_input(self):
+        # In a folder's words on every platform, though Windows refuses
+        # to open one as a denied permission (#270).
+        self.log.mkdir()
+
+        self.assert_no_input(FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+    def test_a_pipe_where_the_chain_belongs_is_never_waited_on(self):
+        os.mkfifo(self.log)
+
+        self.assert_no_input(PIPE)
+
+    @unittest.skipUnless(hasattr(os, "symlink")
+                         and os.path.exists("/dev/zero"), "no /dev/zero here")
+    def test_a_device_where_the_chain_belongs_is_never_read(self):
+        os.symlink("/dev/zero", self.log)
+
+        self.assert_no_input(PIPE)
+
+
 class PackagedNotAFileTest(AnchoredStoreCase):
     """`verify-package` with a folder where a sidecar belongs: beside a
     chain it is that chain's ANCHOR-INVALID or STAMP-INVALID, which the
@@ -218,7 +272,8 @@ class PackagedNotAFileTest(AnchoredStoreCase):
 
 class PackedNotAFileTest(AnchoredStoreCase):
     """`supervisor package`, the issuer's side, with a folder where a
-    chain's sidecar belongs."""
+    chain's sidecar belongs, or a folder or a pipe where the chain does
+    (#374)."""
 
     def test_package_refuses_a_chain_whose_sidecar_is_a_folder(self):
         # The issuer's side: the sidecar travels as it stands, and a
@@ -241,6 +296,35 @@ class PackedNotAFileTest(AnchoredStoreCase):
                               packed.stderr)
                 self.assertFalse(out.exists())
                 sidecar.rmdir()
+
+    def assert_chain_refused(self, why):
+        # Bounded: a package that waited on the pipe would fail here.
+        out = self.work / "refused"
+        packed = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "package", SESSION,
+             "--witness", str(self.witness), "--folder", "--out", str(out)],
+            capture_output=True, encoding="utf-8", errors="replace",
+            env={**self.env, "PYTHONIOENCODING": "utf-8"},
+            cwd=str(self.work), timeout=BOUND)
+
+        self.assertEqual(packed.returncode, 1, packed.stdout + packed.stderr)
+        self.assertNotIn("Traceback", packed.stderr)
+        self.assertIn(f"{self.chain.name} cannot be packed: {why}",
+                      packed.stderr)
+        self.assertFalse(out.exists())
+
+    def test_package_refuses_a_folder_where_the_chain_belongs(self):
+        self.chain.unlink()
+        self.chain.mkdir()
+
+        self.assert_chain_refused(FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+    def test_package_refuses_a_pipe_where_the_chain_belongs(self):
+        self.chain.unlink()
+        os.mkfifo(self.chain)
+
+        self.assert_chain_refused(PIPE)
 
 
 class WrittenNotAFileTest(unittest.TestCase):
@@ -415,11 +499,62 @@ class ReferencedPipeTest(unittest.TestCase):
                 later.unlink()
 
 
+class ReferencedFolderTest(unittest.TestCase):
+    """A file reference that is a folder, the directory half of #270:
+    `log --file` and `run --file` refuse it in a folder's words, exit 66,
+    on every platform, where Windows said `Permission denied`; `verify
+    --files` names it and goes on to its verdict."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        run_receipts("init", cwd=self.workdir)
+        (self.workdir / "sub").mkdir()
+
+    def assert_refused(self, result):
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertIn(f"sub: {FOLDER}", result.stderr)
+        self.assertNotIn("Permission denied", result.stderr)
+        self.assertNotIn("Errno", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_log_refuses_a_folder(self):
+        result = run_receipts("log", "--actor", "agent", "--action", "x",
+                              "--file", "sub", cwd=self.workdir)
+
+        self.assert_refused(result)
+
+    def test_run_refuses_a_folder_after_the_command_ran(self):
+        result = run_receipts("run", "--actor", "agent", "--file", "sub",
+                              "--", sys.executable, "-c", "pass",
+                              cwd=self.workdir)
+
+        self.assert_refused(result)
+        self.assertIn("receipt not written for", result.stderr)
+
+    def test_verify_files_names_a_reference_that_became_a_folder(self):
+        later = self.workdir / "later"
+        later.write_text("hi", encoding="utf-8")
+        run_receipts("log", "--actor", "agent", "--action", "x",
+                     "--file", "later", cwd=self.workdir)
+        later.unlink()
+        later.mkdir()
+
+        result = run_receipts("verify", "--files", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("MISSING (not a readable file here): later",
+                      result.stdout)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "VALID")
+
+
 class SessionEndNotAFileTest(PublishBase):
     """The hook at SessionEnd, wired for every step that writes a
     sidecar (the head, the chain, the stamp, the anchor), with a folder
-    in the place of all three: quiet and exit 0, as it is on every
-    other failure (ADR-0024), and the folders untouched."""
+    in the place of all three, or of the chain itself: quiet and exit 0,
+    as it is on every other failure (ADR-0024), and the folders
+    untouched."""
 
     def test_every_session_end_step_passes_a_folder_by_quietly(self):
         calendar = start_calendar(self)
@@ -481,12 +616,43 @@ class SessionEndNotAFileTest(PublishBase):
         for pipe in pipes:
             self.assertTrue(stat.S_ISFIFO(os.lstat(pipe).st_mode), pipe.name)
 
+    def assert_quiet_where_the_chain_belongs(self, make):
+        # The seal reads the chain before it writes, and a chain that
+        # cannot be read is one more failure passed by quietly (#374);
+        # no head is read, so nothing is sent.
+        calendar = start_calendar(self)
+        authority = start_authority(self)
+        self.transcript.write_bytes(b"page one\n")
+        self.tool_call()
+        chain = self.chain()
+        chain.unlink()
+        make(chain)
+
+        result = self.session_end(
+            "--publish", self.receiver.url,
+            "--publish-chain", self.receiver.url,
+            "--stamp", authority.url,
+            "--anchor", "--calendar", calendar.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.receiver.received, [])
+
+    def test_the_session_end_passes_a_folder_where_the_chain_belongs(self):
+        self.assert_quiet_where_the_chain_belongs(Path.mkdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+    def test_the_session_end_passes_a_pipe_where_the_chain_belongs(self):
+        self.assert_quiet_where_the_chain_belongs(os.mkfifo)
+
 
 class ScannedNotAFileTest(unittest.TestCase):
     """`supervisor scan`, and its keepers, with a folder or a pipe where
     a sidecar belongs: the scan finishes, every chain is in the report,
     a folder of proofs is the chain's ANCHOR-INVALID, and a keeper that
-    cannot write says so in its note."""
+    cannot write says so in its note. A folder or a pipe where a chain
+    belongs is in the report too, with no verdict and verify's reason
+    (#374)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -540,6 +706,40 @@ class ScannedNotAFileTest(unittest.TestCase):
             ("alpha", "sess-aaaa")]
         self.assertEqual(chain["verdict"], "ANCHOR-INVALID")
 
+    def assert_named(self, make, why):
+        hollow = self.root / "alpha" / "receipts" / "receipts-sess-hollow.jsonl"
+        hollow.parent.mkdir(parents=True)
+        make(hollow)
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+
+        # Bounded: a scan that waited on the pipe would fail here.
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "scan",
+             "--root", str(self.root), "--json"],
+            capture_output=True, encoding="utf-8", timeout=BOUND,
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+
+        self.assertNotIn("Traceback", result.stderr)
+        # No verdict, verify's refusal as the evidence, and the refused
+        # rung, 4, as for an empty chain; the other chain is judged.
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (chain,) = sessions[("alpha", "sess-hollow")]
+        self.assertEqual(chain["verdict"], "NO-VERDICT")
+        self.assertEqual(chain["exit"], 4)
+        self.assertEqual(chain["entries"], 0)
+        self.assertTrue(any(f"{NO_CHAIN}: {why}" in line
+                            for line in chain["detail"]), chain["detail"])
+        (other,) = sessions[("beta", "sess-bbbb")]
+        self.assertEqual(other["verdict"], "VALID")
+
+    def test_a_folder_where_a_chain_belongs_is_named_and_the_scan_goes_on(self):
+        self.assert_named(Path.mkdir, FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+    def test_a_pipe_where_a_chain_belongs_is_named_and_never_waited_on(self):
+        self.assert_named(os.mkfifo, PIPE)
+
     def test_the_anchor_keeper_says_the_proof_could_not_be_written(self):
         calendar = start_calendar(self)
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
@@ -566,6 +766,38 @@ class ScannedNotAFileTest(unittest.TestCase):
         self.assertIn("the memo could not be written", note)
         self.assertIn("the memo could not be read", note)
         self.assertEqual(len(receiver.received), 1, "the head went once")
+
+
+@unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+class ExportedPipeTest(ExportBase):
+    """`supervisor export --raw` with a pipe where a chain belongs, and
+    one where another chain's anchors sidecar does (#374): each is named
+    on stderr and left out of the raw archive, never waited on, and the
+    rest is written byte for byte."""
+
+    def test_the_raw_archive_names_a_pipe_and_leaves_it_out(self):
+        other = self.drawer() / f"receipts-{OTHER_SESSION}.jsonl"
+        other.unlink()
+        os.mkfifo(other)
+        sidecar = self.log.with_name(self.log.name + ".anchors.jsonl")
+        os.mkfifo(sidecar)
+
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "export",
+             "--witness", str(self.witness), "--raw"],
+            input=b"yes\n", capture_output=True, cwd=str(self.work),
+            env={**self.env, "PYTHONIOENCODING": "utf-8"}, timeout=BOUND)
+        err = result.stderr.decode("utf-8", "replace")
+
+        self.assertEqual(result.returncode, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn(f"not archived: repo-1/{other.name}: {PIPE}", err)
+        self.assertIn(f"not archived: repo-1/{sidecar.name}: {PIPE}", err)
+        (archive,) = self.work.glob("loxodonta-export-*-raw.zip")
+        with zipfile.ZipFile(archive) as raw:
+            self.assertEqual(raw.namelist(), [f"repo-1/{self.log.name}"])
+            self.assertEqual(raw.read(f"repo-1/{self.log.name}"),
+                             self.log.read_bytes())
 
 
 if __name__ == "__main__":

@@ -530,6 +530,108 @@ class TwinCheckTest(unittest.TestCase):
         done = self.check()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
+    def test_a_pointer_that_would_split_a_continued_line_is_refused(self):
+        # A trailing backslash joins the line above to the copy's, so a
+        # pointer put between them would leave a file that does not
+        # parse (#354).
+        self.edit("receiver.py", POINTER + "\nEX_USAGE = 64  #",
+                  "if True: \\\nEX_USAGE = 64  #")
+        before = self.snapshot()
+        self.assert_refused(self.write(),
+                            "receiver.py is not readable as Python (",
+                            "once a pointer goes above EX_USAGE",
+                            "receiver.py is left as it was")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_nul_byte_is_named_and_nothing_written(self):
+        # Before Python 3.12 a NUL byte raises ValueError, and from 3.12
+        # a SyntaxError with no line (#354).
+        self.append("supervisor.py", "\n_NUL = 1  # \x00\n")
+        before = self.snapshot()
+        for done in (self.check(), self.write()):
+            self.assert_refused(done, "supervisor.py is not readable as "
+                                      "Python (source code string cannot "
+                                      "contain null bytes")
+            self.assertNotIn("None", done.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def in_split_lines(self, text, change):
+        """`text`, the supervisor's, with `change` made to its copy of
+        split_lines alone."""
+        start = text.index("def split_lines(")
+        end = text.index("\n\n\n", start)
+        return text[:start] + change(text[start:end]) + text[end:]
+
+    def test_write_keeps_each_line_its_own_ending(self):
+        # A file whose endings a tool already mixed: each line of a
+        # rewritten copy keeps its own ending, and a line the original
+        # gained takes the ending of the line above it (#354).
+        split = '    lines = data.split(b"\\n")\n'
+        added = "    # The bytes after the last newline are a line too.\n"
+        self.edit("loxodonta.py", split, split + added)
+        # The copy's first line ends LF and the line above the gained one
+        # CRLF, so the gained line's ending shows which it took.
+        above, popped = split[:-1], "        lines.pop()"
+
+        def crlf(block):
+            for line in (above, popped):
+                block = block.replace(line + "\n", line + "\r\n")
+            return block
+
+        mixed = self.in_split_lines(self.text("supervisor.py"), crlf)
+        self.assertEqual(mixed.count("\r\n"), 2)
+        expected = self.in_split_lines(
+            mixed, lambda block: block.replace(
+                above + "\r\n", above + "\r\n" + added[:-1] + "\r\n"))
+        (self.root / "supervisor.py").write_bytes(mixed.encode("utf-8"))
+
+        done = self.write()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("wrote split_lines in supervisor.py", done.stdout)
+        self.assertEqual(self.text("supervisor.py"), expected)
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_pointer_not_directly_above_a_copy_is_stale(self):
+        # What --write left before #354 when a comment went in between a
+        # pointer and its copy: a second pointer, the first one stale.
+        self.edit("supervisor.py", POINTER + "\ndef is_chain_record(",
+                  POINTER + "\n# A note.\n" + POINTER
+                  + "\ndef is_chain_record(")
+        text = self.text("supervisor.py")
+        stale = text[:text.index(POINTER + "\n# A note.")].count("\n") + 1
+        expected = text.replace(POINTER + "\n# A note.\n" + POINTER,
+                                "# A note.\n" + POINTER)
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn(f"the pointer on line {stale} of supervisor.py is "
+                      "stale, not directly above a copy", done.stderr)
+
+        written = self.write()
+        self.assertEqual(written.returncode, 0, written.stderr)
+        self.assertIn("took off a stale pointer in supervisor.py",
+                      written.stdout)
+        self.assertEqual(self.text("supervisor.py"), expected)
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_comment_below_a_pointer_puts_the_pointer_below_it(self):
+        self.edit("supervisor.py", POINTER + "\ndef is_chain_record(",
+                  POINTER + "\n# A note.\ndef is_chain_record(")
+        expected = self.text("supervisor.py").replace(
+            POINTER + "\n# A note.\n", "# A note.\n" + POINTER + "\n")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("is_chain_record in supervisor.py has no pointer",
+                      done.stderr)
+        self.assertIn("of supervisor.py is stale", done.stderr)
+
+        written = self.write()
+        self.assertEqual(written.returncode, 0, written.stderr)
+        self.assertEqual(self.text("supervisor.py"), expected)
+        done = self.check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

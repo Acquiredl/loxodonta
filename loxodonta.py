@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.10.0"
+TOOL_VERSION = "0.10.1"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -103,13 +103,16 @@ def split_lines(data):
 
 def read_log(path):
     """All lines of the receipt log, split by `split_lines`, for every
-    reader and writer here; FileNotFoundError if it doesn't exist. A
-    byte that is not UTF-8 arrives as a lone surrogate (surrogateescape)
-    instead of ending the whole read in a traceback: the walk refuses
-    the one line it sits on by name (SPEC §6), and `tail_entry` calls a
-    tail holding one damaged. The recorder only ever writes ASCII lines,
-    so no line it wrote is read any differently."""
-    with open(path, "rb") as f:
+    reader and writer here, read from the one file `open_regular`
+    opened: FileNotFoundError if it doesn't exist, and an OSError naming
+    why when what is there is not a file, so a pipe where the log
+    belongs is refused rather than waited on (#374). A byte that is not
+    UTF-8 arrives as a lone surrogate (surrogateescape) instead of
+    ending the whole read in a traceback: the walk refuses the one line
+    it sits on by name (SPEC §6), and `tail_entry` calls a tail holding
+    one damaged. The recorder only ever writes ASCII lines, so no line
+    it wrote is read any differently."""
+    with open_regular(path) as f:
         return [line.decode("utf-8", "surrogateescape")
                 for line in split_lines(f.read())]
 
@@ -120,9 +123,10 @@ def missing_log(path):
 
 
 def unreadable_log(path, error):
-    """A log that is there and cannot be read as a file: a folder, or a
-    file this user may not open. No input, like a missing one (ADR-0037);
-    a line that cannot be read is another matter, and the walk names it."""
+    """A log that is there and cannot be read as a file: a folder, a
+    pipe or a device, or a file this user may not open. No input, like a
+    missing one (ADR-0037); a line that cannot be read is another
+    matter, and the walk names it."""
     print(f"error: {path} cannot be read as a receipt log: "
           f"{error.strerror or error}", file=sys.stderr)
     return EX_NOINPUT
@@ -803,14 +807,21 @@ NOT_REGULAR = "it is not a regular file"
 def open_regular(path):
     """`path` opened for reading, as a binary file, when it is a regular
     file; FileNotFoundError when nothing is there, and an OSError naming
-    why when something else is: a folder, a pipe or a device. A sidecar
-    is in the writer's reach, and `mkdir` or `mkfifo` puts one of those
-    where it belongs in one command (#364). The open never waits, since
-    an ordinary open of a pipe waits for a writer that may never come,
-    and the type is asked of the open file, so nothing can be swapped in
-    between the question and the read."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-                 | getattr(os, "O_BINARY", 0))
+    why when something else is: a folder, a pipe or a device. A chain
+    and its sidecars are in the writer's reach, and `mkdir` or `mkfifo`
+    puts one of those where they belong in one command (#364, #374). The
+    open never waits, since an ordinary open of a pipe waits for a
+    writer that may never come, and the type is asked of the open file,
+    so nothing can be swapped in between the question and the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_BINARY", 0))
+    except PermissionError:
+        # Windows refuses to open a folder at all, as a denied
+        # permission; it is named a folder here as everywhere else (#270).
+        if os.path.isdir(path):
+            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+        raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
@@ -834,9 +845,6 @@ def file_problem(path):
     except FileNotFoundError:
         return None
     except OSError as error:
-        # Windows refuses to open a folder at all, as a denied permission.
-        if os.path.isdir(path):
-            return NOT_A_FOLDER
         return error.strerror or str(error)
 
 
@@ -3607,7 +3615,8 @@ def seal_session(log, transcript_path):
         with ChainLock(log):
             try:
                 last = tail_entry(read_log(log))
-            except FileNotFoundError:
+            except OSError:
+                # Gone, or a folder or a pipe in its place (#374).
                 return 0
             if last is None or last.get("action") == action:
                 # A damaged tail cannot anchor a seal, and a session
@@ -4083,7 +4092,7 @@ def entries_on_disk(log):
     line that is not an entry, a torn tail or damage, because the
     receiver refuses a batch whole when any line is not one: the torn
     line stays here as the damage `verify` reports."""
-    with open(log, "rb") as f:
+    with open_regular(log) as f:
         raw = f.read()
     entries = []
     for line in split_lines(raw):
@@ -4312,7 +4321,7 @@ def damaged_tail_after(log, entries):
     `entries_on_disk` reads by, so a chain with Windows line endings
     ends cleanly too."""
     try:
-        with open(log, "rb") as f:
+        with open_regular(log) as f:
             lines = split_lines(f.read())
     except OSError:
         return None
