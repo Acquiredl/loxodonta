@@ -12,7 +12,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
-- A pipe where a chain belongs no longer hangs `verify`, `head`, `supervisor scan`, `package` or `export`. Every reader opens a chain without waiting and asks what it opened: a folder, a pipe or a device there is no input to `verify` and `head` (exit 66, the reason on stderr), a chain with no verdict in the scan, which goes on to the rest, refused by `package`, and named and left out of `export --raw`. With it, #270's directory half: `log --file` and `run --file` refuse a folder as `it is a folder, not a file` on every platform, where Windows said `Permission denied` (#374).
+- A pipe where a chain belongs no longer hangs `verify`, `head`, `supervisor scan`, `package` or `export`, and `log --file` names a folder as one on every platform (#374, #270's directory half).
 
 ## [0.10.0] - 2026-09-29
 
