@@ -164,23 +164,31 @@ def split_lines(data):
 
 
 def read_lines(path, errors="replace"):
-    """A chain's lines as text, split by `split_lines`. A byte that is
-    not UTF-8 reads as U+FFFD by default: the readers here display and
-    count, and the verify walk is where such a line gets its name.
-    Sidecars are read by the copied `read_log` instead, which keeps the
-    bad byte so `read_sidecar_records` names the line unreadable; read
-    here, `{"head":"ab\\xff"}` would parse as a head."""
-    with open(path, "rb") as f:
+    """A chain's lines as text, split by `split_lines`, from the one file
+    `open_regular` opened, so a pipe where a chain belongs is refused
+    rather than waited on (#374). A byte that is not UTF-8 reads as
+    U+FFFD by default: the readers here display and count, and the
+    verify walk is where such a line gets its name. Sidecars are read by
+    the copied `sidecar_lines` instead, which keeps the bad byte so
+    `read_sidecar_records` names the line unreadable; read here,
+    `{"head":"ab\\xff"}` would parse as a head."""
+    with open_regular(path) as f:
         return [line.decode("utf-8", errors) for line in split_lines(f.read())]
 
 
 def read_entries(log):
     """Every line of a chain that still reads as an entry — the census's
     parsing half, display and diffing only (ADR-0005). Damage is not
-    judged here: a torn or garbled line is simply not remembered; the
-    verify walk is where damage gets its name."""
+    judged here: a torn or garbled line is simply not remembered, and a
+    chain that cannot be read as a file, a folder or a pipe in its
+    place, holds nothing to remember (#374); the verify walk is where
+    damage gets its name."""
+    try:
+        lines = read_lines(log)
+    except OSError:
+        return []
     entries = []
-    for line in read_lines(log):
+    for line in lines:
         try:
             entry = json.loads(line)
         except (ValueError, RecursionError):
@@ -946,13 +954,16 @@ def upgrade_due(last_attempt, now):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def read_log(path):
     """All lines of the receipt log, split by `split_lines`, for every
-    reader and writer here; FileNotFoundError if it doesn't exist. A
-    byte that is not UTF-8 arrives as a lone surrogate (surrogateescape)
-    instead of ending the whole read in a traceback: the walk refuses
-    the one line it sits on by name (SPEC §6), and `tail_entry` calls a
-    tail holding one damaged. The recorder only ever writes ASCII lines,
-    so no line it wrote is read any differently."""
-    with open(path, "rb") as f:
+    reader and writer here, read from the one file `open_regular`
+    opened: FileNotFoundError if it doesn't exist, and an OSError naming
+    why when what is there is not a file, so a pipe where the log
+    belongs is refused rather than waited on (#374). A byte that is not
+    UTF-8 arrives as a lone surrogate (surrogateescape) instead of
+    ending the whole read in a traceback: the walk refuses the one line
+    it sits on by name (SPEC §6), and `tail_entry` calls a tail holding
+    one damaged. The recorder only ever writes ASCII lines, so no line
+    it wrote is read any differently."""
+    with open_regular(path) as f:
         return [line.decode("utf-8", "surrogateescape")
                 for line in split_lines(f.read())]
 
@@ -1026,14 +1037,21 @@ NOT_REGULAR = "it is not a regular file"
 def open_regular(path):
     """`path` opened for reading, as a binary file, when it is a regular
     file; FileNotFoundError when nothing is there, and an OSError naming
-    why when something else is: a folder, a pipe or a device. A sidecar
-    is in the writer's reach, and `mkdir` or `mkfifo` puts one of those
-    where it belongs in one command (#364). The open never waits, since
-    an ordinary open of a pipe waits for a writer that may never come,
-    and the type is asked of the open file, so nothing can be swapped in
-    between the question and the read."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-                 | getattr(os, "O_BINARY", 0))
+    why when something else is: a folder, a pipe or a device. A chain
+    and its sidecars are in the writer's reach, and `mkdir` or `mkfifo`
+    puts one of those where they belong in one command (#364, #374). The
+    open never waits, since an ordinary open of a pipe waits for a
+    writer that may never come, and the type is asked of the open file,
+    so nothing can be swapped in between the question and the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_BINARY", 0))
+    except PermissionError:
+        # Windows refuses to open a folder at all, as a denied
+        # permission; it is named a folder here as everywhere else (#270).
+        if os.path.isdir(path):
+            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+        raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
@@ -1058,9 +1076,6 @@ def file_problem(path):
     except FileNotFoundError:
         return None
     except OSError as error:
-        # Windows refuses to open a folder at all, as a denied permission.
-        if os.path.isdir(path):
-            return NOT_A_FOLDER
         return error.strerror or str(error)
 
 
@@ -5328,7 +5343,9 @@ def write_raw_archive(report, ordinal, path):
     ordinals, no project.json: the one export that carries command
     lines, written only after the sender said yes. A raw archive, not a
     package: no manifest, no witness, nothing a recipient verifies as a
-    set (ADR-0026 ruling 9 keeps the two names apart)."""
+    set (ADR-0026 ruling 9 keeps the two names apart). A chain or a
+    sidecar that is not a file, a pipe in its place say, is named on
+    stderr and left out (#374)."""
     import zipfile
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         for repo in report.get("repos", []):
@@ -5336,10 +5353,31 @@ def write_raw_archive(report, ordinal, path):
             for sess in repo.get("sessions", []):
                 for chain in sess.get("chains", []):
                     log = Path(chain["log"])
-                    archive.write(log, f"{label}/{log.name}")
                     sidecar = log.with_name(log.name + ".anchors.jsonl")
-                    if sidecar.is_file():
-                        archive.write(sidecar, f"{label}/{sidecar.name}")
+                    for one in (log, sidecar):
+                        name = f"{label}/{one.name}"
+                        try:
+                            archive_regular(archive, one, name)
+                        except OSError as error:
+                            if one is sidecar and isinstance(
+                                    error, FileNotFoundError):
+                                continue  # an anchors sidecar is optional
+                            print(f"not archived: {name}: "
+                                  f"{error.strerror or error}",
+                                  file=sys.stderr)
+
+
+def archive_regular(archive, path, name):
+    """The file at `path` into the zip `archive` as `name`, dated and
+    moded as `ZipFile.write` would, read from the one file
+    `open_regular` opened: a pipe checked and then read would wait, and
+    a device would be read without end (#374)."""
+    import zipfile
+    with open_regular(path) as f:
+        status = os.fstat(f.fileno())
+        info = zipfile.ZipInfo(name, time.localtime(status.st_mtime)[:6])
+        info.external_attr = (status.st_mode & 0xFFFF) << 16
+        archive.writestr(info, f.read(), zipfile.ZIP_DEFLATED)
 
 
 def issue_body(data, gist_url, raw):
@@ -5567,6 +5605,15 @@ def chain_listing(log):
             # (ADR-0032 ruling 4): both are evidence about this chain,
             # and `verify-package` judges each with the chain it names.
             "stamps": stamps.name if stamps.exists() else None}
+
+
+def copy_regular(source, target):
+    """`source`'s bytes into a new file at `target`, read from the one
+    file `open_regular` opened: every file a package copies is in the
+    writer's reach, and a device swapped in after the check would be
+    copied without end (#374)."""
+    with open_regular(source) as read, open(target, "wb") as written:
+        shutil.copyfileobj(read, written)
 
 
 def artifact_listing(path):
@@ -5935,13 +5982,13 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
             # for byte.
             listing = chain_listing(log)
             listings[session].append(listing)
-            shutil.copyfile(log, stage / log.name)
+            copy_regular(log, stage / log.name)
             written.append(log.name)
             for beside in ("anchors", "stamps"):
                 if not listing[beside]:
                     continue
-                shutil.copyfile(log.with_name(listing[beside]),
-                                stage / listing[beside])
+                copy_regular(log.with_name(listing[beside]),
+                             stage / listing[beside])
                 written.append(listing[beside])
                 artifacts.append(artifact_listing(stage / listing[beside]))
         if transcripts is not None:
@@ -5954,7 +6001,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
             name = f"transcript-{session}.jsonl"
             if session in transcripts:
                 try:
-                    shutil.copyfile(transcripts[session], stage / name)
+                    copy_regular(transcripts[session], stage / name)
                 except OSError:
                     # Named by the scan, unreadable now; nothing partial
                     # stays behind, and the README says which it was.
@@ -5978,7 +6025,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
                 + (", not to the path in `project.json`"
                    if record.exists() else ""))
     if record.exists():
-        shutil.copyfile(record, stage / "project.json")
+        copy_regular(record, stage / "project.json")
         written.append("project.json")
         artifacts.append(artifact_listing(stage / "project.json"))
     witness = witness_snapshot(report, unit, sessions)
@@ -6251,6 +6298,13 @@ def cmd_package(args):
         if split_refusal(session, everywhere.get(session, sessions[session])):
             return 1
     for log in (log for logs in sessions.values() for log in logs):
+        # A folder or a pipe where the chain belongs is no chain to
+        # carry (#374).
+        problem = file_problem(log)
+        if problem is not None:
+            print(f"error: {log.name} cannot be packed: {problem}; "
+                  "nothing written", file=sys.stderr)
+            return 1
         for suffix in (".anchors.jsonl", ".stamps.jsonl"):
             # A package carries a chain's sidecars as they stand, and a
             # folder or a pipe in one's place cannot be carried (#364).
