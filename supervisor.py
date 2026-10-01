@@ -3454,6 +3454,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                               "or someone riding an old session; yours "
                               "to tell apart"),
                 }
+        elif relpath in remembered:
+            # A chain that reads as no entries (empty, or a folder or a
+            # pipe at its name) keeps the head remembered for it, so each
+            # look says regressed until it grows past that head, and a
+            # shorter chain put back reads as one that shrank, never as a
+            # new one (#387). The verdict is this look's, for the digest.
+            heads[relpath] = {**remembered[relpath], "verdict": verdict,
+                              "superseded": stood_down}
 
         # The session's receipt tally for the completeness watch: the
         # whole sibling family counts, minus the recorder's own voice —
@@ -3550,8 +3558,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # report (ADR-0014): a machine asking itself every minute is not
     # somebody looking. It goes in the moment it catches something
     # read-once (a baseline event, a reawakening, both consumed by the
-    # diff), or the event would be recorded nowhere and the day would
-    # paint quiet; the day's worst is sticky so a morning reader sees it.
+    # diff, save the regression of a chain that reads as empty, which
+    # every look catches again, #387), or the event would be recorded
+    # nowhere and the day would paint quiet; the day's worst is sticky
+    # so a morning reader sees it.
     caught = bool(events or awakened)
     days = (remember_day(daybook, now, tally) if remember or caught
             else read_daybook(daybook))

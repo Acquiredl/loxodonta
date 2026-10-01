@@ -916,6 +916,79 @@ class BaselineTest(unittest.TestCase):
                          "remembered anew after diffing — the alarm "
                          "belongs to the tick that caught it")
 
+    def remembered(self, relpath):
+        chains = json.loads(self.baseline.read_text(encoding="utf-8"))
+        return chains["chains"].get(relpath)
+
+    def bounded_scan(self):
+        # Bounded: a scan that waited on a pipe at a chain's name would
+        # fail here rather than hang the suite.
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), "scan",
+             "--root", str(self.root), "--json"],
+            capture_output=True, encoding="utf-8", timeout=60,
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+
+    def assert_remembered_through(self, hollow, clear):
+        """A chain scanned once, then `hollow` puts what reads as no
+        entries at its name for two looks, then `clear` takes it away and
+        the chain comes back one entry short, then whole and one entry
+        longer. The baseline keeps the head it remembered through the
+        hollow looks, so each says regressed, and so does the shorter
+        chain, never read as a new one (#387)."""
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        relpath = log.relative_to(self.root).as_posix()
+        run_scan(self.root, env=self.env)
+        before = self.remembered(relpath)
+        whole = log.read_bytes()
+        log.unlink()
+        hollow(log)
+
+        for look in (1, 2):
+            with self.subTest(look=look):
+                result = self.bounded_scan()
+                self.assertEqual(result.returncode, 5,
+                                 result.stdout + result.stderr)
+                self.assertEqual(
+                    [(e["log"], e["change"]) for e in self.events(result)],
+                    [(relpath, "regressed")])
+                kept = self.remembered(relpath)
+                self.assertIsNotNone(kept, "the baseline forgot the chain")
+                for field in ("n", "head", "last_grew"):
+                    self.assertEqual(kept[field], before[field], field)
+                # The digest's last-scan line reads this look's verdict.
+                self.assertEqual(kept["verdict"], "NO-VERDICT")
+
+        clear(log)
+        log.write_bytes(b"".join(whole.splitlines(keepends=True)[:-1]))
+        shorter = self.bounded_scan()
+        self.assertEqual(shorter.returncode, 5,
+                         shorter.stdout + shorter.stderr)
+        self.assertEqual(
+            [(e["log"], e["change"]) for e in self.events(shorter)],
+            [(relpath, "regressed")],
+            "a chain put back shorter shrank; it is not a new chain")
+
+        log.write_bytes(whole)
+        subprocess.run(
+            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+             "--actor", "claude-code", "--action", "one more step"],
+            capture_output=True, check=True)
+        grown = self.bounded_scan()
+        self.assertEqual(grown.returncode, 0, grown.stdout + grown.stderr)
+        self.assertEqual(self.events(grown), [])
+
+    def test_an_emptied_chain_regresses_until_it_grows_past_its_head(self):
+        self.assert_remembered_through(Path.touch, Path.unlink)
+
+    def test_a_folder_at_a_chains_name_regresses_every_look(self):
+        self.assert_remembered_through(Path.mkdir, Path.rmdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
+    def test_a_pipe_at_a_chains_name_regresses_every_look(self):
+        self.assert_remembered_through(os.mkfifo, Path.unlink)
+
     def test_a_corrupt_baseline_is_reported_never_trusted(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root, env=self.env)
