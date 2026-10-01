@@ -5117,20 +5117,23 @@ def main_repo_root(project):
     if not os.path.isfile(dot_git):
         return project  # a normal checkout (.git/ dir), or not a repo at all
     try:
-        with open(dot_git, encoding="utf-8") as f:
-            line = f.read().strip()
+        # Both files are in the writer's reach, and a pipe at either
+        # name would hold every tool call: read without waiting (#386).
+        with open_regular(dot_git) as f:
+            line = f.read().decode("utf-8").strip()
         if not line.startswith("gitdir:"):
             return project
         gitdir = line[len("gitdir:"):].strip()
         if not os.path.isabs(gitdir):
             gitdir = os.path.join(project, gitdir)
         try:
-            with open(os.path.join(gitdir, "commondir"),
-                      encoding="utf-8") as f:
-                common = f.read().strip()
+            with open_regular(os.path.join(gitdir, "commondir")) as f:
+                common = f.read().decode("utf-8").strip()
             common = os.path.normpath(os.path.join(gitdir, common))
             root = os.path.dirname(common)  # <main>/.git -> <main>
-        except OSError:
+        except OSError as error:
+            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+                return project  # a folder or a pipe there: unexpected
             # A worktree the harness already deregistered (ADR-0023): the
             # gitdir is gone, but the .git file still spells it as
             # <main>/.git/worktrees/<name>, and <main> is in that string.

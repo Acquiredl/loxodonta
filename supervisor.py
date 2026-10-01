@@ -4244,17 +4244,19 @@ def main_repo_of(project):
     if not dot_git.is_file():
         return project  # a normal checkout (.git/ dir), or not a repo
     try:
-        line = dot_git.read_text(encoding="utf-8").strip()
+        # Read without waiting, as the recorder reads them (#386).
+        line = read_whole(dot_git).strip()
         if not line.startswith("gitdir:"):
             return project
         gitdir = Path(line[len("gitdir:"):].strip())
         if not gitdir.is_absolute():
             gitdir = project / gitdir
         try:
-            common = (gitdir / "commondir").read_text(
-                encoding="utf-8").strip()
+            common = read_whole(gitdir / "commondir").strip()
             root = Path(os.path.normpath(gitdir / common)).parent
-        except OSError:
+        except OSError as error:
+            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+                return project  # a folder or a pipe there: unexpected
             # A deregistered worktree (ADR-0023): the gitdir is gone, but
             # its path still spells <main>/.git/worktrees/<name>.
             spelled = gitdir.as_posix()

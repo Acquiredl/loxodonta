@@ -14,8 +14,9 @@ and `package` and `export` never copy it (SPEC section 6).
 
 So is every other file the tools read there (#386): the transcript the
 hook commits and `verify --transcript` judges, a chain's project record,
-and the supervisor's own memory. Each is named where it is read, left as
-it was, and never waited on.
+the supervisor's own memory, and the `.git` file and `commondir` a
+worktree's layout is read from. Each is named where it is read, or read
+as a layout the tools cannot follow, left as it was, and never waited on.
 
 Every test drives the public CLI: the recorder's verbs, its hook at
 SessionEnd, the supervisor's scan and keeper, against the fake calendar,
@@ -1001,6 +1002,64 @@ class HookedNotAFileTest(BoundedHook, PublishBase):
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_where_the_record_belongs_is_passed_by_and_named(self):
         self.assert_record_passed_by(os.mkfifo, PIPE)
+
+
+class WorktreeNotAFileTest(unittest.TestCase):
+    """A project whose `.git` file names a gitdir holding a folder or a
+    pipe where `commondir` belongs (#386). The hook reads that layout on
+    every tool call, and `supervisor digest` at every session start:
+    both read it as a layout they cannot follow, so the project stays
+    itself (SPEC section 8), the receipt is written, and neither waits."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name).resolve()
+        self.project = base / "worktree"
+        self.project.mkdir()
+        self.gitdir = base / "main" / ".git" / "worktrees" / "worktree"
+        self.gitdir.mkdir(parents=True)
+        (self.project / ".git").write_text(
+            f"gitdir: {self.gitdir.as_posix()}\n", encoding="utf-8")
+        self.store = base / "store"
+        self.env = {**isolated_env(base / "home",
+                                   CLAUDE_PROJECT_DIR=str(self.project),
+                                   LOXODONTA_HOME=str(self.store)),
+                    "PYTHONIOENCODING": "utf-8"}
+
+    def assert_the_project_stays_itself(self, make):
+        make(self.gitdir / "commondir")
+        payload = {"session_id": "sess-wt", "hook_event_name": "PostToolUse",
+                   "tool_name": "Bash", "tool_input": {"command": "ls"},
+                   "tool_response": {}}
+
+        hooked = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook"], cwd=str(self.project),
+            input=json.dumps(payload).encode("utf-8"), capture_output=True,
+            env=self.env, timeout=BOUND)
+        digest = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "digest"], cwd=str(self.project),
+            capture_output=True, encoding="utf-8", env=self.env,
+            timeout=BOUND)
+
+        self.assertEqual(hooked.returncode, 0, hooked.stderr)
+        (drawer,) = (self.store / "receipts").iterdir()
+        record = json.loads((drawer / "project.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(record["path"], self.project.as_posix())
+        chain = (drawer / "receipts-sess-wt.jsonl").read_text(
+            encoding="utf-8").splitlines()
+        self.assertEqual(len(chain), 2, "genesis and the receipt")
+        self.assertEqual(digest.returncode, 0, digest.stderr)
+        self.assertNotIn("Traceback", digest.stderr)
+        self.assertIn("recall digest -- worktree (", digest.stdout)
+
+    def test_a_folder_where_commondir_belongs_leaves_the_project_itself(self):
+        self.assert_the_project_stays_itself(Path.mkdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_commondir_belongs_is_never_waited_on(self):
+        self.assert_the_project_stays_itself(os.mkfifo)
 
 
 class ScannedMemoryNotAFileTest(unittest.TestCase):
