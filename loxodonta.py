@@ -3074,9 +3074,27 @@ def write_line_to_disk(path, mode, line):
     "logged entry N" means the entry is there (SPEC §1): a lost receipt
     reads at the witness as a killed hook does, and an innocent loss
     should not wear that face (the cost: docs/DIRECTION.md). A failed
-    sync is said, never hidden; the line is still written."""
-    with open(path, mode, encoding="utf-8", newline="\n") as f:
-        f.write(line)
+    sync is said, never hidden; the line is still written.
+
+    `mode` is `open`'s "x", "w" or "a". The file is opened as
+    `open_regular` opens one to read: without waiting, since an ordinary
+    open of a pipe for writing waits for a reader that may never come,
+    and the hook waited there with its lock held (#385); and the type is
+    asked of the open file, so a pipe or a device at the name is
+    refused, as an OSError, before a byte reaches it."""
+    flags = {"x": os.O_CREAT | os.O_EXCL, "w": os.O_CREAT | os.O_TRUNC,
+             "a": os.O_CREAT | os.O_APPEND}[mode]
+    fd = os.open(path, os.O_WRONLY | flags | getattr(os, "O_NONBLOCK", 0)
+                 | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, NOT_REGULAR, path)
+        f = os.fdopen(fd, "ab")
+    except BaseException:
+        os.close(fd)
+        raise
+    with f:
+        f.write(line.encode("utf-8"))
         f.flush()
         try:
             os.fsync(f.fileno())
@@ -3178,6 +3196,17 @@ def locked_out(log):
           "Retry; if nothing is running, delete the .lock file beside it.",
           file=sys.stderr)
     return EX_TEMPFAIL
+
+
+def unwritable_log(log, error):
+    """A line the chain would not take, 73, a file the verb must write
+    and cannot: a folder, a pipe or a device put at its name after the
+    read that would have refused it (#385), never waited on, or a write
+    the system refused."""
+    print(f"error: {log} could not be written: "
+          f"{unwritable_why(log, error)} — no entry was written",
+          file=sys.stderr)
+    return EX_CANTCREAT
 
 
 # --- Commands -----------------------------------------------------------------
@@ -3355,7 +3384,10 @@ def append_locked(log, actor, action, files):
     # Single write of one complete line (SPEC §1): a crash can at worst
     # truncate this line, never damage earlier entries. Synced before it
     # is reported, so the report is true when it is printed.
-    write_line_to_disk(log, "a", entry_line(entry))
+    try:
+        write_line_to_disk(log, "a", entry_line(entry))
+    except OSError as e:
+        return unwritable_log(log, e)
     print(f"logged entry {entry['n']}")
     return 0
 
@@ -3381,9 +3413,15 @@ def run_signals():
 
 def cmd_run(args):
     # No log means no receipt could be written — refuse before the command
-    # runs, or the wrapper would execute work it cannot record.
-    if not os.path.exists(args.log):
+    # runs, or the wrapper would execute work it cannot record. A folder,
+    # a pipe or a device at its name is no log either (#385).
+    try:
+        with open_regular(args.log):
+            pass
+    except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
     command_line = " ".join(args.command_argv)
 
     # The first signal handled decides how the receipt ends (signals that
@@ -5191,20 +5229,33 @@ def record_project(log_dir, project):
 
 
 def chain_is_damaged(log):
-    """True when the log exists but cannot be extended: a torn tail, or
-    a forked one (`tail_entry`)."""
+    """True when something is at the log's name that cannot be extended:
+    a torn tail, a forked one (`tail_entry`), or a folder, a pipe, a
+    device, a socket or a loop of links in the file's place, each one
+    command away (#385). A file this user may not read is not damage:
+    the append names it."""
     try:
         lines = read_log(log)
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError as error:
+        if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+            return True
+        # A socket fails the open itself, and a loop of links cannot be
+        # followed, so `open_regular` never got to ask: the name is
+        # asked instead.
+        try:
+            return stat.S_ISSOCK(os.stat(log).st_mode)
+        except OSError as again:
+            return again.errno == errno.ELOOP
     return bool(lines) and tail_entry(lines) is None
 
 
 def writable_chain(log_dir, session):
-    """The chain this session writes to: its own, unless that chain's tail
-    is damaged, then the next sibling (ADR-0004). Damage ends a chain,
-    never the recording; the damaged chain is left exactly as it lies,
-    evidence with no repair path (ADR-0002).
+    """The chain this session writes to: its own, unless that chain is
+    damaged (`chain_is_damaged`), then the next sibling (ADR-0004).
+    Damage ends a chain, never the recording; the damaged chain is left
+    exactly as it lies, evidence with no repair path (ADR-0002).
     """
     log = os.path.join(log_dir, f"receipts-{session}.jsonl")
     n = 1
@@ -5338,6 +5389,8 @@ def cmd_hook(args):
         ensure_chain(log)
     except LockTimeout:
         return locked_out(log)
+    except OSError as e:
+        return unwritable_log(log, e)
 
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
