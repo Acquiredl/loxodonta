@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- `tools/build_verifier.py` leaves a current `verifier.py` untouched, so a rebuild on a Windows checkout no longer reads as modified to `git status` with an empty diff (#389).
+
 ## [0.10.1] - 2026-09-30
 
 Three fixes from the round that followed 0.10.0, each found in a review of that round's own pull requests. A pipe or a folder where a chain belongs is named and never waited on, the witness reads a shell refusal without an `Exit code N` line as one that may owe a receipt, and `twin_check --write` handles four unusual layouts. The receipt format is untouched; `verifier.py` moves because the recorder's read of a chain did.
