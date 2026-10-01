@@ -20,6 +20,10 @@ the supervisor's own memory, and the `.git` file and `commondir` a
 worktree's layout is read from. Each is named where it is read, or read
 as a layout the tools cannot follow, left as it was, and never waited on.
 
+So are the coverage marker and the harness settings (#405). The scan
+reads either as absent and names it; `install-hook` and
+`uninstall-hook` refuse by name before they write anything.
+
 Every test drives the public CLI: the recorder's verbs, its hook at
 SessionEnd, the supervisor's scan and keeper, against the fake calendar,
 authority and receiver the other suites use. No network, no internals.
@@ -1411,6 +1415,40 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
                                  "a day book",
                                  lambda report: report["history_note"])
 
+    def assert_read_past(self, path, make, why, key, words):
+        # Read on every scan, and in the writer's reach (#405): named in
+        # the report, read as absent, and left as the writer put it.
+        if path.exists():
+            path.unlink()
+        make(path)
+        before = kind(path)
+
+        report = self.scan()
+
+        self.assertIn(f"{path.as_posix()} cannot be read as {words}: {why}",
+                      report[key])
+        self.assertEqual(kind(path), before, "nothing written over it")
+
+    def test_a_folder_where_the_marker_belongs_is_read_past(self):
+        self.assert_read_past(self.home / "coverage.json", Path.mkdir, FOLDER,
+                              "marker_note", "a coverage marker")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_marker_belongs_is_read_past(self):
+        self.assert_read_past(self.home / "coverage.json", os.mkfifo, PIPE,
+                              "marker_note", "a coverage marker")
+
+    def test_a_folder_where_the_settings_belong_is_read_past(self):
+        self.assert_read_past(self.witness.parent / "settings.json",
+                              Path.mkdir, FOLDER, "settings_note",
+                              "harness settings")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_settings_belong_is_read_past(self):
+        self.assert_read_past(self.witness.parent / "settings.json",
+                              os.mkfifo, PIPE, "settings_note",
+                              "harness settings")
+
 
 class ServedViewsNotAFileTest(ServerFixture):
     """`serve` with a folder or a pipe where the saved views belong
@@ -1487,6 +1525,113 @@ class AdoptedMarkerNotAFileTest(unittest.TestCase):
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_where_the_marker_belongs_is_named_and_left(self):
         self.assert_left(os.mkfifo, PIPE)
+
+
+class InstalledNotAFileTest(unittest.TestCase):
+    """`install-hook` and `uninstall-hook`, each half, with a folder or a
+    pipe where the harness settings or the coverage marker belong
+    (#405): refused by name, exit 66, before a byte is written anywhere
+    in the home, and never waited on. Every run is bounded."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name).resolve()
+        self.env = {**isolated_env(self.home), "PYTHONIOENCODING": "utf-8"}
+        self.marker = self.home / ".loxodonta" / "coverage.json"
+
+    def written(self):
+        """Every regular file in the home: none, when nothing was."""
+        return sorted(path.relative_to(self.home).as_posix()
+                      for path in self.home.rglob("*") if path.is_file())
+
+    def assert_refused(self, path, make, why, *verb):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        make(path)
+        before = kind(path)
+        try:
+            result = subprocess.run([sys.executable, str(LOXODONTA), *verb],
+                                    capture_output=True, encoding="utf-8",
+                                    env=self.env, timeout=BOUND)
+
+            self.assertEqual(result.returncode, 66,
+                             result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn(f"refusing to touch {path}: {why}", result.stderr)
+            self.assertEqual(kind(path), before, "left as the writer put it")
+            self.assertEqual(self.written(), [])
+        finally:
+            # The next verb finds the same name free to be spoiled again.
+            (path.rmdir if path.is_dir() else path.unlink)()
+
+    def settings_files(self):
+        """Each verb that reads a settings file, with the file it reads."""
+        claude = self.home / ".claude" / "settings.json"
+        codex = self.home / ".codex" / "hooks.json"
+        return ((("install-hook",), claude),
+                (("install-hook", "--codex"), codex),
+                (("uninstall-hook",), claude),
+                (("uninstall-hook", "--codex"), codex))
+
+    def test_a_folder_where_the_settings_belong_is_refused(self):
+        for verb, path in self.settings_files():
+            with self.subTest(verb=" ".join(verb)):
+                self.assert_refused(path, Path.mkdir, FOLDER, *verb)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_settings_belong_is_never_waited_on(self):
+        for verb, path in self.settings_files():
+            with self.subTest(verb=" ".join(verb)):
+                self.assert_refused(path, os.mkfifo, PIPE, *verb)
+
+    def test_a_folder_where_the_marker_belongs_is_refused(self):
+        for verb in (("install-hook",), ("install-hook", "--codex")):
+            with self.subTest(verb=" ".join(verb)):
+                self.assert_refused(self.marker, Path.mkdir, FOLDER, *verb)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_marker_belongs_is_never_waited_on(self):
+        for verb in (("install-hook",), ("install-hook", "--codex")):
+            with self.subTest(verb=" ".join(verb)):
+                self.assert_refused(self.marker, os.mkfifo, PIPE, *verb)
+
+
+class ServedMarkerNotAFileTest(unittest.TestCase):
+    """`serve` reads the coverage marker once, before it takes its port,
+    to steer its keepers (ADR-0031): with a folder or a pipe there it
+    starts, finds no profile on record, and is never held (#405)."""
+
+    def assert_started(self, make):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name).resolve()
+        (home / ".loxodonta").mkdir()
+        make(home / ".loxodonta" / "coverage.json")
+        proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
+             "--witness", str(home / "witness")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
+        self.addCleanup(proc.communicate)
+        self.addCleanup(proc.kill)
+        # Both startup lines, read on a thread joined to a bound: a start
+        # held at the marker prints neither, and is killed above.
+        said = []
+        reader = threading.Thread(target=lambda: said.extend(
+            [proc.stdout.readline(), proc.stdout.readline()]), daemon=True)
+        reader.start()
+        reader.join(BOUND)
+
+        self.assertFalse(reader.is_alive(), "serve never said it started")
+        self.assertIn("http://127.0.0.1:", said[0])
+        self.assertIn("anchor off (no profile on record; no flag)", said[1])
+
+    def test_a_folder_where_the_marker_belongs_is_read_past(self):
+        self.assert_started(Path.mkdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_marker_belongs_is_never_waited_on(self):
+        self.assert_started(os.mkfifo)
 
 
 if __name__ == "__main__":

@@ -738,8 +738,9 @@ def marker_harnesses():
     through its newest epoch and no older one: a re-install for that
     harness is its operator's latest word."""
     try:
-        with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
-            data = json.load(f)
+        # In the writer's reach: a folder or a pipe there reads as no
+        # marker, never waited on, and the scan names it (#405).
+        data = json.loads(read_whole(Path(store_home()) / COVERAGE_NAME))
     except (OSError, ValueError):
         return {}
     declared = {}
@@ -1912,7 +1913,10 @@ def read_settings(settings_file):
         raise ValueError(f"{word} is not JSON")
 
     try:
-        settings = json.loads(Path(settings_file).read_text(encoding="utf-8"),
+        # Read on every scan and in the writer's reach: a folder or a
+        # pipe there reads as no settings, never waited on, and the scan
+        # names it (#405).
+        settings = json.loads(read_whole(settings_file),
                               parse_constant=refuse)
     except (OSError, ValueError):
         return None
@@ -2336,8 +2340,9 @@ def coverage_epochs(harness="claude-code"):
     wires `.*` into a different settings file and Codex's coverage must
     never speak for the Claude Code witness."""
     try:
-        with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
-            data = json.load(f)
+        # In the writer's reach: a folder or a pipe there reads as no
+        # marker, never waited on, and the scan names it (#405).
+        data = json.loads(read_whole(Path(store_home()) / COVERAGE_NAME))
     except (OSError, ValueError):
         return []
     epochs = []
@@ -3624,6 +3629,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if note:
         baseline["note"] = note
     shelf = not_a_file(daybook)
+    marker = Path(store_home()) / COVERAGE_NAME
+    unmarked = not_a_file(marker)
+    settings = witness.parent / "settings.json"
+    unset = not_a_file(settings)
     report_note = None
     if store and not repos:
         # An empty store has two unlike causes and this note named only
@@ -3657,6 +3666,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "history": fortnight(days, now),
         **({"history_note": memory_unread(daybook, "a day book", shelf)}
            if shelf else {}),
+        **({"marker_note": f"{marker.as_posix()} cannot be read as a "
+                           f"coverage marker: {unmarked} — read as none, as "
+                           "if install-hook had written nothing"}
+           if unmarked else {}),
+        **({"settings_note": f"{settings.as_posix()} cannot be read as "
+                             f"harness settings: {unset} — read as none, "
+                             "as if no hook were wired"}
+           if unset else {}),
         "baseline": baseline,
         "completeness": completeness,
         "consumption": consumption,
@@ -3720,10 +3737,16 @@ def cmd_adopt(args):
             continue
         os.makedirs(drawer, exist_ok=True)
         record = drawer / "project.json"
-        if not record.exists():
-            record.write_text(json.dumps(
-                {"path": str(project.resolve()).replace(os.sep, "/")})
-                + "\n", encoding="utf-8")
+        try:
+            # Created only where nothing stands, so a pipe put at the
+            # name is kept as it is and never opened (#405).
+            with open(record, "x", encoding="utf-8") as f:
+                f.write(json.dumps(
+                    {"path": str(project.resolve()).replace(os.sep, "/")})
+                    + "\n")
+        except OSError:
+            if not os.path.lexists(record):
+                raise
         marker = log.parent / UNLISTED_NAME
         shutil.move(str(log), str(drawer / log.name))
         for suffix in SIDECAR_SUFFIXES:
@@ -5708,10 +5731,11 @@ def copy_regular(source, target):
 def artifact_listing(path):
     """How the manifest lists a post-close artifact: sha256 of its bytes
     and their count, because nothing else commits it (ADR-0026 ruling 3).
-    Read in chunks: a transcript can run to hundreds of MB."""
+    Read in chunks: a transcript can run to hundreds of MB. Read without
+    waiting, as every file the package copies is (#405)."""
     digest = hashlib.sha256()
     size = 0
-    with open(path, "rb") as f:
+    with open_regular(path) as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             digest.update(chunk)
             size += len(chunk)

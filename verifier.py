@@ -15,6 +15,7 @@ import argparse
 import base64
 import errno
 import hashlib
+import io
 import json
 import os
 import stat
@@ -2421,11 +2422,15 @@ def judge_manifest_signature(folder):
             # the key's two tokens, type and key. The shipped file's own
             # tokens and nothing else, so what verifies is what shipped.
             allowed = os.path.join(scratch, "allowed_signers")
-            with open(public_key, encoding="utf-8", errors="replace") as f:
+            # Read without waiting, as every file of a package is: a pipe
+            # put at either name since it was first looked at would
+            # otherwise hold the verifier for good.
+            with io.TextIOWrapper(open_regular(public_key), encoding="utf-8",
+                                  errors="replace") as f:
                 key = " ".join(f.readline().split()[:2])
             with open(allowed, "w", encoding="utf-8", newline="\n") as f:
                 f.write(f"{SIGNATURE_PRINCIPAL} {key}\n")
-            with open(manifest, "rb") as shipped:
+            with open_regular(manifest) as shipped:
                 verified = subprocess.run(
                     ["ssh-keygen", "-Y", "verify", "-f", allowed,
                      "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,

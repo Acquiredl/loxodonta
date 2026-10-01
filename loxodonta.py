@@ -8,6 +8,7 @@ import argparse
 import base64
 import errno
 import hashlib
+import io
 import json
 import os
 import stat
@@ -2414,11 +2415,15 @@ def judge_manifest_signature(folder):
             # the key's two tokens, type and key. The shipped file's own
             # tokens and nothing else, so what verifies is what shipped.
             allowed = os.path.join(scratch, "allowed_signers")
-            with open(public_key, encoding="utf-8", errors="replace") as f:
+            # Read without waiting, as every file of a package is: a pipe
+            # put at either name since it was first looked at would
+            # otherwise hold the verifier for good.
+            with io.TextIOWrapper(open_regular(public_key), encoding="utf-8",
+                                  errors="replace") as f:
                 key = " ".join(f.readline().split()[:2])
             with open(allowed, "w", encoding="utf-8", newline="\n") as f:
                 f.write(f"{SIGNATURE_PRINCIPAL} {key}\n")
-            with open(manifest, "rb") as shipped:
+            with open_regular(manifest) as shipped:
                 verified = subprocess.run(
                     ["ssh-keygen", "-Y", "verify", "-f", allowed,
                      "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
@@ -5521,25 +5526,42 @@ def settings_shape_problem(settings):
 
 
 def load_settings(path):
-    """The user-level settings, or None with the complaint printed —
-    shared by install and uninstall so both refuse broken JSON, or JSON
-    of a shape they cannot read, the same way instead of clobbering it.
-    The file is left exactly as it was."""
+    """The user-level settings as (settings, None), or (None, the exit
+    code) with the complaint printed — shared by install and uninstall
+    so both refuse the same ways instead of clobbering anything: broken
+    JSON, or JSON of a shape they cannot read, 65; a folder, a pipe or
+    a device at the name, or a file this user may not open, 66. The
+    file is left exactly as it was."""
     if not os.path.exists(path):
-        return {}
+        return {}, None
     try:
-        with open(path, encoding="utf-8") as f:
+        # The settings are in the writer's reach, and an ordinary open
+        # of a pipe there would hold the installer for good (#405).
+        with io.TextIOWrapper(open_regular(path), encoding="utf-8") as f:
             settings = json.load(f)
+    except OSError as e:
+        return None, refuse_to_touch(path, e.strerror or str(e))
     except ValueError as e:  # not JSON, or not UTF-8
         print(f"refusing to touch {path}: it is not valid JSON ({e}) — "
               "fix it by hand first", file=sys.stderr)
-        return None
+        return None, EX_DATAERR
     problem = settings_shape_problem(settings)
     if problem:
         print(f"refusing to touch {path}: expected {SETTINGS_SHAPE}, but "
               f"{problem} — fix it by hand first", file=sys.stderr)
-        return None
-    return settings
+        return None, EX_DATAERR
+    return settings, None
+
+
+def refuse_to_touch(path, why):
+    """The refusal when a file install-hook or uninstall-hook reads
+    before writing anything cannot be read as a file: a folder, a pipe
+    or a device at its name, or a file this user may not open. Named,
+    never waited on, and nothing written (#405): no input, 66, as for a
+    log."""
+    print(f"refusing to touch {path}: {why} — fix it by hand first",
+          file=sys.stderr)
+    return EX_NOINPUT
 
 
 def replace_file(path, data, mode_of=None):
@@ -5583,15 +5605,22 @@ def backup_settings(path):
     written only when none exists yet (#293). Overwriting it on every
     run, as it once was, lost the original on the second run, since
     by then the file held the installer's own edit. Returns the
-    parenthesis the installer prints after the path it wrote."""
+    parenthesis the installer prints after the path it wrote, or None
+    with the refusal printed when a folder or a pipe has been put at
+    the name since `load_settings` read it, never waited on (#405)."""
     backup = path + ".bak"
     name = os.path.basename(backup)
     if not os.path.exists(path):
         return ""
     if os.path.exists(backup):
         return f" (the existing {name} was kept, not overwritten)"
-    with open(path, "rb") as f:
-        replace_file(backup, f.read(), mode_of=path)
+    try:
+        with open_regular(path) as f:
+            original = f.read()
+    except OSError as e:
+        refuse_to_touch(path, e.strerror or str(e))
+        return None
+    replace_file(backup, original, mode_of=path)
     return f" (previous version saved as {name})"
 
 
@@ -5931,9 +5960,9 @@ def install_codex_hooks(publish=None, profile="local",
     has no cursor to resume from, so the supervisor anchors instead.
     `profile` is written to the coverage marker (ADR-0031 ruling 1)."""
     path = codex_hooks_path()
-    settings = load_settings(path)
-    if settings is None:
-        return EX_DATAERR
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
     if publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
@@ -5987,9 +6016,11 @@ def install_codex_hooks(publish=None, profile="local",
     # first time a recorder that knows how walks past.
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
-    marked = record_coverage(CODEX_ACTOR, wired, profile,
-                             remote=publish_chain or publish,
-                             authority=authority)
+    marked, refused = record_coverage(CODEX_ACTOR, wired, profile,
+                                      remote=publish_chain or publish,
+                                      authority=authority)
+    if refused:
+        return refused
     tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -5999,6 +6030,8 @@ def install_codex_hooks(publish=None, profile="local",
             print(tier)
         return 0
     backup = backup_settings(path)
+    if backup is None:
+        return EX_NOINPUT
     write_hooks_file(path, settings)
     print(f"installed in {path}{backup}")
     for line in installed:
@@ -6058,8 +6091,13 @@ def record_coverage(harness, matchers, profile, remote=None,
     that wired it (an epoch without it wired none). The marker never
     travels (the export and the package leave it out), so unlike the
     publish memo it may hold a URL. Every failure is a silent skip: a
-    bookkeeping file is no reason to refuse an install. Returns whether
-    an entry was appended."""
+    bookkeeping file is no reason to refuse an install. A folder, a pipe
+    or a device at the marker's name is no failure but something put
+    there, and an ordinary open of a pipe waits for good: it is refused
+    by name before the settings are touched, 66 when the marker cannot
+    be read and 73 when it cannot be written (#405). Returns (whether
+    an entry was appended, the exit code of a refusal already printed
+    or None)."""
     entry = {"since": now_ts(), "matchers": list(matchers)}
     if failures:
         entry["failures"] = list(failures)
@@ -6068,12 +6106,17 @@ def record_coverage(harness, matchers, profile, remote=None,
         entry["remote"] = remote
     if authority:
         entry["authority"] = authority
+    marker = coverage_path()
     try:
         os.makedirs(store_home(), exist_ok=True)
         try:
-            with open(coverage_path(), encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
+            with open_regular(marker) as f:
+                data = json.loads(f.read().decode("utf-8"))
+        except OSError as error:
+            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+                return False, refuse_to_touch(marker, error.strerror)
+            data = {}
+        except ValueError:
             data = {}
         epochs = [epoch for epoch in data.get("epochs", [])
                   if isinstance(epoch, dict)
@@ -6085,14 +6128,21 @@ def record_coverage(harness, matchers, profile, remote=None,
                 and last.get("profile") == profile \
                 and last.get("remote") == entry.get("remote") \
                 and last.get("authority") == entry.get("authority"):
-            return False
+            return False, None
         body = json.dumps({"purpose": COVERAGE_PURPOSE,
                            "epochs": epochs + [entry]}, indent=2)
-        with open(coverage_path(), "w", encoding="utf-8", newline="\n") as f:
-            f.write(body + "\n")
-        return True
+        try:
+            write_line_to_disk(marker, "w", body + "\n")
+        except OSError:
+            why = file_problem(marker)
+            if why not in (NOT_A_FOLDER, NOT_REGULAR):
+                raise
+            print(f"error: {marker} could not be written: {why} — the "
+                  "settings were left as they were", file=sys.stderr)
+            return False, EX_CANTCREAT
+        return True, None
     except OSError:
-        return False
+        return False, None
 
 
 def cmd_install_hook(args):
@@ -6131,9 +6181,9 @@ def cmd_install_hook(args):
     digest = digest_command()
     path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 
-    settings = load_settings(path)
-    if settings is None:
-        return EX_DATAERR
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
     if args.publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
@@ -6242,12 +6292,14 @@ def cmd_install_hook(args):
 
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
-    marked = record_coverage("claude-code", wired, args.profile,
-                             remote=(args.publish_chain
-                                     or args.publish_head),
-                             authority=args.authority,
-                             failures=[block.get("matcher", "*")
-                                       for block in failed if ours(block)])
+    marked, refused = record_coverage(
+        "claude-code", wired, args.profile,
+        remote=args.publish_chain or args.publish_head,
+        authority=args.authority,
+        failures=[block.get("matcher", "*") for block in failed
+                  if ours(block)])
+    if refused:
+        return refused
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -6258,6 +6310,8 @@ def cmd_install_hook(args):
         return 0
 
     backup = backup_settings(path)
+    if backup is None:
+        return EX_NOINPUT
     write_hooks_file(path, settings)
     print(f"installed in {path}{backup}")
     for line in installed:
@@ -6305,9 +6359,9 @@ def cmd_uninstall_hook(args):
     path = (codex_hooks_path() if args.codex
             else os.path.join(os.path.expanduser("~"), ".claude",
                               "settings.json"))
-    settings = load_settings(path)
-    if settings is None:
-        return EX_DATAERR
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
     if not settings:
         print(f"nothing installed: no hooks file at {path}")
         return 0
@@ -6319,6 +6373,8 @@ def cmd_uninstall_hook(args):
         return 0
 
     backup = backup_settings(path)
+    if backup is None:
+        return EX_NOINPUT
     write_hooks_file(path, settings)
     print(f"removed from {path}: {', '.join(sorted(set(removed)))}{backup}")
     return 0
