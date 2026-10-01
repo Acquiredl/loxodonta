@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-10-01
+
+One family of faults, ended by a check. A test now walks the three scripts and fails on any call that opens, reads, writes or copies a file by path, unless it is the open that never waits, an exclusive create, or on a short list that gives each call a reason. Its first run found the coverage marker and the harness settings still opened waiting, and its review found `export` waiting on a pipe at its own output name and a calendar address fetched whatever its scheme. Three answers moved for scripts: `export` exits 73 for a name it cannot write; `install-hook` and `uninstall-hook` refuse a harness settings file that is not a file, exit 66, where it was a traceback; and an upgrade whose only pending row names an address that is not `http` or `https` exits 0 with a warning. A new export file is readable by its owner only. `verifier.py` moves with no verdict word or exit changed. The receipt format is untouched.
+
 ### Fixed
 
 - A pipe where the harness settings, the coverage marker or an export belongs no longer hangs `scan`, `serve`, `install-hook` or `export`: settings and export are refused by name; the marker is named beside the wired hook (#405).
@@ -285,6 +289,7 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
 [Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.10.0...dev
+[0.10.3]: https://github.com/Acquiredl/loxodonta/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/Acquiredl/loxodonta/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/Acquiredl/loxodonta/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Acquiredl/loxodonta/compare/v0.9.0...v0.10.0
