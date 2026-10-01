@@ -20,6 +20,13 @@ the supervisor's own memory, and the `.git` file and `commondir` a
 worktree's layout is read from. Each is named where it is read, or read
 as a layout the tools cannot follow, left as it was, and never waited on.
 
+So are the coverage marker, the harness settings and the export's
+own names (#405). The scan reads the first two as absent and names
+them; `install-hook` and `uninstall-hook` refuse settings that are not
+a file before they write anything, and wire the hook beside a marker
+that is not one, naming it; `export` refuses a name it cannot write.
+A calendar row with a `file:` address is never fetched (#414).
+
 Every test drives the public CLI: the recorder's verbs, its hook at
 SessionEnd, the supervisor's scan and keeper, against the fake calendar,
 authority and receiver the other suites use. No network, no internals.
@@ -37,6 +44,7 @@ import threading
 import unittest
 import urllib.request
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # This folder on sys.path, so the sibling imports below also resolve
@@ -1411,6 +1419,40 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
                                  "a day book",
                                  lambda report: report["history_note"])
 
+    def assert_read_past(self, path, make, why, key, words):
+        # Read on every scan, and in the writer's reach (#405): named in
+        # the report, read as absent, and left as the writer put it.
+        if path.exists():
+            path.unlink()
+        make(path)
+        before = kind(path)
+
+        report = self.scan()
+
+        self.assertIn(f"{path.as_posix()} cannot be read as {words}: {why}",
+                      report[key])
+        self.assertEqual(kind(path), before, "nothing written over it")
+
+    def test_a_folder_where_the_marker_belongs_is_read_past(self):
+        self.assert_read_past(self.home / "coverage.json", Path.mkdir, FOLDER,
+                              "marker_note", "a coverage marker")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_marker_belongs_is_read_past(self):
+        self.assert_read_past(self.home / "coverage.json", os.mkfifo, PIPE,
+                              "marker_note", "a coverage marker")
+
+    def test_a_folder_where_the_settings_belong_is_read_past(self):
+        self.assert_read_past(self.witness.parent / "settings.json",
+                              Path.mkdir, FOLDER, "settings_note",
+                              "harness settings")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_settings_belong_is_read_past(self):
+        self.assert_read_past(self.witness.parent / "settings.json",
+                              os.mkfifo, PIPE, "settings_note",
+                              "harness settings")
+
 
 class ServedViewsNotAFileTest(ServerFixture):
     """`serve` with a folder or a pipe where the saved views belong
@@ -1487,6 +1529,279 @@ class AdoptedMarkerNotAFileTest(unittest.TestCase):
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_where_the_marker_belongs_is_named_and_left(self):
         self.assert_left(os.mkfifo, PIPE)
+
+
+class InstalledNotAFileTest(unittest.TestCase):
+    """`install-hook` and `uninstall-hook`, each half, with a folder or a
+    pipe where the harness settings or the coverage marker belong
+    (#405), never waited on. Settings that are not a file are refused
+    by name, exit 66, before a byte is written anywhere in the home. A
+    marker that is not one is bookkeeping, no reason to refuse: the
+    hook is wired, exit 0, and the marker is named and left as it was.
+    Every run is bounded."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name).resolve()
+        self.env = {**isolated_env(self.home), "PYTHONIOENCODING": "utf-8"}
+        self.marker = self.home / ".loxodonta" / "coverage.json"
+
+    def written(self):
+        """Every regular file in the home: none, when nothing was."""
+        return sorted(path.relative_to(self.home).as_posix()
+                      for path in self.home.rglob("*") if path.is_file())
+
+    def assert_refused(self, path, make, why, *verb):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        make(path)
+        before = kind(path)
+        try:
+            result = subprocess.run([sys.executable, str(LOXODONTA), *verb],
+                                    capture_output=True, encoding="utf-8",
+                                    env=self.env, timeout=BOUND)
+
+            self.assertEqual(result.returncode, 66,
+                             result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn(f"refusing to touch {path}: {why}", result.stderr)
+            self.assertEqual(kind(path), before, "left as the writer put it")
+            self.assertEqual(self.written(), [])
+        finally:
+            # The next verb finds the same name free to be spoiled again.
+            (path.rmdir if path.is_dir() else path.unlink)()
+
+    def assert_wired_beside(self, make, why):
+        self.marker.parent.mkdir(parents=True)
+        make(self.marker)
+        before = kind(self.marker)
+        for verb, settings in (
+                (("install-hook",), ".claude/settings.json"),
+                (("install-hook", "--codex"), ".codex/hooks.json")):
+            with self.subTest(verb=" ".join(verb)):
+                result = subprocess.run(
+                    [sys.executable, str(LOXODONTA), *verb],
+                    capture_output=True, encoding="utf-8", env=self.env,
+                    timeout=BOUND)
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn(f"warning: {self.marker} cannot be read as a "
+                              f"coverage marker: {why} — the marker was not "
+                              "written, and the hook is wired without it",
+                              result.stderr)
+                self.assertIn("installed in", result.stdout)
+                wired = json.loads((self.home / settings).read_text(
+                    encoding="utf-8"))
+                self.assertIn("PostToolUse", wired["hooks"])
+                self.assertEqual(kind(self.marker), before,
+                                 "left as the writer put it")
+
+    def settings_files(self):
+        """Each verb that reads a settings file, with the file it reads."""
+        claude = self.home / ".claude" / "settings.json"
+        codex = self.home / ".codex" / "hooks.json"
+        return ((("install-hook",), claude),
+                (("install-hook", "--codex"), codex),
+                (("uninstall-hook",), claude),
+                (("uninstall-hook", "--codex"), codex))
+
+    def test_a_folder_where_the_settings_belong_is_refused(self):
+        for verb, path in self.settings_files():
+            with self.subTest(verb=" ".join(verb)):
+                self.assert_refused(path, Path.mkdir, FOLDER, *verb)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_settings_belong_is_never_waited_on(self):
+        for verb, path in self.settings_files():
+            with self.subTest(verb=" ".join(verb)):
+                self.assert_refused(path, os.mkfifo, PIPE, *verb)
+
+    def test_a_folder_where_the_marker_belongs_is_named_beside_the_hook(
+            self):
+        self.assert_wired_beside(Path.mkdir, FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_marker_belongs_is_never_waited_on(self):
+        self.assert_wired_beside(os.mkfifo, PIPE)
+
+
+class ServedMarkerNotAFileTest(unittest.TestCase):
+    """`serve` reads the coverage marker once, before it takes its port,
+    to steer its keepers (ADR-0031): with a folder or a pipe there it
+    starts, finds no profile on record, and is never held (#405)."""
+
+    def assert_started(self, make):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name).resolve()
+        (home / ".loxodonta").mkdir()
+        make(home / ".loxodonta" / "coverage.json")
+        proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
+             "--witness", str(home / "witness")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
+        self.addCleanup(proc.communicate)
+        self.addCleanup(proc.kill)
+        # Both startup lines, read on a thread joined to a bound: a start
+        # held at the marker prints neither, and is killed above.
+        said = []
+        reader = threading.Thread(target=lambda: said.extend(
+            [proc.stdout.readline(), proc.stdout.readline()]), daemon=True)
+        reader.start()
+        reader.join(BOUND)
+
+        self.assertFalse(reader.is_alive(), "serve never said it started")
+        self.assertIn("http://127.0.0.1:", said[0])
+        self.assertIn("anchor off (no profile on record; no flag)", said[1])
+
+    def test_a_folder_where_the_marker_belongs_is_read_past(self):
+        self.assert_started(Path.mkdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_marker_belongs_is_never_waited_on(self):
+        self.assert_started(os.mkfifo)
+
+
+class ExportedNameNotAFileTest(ExportBase):
+    """`supervisor export` with a folder or a pipe at the name it writes
+    by default, a predictable one in the folder it runs in, or at the
+    raw archive's beside it (#405): refused by name with exit 73, a code
+    no scan verdict uses, never waited on, and left as it was."""
+
+    def names(self, suffix):
+        """Where the export of a scan made now lands: today's name, and
+        tomorrow's, for a run that crosses midnight UTC."""
+        now = datetime.now(timezone.utc)
+        return [self.work / ("loxodonta-export-"
+                             + (now + timedelta(days=ahead)).strftime(
+                                 "%Y-%m-%d") + suffix)
+                for ahead in (0, 1)]
+
+    def assert_refused(self, make, why, suffix, then, *args):
+        planted = self.names(suffix)
+        for path in planted:
+            make(path)
+        before = [kind(path) for path in planted]
+        try:
+            result = subprocess.run(
+                [sys.executable, str(SUPERVISOR), "export",
+                 "--witness", str(self.witness), *args],
+                input=b"yes\n", capture_output=True, cwd=str(self.work),
+                env={**self.env, "PYTHONIOENCODING": "utf-8"},
+                timeout=BOUND)
+            err = result.stderr.decode("utf-8", "replace")
+
+            self.assertEqual(result.returncode, 73, err)
+            self.assertNotIn("Traceback", err)
+            self.assertTrue(any(f"{path.name} could not be written: {why} "
+                                f"— {then}" in err for path in planted), err)
+            self.assertEqual([kind(path) for path in planted], before)
+        finally:
+            for path in planted:
+                (path.rmdir if path.is_dir() else path.unlink)()
+
+    def assert_both_refused(self, make, why):
+        with self.subTest(name="the export"):
+            self.assert_refused(make, why, ".json", "nothing was written")
+            self.assertEqual(list(self.work.iterdir()), [])
+        with self.subTest(name="the raw archive"):
+            self.assert_refused(make, why, "-raw.zip",
+                                "loxodonta-export-", "--raw")
+            self.exported_file()
+
+    def test_a_folder_at_either_name_is_refused(self):
+        self.assert_both_refused(Path.mkdir, FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_at_either_name_is_never_waited_on(self):
+        self.assert_both_refused(os.mkfifo, PIPE)
+
+
+def misdirected(sidecar, nonce, away):
+    """Point the one anchor row of `sidecar` at a `file:` calendar in
+    `away`, every other row kept, and return the path urllib would read
+    that row's completion from: a path the row chose (#414)."""
+    rows = [json.loads(line) for line in
+            sidecar.read_text(encoding="utf-8").splitlines()]
+    (anchor,) = [row for row in rows if row.get("kind") == "anchor"]
+    rows = [dict(row, calendar=away.as_uri()) if row is anchor else row
+            for row in rows]
+    sidecar.write_bytes("".join(json.dumps(row) + "\n"
+                                for row in rows).encode("utf-8"))
+    commitment = hashlib.sha256(bytes.fromhex(anchor["head"])
+                                + nonce).hexdigest()
+    target = away / "timestamp" / commitment
+    target.parent.mkdir(parents=True)
+    return target
+
+
+class CalendarSchemeTest(unittest.TestCase):
+    """`anchor --upgrade` with a pending proof whose row names a `file:`
+    calendar (#414): the row is named as one this recorder cannot ask
+    and is never fetched, so a file at the path it chose is never read
+    and a pipe there is never waited on. Nothing is written, exit 0."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+        calendar = start_calendar(self)
+        anchored = run_receipts("anchor", "--calendar", calendar.url,
+                                cwd=self.workdir)
+        self.assertEqual(anchored.returncode, 0, anchored.stderr)
+        self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
+        self.target = misdirected(self.sidecar, calendar.nonce,
+                                  self.workdir / "elsewhere")
+
+    def assert_never_fetched(self, make):
+        make(self.target)
+        before = (kind(self.target), self.sidecar.read_bytes())
+
+        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("the record's calendar is not a URL this recorder can "
+                      "ask", result.stderr)
+        self.assertEqual((kind(self.target), self.sidecar.read_bytes()),
+                         before)
+
+    def test_a_file_the_calendar_row_points_at_is_never_read(self):
+        self.assert_never_fetched(
+            lambda path: path.write_bytes(b"no completion of any proof"))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_the_calendar_row_points_at_is_never_waited_on(self):
+        self.assert_never_fetched(os.mkfifo)
+
+
+class SessionEndCalendarSchemeTest(BoundedHook, PublishBase):
+    """The session end's upgrade half with a pending row naming a `file:`
+    calendar (#414): passed by quietly, as every other row it cannot
+    ask, and the pipe at the path it chose is never waited on."""
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_the_calendar_row_points_at_is_never_waited_on(self):
+        calendar = start_calendar(self)
+        self.tool_call()
+        self.session_end("--anchor", "--calendar", calendar.url)
+        target = misdirected(
+            self.chain().with_name(self.chain().name + ".anchors.jsonl"),
+            calendar.nonce, self.root / "elsewhere")
+        os.mkfifo(target)
+        self.tool_call()
+
+        result = self.session_end("--anchor", "--calendar", calendar.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue(stat.S_ISFIFO(os.lstat(target).st_mode))
 
 
 if __name__ == "__main__":

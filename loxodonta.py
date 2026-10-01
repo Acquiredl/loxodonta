@@ -8,6 +8,7 @@ import argparse
 import base64
 import errno
 import hashlib
+import io
 import json
 import os
 import stat
@@ -22,7 +23,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.10.2"
+TOOL_VERSION = "0.10.3"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -2414,11 +2415,15 @@ def judge_manifest_signature(folder):
             # the key's two tokens, type and key. The shipped file's own
             # tokens and nothing else, so what verifies is what shipped.
             allowed = os.path.join(scratch, "allowed_signers")
-            with open(public_key, encoding="utf-8", errors="replace") as f:
+            # The two files this verifier opens itself, read without
+            # waiting: a pipe put at either name since it was first looked
+            # at would otherwise hold the verifier for good.
+            with io.TextIOWrapper(open_regular(public_key), encoding="utf-8",
+                                  errors="replace") as f:
                 key = " ".join(f.readline().split()[:2])
             with open(allowed, "w", encoding="utf-8", newline="\n") as f:
                 f.write(f"{SIGNATURE_PRINCIPAL} {key}\n")
-            with open(manifest, "rb") as shipped:
+            with open_regular(manifest) as shipped:
                 verified = subprocess.run(
                     ["ssh-keygen", "-Y", "verify", "-f", allowed,
                      "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
@@ -2744,13 +2749,21 @@ def cmd_verify_package(args):
     if not os.path.isfile(path):
         print(f"error: {path} not found", file=sys.stderr)
         return EX_NOINPUT
-    if not zipfile.is_zipfile(path):
+    # Opened once, without waiting, and only that open file is read: a
+    # pipe put at the name since the look above is never waited on, and
+    # a file this cannot open reads as no zip, as is_zipfile reads one.
+    try:
+        handle = open_regular(path)
+    except OSError:
+        handle = io.BytesIO()
+    if not zipfile.is_zipfile(handle):
+        handle.close()
         print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
               "not a loxodonta package")
         return 4
-    with tempfile.TemporaryDirectory() as unpacked:
+    with handle, tempfile.TemporaryDirectory() as unpacked:
         try:
-            with zipfile.ZipFile(path) as package:
+            with zipfile.ZipFile(handle) as package:
                 declared = sum(info.file_size for info in package.infolist())
                 if declared > PACKAGE_MAX_BYTES:
                     print(f"UNSUPPORTED-FORMAT: {path} declares {declared} "
@@ -3606,6 +3619,13 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
 
 
 def calendar_request(url, data=None, timeout=15):
+    """One request to a calendar, and its reply. An address with any
+    scheme but http or https raises ValueError, before anything is
+    asked: an upgrade takes the address from a sidecar row, in the
+    writer's reach, and urllib would read a `file:` one as a path on
+    this machine, a pipe there included (#414)."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        raise ValueError("not an http or https URL")
     request = urllib.request.Request(
         url, data=data,
         headers={"Accept": "application/vnd.opentimestamps.v1",
@@ -4784,7 +4804,7 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
         try:
             proof_bytes = calendar_request(url + "/digest", data=digest)
             judge_proof(head, proof_bytes)  # refuse to store what can't replay
-        except (OSError, ProofError) as e:
+        except (OSError, ProofError, ValueError) as e:
             print(f"warning: calendar {url}: {e}", file=sys.stderr)
             continue
         try:
@@ -5521,25 +5541,42 @@ def settings_shape_problem(settings):
 
 
 def load_settings(path):
-    """The user-level settings, or None with the complaint printed —
-    shared by install and uninstall so both refuse broken JSON, or JSON
-    of a shape they cannot read, the same way instead of clobbering it.
-    The file is left exactly as it was."""
+    """The user-level settings as (settings, None), or (None, the exit
+    code) with the complaint printed — shared by install and uninstall
+    so both refuse the same ways instead of clobbering anything: broken
+    JSON, or JSON of a shape they cannot read, 65; a folder, a pipe or
+    a device at the name, or a file this user may not open, 66. The
+    file is left exactly as it was."""
     if not os.path.exists(path):
-        return {}
+        return {}, None
     try:
-        with open(path, encoding="utf-8") as f:
+        # The settings are in the writer's reach, and an ordinary open
+        # of a pipe there would hold the installer for good (#405).
+        with io.TextIOWrapper(open_regular(path), encoding="utf-8") as f:
             settings = json.load(f)
+    except OSError as e:
+        return None, refuse_to_touch(path, e.strerror or str(e))
     except ValueError as e:  # not JSON, or not UTF-8
         print(f"refusing to touch {path}: it is not valid JSON ({e}) — "
               "fix it by hand first", file=sys.stderr)
-        return None
+        return None, EX_DATAERR
     problem = settings_shape_problem(settings)
     if problem:
         print(f"refusing to touch {path}: expected {SETTINGS_SHAPE}, but "
               f"{problem} — fix it by hand first", file=sys.stderr)
-        return None
-    return settings
+        return None, EX_DATAERR
+    return settings, None
+
+
+def refuse_to_touch(path, why):
+    """The refusal when a file install-hook or uninstall-hook reads
+    before writing anything cannot be read as a file: a folder, a pipe
+    or a device at its name, or a file this user may not open. Named,
+    never waited on, and nothing written (#405): no input, 66, as for a
+    log."""
+    print(f"refusing to touch {path}: {why} — fix it by hand first",
+          file=sys.stderr)
+    return EX_NOINPUT
 
 
 def replace_file(path, data, mode_of=None):
@@ -5583,15 +5620,22 @@ def backup_settings(path):
     written only when none exists yet (#293). Overwriting it on every
     run, as it once was, lost the original on the second run, since
     by then the file held the installer's own edit. Returns the
-    parenthesis the installer prints after the path it wrote."""
+    parenthesis the installer prints after the path it wrote, or None
+    with the refusal printed when a folder or a pipe has been put at
+    the name since `load_settings` read it, never waited on (#405)."""
     backup = path + ".bak"
     name = os.path.basename(backup)
     if not os.path.exists(path):
         return ""
     if os.path.exists(backup):
         return f" (the existing {name} was kept, not overwritten)"
-    with open(path, "rb") as f:
-        replace_file(backup, f.read(), mode_of=path)
+    try:
+        with open_regular(path) as f:
+            original = f.read()
+    except OSError as e:
+        refuse_to_touch(path, e.strerror or str(e))
+        return None
+    replace_file(backup, original, mode_of=path)
     return f" (previous version saved as {name})"
 
 
@@ -5931,9 +5975,9 @@ def install_codex_hooks(publish=None, profile="local",
     has no cursor to resume from, so the supervisor anchors instead.
     `profile` is written to the coverage marker (ADR-0031 ruling 1)."""
     path = codex_hooks_path()
-    settings = load_settings(path)
-    if settings is None:
-        return EX_DATAERR
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
     if publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
@@ -5987,18 +6031,19 @@ def install_codex_hooks(publish=None, profile="local",
     # first time a recorder that knows how walks past.
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
-    marked = record_coverage(CODEX_ACTOR, wired, profile,
-                             remote=publish_chain or publish,
-                             authority=authority)
+    marked, unmarked = record_coverage(CODEX_ACTOR, wired, profile,
+                                       remote=publish_chain or publish,
+                                       authority=authority)
     tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
-        if marked:
-            print(f"  coverage recorded in {coverage_path()}")
+        coverage_said(marked, unmarked)
         if tier:
             print(tier)
         return 0
     backup = backup_settings(path)
+    if backup is None:
+        return EX_NOINPUT
     write_hooks_file(path, settings)
     print(f"installed in {path}{backup}")
     for line in installed:
@@ -6006,8 +6051,7 @@ def install_codex_hooks(publish=None, profile="local",
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
               "moved — now pointing at this install")
-    if marked:
-        print(f"  coverage recorded in {coverage_path()}")
+    coverage_said(marked, unmarked)
     print("Codex asks you to review new hooks once: open Codex and run "
           "/hooks to trust them.")
     print("every NEW Codex session on this machine then leaves a chain in")
@@ -6058,8 +6102,11 @@ def record_coverage(harness, matchers, profile, remote=None,
     that wired it (an epoch without it wired none). The marker never
     travels (the export and the package leave it out), so unlike the
     publish memo it may hold a URL. Every failure is a silent skip: a
-    bookkeeping file is no reason to refuse an install. Returns whether
-    an entry was appended."""
+    bookkeeping file is no reason to refuse an install. A folder, a pipe
+    or a device at the marker's name is skipped too, never waited on,
+    but not silently, since it is something put there (#405): returned
+    in words for the installer to name beside the hook it wired.
+    Returns (whether an entry was appended, those words or None)."""
     entry = {"since": now_ts(), "matchers": list(matchers)}
     if failures:
         entry["failures"] = list(failures)
@@ -6068,12 +6115,18 @@ def record_coverage(harness, matchers, profile, remote=None,
         entry["remote"] = remote
     if authority:
         entry["authority"] = authority
+    marker = coverage_path()
     try:
         os.makedirs(store_home(), exist_ok=True)
         try:
-            with open(coverage_path(), encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
+            with open_regular(marker) as f:
+                data = json.loads(f.read().decode("utf-8"))
+        except OSError as error:
+            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+                return False, ("cannot be read as a coverage marker: "
+                               f"{error.strerror}")
+            data = {}
+        except ValueError:
             data = {}
         epochs = [epoch for epoch in data.get("epochs", [])
                   if isinstance(epoch, dict)
@@ -6085,14 +6138,30 @@ def record_coverage(harness, matchers, profile, remote=None,
                 and last.get("profile") == profile \
                 and last.get("remote") == entry.get("remote") \
                 and last.get("authority") == entry.get("authority"):
-            return False
+            return False, None
         body = json.dumps({"purpose": COVERAGE_PURPOSE,
                            "epochs": epochs + [entry]}, indent=2)
-        with open(coverage_path(), "w", encoding="utf-8", newline="\n") as f:
-            f.write(body + "\n")
-        return True
+        try:
+            write_line_to_disk(marker, "w", body + "\n")
+        except OSError:
+            why = file_problem(marker)
+            if why not in (NOT_A_FOLDER, NOT_REGULAR):
+                raise
+            return False, f"could not be written: {why}"
+        return True, None
     except OSError:
-        return False
+        return False, None
+
+
+def coverage_said(marked, unmarked):
+    """The installer's word on the marker (record_coverage): where the
+    coverage was recorded, or on stderr what stands at the marker's name
+    instead, beside a hook that is wired all the same (#405)."""
+    if marked:
+        print(f"  coverage recorded in {coverage_path()}")
+    if unmarked:
+        print(f"warning: {coverage_path()} {unmarked} — the marker was not "
+              "written, and the hook is wired without it", file=sys.stderr)
 
 
 def cmd_install_hook(args):
@@ -6131,9 +6200,9 @@ def cmd_install_hook(args):
     digest = digest_command()
     path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 
-    settings = load_settings(path)
-    if settings is None:
-        return EX_DATAERR
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
     if args.publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
@@ -6242,22 +6311,23 @@ def cmd_install_hook(args):
 
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
-    marked = record_coverage("claude-code", wired, args.profile,
-                             remote=(args.publish_chain
-                                     or args.publish_head),
-                             authority=args.authority,
-                             failures=[block.get("matcher", "*")
-                                       for block in failed if ours(block)])
+    marked, unmarked = record_coverage(
+        "claude-code", wired, args.profile,
+        remote=args.publish_chain or args.publish_head,
+        authority=args.authority,
+        failures=[block.get("matcher", "*") for block in failed
+                  if ours(block)])
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
-        if marked:
-            print(f"  coverage recorded in {coverage_path()}")
+        coverage_said(marked, unmarked)
         if tier:
             print(tier)
         return 0
 
     backup = backup_settings(path)
+    if backup is None:
+        return EX_NOINPUT
     write_hooks_file(path, settings)
     print(f"installed in {path}{backup}")
     for line in installed:
@@ -6265,8 +6335,7 @@ def cmd_install_hook(args):
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
               "moved — now pointing at this install")
-    if marked:
-        print(f"  coverage recorded in {coverage_path()}")
+    coverage_said(marked, unmarked)
     print("every NEW Claude Code session on this machine now leaves a chain")
     print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
     print("drawer per project. Restart open sessions.")
@@ -6305,9 +6374,9 @@ def cmd_uninstall_hook(args):
     path = (codex_hooks_path() if args.codex
             else os.path.join(os.path.expanduser("~"), ".claude",
                               "settings.json"))
-    settings = load_settings(path)
-    if settings is None:
-        return EX_DATAERR
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
     if not settings:
         print(f"nothing installed: no hooks file at {path}")
         return 0
@@ -6319,6 +6388,8 @@ def cmd_uninstall_hook(args):
         return 0
 
     backup = backup_settings(path)
+    if backup is None:
+        return EX_NOINPUT
     write_hooks_file(path, settings)
     print(f"removed from {path}: {', '.join(sorted(set(removed)))}{backup}")
     return 0

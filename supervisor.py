@@ -76,7 +76,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.10.2"
+TOOL_VERSION = "0.10.3"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -302,7 +302,8 @@ def write_whole(path, text):
     path that is a symbolic link is written through, so the link stays
     a link. A folder, a pipe or a device at the name is refused, an
     OSError in `open_regular`'s words, and left as the writer put it,
-    for the next look to name again (#386)."""
+    for the next look to name again (#386). Bytes are written as they
+    are."""
     path = os.path.realpath(path)
     try:
         mode = os.stat(path).st_mode
@@ -317,7 +318,7 @@ def write_whole(path, text):
                                 prefix=os.path.basename(path) + ".")
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(text.encode("utf-8"))
+            f.write(text if isinstance(text, bytes) else text.encode("utf-8"))
             f.flush()
             os.fsync(f.fileno())
         try:
@@ -738,8 +739,9 @@ def marker_harnesses():
     through its newest epoch and no older one: a re-install for that
     harness is its operator's latest word."""
     try:
-        with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
-            data = json.load(f)
+        # In the writer's reach: a folder or a pipe there reads as no
+        # marker, never waited on, and the scan names it (#405).
+        data = json.loads(read_whole(Path(store_home()) / COVERAGE_NAME))
     except (OSError, ValueError):
         return {}
     declared = {}
@@ -1912,7 +1914,12 @@ def read_settings(settings_file):
         raise ValueError(f"{word} is not JSON")
 
     try:
-        settings = json.loads(Path(settings_file).read_text(encoding="utf-8"),
+        # In the writer's reach: a folder or a pipe there reads as no
+        # settings, never waited on (#405). The scan names one at Claude
+        # Code's settings (settings_note); one at Codex's hooks.json,
+        # read only at `serve`'s start and by `drill`, reads as no
+        # recorder wired there.
+        settings = json.loads(read_whole(settings_file),
                               parse_constant=refuse)
     except (OSError, ValueError):
         return None
@@ -2336,8 +2343,9 @@ def coverage_epochs(harness="claude-code"):
     wires `.*` into a different settings file and Codex's coverage must
     never speak for the Claude Code witness."""
     try:
-        with open(Path(store_home()) / COVERAGE_NAME, encoding="utf-8") as f:
-            data = json.load(f)
+        # In the writer's reach: a folder or a pipe there reads as no
+        # marker, never waited on, and the scan names it (#405).
+        data = json.loads(read_whole(Path(store_home()) / COVERAGE_NAME))
     except (OSError, ValueError):
         return []
     epochs = []
@@ -3624,6 +3632,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if note:
         baseline["note"] = note
     shelf = not_a_file(daybook)
+    marker = Path(store_home()) / COVERAGE_NAME
+    unmarked = not_a_file(marker)
+    settings = witness.parent / "settings.json"
+    unset = not_a_file(settings)
     report_note = None
     if store and not repos:
         # An empty store has two unlike causes and this note named only
@@ -3657,6 +3669,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "history": fortnight(days, now),
         **({"history_note": memory_unread(daybook, "a day book", shelf)}
            if shelf else {}),
+        **({"marker_note": f"{marker.as_posix()} cannot be read as a "
+                           f"coverage marker: {unmarked} — read as none, as "
+                           "if install-hook had written nothing"}
+           if unmarked else {}),
+        **({"settings_note": f"{settings.as_posix()} cannot be read as "
+                             f"harness settings: {unset} — read as none, "
+                             "as if no hook were wired"}
+           if unset else {}),
         "baseline": baseline,
         "completeness": completeness,
         "consumption": consumption,
@@ -3720,10 +3740,16 @@ def cmd_adopt(args):
             continue
         os.makedirs(drawer, exist_ok=True)
         record = drawer / "project.json"
-        if not record.exists():
-            record.write_text(json.dumps(
-                {"path": str(project.resolve()).replace(os.sep, "/")})
-                + "\n", encoding="utf-8")
+        try:
+            # Created only where nothing stands, so a pipe put at the
+            # name is kept as it is and never opened (#405).
+            with open(record, "x", encoding="utf-8") as f:
+                f.write(json.dumps(
+                    {"path": str(project.resolve()).replace(os.sep, "/")})
+                    + "\n")
+        except OSError:
+            if not os.path.lexists(record):
+                raise
         marker = log.parent / UNLISTED_NAME
         shutil.move(str(log), str(drawer / log.name))
         for suffix in SIDECAR_SUFFIXES:
@@ -5264,7 +5290,10 @@ EXPORT_WORDS = (
 
 def write_lf(path, text):
     """Write text with LF line endings on every platform. (Path.write_text
-    grew its newline= argument in 3.10; the README promises 3.9.)"""
+    grew its newline= argument in 3.10; the README promises 3.9.) Only
+    into a folder the supervisor has just made, a package's staging
+    folder or a temporary one: a name the writer can reach goes through
+    write_whole, which refuses a pipe there (#405)."""
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
 
@@ -5427,16 +5456,18 @@ def build_export(report):
     return data, ordinal, newest
 
 
-def write_raw_archive(report, ordinal, path):
-    """Chain bytes and anchor sidecars, drawers renamed to their
-    ordinals, no project.json: the one export that carries command
-    lines, written only after the sender said yes. A raw archive, not a
-    package: no manifest, no witness, nothing a recipient verifies as a
-    set (ADR-0026 ruling 9 keeps the two names apart). A chain or a
-    sidecar that is not a file, a pipe in its place say, is named on
-    stderr and left out (#374)."""
+def raw_archive(report, ordinal):
+    """The raw archive's bytes: chain bytes and anchor sidecars, drawers
+    renamed to their ordinals, no project.json: the one export that
+    carries command lines, written only after the sender said yes. A
+    raw archive, not a package: no manifest, no witness, nothing a
+    recipient verifies as a set (ADR-0026 ruling 9 keeps the two names
+    apart). A chain or a sidecar that is not a file, a pipe in its place
+    say, is named on stderr and left out (#374). Built in memory, so
+    `write_export` puts it at its name whole or not at all (#405)."""
     import zipfile
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+    built = io.BytesIO()
+    with zipfile.ZipFile(built, "w", zipfile.ZIP_DEFLATED) as archive:
         for repo in report.get("repos", []):
             label = ordinal.get(repo.get("repo"), "repo-0")
             for sess in repo.get("sessions", []):
@@ -5454,6 +5485,26 @@ def write_raw_archive(report, ordinal, path):
                             print(f"not archived: {name}: "
                                   f"{error.strerror or error}",
                                   file=sys.stderr)
+    return built.getvalue()
+
+
+def write_export(path, data, then):
+    """One file `export` hands the operator, written whole (write_whole),
+    or the refusal when a folder or a pipe stands at its name: the
+    export's own name is a predictable one in the folder the command
+    runs in, which is the writer's, and an ordinary open of a pipe
+    there waits for good (#405). `then` says what that leaves. Returns
+    None, or 73 with the refusal printed: sysexits' EX_CANTCREAT, which
+    no scan verdict uses."""
+    try:
+        write_whole(path, data)
+    except OSError as error:
+        if error.strerror not in (NOT_A_FOLDER, NOT_REGULAR):
+            raise
+        print(f"error: {Path(path).name} could not be written: "
+              f"{error.strerror} — {then}", file=sys.stderr)
+        return 73
+    return None
 
 
 def archive_regular(archive, path, name):
@@ -5540,11 +5591,17 @@ def cmd_export(args):
         archive = out.with_name(out.stem + "-raw.zip")
 
     body = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    write_lf(out, body)
+    refused = write_export(out, body, "nothing was written")
+    if refused:
+        return refused
     print(body, end="")
     print(f"written: {out.name}", file=sys.stderr)
     if archive is not None:
-        write_raw_archive(report, ordinal, archive)
+        refused = write_export(archive, raw_archive(report, ordinal),
+                               f"{out.name} was written without the raw "
+                               "chains")
+        if refused:
+            return refused
         print(f"written: {archive.name} (raw chains)", file=sys.stderr)
 
     if not args.send:
@@ -5559,7 +5616,11 @@ def send_export(data, out, archive):
     issue = out.with_name(out.stem + ".issue.md")
     gh = shutil.which("gh")
     if gh is None:
-        write_lf(issue, issue_body(data, None, archive is not None))
+        refused = write_export(issue, issue_body(data, None,
+                                                 archive is not None),
+                               "nothing was sent")
+        if refused:
+            return refused
         print("gh is not on PATH, so nothing was sent. The export and an "
               f"issue body ({issue.name}) are beside you: upload the export "
               "as a secret gist and open a field-data issue on "
@@ -5580,7 +5641,12 @@ def send_export(data, out, archive):
         return 1
     lines = gist.stdout.strip().splitlines()
     gist_url = lines[-1] if lines else "<gist link>"
-    write_lf(issue, issue_body(data, gist_url, archive is not None))
+    refused = write_export(issue, issue_body(data, gist_url,
+                                             archive is not None),
+                           f"the gist is up at {gist_url}, and no issue "
+                           "was filed")
+    if refused:
+        return refused
     title = (f"field-data: {machine['os']} / {len(data['sessions'])} "
              f"sessions / {stamp}")
     filed = subprocess.run([gh, "issue", "create", "--repo", FIELD_DATA_REPO,
@@ -5700,18 +5766,20 @@ def copy_regular(source, target):
     """`source`'s bytes into a new file at `target`, read from the one
     file `open_regular` opened: every file a package copies is in the
     writer's reach, and a device swapped in after the check would be
-    copied without end (#374)."""
-    with open_regular(source) as read, open(target, "wb") as written:
+    copied without end (#374). The target is created exclusively, so
+    nothing already standing at its name is opened (#405)."""
+    with open_regular(source) as read, open(target, "xb") as written:
         shutil.copyfileobj(read, written)
 
 
 def artifact_listing(path):
     """How the manifest lists a post-close artifact: sha256 of its bytes
     and their count, because nothing else commits it (ADR-0026 ruling 3).
-    Read in chunks: a transcript can run to hundreds of MB."""
+    Read in chunks: a transcript can run to hundreds of MB. Read without
+    waiting, as every file the package copies is (#405)."""
     digest = hashlib.sha256()
     size = 0
-    with open(path, "rb") as f:
+    with open_regular(path) as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             digest.update(chunk)
             size += len(chunk)
