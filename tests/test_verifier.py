@@ -21,6 +21,7 @@ import os
 import subprocess
 import symtable
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -97,6 +98,52 @@ class TheCopyTest(unittest.TestCase):
                 refused = run(VERIFIER, verb)
                 self.assertEqual(refused.returncode, 64, refused.stderr)
                 self.assertIn("invalid choice", refused.stderr)
+
+
+
+class TheBuildTest(unittest.TestCase):
+    """tools/build_verifier.py run on a copy of the recorder in a folder of
+    its own, which the tool finds beside its tools folder. The recorder is
+    copied with CRLF, as a Windows checkout holds it, on every platform."""
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        (self.root / "tools").mkdir()
+        (self.root / "tools" / "build_verifier.py").write_bytes(
+            BUILD.read_bytes())
+        recorder = (REPO_ROOT / "loxodonta.py").read_text(encoding="utf-8")
+        (self.root / "loxodonta.py").write_bytes(
+            recorder.replace("\n", "\r\n").encode("utf-8"))
+        self.built = self.root / "verifier.py"
+
+    def build(self):
+        return run(self.root / "tools" / "build_verifier.py")
+
+    def test_a_build_writes_lf_whatever_the_checkout_holds(self):
+        self.built.write_bytes(b"stale\r\n")
+        done = self.build()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("wrote verifier.py", done.stdout)
+        written = self.built.read_bytes()
+        self.assertNotIn(b"\r", written)
+        self.assertEqual(written.decode("utf-8"),
+                         VERIFIER.read_text(encoding="utf-8"))
+
+    def test_a_rebuild_with_nothing_changed_leaves_the_file_alone(self):
+        # A current copy that a Windows checkout wrote with CRLF, rewritten
+        # as LF, reads as modified to git status with an empty diff (#389).
+        self.build()
+        crlf = self.built.read_bytes().replace(b"\n", b"\r\n")
+        self.built.write_bytes(crlf)
+        done = self.build()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("verifier.py is current", done.stdout)
+        self.assertEqual(self.built.read_bytes(), crlf)
+        checked = run(self.root / "tools" / "build_verifier.py", "--check")
+        self.assertEqual(checked.returncode, 0,
+                         checked.stdout + checked.stderr)
 
 
 # The classes that exercise `head`, `verify` and `verify-package`, by
