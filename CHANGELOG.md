@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Fixed
 
 - `tools/build_verifier.py` leaves a current `verifier.py` untouched, so a rebuild on a Windows checkout no longer reads as modified to `git status` with an empty diff (#389).
+- A pipe where a chain belongs no longer hangs the hook with its lock held: a pipe, folder or device there is damage, and the hook records in a sibling; `run` refuses before its command runs (#385).
 - A pipe where a transcript, a project record, a worktree's `commondir` or the supervisor's baseline, day book or views belongs no longer hangs `scan`, `serve`, `verify --transcript`, `log --file` or the hook (#386).
 
 ## [0.10.1] - 2026-09-30

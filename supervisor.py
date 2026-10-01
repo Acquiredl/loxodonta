@@ -169,7 +169,7 @@ def read_lines(path, errors="replace"):
     rather than waited on (#374). A byte that is not UTF-8 reads as
     U+FFFD by default: the readers here display and count, and the
     verify walk is where such a line gets its name. Sidecars are read by
-    the copied `sidecar_lines` instead, which keeps the bad byte so
+    the copied `read_log` instead, which keeps the bad byte so
     `read_sidecar_records` names the line unreadable; read here,
     `{"head":"ab\\xff"}` would parse as a head."""
     with open_regular(path) as f:
@@ -1001,7 +1001,8 @@ def read_log(path):
     ending the whole read in a traceback: the walk refuses the one line
     it sits on by name (SPEC §6), and `tail_entry` calls a tail holding
     one damaged. The recorder only ever writes ASCII lines, so no line
-    it wrote is read any differently."""
+    it wrote is read any differently. Sidecars are read here too, where
+    `read_sidecar_records` calls such a line unreadable."""
     with open_regular(path) as f:
         return [line.decode("utf-8", "surrogateescape")
                 for line in split_lines(f.read())]
@@ -1119,23 +1120,12 @@ def file_problem(path):
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def sidecar_lines(path):
-    """The lines of the sidecar at `path`, split and decoded as
-    `read_log` reads a chain's, from the one file `open_regular` opened:
-    FileNotFoundError when there is none, and an OSError naming why when
-    what is there is not a file."""
-    with open_regular(path) as f:
-        return [line.decode("utf-8", "surrogateescape")
-                for line in split_lines(f.read())]
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
-    surrogate from `sidecar_lines`), an integer too long to read, nesting
+    surrogate from `read_log`), an integer too long to read, nesting
     too deep (#299). A line a strict JSON parser refuses is unreadable
     too, before its kind is read: a key given twice, as the walk refuses
     one in an entry, `NaN`, `Infinity` or `-Infinity`, and a number too
@@ -1143,7 +1133,7 @@ def read_sidecar_records(path):
     cannot be read as a file (`open_regular`) reads as one unreadable
     line, so no reader stops on it and a judge names it (#364)."""
     try:
-        lines = sidecar_lines(path)
+        lines = read_log(path)
     except FileNotFoundError:
         return None
     except OSError:
@@ -1450,7 +1440,7 @@ def chain_cursor(log, url):
     try:
         # A folder or a pipe where the memo belongs (#364) is a memo
         # that cannot be read, raised as such, and never waited on.
-        lines = sidecar_lines(published_path(log))
+        lines = read_log(published_path(log))
     except FileNotFoundError:
         return -1
     mine = remote_id(url)

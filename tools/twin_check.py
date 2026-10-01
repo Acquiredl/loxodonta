@@ -131,7 +131,7 @@ TWINS = (
          "two names some system opens as one file (ADR-0026, #358)."),
     Twin("Reading a sidecar",
          ("read_log", "sidecar_path", "published_path", "NOT_A_FOLDER",
-          "NOT_REGULAR", "open_regular", "file_problem", "sidecar_lines",
+          "NOT_REGULAR", "open_regular", "file_problem",
           "KeyGivenTwice", "object_with_each_key_once", "NotStrictJson",
           "not_json", "finite_float", "read_sidecar_records"),
          ORIGINAL, SUPERVISOR,
