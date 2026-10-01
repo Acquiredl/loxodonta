@@ -190,9 +190,14 @@ def files_base(log):
     if not os.path.exists(record):
         return log_dir, None
     try:
-        with open(record, encoding="utf-8") as f:
-            path = json.load(f).get("path")
-    except (OSError, ValueError):
+        # The record sits beside the chain, in the writer's reach, so a
+        # pipe there is refused by name rather than waited on (#386).
+        with open_regular(record) as f:
+            path = json.loads(f.read().decode("utf-8")).get("path")
+    except OSError as error:
+        return None, (f"{record} cannot be read as a project record: "
+                      f"{error.strerror or error}")
+    except ValueError:
         return None, f"project record unreadable: {record}"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
@@ -515,12 +520,19 @@ def judge_prefixes(marks, transcript_path):
         print("no transcript commitments in this chain — nothing to judge")
         return False
     try:
-        handle = open(transcript_path, "rb")
-    except OSError:
+        handle = open_regular(transcript_path)
+    except FileNotFoundError:
         # Absence is a note, never a verdict: the harness cleans
         # transcripts on a retention cycle (ADR-0017).
         print(f"TRANSCRIPT-UNRESOLVED: no transcript at {transcript_path} "
               "— commitments unjudgeable; chain verdict unaffected")
+        return False
+    except OSError as error:
+        # A folder, a pipe or a device in its place is named and never
+        # waited on or read (#386); a note like absence, never a verdict.
+        print(f"TRANSCRIPT-UNRESOLVED: {transcript_path} cannot be read as "
+              f"a transcript: {error.strerror or error} — commitments "
+              "unjudgeable; chain verdict unaffected")
         return False
     diverged = False
     with handle:

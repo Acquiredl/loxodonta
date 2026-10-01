@@ -183,9 +183,14 @@ def files_base(log):
     if not os.path.exists(record):
         return log_dir, None
     try:
-        with open(record, encoding="utf-8") as f:
-            path = json.load(f).get("path")
-    except (OSError, ValueError):
+        # The record sits beside the chain, in the writer's reach, so a
+        # pipe there is refused by name rather than waited on (#386).
+        with open_regular(record) as f:
+            path = json.loads(f.read().decode("utf-8")).get("path")
+    except OSError as error:
+        return None, (f"{record} cannot be read as a project record: "
+                      f"{error.strerror or error}")
+    except ValueError:
         return None, f"project record unreadable: {record}"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
@@ -508,12 +513,19 @@ def judge_prefixes(marks, transcript_path):
         print("no transcript commitments in this chain — nothing to judge")
         return False
     try:
-        handle = open(transcript_path, "rb")
-    except OSError:
+        handle = open_regular(transcript_path)
+    except FileNotFoundError:
         # Absence is a note, never a verdict: the harness cleans
         # transcripts on a retention cycle (ADR-0017).
         print(f"TRANSCRIPT-UNRESOLVED: no transcript at {transcript_path} "
               "— commitments unjudgeable; chain verdict unaffected")
+        return False
+    except OSError as error:
+        # A folder, a pipe or a device in its place is named and never
+        # waited on or read (#386); a note like absence, never a verdict.
+        print(f"TRANSCRIPT-UNRESOLVED: {transcript_path} cannot be read as "
+              f"a transcript: {error.strerror or error} — commitments "
+              "unjudgeable; chain verdict unaffected")
         return False
     diverged = False
     with handle:
@@ -3277,13 +3289,16 @@ def file_reference(base, raw_path):
     return {"path": stored, "sha256": sha256}
 
 
-def build_references(log, file_paths):
+def build_references(log, file_paths, base=None):
     """The sorted {path, sha256} list for an append, or (None, exit code)
     with the complaint printed — shared by `log`/`run`/`hook` so all
     three refuse the same ways. A path spelled against SPEC §3 (absolute,
     or with `..`) is the command spoken wrong, 64; a file, or a project
-    record, that cannot be read is no input, 66 (ADR-0037)."""
-    base, problem = files_base(log)
+    record, that cannot be read is no input, 66 (ADR-0037). `base`, when
+    given, stands in for the one the project record names."""
+    problem = None
+    if base is None:
+        base, problem = files_base(log)
     if problem and file_paths:
         print(f"error: {problem}", file=sys.stderr)
         return None, EX_NOINPUT
@@ -5060,7 +5075,9 @@ def transcript_commitment_action(transcript_path):
     if not isinstance(transcript_path, str) or not transcript_path:
         return None
     try:
-        with open(transcript_path, "rb") as f:
+        # The transcript is the writer's file, and a pipe at its name
+        # would hold the hook, and the session with it (#386).
+        with open_regular(transcript_path) as f:
             data = f.read()
     except (OSError, ValueError):
         # ValueError: a path no filesystem can name, one holding a NUL
@@ -5080,7 +5097,8 @@ def commit_transcript_due(log, transcript_path):
     operator to turn the hook off."""
     try:
         last = tail_entry(read_log(log))
-    except FileNotFoundError:
+    except OSError:
+        # Gone, or a folder or a pipe in its place (#374).
         return
     if last is None or last["n"] == 0 or last["n"] % COMMITMENT_CADENCE:
         return
@@ -5128,20 +5146,23 @@ def main_repo_root(project):
     if not os.path.isfile(dot_git):
         return project  # a normal checkout (.git/ dir), or not a repo at all
     try:
-        with open(dot_git, encoding="utf-8") as f:
-            line = f.read().strip()
+        # Both files are in the writer's reach, and a pipe at either
+        # name would hold every tool call: read without waiting (#386).
+        with open_regular(dot_git) as f:
+            line = f.read().decode("utf-8").strip()
         if not line.startswith("gitdir:"):
             return project
         gitdir = line[len("gitdir:"):].strip()
         if not os.path.isabs(gitdir):
             gitdir = os.path.join(project, gitdir)
         try:
-            with open(os.path.join(gitdir, "commondir"),
-                      encoding="utf-8") as f:
-                common = f.read().strip()
+            with open_regular(os.path.join(gitdir, "commondir")) as f:
+                common = f.read().decode("utf-8").strip()
             common = os.path.normpath(os.path.join(gitdir, common))
             root = os.path.dirname(common)  # <main>/.git -> <main>
-        except OSError:
+        except OSError as error:
+            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+                return project  # a folder or a pipe there: unexpected
             # A worktree the harness already deregistered (ADR-0023): the
             # gitdir is gone, but the .git file still spells it as
             # <main>/.git/worktrees/<name>, and <main> is in that string.
@@ -5432,7 +5453,18 @@ def cmd_hook(args):
             continue
         file_paths.append(relative.replace(os.sep, "/"))
 
-    files, code = build_references(log, file_paths)
+    # A folder or a pipe where the project record belongs names no base,
+    # and the drawer is in the writer's reach: the hook takes the
+    # project it knows, as it does when it writes a new record, and
+    # says so rather than lose the receipt (#386).
+    record = os.path.join(os.path.dirname(log), "project.json")
+    unread = file_problem(record) if file_paths else None
+    if unread is not None:
+        print(f"warning: {record} cannot be read as a project record: "
+              f"{unread} — the files are fingerprinted against {base}",
+              file=sys.stderr)
+    files, code = build_references(
+        log, file_paths, base=base if unread is not None else None)
     if files is None:
         return code
     # One lock for the receipt and any due transcript commitment: a

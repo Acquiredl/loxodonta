@@ -14,11 +14,18 @@ and `package` and `export` never copy it (SPEC section 6). The hook
 reads it as damage and keeps its receipt in a sibling, and the other
 writers refuse it as `verify` does (#385).
 
+So is every other file the tools read there (#386): the transcript the
+hook commits and `verify --transcript` judges, a chain's project record,
+the supervisor's own memory, and the `.git` file and `commondir` a
+worktree's layout is read from. Each is named where it is read, or read
+as a layout the tools cannot follow, left as it was, and never waited on.
+
 Every test drives the public CLI: the recorder's verbs, its hook at
 SessionEnd, the supervisor's scan and keeper, against the fake calendar,
 authority and receiver the other suites use. No network, no internals.
 """
 
+import hashlib
 import json
 import os
 import socket
@@ -28,6 +35,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -39,9 +47,11 @@ from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env  # noqa: E4
 from test_export import OTHER_SESSION, ExportBase  # noqa: E402
 from test_package_anchor import SESSION, AnchoredStoreCase  # noqa: E402
 from test_publish import PublishBase  # noqa: E402
+from test_serve import OPENER, ServerFixture  # noqa: E402
 from test_stamp import start_authority  # noqa: E402
 from test_supervisor import (chains_by_session, home_outside,  # noqa: E402
-                             isolated_env, make_chain, run_scan)
+                             install_witness_hook, isolated_env, make_chain,
+                             run_scan)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -52,6 +62,7 @@ FOLDER = "it is a folder, not a file"
 PIPE = "it is not a regular file"
 NOT_EVIDENCE = "evidence that does not verify is not evidence"
 NO_CHAIN = "cannot be read as a receipt log"
+NO_FIFOS = "no named pipes here"
 # A pipe opened for reading waits for a writer that never comes, so a
 # reader that opened one would hang: every run here is bounded.
 BOUND = 60
@@ -61,6 +72,11 @@ def run_receipts(*args, cwd):
     return subprocess.run([sys.executable, str(LOXODONTA), *args], cwd=cwd,
                           capture_output=True, encoding="utf-8",
                           env=clean_env(), timeout=BOUND)
+
+
+def kind(path):
+    """What stands at `path`, as the file type bits of its own entry."""
+    return stat.S_IFMT(os.lstat(path).st_mode)
 
 
 HOOKED = "sess-1234abcd"
@@ -784,7 +800,24 @@ class ReferencedFolderTest(unittest.TestCase):
         self.assertEqual(result.stdout.strip().splitlines()[-1], "VALID")
 
 
-class SessionEndNotAFileTest(PublishBase):
+class BoundedHook:
+    """PublishBase's hook, bounded: a step that waited on a pipe would
+    fail the test rather than hold the suite."""
+
+    def hook(self, payload, *extra):
+        env = isolated_env(self.home, CLAUDE_PROJECT_DIR=str(self.project),
+                           LOXODONTA_HOME=str(self.store),
+                           PYTHONIOENCODING="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook", *extra],
+            cwd=self.project, input=json.dumps(payload).encode("utf-8"),
+            capture_output=True, env=env, timeout=BOUND)
+        result.stdout = result.stdout.decode("utf-8", "replace")
+        result.stderr = result.stderr.decode("utf-8", "replace")
+        return result
+
+
+class SessionEndNotAFileTest(BoundedHook, PublishBase):
     """The hook at SessionEnd, wired for every step that writes a
     sidecar (the head, the chain, the stamp, the anchor), with a folder
     in the place of all three, or of the chain itself: quiet and exit 0,
@@ -814,20 +847,6 @@ class SessionEndNotAFileTest(PublishBase):
         self.assertNotIn("Traceback", result.stdout)
         for folder in folders:
             self.assertTrue(folder.is_dir(), folder.name)
-
-    def hook(self, payload, *extra):
-        # PublishBase's hook, bounded: a step that waited on a pipe would
-        # fail the test rather than hold the suite.
-        env = isolated_env(self.home, CLAUDE_PROJECT_DIR=str(self.project),
-                           LOXODONTA_HOME=str(self.store),
-                           PYTHONIOENCODING="utf-8")
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook", *extra],
-            cwd=self.project, input=json.dumps(payload).encode("utf-8"),
-            capture_output=True, env=env, timeout=BOUND)
-        result.stdout = result.stdout.decode("utf-8", "replace")
-        result.stderr = result.stderr.decode("utf-8", "replace")
-        return result
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
     def test_every_session_end_step_passes_a_pipe_by_quietly(self):
@@ -1033,6 +1052,441 @@ class ExportedPipeTest(ExportBase):
             self.assertEqual(raw.namelist(), [f"repo-1/{self.log.name}"])
             self.assertEqual(raw.read(f"repo-1/{self.log.name}"),
                              self.log.read_bytes())
+
+
+class TranscriptNotAFileTest(unittest.TestCase):
+    """`verify --transcript` with a folder, a pipe or a device where the
+    transcript belongs (#386): named, never waited on and never read,
+    and a note like a missing transcript, so the verdict is the chain's
+    (SPEC section 6)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.transcript = self.workdir / "transcript.jsonl"
+        page = b"page one\n"
+        run_receipts("init", cwd=self.workdir)
+        run_receipts("log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir)
+        run_receipts("log", "--actor", "receipts", "--action",
+                     f"transcript-commitment: bytes={len(page)} "
+                     f"sha256={hashlib.sha256(page).hexdigest()}",
+                     cwd=self.workdir)
+
+    def assert_named(self, why):
+        result = run_receipts("verify", "--transcript", str(self.transcript),
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(f"TRANSCRIPT-UNRESOLVED: {self.transcript} cannot be "
+                      f"read as a transcript: {why}", result.stdout)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "VALID")
+
+    def test_a_folder_where_the_transcript_belongs_is_named(self):
+        self.transcript.mkdir()
+
+        self.assert_named(FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_transcript_belongs_is_never_waited_on(self):
+        os.mkfifo(self.transcript)
+
+        self.assert_named(PIPE)
+
+    @unittest.skipUnless(hasattr(os, "symlink")
+                         and os.path.exists("/dev/zero"), "no /dev/zero here")
+    def test_a_device_where_the_transcript_belongs_is_never_read(self):
+        os.symlink("/dev/zero", self.transcript)
+
+        self.assert_named(PIPE)
+
+
+class ProjectRecordNotAFileTest(unittest.TestCase):
+    """A folder or a pipe where a chain's project record belongs,
+    `project.json` beside it (#386): `log --file` refuses by the
+    record's name, exit 66, and writes nothing, and `verify --files`
+    names it and gives the chain's verdict, as it does for a record it
+    cannot follow (SPEC section 3). Never waited on."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        project = self.workdir / "theproject"
+        project.mkdir()
+        (project / "report.md").write_bytes(b"v1\n")
+        drawer = self.workdir / "drawer"
+        drawer.mkdir()
+        self.record = drawer / "project.json"
+        self.record.write_text(json.dumps({"path": project.as_posix()}),
+                               encoding="utf-8")
+        self.log = drawer / "receipts-sess-rec.jsonl"
+        run_receipts("init", "--log", str(self.log), cwd=self.workdir)
+        logged = self.log_report()
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+        self.record.unlink()
+
+    def log_report(self):
+        return run_receipts("log", "--log", str(self.log), "--actor", "agent",
+                            "--action", "wrote report", "--file", "report.md",
+                            cwd=self.workdir)
+
+    def named(self, why):
+        return f"{self.record} cannot be read as a project record: {why}"
+
+    def assert_log_refused(self, make, why):
+        make(self.record)
+        before = self.log.read_bytes()
+
+        result = self.log_report()
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(self.named(why), result.stderr)
+        self.assertEqual(self.log.read_bytes(), before)
+
+    def assert_verify_named(self, make, why):
+        make(self.record)
+
+        result = run_receipts("verify", "--log", str(self.log), "--files",
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(f"FILES-UNRESOLVED: {self.named(why)} — file checks "
+                      "skipped", result.stdout)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "VALID")
+
+    def test_log_refuses_a_folder_where_the_record_belongs(self):
+        self.assert_log_refused(Path.mkdir, FOLDER)
+
+    def test_verify_files_names_a_folder_where_the_record_belongs(self):
+        self.assert_verify_named(Path.mkdir, FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_log_refuses_a_pipe_where_the_record_belongs(self):
+        self.assert_log_refused(os.mkfifo, PIPE)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_verify_files_names_a_pipe_where_the_record_belongs(self):
+        self.assert_verify_named(os.mkfifo, PIPE)
+
+
+class HookedNotAFileTest(BoundedHook, PublishBase):
+    """The hook with a folder or a pipe where the transcript or the
+    project record belongs (#386). The every-25 commitment and the
+    session end's seal pass a transcript that is not a file by, quietly
+    and exit 0, as they pass a missing one. With the record, the receipt
+    is still written, its file fingerprinted against the project the
+    hook knows, as when it writes a new record, and the hook says so."""
+
+    def assert_commitments_pass_by(self, make):
+        make(self.transcript)
+        before = kind(self.transcript)
+
+        for call in range(25):  # one cadence (ADR-0017)
+            result = self.tool_call(f"step {call}")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+        ended = self.session_end()
+
+        self.assertEqual(ended.returncode, 0, ended.stderr)
+        self.assertEqual(ended.stderr, "")
+        lines = self.chain().read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 26, "genesis and 25 receipts, and no "
+                         "commitment")
+        self.assertEqual(kind(self.transcript), before)
+
+    def test_the_commitments_pass_a_folder_where_the_transcript_belongs(self):
+        self.assert_commitments_pass_by(Path.mkdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_the_commitments_pass_a_pipe_where_the_transcript_belongs(self):
+        self.assert_commitments_pass_by(os.mkfifo)
+
+    def assert_record_passed_by(self, make, why):
+        self.tool_call()  # files the drawer and writes its record
+        record = self.chain().with_name("project.json")
+        record.unlink()
+        make(record)
+        before = kind(record)
+        notes = self.project / "notes.md"
+        notes.write_bytes(b"hi\n")
+
+        result = self.hook({"session_id": self.SESSION,
+                            "hook_event_name": "PostToolUse",
+                            "tool_name": "Write",
+                            "tool_input": {"file_path": str(notes)},
+                            "tool_response": {}})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{record} cannot be read as a project record: {why}",
+                      result.stderr)
+        last = json.loads(self.chain().read_text(
+            encoding="utf-8").splitlines()[-1])
+        self.assertTrue(last["action"].startswith("Write: "), last)
+        self.assertEqual(last["files"], [
+            {"path": "notes.md", "sha256": hashlib.sha256(b"hi\n").hexdigest()}])
+        self.assertEqual(kind(record), before)
+
+    def test_a_folder_where_the_record_belongs_is_passed_by_and_named(self):
+        self.assert_record_passed_by(Path.mkdir, FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_record_belongs_is_passed_by_and_named(self):
+        self.assert_record_passed_by(os.mkfifo, PIPE)
+
+
+class WorktreeNotAFileTest(unittest.TestCase):
+    """A project whose `.git` file names a gitdir holding a folder or a
+    pipe where `commondir` belongs (#386). The hook reads that layout on
+    every tool call, and `supervisor digest` at every session start:
+    both read it as a layout they cannot follow, so the project stays
+    itself (SPEC section 8), the receipt is written, and neither waits."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name).resolve()
+        self.project = base / "worktree"
+        self.project.mkdir()
+        self.gitdir = base / "main" / ".git" / "worktrees" / "worktree"
+        self.gitdir.mkdir(parents=True)
+        (self.project / ".git").write_text(
+            f"gitdir: {self.gitdir.as_posix()}\n", encoding="utf-8")
+        self.store = base / "store"
+        self.env = {**isolated_env(base / "home",
+                                   CLAUDE_PROJECT_DIR=str(self.project),
+                                   LOXODONTA_HOME=str(self.store)),
+                    "PYTHONIOENCODING": "utf-8"}
+
+    def assert_the_project_stays_itself(self, make):
+        make(self.gitdir / "commondir")
+        payload = {"session_id": "sess-wt", "hook_event_name": "PostToolUse",
+                   "tool_name": "Bash", "tool_input": {"command": "ls"},
+                   "tool_response": {}}
+
+        hooked = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook"], cwd=str(self.project),
+            input=json.dumps(payload).encode("utf-8"), capture_output=True,
+            env=self.env, timeout=BOUND)
+        digest = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "digest"], cwd=str(self.project),
+            capture_output=True, encoding="utf-8", env=self.env,
+            timeout=BOUND)
+
+        self.assertEqual(hooked.returncode, 0, hooked.stderr)
+        (drawer,) = (self.store / "receipts").iterdir()
+        record = json.loads((drawer / "project.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(record["path"], self.project.as_posix())
+        chain = (drawer / "receipts-sess-wt.jsonl").read_text(
+            encoding="utf-8").splitlines()
+        self.assertEqual(len(chain), 2, "genesis and the receipt")
+        self.assertEqual(digest.returncode, 0, digest.stderr)
+        self.assertNotIn("Traceback", digest.stderr)
+        self.assertIn("recall digest -- worktree (", digest.stdout)
+
+    def test_a_folder_where_commondir_belongs_leaves_the_project_itself(self):
+        self.assert_the_project_stays_itself(Path.mkdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_commondir_belongs_is_never_waited_on(self):
+        self.assert_the_project_stays_itself(os.mkfifo)
+
+
+class ScannedMemoryNotAFileTest(unittest.TestCase):
+    """`supervisor scan` over the store with a folder or a pipe where a
+    transcript, a drawer's project record, the baseline or the day book
+    belongs (#386): the scan finishes and judges every chain, a session
+    whose transcript is not a file reads UNWITNESSED with why, the
+    baseline and the day book are named and read as absent, and what the
+    writer put there is left as it was. Every scan is bounded."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name).resolve()
+        self.home = base / "storehome"
+        self.witness = base / "witness"
+        install_witness_hook(self.witness)
+        self.drawer = self.home / "receipts" / "alpha-11111111"
+        self.drawer.mkdir(parents=True)
+        (self.drawer / "project.json").write_text(
+            json.dumps({"path": "C:/work/alpha"}), encoding="utf-8")
+        make_chain(self.drawer, "sess-aaaa")
+        self.env = {**isolated_env(base / "home",
+                                   LOXODONTA_HOME=str(self.home)),
+                    "PYTHONIOENCODING": "utf-8"}
+
+    def scan(self, repo="alpha"):
+        # Bounded: a scan that waited on a pipe would fail here.
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "scan", "--json",
+             "--witness", str(self.witness)],
+            capture_output=True, encoding="utf-8", timeout=BOUND,
+            env=self.env)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        (chain,) = chains_by_session(report)[(repo, "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "VALID")
+        return report
+
+    def assert_unwitnessed(self, make, why):
+        folder = self.witness / "anyproj"
+        folder.mkdir()
+        make(folder / "sess-aaaa.jsonl")
+
+        report = self.scan()
+
+        (row,) = [row for row in report["completeness"]["sessions"]
+                  if row["session"] == "sess-aaaa"]
+        self.assertEqual(row["state"], "UNWITNESSED")
+        self.assertIn(f"sess-aaaa.jsonl cannot be read as a transcript: "
+                      f"{why}", row["note"])
+
+    def test_a_folder_where_a_transcript_belongs_is_unwitnessed_with_why(self):
+        self.assert_unwitnessed(Path.mkdir, FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_a_transcript_belongs_is_unwitnessed_with_why(self):
+        self.assert_unwitnessed(os.mkfifo, PIPE)
+
+    def assert_filed_under_its_slug(self, make):
+        # A drawer whose record cannot be read is filed under its own
+        # slug, as one with a damaged record is.
+        record = self.drawer / "project.json"
+        record.unlink()
+        make(record)
+        before = kind(record)
+
+        report = self.scan(repo="alpha-11111111")
+
+        self.assertEqual([repo["repo"] for repo in report["repos"]],
+                         ["alpha-11111111"])
+        self.assertEqual(kind(record), before)
+
+    def test_a_folder_where_a_project_record_belongs_is_read_past(self):
+        self.assert_filed_under_its_slug(Path.mkdir)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_a_project_record_belongs_is_read_past(self):
+        self.assert_filed_under_its_slug(os.mkfifo)
+
+    def assert_memory_named(self, name, make, why, words, where):
+        memory = self.home / name
+        make(memory)
+        before = kind(memory)
+
+        first = self.scan()
+        second = self.scan()
+
+        for report in (first, second):
+            self.assertIn(f"{name} cannot be read as {words}: {why}",
+                          where(report))
+        self.assertEqual(kind(memory), before, "nothing written over it")
+
+    def test_a_folder_where_the_baseline_belongs_is_named_and_kept(self):
+        self.assert_memory_named("baseline.json", Path.mkdir, FOLDER,
+                                 "a baseline",
+                                 lambda report: report["baseline"]["note"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_baseline_belongs_is_named_and_kept(self):
+        self.assert_memory_named("baseline.json", os.mkfifo, PIPE,
+                                 "a baseline",
+                                 lambda report: report["baseline"]["note"])
+
+    def test_a_folder_where_the_day_book_belongs_is_named_and_kept(self):
+        self.assert_memory_named("daybook.json", Path.mkdir, FOLDER,
+                                 "a day book",
+                                 lambda report: report["history_note"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_day_book_belongs_is_named_and_kept(self):
+        self.assert_memory_named("daybook.json", os.mkfifo, PIPE,
+                                 "a day book",
+                                 lambda report: report["history_note"])
+
+
+class ServedViewsNotAFileTest(ServerFixture):
+    """`serve` with a folder or a pipe where the saved views belong
+    (#386): the views route answers, with no view and the reason, and a
+    view saved there is not written over it."""
+
+    def views(self, body=None):
+        if body is None:
+            return json.loads(self.get("/api/views")[2])
+        request = urllib.request.Request(
+            self.url + "/api/views", data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with OPENER.open(request, timeout=BOUND) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def assert_named(self, make, why):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        book = self.root / ".supervisor-views.json"
+        make(book)
+        before = kind(book)
+        self.serve()
+
+        for reply in (self.views(),
+                      self.views({"save": {"name": "alpha lately"}})):
+            self.assertEqual(reply["views"], [])
+            self.assertIn(f".supervisor-views.json cannot be read as the "
+                          f"saved views: {why}", reply["note"])
+        self.assertEqual(kind(book), before, "nothing written over it")
+
+    def test_a_folder_where_the_views_belong_is_named(self):
+        self.assert_named(Path.mkdir, FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_views_belong_is_named(self):
+        self.assert_named(os.mkfifo, PIPE)
+
+
+class AdoptedMarkerNotAFileTest(unittest.TestCase):
+    """`supervisor adopt` with a folder or a pipe where a legacy
+    folder's `.unlisted` marker belongs (#386): the chain moves into the
+    store, and the marker is named and left, never copied, never waited
+    on."""
+
+    def assert_left(self, make, why):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name).resolve()
+        root = base / "repos"
+        receipts = root / "alpha" / "receipts"
+        make_chain(receipts, "sess-aaaa")
+        marker = receipts / ".unlisted"
+        make(marker)
+        before = kind(marker)
+        home = base / "home"
+
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root)],
+            capture_output=True, encoding="utf-8", timeout=BOUND,
+            env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("adopted alpha/receipts/receipts-sess-aaaa.jsonl",
+                      result.stdout)
+        self.assertIn(f"alpha/receipts/.unlisted: {why}", result.stdout)
+        (drawer,) = (home / ".loxodonta" / "receipts").iterdir()
+        self.assertTrue((drawer / "receipts-sess-aaaa.jsonl").is_file())
+        self.assertFalse(os.path.lexists(drawer / ".unlisted"))
+        self.assertEqual(kind(marker), before)
+
+    def test_a_folder_where_the_marker_belongs_is_named_and_left(self):
+        self.assert_left(Path.mkdir, FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_the_marker_belongs_is_named_and_left(self):
+        self.assert_left(os.mkfifo, PIPE)
 
 
 if __name__ == "__main__":
