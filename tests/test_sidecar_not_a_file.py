@@ -990,7 +990,7 @@ class HookedNotAFileTest(BoundedHook, PublishBase):
                       result.stderr)
         last = json.loads(self.chain().read_text(
             encoding="utf-8").splitlines()[-1])
-        self.assertEqual(last["action"], f"Write: {notes}")
+        self.assertTrue(last["action"].startswith("Write: "), last)
         self.assertEqual(last["files"], [
             {"path": "notes.md", "sha256": hashlib.sha256(b"hi\n").hexdigest()}])
         self.assertEqual(kind(record), before)

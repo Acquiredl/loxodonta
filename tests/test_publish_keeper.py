@@ -810,14 +810,16 @@ class HeadlessKeeperTest(ReceiverFixture):
     day-book test opens the page at the end, which is the difference it
     is about."""
 
-    def serve(self, *extra, **knobs):
+    def serve(self, *extra, store=False, **knobs):
         """Start `serve` and read both startup lines before anything
         stops the process: they are two flushes, and a kill sent the
         instant the first arrives can land before the second is
-        written."""
+        written. `store` serves the store LOXODONTA_HOME names instead
+        of the root."""
+        where = [] if store else ["--root", str(self.root)]
         self.proc = subprocess.Popen(
-            [sys.executable, str(SUPERVISOR), "serve", "--root",
-             str(self.root), "--port", "0", *extra],
+            [sys.executable, str(SUPERVISOR), "serve", *where,
+             "--port", "0", *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env={**self.env, "PYTHONIOENCODING": "utf-8", **knobs})
         self.addCleanup(self._stop)
@@ -1031,13 +1033,18 @@ class HeadlessKeeperTest(ReceiverFixture):
         # clock exists for nothing else is looking, so it is said: one
         # line on stderr, no traceback, and not again on every tick.
         # The server and the clock both live through it.
-        make_chain(self.root / "alpha" / "receipts", "sess-unreadable")
-        (self.root / BASELINE_NAME).mkdir()  # the scan cannot write it
+        # A store the scan cannot walk: its home is a file, so the
+        # folder its memory lives in cannot be made. A folder where the
+        # baseline belongs no longer does it: the scan names that and
+        # finishes (#386).
+        home = self.root / "storehome"
+        home.write_text("not a folder\n", encoding="utf-8")
 
         # A cadence in force, so the clock turns, and a day's cadence, so
-        # no head in this fresh root is ripe and nothing is ever sent.
+        # no head is ever ripe and nothing is ever sent.
         self.serve("--publish-every", "1d", "--publish-url",
-                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.1",
+                   self.receiver.url, store=True, LOXODONTA_HOME=str(home),
+                   SUPERVISOR_KEEPER_TICK_SECONDS="0.1",
                    SUPERVISOR_SCAN_TTL_SECONDS="0")
         said = self.proc.stderr.readline()
         time.sleep(2)  # many more turns, each failing the same way
@@ -1046,9 +1053,8 @@ class HeadlessKeeperTest(ReceiverFixture):
         _, rest = self.proc.communicate()
 
         # The line's promise is its shape: the failure named by kind.
-        # Which kind is the platform's to say — a directory where a file
-        # belongs is `PermissionError` on Windows and `IsADirectoryError`
-        # on POSIX — so the test pins the promise, not one spelling.
+        # Which kind is the platform's to say, so the test pins the
+        # promise, not one spelling.
         self.assertRegex(
             said, r"^error: the keeper's scan did not finish: \w*Error")
         self.assertNotIn("Traceback", said)
