@@ -5239,16 +5239,24 @@ def record_project(log_dir, project):
 
 def chain_is_damaged(log):
     """True when something is at the log's name that cannot be extended:
-    a torn tail, a forked one (`tail_entry`), or a folder, a pipe or a
-    device in the file's place, which `mkdir` or `mkfifo` puts there in
-    one command (#385). A file this user may not read is not damage:
+    a torn tail, a forked one (`tail_entry`), or a folder, a pipe, a
+    device, a socket or a loop of links in the file's place, each one
+    command away (#385). A file this user may not read is not damage:
     the append names it."""
     try:
         lines = read_log(log)
     except FileNotFoundError:
         return False
     except OSError as error:
-        return error.strerror in (NOT_A_FOLDER, NOT_REGULAR)
+        if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+            return True
+        # A socket fails the open itself, and a loop of links cannot be
+        # followed, so `open_regular` never got to ask: the name is
+        # asked instead.
+        try:
+            return stat.S_ISSOCK(os.stat(log).st_mode)
+        except OSError as again:
+            return again.errno == errno.ELOOP
     return bool(lines) and tail_entry(lines) is None
 
 

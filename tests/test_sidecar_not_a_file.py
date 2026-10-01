@@ -21,6 +21,7 @@ authority and receiver the other suites use. No network, no internals.
 
 import json
 import os
+import socket
 import stat
 import subprocess
 import sys
@@ -60,6 +61,23 @@ def run_receipts(*args, cwd):
     return subprocess.run([sys.executable, str(LOXODONTA), *args], cwd=cwd,
                           capture_output=True, encoding="utf-8",
                           env=clean_env(), timeout=BOUND)
+
+
+HOOKED = "sess-1234abcd"
+
+
+def fire_hook(case, log_dir, command):
+    """One PostToolUse receipt for session HOOKED into `log_dir`, run
+    with homes of `case`'s own and bounded."""
+    payload = json.dumps({"session_id": HOOKED,
+                          "hook_event_name": "PostToolUse",
+                          "tool_name": "Bash",
+                          "tool_input": {"command": command}})
+    return subprocess.run(
+        [sys.executable, str(LOXODONTA), "hook", "--log-dir", str(log_dir)],
+        input=payload, capture_output=True, encoding="utf-8",
+        cwd=str(log_dir), timeout=BOUND,
+        env=isolated_env(home_outside(case), PYTHONIOENCODING="utf-8"))
 
 
 def start_calendar(case):
@@ -213,7 +231,6 @@ class WrittenChainNotAFileTest(unittest.TestCase):
     not hang."""
 
     WHY = FOLDER
-    HOOKED = "sess-1234abcd"
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -232,23 +249,14 @@ class WrittenChainNotAFileTest(unittest.TestCase):
         self.assertEqual(list(self.workdir.glob("*.lock")), [])
 
     def test_the_hook_keeps_the_receipt_in_a_sibling(self):
-        chain = self.workdir / f"receipts-{self.HOOKED}.jsonl"
+        chain = self.workdir / f"receipts-{HOOKED}.jsonl"
         self.put(chain)
-        payload = json.dumps({"session_id": self.HOOKED,
-                              "hook_event_name": "PostToolUse",
-                              "tool_name": "Bash",
-                              "tool_input": {"command": "echo kept"}})
 
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook",
-             "--log-dir", str(self.workdir)],
-            input=payload, capture_output=True, encoding="utf-8",
-            cwd=str(self.workdir), timeout=BOUND,
-            env=isolated_env(home_outside(self), PYTHONIOENCODING="utf-8"))
+        result = fire_hook(self, self.workdir, "echo kept")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        sibling = self.workdir / f"receipts-{self.HOOKED}-002.jsonl"
+        sibling = self.workdir / f"receipts-{HOOKED}-002.jsonl"
         entries = [json.loads(line) for line
                    in sibling.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([e["action"] for e in entries],
@@ -330,6 +338,102 @@ class WrittenChainDeviceTest(WrittenChainNotAFileTest):
 
     def still_there(self, path):
         return os.path.islink(path)
+
+
+class UnopenableChainTest(unittest.TestCase):
+    """A socket or a loop of links where the chain belongs: the open
+    fails before it can ask what it opened, so the hook asks the name,
+    reads either as damage and keeps the receipt in a sibling (#385)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
+
+    def assert_kept_in_a_sibling(self):
+        result = fire_hook(self, self.workdir, "echo kept")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        sibling = self.workdir / f"receipts-{HOOKED}-002.jsonl"
+        entries = [json.loads(line) for line
+                   in sibling.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([e["action"] for e in entries],
+                         ["genesis", "Bash: echo kept"])
+        self.assertEqual(list(self.workdir.glob("*.lock")), [])
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX") and hasattr(os, "mkfifo"),
+                         "no Unix sockets here")
+    def test_a_socket_where_the_chain_belongs(self):
+        with socket.socket(socket.AF_UNIX) as bound:
+            bound.bind(str(self.chain))
+
+        self.assert_kept_in_a_sibling()
+        self.assertTrue(stat.S_ISSOCK(os.lstat(self.chain).st_mode))
+
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix",
+                         "no POSIX links here")
+    def test_a_loop_of_links_where_the_chain_belongs(self):
+        os.symlink(self.chain.name, self.chain)
+
+        self.assert_kept_in_a_sibling()
+        self.assertTrue(self.chain.is_symlink())
+
+
+@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                 "root writes to a read-only file")
+class UnwritableChainTest(unittest.TestCase):
+    """A chain that reads as a file and will not take a line: read-only,
+    the way through the CLI to the write's own refusal, which a pipe put
+    at the name after the read meets too (#385). `log`, `run` and the
+    hook say the chain could not be written, exit 73, a file the verb
+    must write and cannot. A file that will not take a line is not
+    damage, so no sibling starts; the chain is left byte for byte, and
+    no lock beside it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
+        first = fire_hook(self, self.workdir, "echo first")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.before = self.chain.read_bytes()
+        os.chmod(self.chain, stat.S_IREAD)
+        # Writable again before the folder goes, which Windows refuses
+        # while a file in it is read-only.
+        self.addCleanup(os.chmod, self.chain, stat.S_IREAD | stat.S_IWRITE)
+
+    def assert_not_written(self, result):
+        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("could not be written", result.stderr)
+        self.assertIn("no entry was written", result.stderr)
+        self.assertEqual(self.chain.read_bytes(), self.before)
+        self.assertEqual(list(self.workdir.glob("*.lock")), [])
+
+    def test_log_says_the_chain_could_not_be_written(self):
+        result = run_receipts("log", "--log", str(self.chain),
+                              "--actor", "agent", "--action", "x",
+                              cwd=self.workdir)
+
+        self.assert_not_written(result)
+
+    def test_run_says_so_after_its_command_ran(self):
+        result = run_receipts("run", "--log", str(self.chain),
+                              "--actor", "agent", "--",
+                              sys.executable, "-c", "pass", cwd=self.workdir)
+
+        self.assert_not_written(result)
+        self.assertIn("receipt not written for", result.stderr)
+
+    def test_the_hook_says_the_chain_could_not_be_written(self):
+        result = fire_hook(self, self.workdir, "echo second")
+
+        self.assert_not_written(result)
+        self.assertFalse(
+            (self.workdir / f"receipts-{HOOKED}-002.jsonl").exists())
 
 
 class PackagedNotAFileTest(AnchoredStoreCase):
