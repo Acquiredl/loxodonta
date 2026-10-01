@@ -821,7 +821,7 @@ def anchors_path(log):
     return sidecar_path(log, ".anchors.jsonl")
 
 
-NOT_A_FOLDER = "it is a folder, not a file"
+IS_A_FOLDER = "it is a folder, not a file"
 NOT_REGULAR = "it is not a regular file"
 
 
@@ -841,12 +841,12 @@ def open_regular(path):
         # Windows refuses to open a folder at all, as a denied
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path)
         if not stat.S_ISREG(mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
         return os.fdopen(fd, "rb")

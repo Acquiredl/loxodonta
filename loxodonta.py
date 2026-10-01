@@ -814,7 +814,7 @@ def anchors_path(log):
     return sidecar_path(log, ".anchors.jsonl")
 
 
-NOT_A_FOLDER = "it is a folder, not a file"
+IS_A_FOLDER = "it is a folder, not a file"
 NOT_REGULAR = "it is not a regular file"
 
 
@@ -834,12 +834,12 @@ def open_regular(path):
         # Windows refuses to open a folder at all, as a denied
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path)
         if not stat.S_ISREG(mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
         return os.fdopen(fd, "rb")
@@ -5181,7 +5181,7 @@ def main_repo_root(project):
             common = os.path.normpath(os.path.join(gitdir, common))
             root = os.path.dirname(common)  # <main>/.git -> <main>
         except OSError as error:
-            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+            if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
                 return project  # a folder or a pipe there: unexpected
             # A worktree the harness already deregistered (ADR-0023): the
             # gitdir is gone, but the .git file still spells it as
@@ -5280,7 +5280,7 @@ def chain_is_damaged(log):
     except FileNotFoundError:
         return False
     except OSError as error:
-        if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+        if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
             return True
         # A socket fails the open itself, and a loop of links cannot be
         # followed, so `open_regular` never got to ask: the name is
@@ -6122,7 +6122,7 @@ def record_coverage(harness, matchers, profile, remote=None,
             with open_regular(marker) as f:
                 data = json.loads(f.read().decode("utf-8"))
         except OSError as error:
-            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+            if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
                 return False, ("cannot be read as a coverage marker: "
                                f"{error.strerror}")
             data = {}
@@ -6145,7 +6145,7 @@ def record_coverage(harness, matchers, profile, remote=None,
             write_line_to_disk(marker, "w", body + "\n")
         except OSError:
             why = file_problem(marker)
-            if why not in (NOT_A_FOLDER, NOT_REGULAR):
+            if why not in (IS_A_FOLDER, NOT_REGULAR):
                 raise
             return False, f"could not be written: {why}"
         return True, None

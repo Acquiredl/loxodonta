@@ -310,7 +310,7 @@ def write_whole(path, text):
     except FileNotFoundError:
         mode = stat.S_IFREG
     if stat.S_ISDIR(mode):
-        raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+        raise OSError(errno.EISDIR, IS_A_FOLDER, path)
     if not stat.S_ISREG(mode):
         raise OSError(errno.EINVAL, NOT_REGULAR, path)
     folder = os.path.dirname(path)
@@ -363,7 +363,7 @@ def not_a_file(path):
     `path`; None for a file, for nothing, and for a file this user may
     not open, which each reader here answers as it always has."""
     problem = file_problem(path)
-    return problem if problem in (NOT_A_FOLDER, NOT_REGULAR) else None
+    return problem if problem in (IS_A_FOLDER, NOT_REGULAR) else None
 
 
 def memory_unread(path, what, why):
@@ -420,7 +420,7 @@ def read_baseline(path):
     except (ValueError, KeyError, TypeError, AttributeError,
             json.JSONDecodeError, OSError) as error:
         why = getattr(error, "strerror", None)
-        if why in (NOT_A_FOLDER, NOT_REGULAR):
+        if why in (IS_A_FOLDER, NOT_REGULAR):
             return {}, {}, [], {}, memory_unread(path, "a baseline", why)
         return {}, {}, [], {}, ("the baseline could not be read — "
                                 "remembering afresh from this look; it "
@@ -1071,7 +1071,7 @@ def finite_float(text):
     if value != value or value in (float("inf"), float("-inf")):
         raise NotStrictJson(f"{text}, a number past what JSON holds")
     return value
-NOT_A_FOLDER = "it is a folder, not a file"
+IS_A_FOLDER = "it is a folder, not a file"
 NOT_REGULAR = "it is not a regular file"
 
 
@@ -1092,12 +1092,12 @@ def open_regular(path):
         # Windows refuses to open a folder at all, as a denied
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path)
         if not stat.S_ISREG(mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
         return os.fdopen(fd, "rb")
@@ -3582,7 +3582,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             "sessionend": sessionend,
         }, indent=2) + "\n")
     except OSError as error:
-        if error.strerror not in (NOT_A_FOLDER, NOT_REGULAR):
+        if error.strerror not in (IS_A_FOLDER, NOT_REGULAR):
             raise
         note = memory_unread(baseline_path, "a baseline", error.strerror)
     if events:
@@ -4284,7 +4284,7 @@ def main_repo_of(project):
             common = read_whole(gitdir / "commondir").strip()
             root = Path(os.path.normpath(gitdir / common)).parent
         except OSError as error:
-            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+            if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
                 return project  # a folder or a pipe there: unexpected
             # A deregistered worktree (ADR-0023): the gitdir is gone, but
             # its path still spells <main>/.git/worktrees/<name>.
@@ -5499,7 +5499,7 @@ def write_export(path, data, then):
     try:
         write_whole(path, data)
     except OSError as error:
-        if error.strerror not in (NOT_A_FOLDER, NOT_REGULAR):
+        if error.strerror not in (IS_A_FOLDER, NOT_REGULAR):
             raise
         print(f"error: {Path(path).name} could not be written: "
               f"{error.strerror} — {then}", file=sys.stderr)
