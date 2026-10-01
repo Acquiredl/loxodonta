@@ -294,7 +294,8 @@ def shape_problem(entry):
     if not isinstance(files, list):
         return "files is not an array"
     for ref in files:
-        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}                 or not all(isinstance(value, str) for value in ref.values()):
+        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"} \
+                or not all(isinstance(value, str) for value in ref.values()):
             return "files holds something that is not a reference"
     for ref in files:
         how = path_leaving_base(ref["path"])
@@ -3046,6 +3047,7 @@ def run_main(main):
 # The imports only the writers use. They sit below the verifier so that
 # the copy a recipient runs imports nothing that opens a socket or starts
 # a thread (ADR-0035).
+import http.client
 import shlex
 import signal
 import socket
@@ -3624,7 +3626,11 @@ def calendar_request(url, data=None, timeout=15):
     scheme but http or https raises ValueError, before anything is
     asked: an upgrade takes the address from a sidecar row, in the
     writer's reach, and urllib would read a `file:` one as a path on
-    this machine, a pipe there included (#414)."""
+    this machine, a pipe there included (#414). An address http will
+    not send, a space in it say, is a ValueError too, and a reply that
+    is not HTTP an OSError: urllib hands both on as http.client's own
+    errors, which are neither, so one bad row or one bad calendar
+    would end the run for every calendar after it."""
     if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
         raise ValueError("not an http or https URL")
     request = urllib.request.Request(
@@ -3632,8 +3638,14 @@ def calendar_request(url, data=None, timeout=15):
         headers={"Accept": "application/vnd.opentimestamps.v1",
                  "User-Agent": "loxodonta"},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read(MAX_PROOF_BYTES)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read(MAX_PROOF_BYTES)
+    except http.client.InvalidURL:
+        raise ValueError("not a URL http can send") from None
+    except http.client.HTTPException as error:
+        raise OSError("the reply was not HTTP "
+                      f"({type(error).__name__})") from None
 
 
 # --- Writing attempt records (#240) -------------------------------------------

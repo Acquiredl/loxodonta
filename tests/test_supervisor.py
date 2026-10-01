@@ -937,6 +937,25 @@ class BaselineTest(unittest.TestCase):
         self.assertEqual(changes, {"sess-aaaa": "regressed",
                                    "sess-bbbb": "vanished"})
 
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not look into")
+    def test_a_chain_in_a_folder_closed_to_the_scan_reads_as_vanished(self):
+        # One chmod is in the writer's reach: it costs that chain an
+        # event, never the whole scan its report.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        run_scan(self.root, env=self.env)
+        closed = self.root / "alpha" / "receipts"
+        os.chmod(closed, 0)
+        self.addCleanup(os.chmod, closed, 0o755)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        changes = {e["session"]: e["change"] for e in self.events(result)}
+        self.assertEqual(changes, {"sess-aaaa": "vanished"})
+
     def test_alarm_language_investigates_and_never_claims_a_verdict(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root, env=self.env)
@@ -2871,6 +2890,27 @@ class BeforeMemoryTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0,
                          "no siren for history the supervisor never saw")
         self.assertEqual(self.watch(result)["before_memory"]["count"], 1)
+
+    def test_a_session_is_dated_from_its_first_call_even_a_failed_one(self):
+        # The first witnessed call decides (ADR-0029 ruling 2), whatever
+        # it owes: a call that failed before the memory began is still
+        # when the session started working.
+        self.scan()
+        store = Path(self.env["LOXODONTA_HOME"])
+        store.mkdir(parents=True)
+        (store / "coverage.json").write_text(json.dumps({
+            "purpose": "test fixture",
+            "epochs": [{"since": ago(500), "matchers": ["*"],
+                        "harness": "claude-code"}]}), encoding="utf-8")
+        write_transcript(self.witness, self.root / "alpha", "sess-straddle",
+                         event_times=[ago(400), ago(300)],
+                         error_times=[ago(600)],
+                         failure="refused before it ran")
+
+        watch = self.watch(self.scan())
+
+        self.assertEqual(watch["sessions"], [])
+        self.assertEqual(watch["before_memory"]["count"], 1)
 
     def test_the_rows_are_there_for_anyone_who_asks(self):
         self.scan()

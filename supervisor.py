@@ -2642,9 +2642,9 @@ def read_witness(transcript, calibration):
     from a line naming none. `latest` is the liveness clock, the newest
     timestamped conversational record: chatter moves it, the harness's
     timestamp-less metadata records never do, or an old deficit comes
-    back as an immortal live alarm (#85). `first` is the earliest
-    working call, read before the coverage filter (ADR-0029 asks when
-    the session started working). `worded` counts the failed calls read
+    back as an immortal live alarm (#85). `first` is the earliest call
+    with a result, failed or not, read before the coverage filter
+    (ADR-0029 asks when the session started working). `worded` counts the failed calls read
     as owed, and `unworded` the failed Bash and PowerShell calls read as
     `may_owe` because no `Exit code N` line opened them (#379); both are
     counted for the canary in watch_completeness(), and neither moves
@@ -2680,7 +2680,8 @@ def read_witness(transcript, calibration):
                 if not isinstance(blocks, list):
                     blocks = []
                 for block in blocks:
-                    if isinstance(block, dict)                             and block.get("type") == "tool_use":
+                    if isinstance(block, dict) \
+                            and block.get("type") == "tool_use":
                         names[block.get("id")] = block.get("name")
                 found = next((block for block in blocks
                               if isinstance(block, dict)
@@ -2705,6 +2706,10 @@ def read_witness(transcript, calibration):
                 witnessed.add(name)
                 when = record.get("timestamp")
                 epoch = epoch_at(calibration, when)
+                # Before every filter below: a call that failed, or one
+                # no matcher covered, is still the session at work.
+                if isinstance(when, str) and (first is None or when < first):
+                    first = when
                 if failed:
                     owes = failed_call_owes(record, found, name, epoch)
                     if owes == "may_owe":
@@ -2717,8 +2722,6 @@ def read_witness(transcript, calibration):
                     owed.append((when, name))
                 elif owes_receipt(name, epoch["matchers"]):
                     owed.append((when, name))
-                if isinstance(when, str) and (first is None or when < first):
-                    first = when
     # Merged across files, so order is no longer a given, and the
     # deficit clock reads the first unpaired call, which names the right
     # moment only in time order.
@@ -3564,7 +3567,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             family["home"] = (root / relpath).parent.as_posix()
 
     for relpath in remembered:
-        if relpath not in heads and not (root / relpath).exists():
+        # os.path.exists, which answers False for a folder this user
+        # may not look into: Path.exists raises there before Python
+        # 3.13, and one chmod would cost every chain its scan.
+        if relpath not in heads and not os.path.exists(root / relpath):
             repo_name, session, _ = (store_identity(root / relpath) if store
                                      else chain_identity(root, root / relpath))
             events.append({"repo": repo_name, "session": session,
@@ -4698,7 +4704,8 @@ def cmd_digest(args):
     """The session-start injection: local by design ("all memory" means
     all reachable, never all injected), budget-capped, zero subprocess
     spawns — recall owns no verdicts, so nothing here runs verify."""
-    if getattr(args, "payload", False) and not args.repo             and not os.environ.get("CLAUDE_PROJECT_DIR"):
+    if getattr(args, "payload", False) and not args.repo \
+            and not os.environ.get("CLAUDE_PROJECT_DIR"):
         args.repo = payload_cwd()  # the environment wins when present
     repo = invoking_repo(args)
     families, rows = gather(project_chains(repo))

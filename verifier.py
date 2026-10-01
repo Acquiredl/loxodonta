@@ -301,7 +301,8 @@ def shape_problem(entry):
     if not isinstance(files, list):
         return "files is not an array"
     for ref in files:
-        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}                 or not all(isinstance(value, str) for value in ref.values()):
+        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"} \
+                or not all(isinstance(value, str) for value in ref.values()):
             return "files holds something that is not a reference"
     for ref in files:
         how = path_leaving_base(ref["path"])

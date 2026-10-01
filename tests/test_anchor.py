@@ -18,6 +18,7 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import socket
 import socketserver
 from pathlib import Path
 
@@ -193,6 +194,29 @@ class StallingCalendarHandler(FakeCalendarHandler):
         super().do_POST()
 
 
+def start_not_http(case):
+    """A listener that answers every request with one line that is not
+    HTTP, and its address: what http.client calls a bad status line,
+    and no OSError."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+
+    def answer():
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return  # closed: the test is over
+            with connection:
+                connection.recv(65536)
+                connection.sendall(b"HELLO THERE\r\n\r\n")
+
+    threading.Thread(target=answer, daemon=True).start()
+    case.addCleanup(listener.close)
+    return f"http://127.0.0.1:{listener.getsockname()[1]}"
+
+
 class SessionEndAnchorTest(unittest.TestCase):
     """ADR-0024: a hook wired with --anchor anchors the session's chain
     head at SessionEnd, quietly and best-effort, and spends what is left
@@ -304,6 +328,42 @@ class SessionEndAnchorTest(unittest.TestCase):
                         row["outcome"])
         self.assertAlmostEqual(row["budget"], 12, delta=1)
         self.assertNotIn("127.0.0.1", self.sidecar.read_text("utf-8"))
+
+    def test_a_calendar_that_answers_no_http_does_not_stop_the_next(self):
+        # One calendar's answer is that calendar's failure: the next is
+        # still asked, and the row says the head was submitted.
+        self.tool_call()
+        result = self.session_end("--anchor",
+                                  "--calendar", start_not_http(self),
+                                  "--calendar", self.server.url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertEqual(len(self.proofs()), 1)
+        (row,) = self.attempts()
+        self.assertEqual(row["outcome"], "submitted")
+
+    def test_a_row_naming_an_address_http_cannot_send_stops_no_upgrade(self):
+        # The sidecar is in the writer's reach: a pending row whose
+        # calendar holds a space is skipped, and the rows after it are
+        # still asked about.
+        self.tool_call()
+        self.session_end("--anchor", "--calendar", self.server.url)
+        (pending,) = self.proofs()
+        planted = dict(pending, calendar=self.server.url + "/a b")
+        self.sidecar.write_bytes("".join(
+            json.dumps(row) + "\n"
+            for row in [planted] + self.records()).encode("utf-8"))
+        self.server.mode = "complete"
+        asked = len(self.server.polled)
+
+        result = self.session_end("--anchor", "--calendar", self.server.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertEqual(len(self.server.polled), asked + 1,
+                         "the row after the planted one was not asked about")
+        # The planted row, the pending proof, and its completion.
+        self.assertEqual(len(self.proofs()), 3)
 
     def test_session_end_without_anchor_leaves_no_sidecar(self):
         self.tool_call()
@@ -532,6 +592,71 @@ class AnchorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 69)  # EX_UNAVAILABLE (ADR-0037)
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.sidecar.exists())
+
+    def test_a_calendar_that_answers_no_http_is_one_that_failed(self):
+        garbage = start_not_http(self)
+
+        alone = run_receipts("anchor", "--calendar", garbage,
+                             cwd=self.workdir)
+
+        self.assertEqual(alone.returncode, 69, alone.stderr)
+        self.assertNotIn("Traceback", alone.stderr)
+        self.assertIn(f"warning: calendar {garbage}: ", alone.stderr)
+        self.assertFalse(self.sidecar.exists())
+
+        beside = run_receipts("anchor", "--calendar", garbage,
+                              "--calendar", self.server.url,
+                              cwd=self.workdir)
+
+        self.assertEqual(beside.returncode, 0, beside.stderr)
+        self.assertNotIn("Traceback", beside.stderr)
+        self.assertEqual(len(self.sidecar_records()), 1)
+
+    def test_a_calendar_address_http_cannot_send_is_one_that_failed(self):
+        crooked = self.server.url + "/a b"
+
+        result = run_receipts("anchor", "--calendar", crooked,
+                              cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 69, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("warning: calendar ", result.stderr)
+        self.assertFalse(self.sidecar.exists())
+        self.assertEqual(self.server.submitted, [])
+
+    def repoint(self, calendar):
+        """The sidecar with a copy of its one row put first, naming
+        `calendar`: a second pending proof of the same head."""
+        (row,) = self.sidecar_records()
+        self.sidecar.write_bytes("".join(
+            json.dumps(each) + "\n"
+            for each in (dict(row, calendar=calendar), row)).encode("utf-8"))
+
+    def test_upgrade_skips_a_row_whose_calendar_http_cannot_send(self):
+        self.anchor()
+        self.repoint(self.server.url + "/a b")
+        self.server.mode = "complete"
+
+        upgrade = self.anchor("--upgrade")
+
+        self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
+        self.assertNotIn("Traceback", upgrade.stderr)
+        self.assertIn("the record's calendar is not a URL this recorder can "
+                      "ask", upgrade.stderr)
+        self.assertIn("upgraded: ", upgrade.stdout)
+
+    def test_upgrade_counts_a_reply_that_is_not_http_as_a_failure(self):
+        self.anchor()
+        garbage = start_not_http(self)
+        self.repoint(garbage)
+        self.server.mode = "complete"
+
+        upgrade = self.anchor("--upgrade")
+
+        self.assertEqual(upgrade.returncode, 69, upgrade.stderr)
+        self.assertNotIn("Traceback", upgrade.stderr)
+        self.assertIn(f"warning: calendar {garbage}: ", upgrade.stderr)
+        self.assertIn("upgraded: ", upgrade.stdout)
 
     def test_anchor_without_log_errors_cleanly(self):
         empty = self.workdir / "elsewhere"
