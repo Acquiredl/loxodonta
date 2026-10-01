@@ -14,7 +14,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `tools/build_verifier.py` leaves a current `verifier.py` untouched, so a rebuild on a Windows checkout no longer reads as modified to `git status` with an empty diff (#389).
 - A pipe where a chain belongs no longer hangs the hook with its lock held: a pipe, folder or device there is damage, and the hook records in a sibling; `run` refuses before its command runs (#385).
-- `supervisor scan` keeps a chain's remembered head while the chain reads as empty, a folder or a pipe, and says `regressed` every look until it grows past it, so a shorter chain put back never reads as new (#387).
+- `supervisor scan` keeps a chain's remembered head while the chain reads as empty, a folder or a pipe, and says `regressed` on every such look, so a shorter chain put back reads as one that shrank, not as new (#387).
 
 ## [0.10.1] - 2026-09-30
 

@@ -58,7 +58,7 @@ An operator-side reader process that continuously verifies receipt logs against 
 
 ### Baseline
 
-The supervisor's remembered copy of chain heads, used to detect change between looks. Writer-reachable by definition, therefore trusted for nothing: a baseline that disagrees with the log is a reason to shout, never a verdict about which side is true — verdicts still come only from `verify` and its inputs. Named after the Tripwire/AIDE convention, where the same weakness (an adversary who can reach the baseline) has the same documented answer: the trustworthy copy lives out of reach (here, the anchor). A chain that reads as empty keeps its remembered head, and reads as `regressed` on every look until it grows past it (#387).
+The supervisor's remembered copy of chain heads, used to detect change between looks. Writer-reachable by definition, therefore trusted for nothing: a baseline that disagrees with the log is a reason to shout, never a verdict about which side is true — verdicts still come only from `verify` and its inputs. Named after the Tripwire/AIDE convention, where the same weakness (an adversary who can reach the baseline) has the same documented answer: the trustworthy copy lives out of reach (here, the anchor). A chain that reads as empty keeps its remembered head, and reads as `regressed` on every look while it stays that way; what is put back is diffed against that head (#387).
 
 ### Day book
 
