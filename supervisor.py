@@ -5493,16 +5493,16 @@ def write_export(path, data, then):
     or the refusal when a folder or a pipe stands at its name: the
     export's own name is a predictable one in the folder the command
     runs in, which is the writer's, and an ordinary open of a pipe
-    there waits for good (#405). `then` says what that leaves. Returns
-    None, or 73 with the refusal printed: sysexits' EX_CANTCREAT, which
-    no scan verdict uses."""
+    there waits for good (#405). Any other write the system refuses, a
+    folder this user may not write in, is named the same way, as the
+    recorder's `unwritable_log` names one. `then` says what that leaves.
+    Returns None, or 73 with the refusal printed: sysexits'
+    EX_CANTCREAT, which no scan verdict uses."""
     try:
         write_whole(path, data)
     except OSError as error:
-        if error.strerror not in (IS_A_FOLDER, NOT_REGULAR):
-            raise
         print(f"error: {Path(path).name} could not be written: "
-              f"{error.strerror} — {then}", file=sys.stderr)
+              f"{error.strerror or error} — {then}", file=sys.stderr)
         return 73
     return None
 

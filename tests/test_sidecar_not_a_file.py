@@ -1719,6 +1719,26 @@ class ExportedNameNotAFileTest(ExportBase):
     def test_a_pipe_at_either_name_is_never_waited_on(self):
         self.assert_both_refused(os.mkfifo, PIPE)
 
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not write in")
+    def test_a_folder_it_may_not_write_in_is_refused_by_name(self):
+        """Any write the system refuses is named with exit 73, as the
+        recorder names one (`unwritable_log`): never a traceback."""
+        os.chmod(self.work, 0o555)
+        self.addCleanup(os.chmod, self.work, 0o755)
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "export",
+             "--witness", str(self.witness)],
+            capture_output=True, cwd=str(self.work),
+            env={**self.env, "PYTHONIOENCODING": "utf-8"}, timeout=BOUND)
+        err = result.stderr.decode("utf-8", "replace")
+
+        self.assertEqual(result.returncode, 73, err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("could not be written: ", err)
+        self.assertIn("— nothing was written", err)
+        self.assertEqual(list(self.work.iterdir()), [])
+
 
 def misdirected(sidecar, nonce, away):
     """Point the one anchor row of `sidecar` at a `file:` calendar in
