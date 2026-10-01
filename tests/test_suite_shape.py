@@ -21,8 +21,19 @@ import each other (ADR-0035), are listed in tools/twin_check.py and
 docs/TWINS.md. The suite runs the tool's `--check` on the tree, and on
 a spoiled copy of the scripts to see it fail, then its `--write` on the
 copy to see it mend only what was spoiled.
+
+Every call in the three scripts that opens, reads, writes, copies or
+moves a file by its name goes through `open_regular`, which never
+waits, or is on a list kept here (#405): an ordinary open of a pipe
+waits for the other end, and four issues before this one each fixed the
+opens somebody happened to find. The test walks each script's syntax
+tree, holds every such call to the list by script and function, and
+spoils a copy to see it fail. An entry on the list is a stated reason,
+never a waiver: it gives the number of calls its function may make and
+one line of why, so a call added beside a listed one fails too.
 """
 
+import ast
 import os
 import re
 import subprocess
@@ -631,6 +642,247 @@ class TwinCheckTest(unittest.TestCase):
         self.assertEqual(self.text("supervisor.py"), expected)
         done = self.check()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+
+# What the walk collects (#405): a call that opens, reads, writes,
+# copies or moves a file by its name. The builtin `open`; any object's
+# `.open(` and its four whole-file reads and writes, so `os.open` and a
+# URL opener are collected too and listed for what they are; and
+# `shutil`'s copies and its move by that name alone, since a hash
+# object's `.copy()` opens nothing. `open_regular` is the open that
+# never waits, and is never collected. A helper that wraps a plain open
+# is collected at that open, and listed for what its callers hand it.
+FILE_METHODS = {"open", "read_text", "read_bytes", "write_text",
+                "write_bytes"}
+SHUTIL_CALLS = {"copy", "copy2", "copyfile", "copyfileobj", "copytree",
+                "move"}
+
+RECEIVER_DATA = ("the receiver's own data folder, on a machine the writer "
+                 "cannot reach (ADR-0031)")
+NEVER_WAITS = ("the open that never waits: O_NONBLOCK, and the type asked "
+               "of the open file")
+
+# Every function that still opens a file by its name without
+# `open_regular`: (script, function) -> (how many such calls, and why).
+ALLOWED_OPENS = {
+    ("loxodonta.py", "open_regular"): (1, NEVER_WAITS),
+    ("loxodonta.py", "write_line_to_disk"): (1, NEVER_WAITS),
+    ("loxodonta.py", "append_sidecar_record"): (1, NEVER_WAITS),
+    ("loxodonta.py", "run_main"): (
+        1, "the null device, a sink for a reader that has gone"),
+    ("loxodonta.py", "post_for_reply"): (1, "a URL, not a file"),
+    ("loxodonta.py", "judge_stamp"): (
+        1, "writes the token into a temporary folder of its own"),
+    ("loxodonta.py", "judge_manifest_signature"): (
+        1, "writes the allowed-signers line into a temporary folder of "
+           "its own"),
+    ("supervisor.py", "open_regular"): (1, NEVER_WAITS),
+    ("supervisor.py", "copy_regular"): (
+        2, "copies from a file open_regular opened into a new file in "
+           "the package's own staging folder"),
+    ("supervisor.py", "write_lf"): (
+        1, "writes the export where the operator asked, and a package's "
+           "files into the folder it stages them in"),
+    ("supervisor.py", "sign_manifest"): (
+        2, "the .pub beside the issuer's key, out of the writer's reach "
+           "(ADR-0008), and the manifest it has just staged"),
+    ("supervisor.py", "write_lines"): (
+        1, "writes the drill's copies into the sandbox it has just made "
+           "afresh"),
+    ("supervisor.py", "cmd_adopt"): (
+        2, "moves a legacy chain and its sidecars: a rename within one "
+           "filesystem opens nothing, and across two shutil refuses a "
+           "named pipe at either end"),
+    ("supervisor.py", "Face.do_GET"): (
+        1, "serves docs/FIRE-DRILL.md from the supervisor's own checkout"),
+    ("receiver.py", "mint_token"): (1, RECEIVER_DATA),
+    ("receiver.py", "current_token"): (1, RECEIVER_DATA),
+    ("receiver.py", "ends_mid_line"): (1, RECEIVER_DATA),
+    ("receiver.py", "append_durably"): (1, RECEIVER_DATA),
+    ("receiver.py", "known_pairs"): (1, RECEIVER_DATA),
+}
+
+
+def argument(call, place, keyword):
+    """What a call passes at `place`, or as `keyword`; None if neither."""
+    if len(call.args) > place:
+        return call.args[place]
+    return next((given.value for given in call.keywords
+                 if given.arg == keyword), None)
+
+
+def or_operands(node):
+    """The operands of `a | b | c` as written; [node] for anything else."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return or_operands(node.left) + or_operands(node.right)
+    return [node]
+
+
+def creates_exclusively(call, os_open):
+    """Whether the call creates its file exclusively, which never opens
+    one already there, so nothing put at the name can be waited on: the
+    builtin `open` with a literal mode holding `x`, or `os.open` with
+    `os.O_CREAT` and `os.O_EXCL` written among the flags it ORs, since
+    an OR sets bits and never clears one. A non-waiting open
+    (`O_NONBLOCK`) passes nowhere here: it still reads a device without
+    end unless the type is asked of the open file, which no syntax
+    shows, so each one is listed with its reason."""
+    if os_open:
+        flags = argument(call, 1, "flags")
+        written = ({ast.unparse(operand) for operand in or_operands(flags)}
+                   if flags is not None else set())
+        return {"os.O_CREAT", "os.O_EXCL"} <= written
+    mode = argument(call, 1, "mode")
+    return (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
+            and "x" in mode.value)
+
+
+def opens_a_file(call):
+    """Whether the walk collects `call` (FILE_METHODS, SHUTIL_CALLS)."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id == "open" and not creates_exclusively(call, False)
+    if not isinstance(func, ast.Attribute):
+        return False
+    base = func.value.id if isinstance(func.value, ast.Name) else None
+    if func.attr in FILE_METHODS:
+        return not (base == "os" and func.attr == "open"
+                    and creates_exclusively(call, True))
+    return func.attr in SHUTIL_CALLS and base == "shutil"
+
+
+class FileCalls(ast.NodeVisitor):
+    """One script's walk. `opens` maps each function, named with the
+    classes and functions around it (`Face.do_GET`), to the lines of
+    the calls collected in it; `defined` holds every such name."""
+
+    def __init__(self):
+        self.scope, self.opens, self.defined = [], {}, set()
+
+    def visit_FunctionDef(self, node):
+        self.scope.append(node.name)
+        self.defined.add(".".join(self.scope))
+        self.generic_visit(node)
+        self.scope.pop()
+
+    visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
+
+    def visit_Call(self, node):
+        if opens_a_file(node):
+            where = ".".join(self.scope) or "<module>"
+            self.opens.setdefault(where, []).append(node.lineno)
+        self.generic_visit(node)
+
+
+def file_calls(path):
+    """The walk of the script at `path`."""
+    calls = FileCalls()
+    calls.visit(ast.parse(Path(path).read_bytes()))
+    return calls
+
+
+def beyond_the_list(name, calls):
+    """Each function of script `name` making more collected calls than
+    the list allows it, as (function, allowed, lines)."""
+    over = []
+    for where, lines in sorted(calls.opens.items()):
+        allowed = ALLOWED_OPENS.get((name, where), (0, None))[0]
+        if len(lines) > allowed:
+            over.append((where, allowed, lines))
+    return over
+
+
+class EveryOpenIsListedTest(unittest.TestCase):
+    """The rule of #364, #374, #385, #386 and #405 as a check: a call
+    that opens, reads, writes, copies or moves a file by its name goes
+    through `open_regular`, or its function is on ALLOWED_OPENS with
+    the number of such calls it makes and why. An exclusive create
+    passes on its own. `verifier.py` is not walked: it is copied from
+    the recorder, and `tools/build_verifier.py --check` holds it
+    equal."""
+
+    def test_every_file_call_on_the_tree_is_listed_at_its_count(self):
+        found = [f"{name} {where}, line {', '.join(map(str, lines))}: "
+                 f"{len(lines)} call(s), and the list allows {allowed}"
+                 for name in SCRIPTS
+                 for where, allowed, lines in beyond_the_list(
+                     name, file_calls(REPO_ROOT / name))]
+        self.assertEqual(found, [], "a file opened by its name, not "
+                         "through open_regular: read it through that, or "
+                         "list its function with the count and why (#405)")
+
+    def test_no_entry_on_the_list_is_stale(self):
+        walks = {name: file_calls(REPO_ROOT / name) for name in SCRIPTS}
+        stale = []
+        for (name, where), (allowed, why) in sorted(ALLOWED_OPENS.items()):
+            self.assertIn(name, walks)
+            self.assertTrue(why, f"{name} {where} is listed with no reason")
+            made = len(walks[name].opens.get(where, []))
+            if where not in walks[name].defined:
+                stale.append(f"{name} no longer defines {where}")
+            elif made < allowed:
+                stale.append(f"{name} {where} makes {made} call(s), and the "
+                             f"list allows {allowed}")
+        self.assertEqual(stale, [], "take the entry off, or lower its count")
+
+    def spoiled(self, name, old, new):
+        """The walk of a copy of script `name` with `old` made `new`, and
+        the copy's text, to find the lines in."""
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        self.assertEqual(text.count(old), 1, f"{old!r} in {name}")
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        copy = Path(scratch.name) / name
+        copy.write_bytes(text.replace(old, new).encode())
+        return file_calls(copy), copy.read_text(encoding="utf-8")
+
+    def line_of(self, text, line):
+        """The number of the one line of `text` that is `line`."""
+        found = [number for number, said in enumerate(text.split("\n"), 1)
+                 if said == line]
+        self.assertEqual(len(found), 1, line)
+        return found[0]
+
+    def test_a_plain_read_added_to_a_function_is_named_at_its_line(self):
+        added = "    with open(log) as spoiled:"
+        old = 'def anchors_path(log):\n'
+        calls, text = self.spoiled("loxodonta.py", old,
+                                   old + added + "\n        spoiled.read()\n")
+        self.assertEqual(beyond_the_list("loxodonta.py", calls),
+                         [("anchors_path", 0, [self.line_of(text, added)])])
+
+    def test_a_plain_write_added_to_a_function_is_named_at_its_line(self):
+        # A pipe opened for writing waits for a reader, as #385's did.
+        added = '    with open(path, "w") as spoiled:'
+        old = '    return re.sub(r"[^A-Za-z0-9-]", "-", str(path))\n'
+        calls, text = self.spoiled(
+            "supervisor.py", old,
+            added + '\n        spoiled.write("")\n' + old)
+        self.assertEqual(beyond_the_list("supervisor.py", calls),
+                         [("munge", 0, [self.line_of(text, added)])])
+
+    def test_a_call_added_beside_a_listed_one_fails_on_the_count(self):
+        listed = '    with open(path, "ab") as f:'
+        added = '    with open(path, "ab") as spoiled:'
+        calls, text = self.spoiled(
+            "receiver.py", listed + "\n",
+            added + '\n        spoiled.write(b"")\n' + listed + "\n")
+        self.assertEqual(beyond_the_list("receiver.py", calls),
+                         [("append_durably", 1,
+                           [self.line_of(text, added),
+                            self.line_of(text, listed)])])
+
+    def test_an_exclusive_create_passes_and_only_an_exclusive_one(self):
+        old = 'def anchors_path(log):\n'
+        exclusive = "os.O_WRONLY | os.O_CREAT | os.O_EXCL"
+        calls, text = self.spoiled("loxodonta.py", old, old + (
+            '    open(log, "x").close()\n'
+            f"    os.close(os.open(log, {exclusive}))\n"
+            "    os.close(os.open(log, os.O_WRONLY | os.O_CREAT))\n"))
+        line = self.line_of(
+            text, "    os.close(os.open(log, os.O_WRONLY | os.O_CREAT))")
+        self.assertEqual(beyond_the_list("loxodonta.py", calls),
+                         [("anchors_path", 0, [line])])
 
 
 if __name__ == "__main__":
