@@ -10,6 +10,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- A pipe where the harness settings, the coverage marker or an export belongs no longer hangs `scan`, `serve`, `install-hook` or `export`: settings and export are refused by name; the marker is named beside the wired hook (#405).
+- `anchor --upgrade` and the session end ask a calendar only at an http or https address: a sidecar row naming a `file:` one is skipped and never read (#414).
+
 ## [0.10.2] - 2026-10-01
 
 The round after 0.10.1 cleared what its reviews had found. The hook keeps its receipt in a sibling when something that is not a file sits at its chain's name, a pipe at a transcript, a project record or the supervisor's memory is named or read past, and the baseline keeps a chain's remembered head while the chain reads as empty. Three answers moved for scripts: `run` refuses a chain that is not a file before its command runs, exit 66; a chain line that cannot be written is exit 73, where it was a traceback; and a transcript that is a link to a device reads `TRANSCRIPT-UNRESOLVED`, exit 0, where it read `TRANSCRIPT-DIVERGED`. `verifier.py` moves with the recorder's reads of a transcript and a project record. The receipt format is untouched.
