@@ -12,7 +12,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
-- A pipe where the coverage marker or the harness settings belong no longer hangs `scan`, `serve` or `install-hook`: the scan names it and reads past, and `install-hook` and `uninstall-hook` refuse it by name, exit 66 (#405).
+- A pipe where the harness settings, the coverage marker or an export belongs no longer hangs `scan`, `serve`, `install-hook` or `export`: settings and export are refused by name; the marker is named beside the wired hook (#405).
+- `anchor --upgrade` and the session end ask a calendar only at an http or https address: a sidecar row naming a `file:` one is skipped and never read (#414).
 
 ## [0.10.2] - 2026-10-01
 

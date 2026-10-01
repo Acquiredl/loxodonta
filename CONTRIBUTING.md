@@ -52,8 +52,9 @@ change one, edit the original in `loxodonta.py`, run
 files, then run `python tools/twin_check.py --check`.
 
 A file the three scripts open by its name goes through `open_regular`, which
-never waits on a pipe put in its place, and `tests/test_suite_shape.py` holds
-them to that, listing the few opens that need not with a reason for each.
+never waits on a pipe put in its place; `tests/test_suite_shape.py` checks the
+calls it can see, lists the few that need not with a reason for each, and says
+what it cannot see.
 
 ## The one local check
 
