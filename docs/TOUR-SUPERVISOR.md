@@ -279,7 +279,9 @@ drift is the operator's to resolve, deliberately.
 
 Two subtleties. Baseline events are **one-shot**: the baseline is
 remembered anew after diffing, so an alarm belongs to the tick that
-caught it, and the next tick reads quiet — the day book's sticky
+caught it, and the next tick reads quiet (save a chain that reads as
+empty, which keeps its old head and says `regressed` on every tick
+while it stays that way) — the day book's sticky
 `worst` is what keeps the day honest. And the day book's `broken`
 counts only damage that *demands attention* (stood-down tears are
 excluded), while the chain list and the digest's testimony line count

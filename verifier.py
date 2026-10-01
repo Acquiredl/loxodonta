@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.10.1"
+TOOL_VERSION = "0.10.2"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -118,7 +118,8 @@ def read_log(path):
     ending the whole read in a traceback: the walk refuses the one line
     it sits on by name (SPEC §6), and `tail_entry` calls a tail holding
     one damaged. The recorder only ever writes ASCII lines, so no line
-    it wrote is read any differently."""
+    it wrote is read any differently. Sidecars are read here too, where
+    `read_sidecar_records` calls such a line unreadable."""
     with open_regular(path) as f:
         return [line.decode("utf-8", "surrogateescape")
                 for line in split_lines(f.read())]
@@ -189,9 +190,14 @@ def files_base(log):
     if not os.path.exists(record):
         return log_dir, None
     try:
-        with open(record, encoding="utf-8") as f:
-            path = json.load(f).get("path")
-    except (OSError, ValueError):
+        # The record sits beside the chain, in the writer's reach, so a
+        # pipe there is refused by name rather than waited on (#386).
+        with open_regular(record) as f:
+            path = json.loads(f.read().decode("utf-8")).get("path")
+    except OSError as error:
+        return None, (f"{record} cannot be read as a project record: "
+                      f"{error.strerror or error}")
+    except ValueError:
         return None, f"project record unreadable: {record}"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
@@ -514,12 +520,19 @@ def judge_prefixes(marks, transcript_path):
         print("no transcript commitments in this chain — nothing to judge")
         return False
     try:
-        handle = open(transcript_path, "rb")
-    except OSError:
+        handle = open_regular(transcript_path)
+    except FileNotFoundError:
         # Absence is a note, never a verdict: the harness cleans
         # transcripts on a retention cycle (ADR-0017).
         print(f"TRANSCRIPT-UNRESOLVED: no transcript at {transcript_path} "
               "— commitments unjudgeable; chain verdict unaffected")
+        return False
+    except OSError as error:
+        # A folder, a pipe or a device in its place is named and never
+        # waited on or read (#386); a note like absence, never a verdict.
+        print(f"TRANSCRIPT-UNRESOLVED: {transcript_path} cannot be read as "
+              f"a transcript: {error.strerror or error} — commitments "
+              "unjudgeable; chain verdict unaffected")
         return False
     diverged = False
     with handle:
@@ -855,22 +868,12 @@ def file_problem(path):
         return error.strerror or str(error)
 
 
-def sidecar_lines(path):
-    """The lines of the sidecar at `path`, split and decoded as
-    `read_log` reads a chain's, from the one file `open_regular` opened:
-    FileNotFoundError when there is none, and an OSError naming why when
-    what is there is not a file."""
-    with open_regular(path) as f:
-        return [line.decode("utf-8", "surrogateescape")
-                for line in split_lines(f.read())]
-
-
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
-    surrogate from `sidecar_lines`), an integer too long to read, nesting
+    surrogate from `read_log`), an integer too long to read, nesting
     too deep (#299). A line a strict JSON parser refuses is unreadable
     too, before its kind is read: a key given twice, as the walk refuses
     one in an entry, `NaN`, `Infinity` or `-Infinity`, and a number too
@@ -878,7 +881,7 @@ def read_sidecar_records(path):
     cannot be read as a file (`open_regular`) reads as one unreadable
     line, so no reader stops on it and a judge names it (#364)."""
     try:
-        lines = sidecar_lines(path)
+        lines = read_log(path)
     except FileNotFoundError:
         return None
     except OSError:

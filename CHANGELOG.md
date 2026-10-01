@@ -10,6 +10,17 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-10-01
+
+The round after 0.10.1 cleared what its reviews had found. The hook keeps its receipt in a sibling when something that is not a file sits at its chain's name, a pipe at a transcript, a project record or the supervisor's memory is named or read past, and the baseline keeps a chain's remembered head while the chain reads as empty. Three answers moved for scripts: `run` refuses a chain that is not a file before its command runs, exit 66; a chain line that cannot be written is exit 73, where it was a traceback; and a transcript that is a link to a device reads `TRANSCRIPT-UNRESOLVED`, exit 0, where it read `TRANSCRIPT-DIVERGED`. `verifier.py` moves with the recorder's reads of a transcript and a project record. The receipt format is untouched.
+
+### Fixed
+
+- `tools/build_verifier.py` leaves a current `verifier.py` untouched, so a rebuild on a Windows checkout no longer reads as modified to `git status` with an empty diff (#389).
+- A pipe where a chain belongs no longer hangs the hook with its lock held: a pipe, folder or device there is damage, and the hook records in a sibling; `run` refuses before its command runs (#385).
+- `supervisor scan` keeps a chain's remembered head while the chain reads as empty, a folder or a pipe, and says `regressed` on every such look, so a shorter chain put back reads as one that shrank, not as new (#387).
+- A pipe where a transcript, a project record, a worktree's `commondir` or the supervisor's baseline, day book or views belongs no longer hangs `scan`, `serve`, `verify --transcript`, `log --file` or the hook (#386).
+
 ## [0.10.1] - 2026-09-30
 
 Three fixes from the round that followed 0.10.0, each found in a review of that round's own pull requests. A pipe or a folder where a chain belongs is named and never waited on, the witness reads a shell refusal without an `Exit code N` line as one that may owe a receipt, and `twin_check --write` handles four unusual layouts. The receipt format is untouched; `verifier.py` moves because the recorder's read of a chain did.
@@ -269,6 +280,7 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
 [Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.10.0...dev
+[0.10.2]: https://github.com/Acquiredl/loxodonta/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/Acquiredl/loxodonta/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Acquiredl/loxodonta/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Acquiredl/loxodonta/compare/v0.8.1...v0.9.0
