@@ -2422,9 +2422,9 @@ def judge_manifest_signature(folder):
             # the key's two tokens, type and key. The shipped file's own
             # tokens and nothing else, so what verifies is what shipped.
             allowed = os.path.join(scratch, "allowed_signers")
-            # Read without waiting, as every file of a package is: a pipe
-            # put at either name since it was first looked at would
-            # otherwise hold the verifier for good.
+            # The two files this verifier opens itself, read without
+            # waiting: a pipe put at either name since it was first looked
+            # at would otherwise hold the verifier for good.
             with io.TextIOWrapper(open_regular(public_key), encoding="utf-8",
                                   errors="replace") as f:
                 key = " ".join(f.readline().split()[:2])
@@ -2756,13 +2756,21 @@ def cmd_verify_package(args):
     if not os.path.isfile(path):
         print(f"error: {path} not found", file=sys.stderr)
         return EX_NOINPUT
-    if not zipfile.is_zipfile(path):
+    # Opened once, without waiting, and only that open file is read: a
+    # pipe put at the name since the look above is never waited on, and
+    # a file this cannot open reads as no zip, as is_zipfile reads one.
+    try:
+        handle = open_regular(path)
+    except OSError:
+        handle = io.BytesIO()
+    if not zipfile.is_zipfile(handle):
+        handle.close()
         print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
               "not a loxodonta package")
         return 4
-    with tempfile.TemporaryDirectory() as unpacked:
+    with handle, tempfile.TemporaryDirectory() as unpacked:
         try:
-            with zipfile.ZipFile(path) as package:
+            with zipfile.ZipFile(handle) as package:
                 declared = sum(info.file_size for info in package.infolist())
                 if declared > PACKAGE_MAX_BYTES:
                     print(f"UNSUPPORTED-FORMAT: {path} declares {declared} "

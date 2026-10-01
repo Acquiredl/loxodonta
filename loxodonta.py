@@ -2415,9 +2415,9 @@ def judge_manifest_signature(folder):
             # the key's two tokens, type and key. The shipped file's own
             # tokens and nothing else, so what verifies is what shipped.
             allowed = os.path.join(scratch, "allowed_signers")
-            # Read without waiting, as every file of a package is: a pipe
-            # put at either name since it was first looked at would
-            # otherwise hold the verifier for good.
+            # The two files this verifier opens itself, read without
+            # waiting: a pipe put at either name since it was first looked
+            # at would otherwise hold the verifier for good.
             with io.TextIOWrapper(open_regular(public_key), encoding="utf-8",
                                   errors="replace") as f:
                 key = " ".join(f.readline().split()[:2])
@@ -2749,13 +2749,21 @@ def cmd_verify_package(args):
     if not os.path.isfile(path):
         print(f"error: {path} not found", file=sys.stderr)
         return EX_NOINPUT
-    if not zipfile.is_zipfile(path):
+    # Opened once, without waiting, and only that open file is read: a
+    # pipe put at the name since the look above is never waited on, and
+    # a file this cannot open reads as no zip, as is_zipfile reads one.
+    try:
+        handle = open_regular(path)
+    except OSError:
+        handle = io.BytesIO()
+    if not zipfile.is_zipfile(handle):
+        handle.close()
         print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
               "not a loxodonta package")
         return 4
-    with tempfile.TemporaryDirectory() as unpacked:
+    with handle, tempfile.TemporaryDirectory() as unpacked:
         try:
-            with zipfile.ZipFile(path) as package:
+            with zipfile.ZipFile(handle) as package:
                 declared = sum(info.file_size for info in package.infolist())
                 if declared > PACKAGE_MAX_BYTES:
                     print(f"UNSUPPORTED-FORMAT: {path} declares {declared} "
@@ -3611,6 +3619,13 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
 
 
 def calendar_request(url, data=None, timeout=15):
+    """One request to a calendar, and its reply. An address with any
+    scheme but http or https raises ValueError, before anything is
+    asked: an upgrade takes the address from a sidecar row, in the
+    writer's reach, and urllib would read a `file:` one as a path on
+    this machine, a pipe there included (#414)."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        raise ValueError("not an http or https URL")
     request = urllib.request.Request(
         url, data=data,
         headers={"Accept": "application/vnd.opentimestamps.v1",
@@ -4789,7 +4804,7 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
         try:
             proof_bytes = calendar_request(url + "/digest", data=digest)
             judge_proof(head, proof_bytes)  # refuse to store what can't replay
-        except (OSError, ProofError) as e:
+        except (OSError, ProofError, ValueError) as e:
             print(f"warning: calendar {url}: {e}", file=sys.stderr)
             continue
         try:
@@ -6016,16 +6031,13 @@ def install_codex_hooks(publish=None, profile="local",
     # first time a recorder that knows how walks past.
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
-    marked, refused = record_coverage(CODEX_ACTOR, wired, profile,
-                                      remote=publish_chain or publish,
-                                      authority=authority)
-    if refused:
-        return refused
+    marked, unmarked = record_coverage(CODEX_ACTOR, wired, profile,
+                                       remote=publish_chain or publish,
+                                       authority=authority)
     tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
-        if marked:
-            print(f"  coverage recorded in {coverage_path()}")
+        coverage_said(marked, unmarked)
         if tier:
             print(tier)
         return 0
@@ -6039,8 +6051,7 @@ def install_codex_hooks(publish=None, profile="local",
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
               "moved — now pointing at this install")
-    if marked:
-        print(f"  coverage recorded in {coverage_path()}")
+    coverage_said(marked, unmarked)
     print("Codex asks you to review new hooks once: open Codex and run "
           "/hooks to trust them.")
     print("every NEW Codex session on this machine then leaves a chain in")
@@ -6092,12 +6103,10 @@ def record_coverage(harness, matchers, profile, remote=None,
     travels (the export and the package leave it out), so unlike the
     publish memo it may hold a URL. Every failure is a silent skip: a
     bookkeeping file is no reason to refuse an install. A folder, a pipe
-    or a device at the marker's name is no failure but something put
-    there, and an ordinary open of a pipe waits for good: it is refused
-    by name before the settings are touched, 66 when the marker cannot
-    be read and 73 when it cannot be written (#405). Returns (whether
-    an entry was appended, the exit code of a refusal already printed
-    or None)."""
+    or a device at the marker's name is skipped too, never waited on,
+    but not silently, since it is something put there (#405): returned
+    in words for the installer to name beside the hook it wired.
+    Returns (whether an entry was appended, those words or None)."""
     entry = {"since": now_ts(), "matchers": list(matchers)}
     if failures:
         entry["failures"] = list(failures)
@@ -6114,7 +6123,8 @@ def record_coverage(harness, matchers, profile, remote=None,
                 data = json.loads(f.read().decode("utf-8"))
         except OSError as error:
             if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
-                return False, refuse_to_touch(marker, error.strerror)
+                return False, ("cannot be read as a coverage marker: "
+                               f"{error.strerror}")
             data = {}
         except ValueError:
             data = {}
@@ -6137,12 +6147,21 @@ def record_coverage(harness, matchers, profile, remote=None,
             why = file_problem(marker)
             if why not in (NOT_A_FOLDER, NOT_REGULAR):
                 raise
-            print(f"error: {marker} could not be written: {why} — the "
-                  "settings were left as they were", file=sys.stderr)
-            return False, EX_CANTCREAT
+            return False, f"could not be written: {why}"
         return True, None
     except OSError:
         return False, None
+
+
+def coverage_said(marked, unmarked):
+    """The installer's word on the marker (record_coverage): where the
+    coverage was recorded, or on stderr what stands at the marker's name
+    instead, beside a hook that is wired all the same (#405)."""
+    if marked:
+        print(f"  coverage recorded in {coverage_path()}")
+    if unmarked:
+        print(f"warning: {coverage_path()} {unmarked} — the marker was not "
+              "written, and the hook is wired without it", file=sys.stderr)
 
 
 def cmd_install_hook(args):
@@ -6292,19 +6311,16 @@ def cmd_install_hook(args):
 
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
-    marked, refused = record_coverage(
+    marked, unmarked = record_coverage(
         "claude-code", wired, args.profile,
         remote=args.publish_chain or args.publish_head,
         authority=args.authority,
         failures=[block.get("matcher", "*") for block in failed
                   if ours(block)])
-    if refused:
-        return refused
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
-        if marked:
-            print(f"  coverage recorded in {coverage_path()}")
+        coverage_said(marked, unmarked)
         if tier:
             print(tier)
         return 0
@@ -6319,8 +6335,7 @@ def cmd_install_hook(args):
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
               "moved — now pointing at this install")
-    if marked:
-        print(f"  coverage recorded in {coverage_path()}")
+    coverage_said(marked, unmarked)
     print("every NEW Claude Code session on this machine now leaves a chain")
     print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
     print("drawer per project. Restart open sessions.")
