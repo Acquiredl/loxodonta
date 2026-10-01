@@ -13,6 +13,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Fixed
 
 - `supervisor export` names any write the system refuses and exits 73, instead of ending in a traceback in a folder the user may not write in.
+- `supervisor package` refuses an `--out` where a link to nowhere stands, where it wrote the package through the link, and names an `--out` it cannot create instead of ending in a traceback.
+- `supervisor adopt` names a folder or a pipe at a legacy chain's or sidecar's name and leaves it, where it moved a folder into the store as a chain and could end in a traceback on a pipe.
 
 ## [0.10.3] - 2026-10-01
 

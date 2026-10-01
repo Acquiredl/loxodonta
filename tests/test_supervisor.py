@@ -358,6 +358,59 @@ class AdoptTest(unittest.TestCase):
         self.assertEqual(squatter.read_text(encoding="utf-8"), "{}\n",
                          "the store copy is untouched")
 
+    def test_a_folder_where_a_legacy_chain_belongs_is_refused_and_left(self):
+        # No chain to move (#374): named, and left as it lies.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        folder = self.root / "alpha" / "receipts" / "receipts-sess-bbbb.jsonl"
+        folder.mkdir()
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
+                      "it is a folder, not a file", result.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertTrue(folder.is_dir(), "the folder stays put")
+        (name,) = self.drawers()
+        self.assertEqual(
+            sorted(p.name for p in (self.home / "receipts" / name).iterdir()),
+            ["project.json", "receipts-sess-aaaa.jsonl"])
+
+    def test_only_a_folder_at_a_chain_name_is_refused_and_no_drawer_made(self):
+        folder = self.root / "alpha" / "receipts" / "receipts-sess-bbbb.jsonl"
+        folder.mkdir(parents=True)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
+                      "it is a folder, not a file", result.stdout)
+        self.assertNotIn("adopted", result.stdout)
+        self.assertEqual(self.drawers(), [])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
+    def test_a_pipe_at_a_chain_or_a_sidecar_name_is_named_and_left(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        sidecar = log.with_name(log.name + ".anchors.jsonl")
+        os.mkfifo(sidecar)
+        chain = log.with_name("receipts-sess-bbbb.jsonl")
+        os.mkfifo(chain)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
+                      "it is not a regular file", result.stdout)
+        self.assertIn("left sidecar alpha/receipts/receipts-sess-aaaa.jsonl"
+                      ".anchors.jsonl: it is not a regular file",
+                      result.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertTrue(os.path.lexists(sidecar) and os.path.lexists(chain))
+        (name,) = self.drawers()
+        self.assertEqual(
+            sorted(p.name for p in (self.home / "receipts" / name).iterdir()),
+            ["project.json", "receipts-sess-aaaa.jsonl"])
+
     def test_adopt_twice_is_a_quiet_no_op(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_adopt(self.home, self.root)

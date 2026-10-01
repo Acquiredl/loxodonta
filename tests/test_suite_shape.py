@@ -698,9 +698,8 @@ ALLOWED_OPENS = {
         1, "builds the raw archive in memory; write_export puts it at its "
            "name"),
     ("supervisor.py", "zip_package"): (
-        1, "the package's zip at --out, which cmd_package refuses "
-           "beforehand when anything stands there: only a pipe put there "
-           "between that look and this open would be waited on"),
+        1, "the package's zip at --out, created exclusively (mode x): "
+           "whatever stands there is kept and never opened"),
     ("supervisor.py", "sign_manifest"): (
         2, "the .pub beside the issuer's key, out of the writer's reach "
            "(ADR-0008), and the manifest it has just staged"),
@@ -708,9 +707,10 @@ ALLOWED_OPENS = {
         1, "writes the drill's copies into the sandbox it has just made "
            "afresh"),
     ("supervisor.py", "cmd_adopt"): (
-        2, "moves a legacy chain and its sidecars: a rename within one "
+        2, "moves a legacy chain and its sidecars, each asked first "
+           "whether it is a file (file_problem): a rename within one "
            "filesystem opens nothing, and across two shutil refuses a "
-           "named pipe at either end"),
+           "named pipe put there after the question"),
     ("supervisor.py", "Face.do_GET"): (
         1, "serves docs/FIRE-DRILL.md from the supervisor's own checkout"),
     ("receiver.py", "mint_token"): (1, RECEIVER_DATA),
@@ -839,7 +839,10 @@ class EveryOpenIsListedTest(unittest.TestCase):
     equal.
 
     What the walk does not see: a path handed by name to another
-    program (ssh-keygen opens a package's `.pub` and `.sig` itself); a
+    program (ssh-keygen opens a package's `.pub` and `.sig` itself), or
+    to a library method that opens it itself (a zip's `write` and
+    `extractall`, which today read and fill only a folder the script
+    has just made, and the receiver's `load_cert_chain`); a
     renamed import or an alias, `from shutil import copyfile` or
     `opener = open`, none of which the three scripts hold today; and a
     call reached through `getattr`, `functools.partial` or `map`. An

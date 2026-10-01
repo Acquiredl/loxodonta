@@ -3724,13 +3724,19 @@ def cmd_adopt(args):
     the plan. Empty legacy folders are left for the operator to
     prune."""
     root = Path(args.root).resolve()
-    moves, refused = [], []
+    moves, refused, not_files = [], [], []
     for log in find_chains(root):
+        problem = file_problem(log)
+        if problem is not None:
+            # A folder or a pipe where a chain belongs is no chain to
+            # move (#374): named, and left as it lies.
+            not_files.append((log, problem))
+            continue
         project = adoption_project(root, log)
         drawer = store_receipts() / project_slug(project)
         (refused if (drawer / log.name).exists() else moves).append(
             (log, drawer, project))
-    if not moves and not refused:
+    if not moves and not refused and not not_files:
         print(f"nothing to adopt under {root.as_posix()}")
         return 0
     for log, drawer, project in moves:
@@ -3756,7 +3762,12 @@ def cmd_adopt(args):
             sidecar = log.parent / (log.name + suffix)
             if not sidecar.exists():
                 continue
-            if (drawer / sidecar.name).exists():
+            problem = file_problem(sidecar)
+            if problem is not None:
+                print(f"left sidecar "
+                      f"{sidecar.relative_to(root).as_posix()}: {problem} "
+                      "— not moved; reconcile by hand")
+            elif (drawer / sidecar.name).exists():
                 # Proofs left behind are still proofs; say so — silence
                 # here would read as "everything travelled".
                 print(f"left sidecar "
@@ -3780,6 +3791,9 @@ def cmd_adopt(args):
         print(f"refused {log.relative_to(root).as_posix()}: "
               f"{drawer.name}/{log.name} already exists in the store — "
               "evidence is never overwritten; reconcile by hand")
+    for log, problem in not_files:
+        print(f"refused {log.relative_to(root).as_posix()}: {problem} — "
+              "no chain to adopt; left as it lies")
     if not args.dry_run and moves:
         print(f"{len(moves)} chain(s) adopted into "
               f"{store_receipts().as_posix()}")
@@ -6333,11 +6347,19 @@ def seal_package(stage, seals, calendars, keyfile, authority=None):
 
 def zip_package(stage, written, out):
     """The default shape: one zip, members in write order, so the
-    manifest is the last member too."""
+    manifest is the last member too. Created exclusively: whatever
+    stands at `out` by now is kept and never opened, a pipe or a link
+    to nowhere included. Returns the error when the zip could not be
+    created, for the caller to refuse by (`out_refused`), else None."""
     import zipfile
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
+    try:
+        package = zipfile.ZipFile(out, "x", zipfile.ZIP_DEFLATED)
+    except OSError as error:
+        return error
+    with package:
         for name in written:
             package.write(stage / name, name)
+    return None
 
 
 def select_session(selector, sessions):
@@ -6374,6 +6396,24 @@ def split_refusal(session, chains):
           f"({', '.join(d.name for d in drawers)}); packaging a split "
           "session is not built", file=sys.stderr)
     return True
+
+
+def out_refused(out, error=None):
+    """The refusal when --out cannot be created. Something stands there,
+    at the look or at the create after it, and a package never replaces
+    it; or the system would not make it, said in the system's words."""
+    if error is None or (isinstance(error, FileExistsError)
+                         and os.path.lexists(out)):
+        print(f"error: {out} already exists; choose another --out",
+              file=sys.stderr)
+        return 1
+    # The parent that is in the way, when it is not --out itself.
+    where = "" if error.filename in (None, str(out)) \
+        else f" at {error.filename}"
+    print(f"error: {out} could not be written: "
+          f"{error.strerror or error}{where}; no package written",
+          file=sys.stderr)
+    return 1
 
 
 def swapped_out(error):
@@ -6486,10 +6526,10 @@ def cmd_package(args):
     default = Path.cwd() / f"loxodonta-package-{stem}"
     out = Path(args.out) if args.out else (
         default if args.folder else default.with_name(default.name + ".zip"))
-    if out.exists():
-        print(f"error: {out} already exists; choose another --out",
-              file=sys.stderr)
-        return 1
+    if os.path.lexists(out):
+        # A link to nowhere stands there too: written through, the
+        # package would land where nobody named.
+        return out_refused(out)
     # A reading, not a tick (tick=False): the keepers stay quiet, so
     # packaging appends nothing to the chain it copies and sends nothing
     # off the machine; the baseline still remembers the look. Only the
@@ -6524,9 +6564,13 @@ def cmd_package(args):
     if problem:
         print(f"error: {problem}", file=sys.stderr)
         return 1
-    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if args.folder:
+            out.mkdir()
+    except OSError as error:
+        return out_refused(out, error)
     if args.folder:
-        out.mkdir()
         try:
             written = write_package(unit, sessions, drawer, report, out,
                                     packed, seals, transcripts)
@@ -6556,7 +6600,10 @@ def cmd_package(args):
             sealed, fingerprint, problem = seal_package(
                 Path(staging), seals, calendars, keyfile, args.stamp)
             if not problem:
-                zip_package(Path(staging), written + sealed, out)
+                refused = zip_package(Path(staging), written + sealed,
+                                      out)
+                if refused is not None:
+                    return out_refused(out, refused)
     if problem:
         print(f"error: {problem}; nothing written", file=sys.stderr)
         return 1
