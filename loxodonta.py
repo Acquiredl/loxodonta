@@ -3062,8 +3062,9 @@ import urllib.request
 EX_DATAERR = 65      # the hook's stdin, or a settings file, is not what it must be
 EX_UNAVAILABLE = 69  # a calendar, a publish URL, an authority, or the
                      # narrating command did not do what was asked
-EX_CANTCREAT = 73    # a file this verb must create cannot be: a log that
-                     # already exists, a lock file, a granted token
+EX_CANTCREAT = 73    # a file this verb must write cannot be: a log that
+                     # already exists, a lock file, a granted token, a
+                     # line the chain or a sidecar would not take
 EX_TEMPFAIL = 75     # another writer holds the lock; try again
 
 
@@ -3154,7 +3155,7 @@ def lock_timeout():
 
 class ChainLock:
     """Exclusive lock over one log's read-tail-then-append: `O_EXCL` on a
-    sidecar file, since `fcntl` and `msvcrt` would fork this file in two
+    lock file beside it, since `fcntl` and `msvcrt` would fork this file in two
     (ADR-0004; the one Windows difference is in `__enter__`). The writer
     can reach the lock, so it prevents accidents, not adversaries
     (ADR-0002).
@@ -3595,7 +3596,7 @@ def append_sidecar_record(path, record):
 
 
 def unwritable_why(path, error):
-    """Why an append to the sidecar at `path` failed, in words: what
+    """Why a write to the chain or a sidecar at `path` failed, in words: what
     `file_problem` says of the path, a folder in its place say, which
     Windows reports as a denied permission (#364); else the system's
     reason."""
