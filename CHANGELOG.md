@@ -26,6 +26,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `anchor` and `anchor --upgrade` count a calendar that redirects to an address http cannot send as that calendar failing, where they blamed the operator's address or skipped the row (#422).
 - `supervisor package`, refused after it made folders for `--out` or part of a zip, removes them and names what it removed; a zip the disk will not finish is 73, not a traceback (#422).
 - `supervisor adopt --dry-run` asks the real run's refusals: it names each sidecar the move would leave behind and refuses a drawer closed to the user, where it said "would adopt" (#422).
+- On a disk that ignores case, a chain renamed by a change of case is compared with what the baseline remembers: cut short, it reads `regressed`, exit 5, not exit 0. A `.JSONL` name counts as a chain everywhere (#445).
 
 ## [0.11.0] - 2026-10-02
 
