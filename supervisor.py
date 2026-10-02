@@ -268,7 +268,7 @@ def superseded(log, detail):
     tampering to shout about, sibling or not."""
     broken = [l for l in detail if l.startswith("BROKEN")]
     return (len(broken) == 1 and "torn tail" in broken[0]
-            and sibling_of(log).exists())
+            and os.path.exists(sibling_of(log)))
 
 
 # --- Writing state whole ------------------------------------------------------
@@ -1507,7 +1507,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
-    if sidecar.is_file():
+    if os.path.isfile(sidecar):
         finished = run_verb(["anchor", "--upgrade", f"--log={log}"], env)
         attempted = True
         if finished is None:
@@ -2469,7 +2469,7 @@ def recorder_drift(witness):
     notice = {"state": "unknown", "path": script.as_posix(), "branch": None,
               "head": None, "dirty": False, "upstream": None,
               "ahead": None, "behind": None, "fetched": None, "note": None}
-    if not script.exists():
+    if not os.path.exists(script):
         notice["note"] = ("the wired recorder is not on disk — the hook "
                           "runs nothing, and a session that records "
                           "nothing looks exactly like a quiet one")
@@ -2969,13 +2969,13 @@ def watch_completeness(root, witness, families, everywhere=False,
                         "judged by one are judged on that word, not on "
                         "anything this supervisor watched")
     transcripts = {}
-    if witness.is_dir():
+    if os.path.isdir(witness):
         transcripts = {t.stem: t for t in sorted(witness.glob("*/*.jsonl"))}
     else:
         watch["note"] = (f"witness absent — no transcript layout at "
                          f"{witness.as_posix()}; completeness cannot be "
                          "watched this look")
-    if witness.is_dir() and not matchers:
+    if os.path.isdir(witness) and not matchers:
         watch["note"] = ("no recorder hook is wired into the harness "
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
@@ -3382,7 +3382,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if store:
         found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
                         if not p.name.endswith(SIDECAR_SUFFIXES))
-                 if root.is_dir() else [])
+                 if os.path.isdir(root) else [])
         census = sorted((store_identity(log), log) for log in found)
     else:
         census = sorted((chain_identity(root, log), log)
@@ -3742,40 +3742,49 @@ def cmd_adopt(args):
             continue
         project = adoption_project(root, log)
         drawer = store_receipts() / project_slug(project)
-        (refused if (drawer / log.name).exists() else moves).append(
+        # lexists: a link to nowhere at the name stands there too, and a
+        # move across two filesystems would copy through it (#422).
+        (refused if os.path.lexists(drawer / log.name) else moves).append(
             (log, drawer, project))
     if not moves and not refused and not not_files:
         print(f"nothing to adopt under {root.as_posix()}")
         return 0
+    adopted = 0
     for log, drawer, project in moves:
         line = f"{log.relative_to(root).as_posix()} -> {drawer.name}/"
         if args.dry_run:
             print(f"would adopt {line}")
             continue
-        os.makedirs(drawer, exist_ok=True)
         record = drawer / "project.json"
         try:
+            os.makedirs(drawer, exist_ok=True)
             # Created only where nothing stands, so a pipe put at the
             # name is kept as it is and never opened (#405).
             with open(record, "x", encoding="utf-8") as f:
                 f.write(json.dumps(
                     {"path": str(project.resolve()).replace(os.sep, "/")})
                     + "\n")
-        except OSError:
+        except OSError as error:
             if not os.path.lexists(record):
-                raise
+                # A drawer, or the store around it, closed to this user
+                # (#421): named, and the chain left where it lies.
+                print(f"refused {log.relative_to(root).as_posix()}: "
+                      f"{drawer.name}/ cannot be written: "
+                      f"{error.strerror or error} — not adopted; left as "
+                      "it lies")
+                continue
         marker = log.parent / UNLISTED_NAME
         shutil.move(str(log), str(drawer / log.name))
         for suffix in SIDECAR_SUFFIXES:
             sidecar = log.parent / (log.name + suffix)
-            if not sidecar.exists():
+            if not os.path.exists(sidecar):
                 continue
             problem = file_problem(sidecar)
             if problem is not None:
                 print(f"left sidecar "
                       f"{sidecar.relative_to(root).as_posix()}: {problem} "
                       "— not moved; reconcile by hand")
-            elif (drawer / sidecar.name).exists():
+            elif os.path.lexists(drawer / sidecar.name):
                 # Proofs left behind are still proofs; say so — silence
                 # here would read as "everything travelled".
                 print(f"left sidecar "
@@ -3785,7 +3794,8 @@ def cmd_adopt(args):
                       "reconcile by hand")
             else:
                 shutil.move(str(sidecar), str(drawer / sidecar.name))
-        if marker.exists() and not (drawer / UNLISTED_NAME).exists():
+        if os.path.exists(marker) \
+                and not os.path.exists(drawer / UNLISTED_NAME):
             try:
                 copy_regular(marker, drawer / UNLISTED_NAME)
             except OSError as error:
@@ -3795,6 +3805,7 @@ def cmd_adopt(args):
                       f"{error.strerror or error} — not copied, so "
                       f"{drawer.name}/ is listed; unlist it by hand")
         print(f"adopted {line}")
+        adopted += 1
     for log, drawer, _ in refused:
         print(f"refused {log.relative_to(root).as_posix()}: "
               f"{drawer.name}/{log.name} already exists in the store — "
@@ -3802,8 +3813,8 @@ def cmd_adopt(args):
     for log, problem in not_files:
         print(f"refused {log.relative_to(root).as_posix()}: {problem} — "
               "not adopted; left as it lies")
-    if not args.dry_run and moves:
-        print(f"{len(moves)} chain(s) adopted into "
+    if adopted:
+        print(f"{adopted} chain(s) adopted into "
               f"{store_receipts().as_posix()}")
     return 0
 
@@ -3965,7 +3976,7 @@ def universe(root, store):
     if store:
         found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
                         if not p.name.endswith(SIDECAR_SUFFIXES))
-                 if root.is_dir() else [])
+                 if os.path.isdir(root) else [])
         return [(*store_identity(log), log) for log in found]
     return [(*chain_identity(root, log), log) for log in find_chains(root)]
 
@@ -4187,7 +4198,7 @@ def resolve_chain(root, asked):
         return None
     if (not path.name.endswith(".jsonl")
             or path.name.endswith(SIDECAR_SUFFIXES)
-            or not path.is_file()):
+            or not os.path.isfile(path)):
         return None
     return path
 
@@ -4292,7 +4303,7 @@ def main_repo_of(project):
     returns `project` unchanged, since recall never fails over path
     layout."""
     dot_git = project / ".git"
-    if not dot_git.is_file():
+    if not os.path.isfile(dot_git):
         return project  # a normal checkout (.git/ dir), or not a repo
     try:
         # Read without waiting, as the recorder reads them (#386).
@@ -4315,7 +4326,7 @@ def main_repo_of(project):
             if at <= 0:
                 return project
             root = Path(spelled[:at])
-        return root if root.is_dir() else project
+        return root if os.path.isdir(root) else project
     except OSError:
         return project
 
@@ -4395,7 +4406,8 @@ def repo_label(log):
     lives: a store drawer labels itself; a legacy path is named by the
     folder that holds its receipts/."""
     parent = log.parent
-    if (parent / "project.json").exists() or parent.parent == store_receipts():
+    if os.path.exists(parent / "project.json") \
+            or parent.parent == store_receipts():
         return drawer_name(parent)
     return parent.parent.name
 
@@ -4411,7 +4423,8 @@ def worktree_drawers(repo):
         + "/.claude/worktrees/"
     found = []
     try:
-        drawers = sorted(p for p in store_receipts().iterdir() if p.is_dir())
+        drawers = sorted(p for p in store_receipts().iterdir()
+                         if os.path.isdir(p))
     except OSError:
         return found
     for drawer in drawers:
@@ -4442,7 +4455,7 @@ def repo_drawers(repo):
     (ADR-0023). The one resolution `digest --repo`, `search --repo`,
     `timeline`, and `package --repo` all read a repository through."""
     drawer = store_receipts() / project_slug(repo)
-    found = [drawer] if drawer.is_dir() else []
+    found = [drawer] if os.path.isdir(drawer) else []
     found += [extra for extra in worktree_drawers(repo) if extra != drawer]
     return found
 
@@ -4480,7 +4493,7 @@ def recall_scope(args):
             for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
                 if log.name.endswith(SIDECAR_SUFFIXES) or log in known:
                     continue
-                if (log.parent / UNLISTED_NAME).exists() \
+                if os.path.exists(log.parent / UNLISTED_NAME) \
                         and log.parent != drawer:
                     continue
                 logs.append(log)
@@ -4499,7 +4512,7 @@ def legacy_recall_scope(args, repo):
             log = log.resolve()
             if log in known:
                 continue
-            if (log.parent / UNLISTED_NAME).exists():
+            if os.path.exists(log.parent / UNLISTED_NAME):
                 try:
                     repo.relative_to(log.parent.parent)
                 except ValueError:
@@ -5778,11 +5791,11 @@ def chain_listing(log):
     anchors = log.with_name(log.name + ".anchors.jsonl")
     stamps = log.with_name(log.name + ".stamps.jsonl")
     return {"path": log.name, "head": head, "entries": len(lines),
-            "anchors": anchors.name if anchors.exists() else None,
+            "anchors": anchors.name if os.path.exists(anchors) else None,
             # The stamps sidecar travels as the anchors sidecar does
             # (ADR-0032 ruling 4): both are evidence about this chain,
             # and `verify-package` judges each with the chain it names.
-            "stamps": stamps.name if stamps.exists() else None}
+            "stamps": stamps.name if os.path.exists(stamps) else None}
 
 
 def copy_regular(source, target):
@@ -6149,6 +6162,10 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     transcript still on disk (ADR-0026 ruling 2). Returns the file names
     in the order they were written, which is the order the zip keeps."""
     record = drawer / "project.json"   # travels only when it exists
+    # Or when it cannot be asked about, in a drawer closed to this user
+    # (#421): the copy below then refuses the package by name, where it
+    # would have shipped without the record and said nothing.
+    carried = os.path.exists(record) or file_problem(record) is not None
     written = []
     listings = {}
     artifacts = []
@@ -6203,8 +6220,8 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
                 "repository's history (ADR-0023); its file references are "
                 "relative to that worktree"
                 + (", not to the path in `project.json`"
-                   if record.exists() else ""))
-    if record.exists():
+                   if carried else ""))
+    if carried:
         copy_regular(record, stage / "project.json")
         written.append("project.json")
         artifacts.append(artifact_listing(stage / "project.json"))
@@ -6214,7 +6231,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     written.append("witness.json")
     artifacts.append(artifact_listing(stage / "witness.json"))
     write_lf(stage / "README.md",
-             package_readme(unit, packed, listings, witness, record.exists(),
+             package_readme(unit, packed, listings, witness, carried,
                             notes, seals, shipped))
     written.append("README.md")
     artifacts.append(artifact_listing(stage / "README.md"))
@@ -6269,7 +6286,7 @@ def sign_manifest(stage, keyfile):
         return None, (f"the manifest was not signed (ssh-keygen exited "
                       f"{signed.returncode}; its words are above)")
     beside = keyfile.with_name(keyfile.name + ".pub")
-    if beside.is_file():
+    if os.path.isfile(beside):
         line = beside.read_text("utf-8", errors="replace")
     else:
         derived = subprocess.run(["ssh-keygen", "-y", "-f", str(keyfile)],
@@ -6295,7 +6312,7 @@ def sign_manifest(stage, keyfile):
     if verified.returncode != 0:
         reason = "; ".join(verified.stderr.strip().splitlines()) \
             or "ssh-keygen gave no reason"
-        source = beside if beside.is_file() else keyfile
+        source = beside if os.path.isfile(beside) else keyfile
         return None, (f"the signature does not verify under the public key "
                       f"{source} gave ({reason}); a stale .pub beside a "
                       "regenerated key looks like this: move it aside and "
@@ -6501,13 +6518,13 @@ def cmd_package(args):
                       "to package (a legacy receipts/ layout moves into the "
                       "store with `supervisor adopt`)", file=sys.stderr)
             return 1
-        project = drawer_name(drawer) if drawer.is_dir() else repo.name
+        project = drawer_name(drawer) if os.path.isdir(drawer) else repo.name
         unit = {"kind": "drawer", "project": project,
                 "sessions": len(sessions)}
         # The file is named for the drawer folder, the slug: safe on every
         # filesystem and hash-suffixed, so two projects of one name never
         # collide (ADR-0011). The README keeps the display name.
-        slug = drawer.name if drawer.is_dir() else project_slug(repo)
+        slug = drawer.name if os.path.isdir(drawer) else project_slug(repo)
         stem, label = slug, f"drawer {slug}, {len(sessions)} session(s)"
     for session in sessions:
         # Checked against the whole store, not the selection: half of a
@@ -6699,7 +6716,7 @@ def run_drill(root, asked):
                 "two receipts past genesis"}, 1
 
     sandbox = root / DRILL_DIR
-    if sandbox.exists():
+    if os.path.exists(sandbox):
         shutil.rmtree(sandbox)
     sandbox.mkdir()
     write_lines(sandbox / "pristine.jsonl", lines)
@@ -7189,7 +7206,7 @@ class Face(BaseHTTPRequestHandler):
                        "application/json")
         elif url.path == "/checklist":
             doc = HERE / "docs" / "FIRE-DRILL.md"
-            if not doc.is_file():
+            if not os.path.isfile(doc):
                 self.send_error(404)
                 return
             self.reply(doc.read_bytes(), "text/plain; charset=utf-8")
