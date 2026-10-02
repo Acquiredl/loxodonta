@@ -137,7 +137,10 @@ only tools the *wired matchers* cover (`hook_matchers` reads the
 harness settings — an all-tools witness over an `Edit|Write|Bash` hook
 manufactures deficits), and failed tool calls are skipped, because the
 harness fires no hook for them and marks them with `is_error` on the
-`tool_result` block, not on `toolUseResult`. So witnessed count equals
+`tool_result` block, not on `toolUseResult` (as of that date:
+since #239 a failed call that ran fires `PostToolUseFailure` and owes its
+receipt by ADR-0034, and a refusal the harness writes as a failed
+result, the worktree guard's, fires one too, #379). So witnessed count equals
 receipts owed, and a chat-only session can never alarm.
 
 A third finding widened where the witness looks (#211). A session that
