@@ -758,7 +758,7 @@ ALLOWED_OPENS = {
            "whether it is a file (file_problem): a rename within one "
            "filesystem opens nothing, and across two shutil refuses a "
            "named pipe put there after the question"),
-    ("supervisor.py", "Face.do_GET"): (
+    ("supervisor.py", "Face.answer_get"): (
         1, "serves docs/FIRE-DRILL.md from the supervisor's own checkout"),
     ("receiver.py", "mint_token"): (1, RECEIVER_DATA),
     ("receiver.py", "current_token"): (1, RECEIVER_DATA),
@@ -1130,6 +1130,80 @@ class ExistenceIsAskedThroughOsPathTest(SpoiledScript, unittest.TestCase):
             "    os.path.isdir(log)", "    os.path.islink(log)",
             "    os.path.lexists(log)", collects=asks_by_method)
         self.assertEqual(calls.opens, {})
+
+
+# What the listing walk collects (#431): a call that lists a folder.
+# pathlib's glob passes a folder it may not list in silence on every
+# Python, and before 3.13 raises on some others; os's listings raise.
+LISTING_METHODS = {"glob", "rglob", "iterdir"}
+OS_LISTINGS = {"listdir", "scandir", "walk"}
+
+WITNESS = "the harness's transcripts, which are not the store"
+
+# Every function of the supervisor that lists a folder:
+# function -> (how many such calls, and why).
+ALLOWED_LISTINGS = {
+    "listed": (1, "the one listing over the store: a folder it cannot list "
+                  "is named or raised, never read as empty (#431)"),
+    "witness_files": (1, WITNESS),
+    "watch_completeness": (1, WITNESS),
+}
+
+
+def lists_a_folder(call):
+    """Whether the listing walk collects `call`."""
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    base = func.value.id if isinstance(func.value, ast.Name) else None
+    return (func.attr in LISTING_METHODS
+            or (base == "os" and func.attr in OS_LISTINGS))
+
+
+def listings_beyond_the_list(calls):
+    """Each function making more listings than ALLOWED_LISTINGS allows
+    it, as (function, allowed, lines)."""
+    return [(where, ALLOWED_LISTINGS.get(where, (0, None))[0], lines)
+            for where, lines in sorted(calls.opens.items())
+            if len(lines) > ALLOWED_LISTINGS.get(where, (0, None))[0]]
+
+
+class EveryStoreListingIsNamedTest(SpoiledScript, unittest.TestCase):
+    """The rule of #431 as a check: the supervisor lists a folder of the
+    store only through `listed`, which names a folder it cannot list or
+    raises, and never reads it as empty, on every Python. The harness's
+    transcripts are listed on their own and are on the list. The
+    recorder and the receiver are not walked: the rule is the reader's.
+
+    What the walk does not see: a listing reached through `getattr`, or
+    inside a library call that lists a folder itself."""
+
+    def test_every_listing_in_the_supervisor_is_on_the_list(self):
+        found = [f"{where}, line {', '.join(map(str, lines))}: {len(lines)} "
+                 f"listing(s), and the list allows {allowed}"
+                 for where, allowed, lines in listings_beyond_the_list(
+                     file_calls(REPO_ROOT / "supervisor.py",
+                                lists_a_folder))]
+        self.assertEqual(found, [], "list the store through `listed`, which "
+                         "names a folder it cannot list (#431)")
+
+    def test_no_entry_on_the_list_is_stale(self):
+        calls = file_calls(REPO_ROOT / "supervisor.py", lists_a_folder)
+        for where, (count, why) in ALLOWED_LISTINGS.items():
+            with self.subTest(where=where):
+                self.assertTrue(why)
+                self.assertIn(where, calls.defined)
+                self.assertEqual(len(calls.opens.get(where, [])), count)
+
+    def test_a_glob_or_a_listdir_added_to_a_function_is_named(self):
+        old = "def store_receipts():\n"
+        added = ("    Path(store_home()).glob('*')",
+                 "    os.listdir(store_home())")
+        calls, text = self.spoiled("supervisor.py", old, old + "".join(
+            line + "\n" for line in added), lists_a_folder)
+        self.assertEqual(listings_beyond_the_list(calls),
+                         [("store_receipts", 0,
+                           [self.line_of(text, line) for line in added])])
 
 
 # The prefixes of the variables the scripts read for themselves; a name

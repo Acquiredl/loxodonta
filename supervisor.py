@@ -27,8 +27,8 @@ machine-readable JSON on stdout, and an exit code cron can shout about —
 0 when nothing demands attention, 1–4 for the worst verify exit found
 (a chain verify could not judge at all, empty or unreadable, counts as
 4, the refusal), 5 when the baseline saw a change appends cannot explain,
-or cannot itself be read or kept (a reason to investigate, never a
-verdict; ADR-0039), 6 when a session is demonstrably active
+or cannot itself be read or kept, or the census cannot list a folder
+(a reason to investigate, never a verdict; ADR-0039, #431), 6 when a session is demonstrably active
 but its chain is behind the witness (the completeness alarm), 7 when a
 chain's transcript commitments contradict each other (verify's exit 5,
 ADR-0017 — renumbered in this fold because scan's 5 already means the
@@ -49,6 +49,7 @@ import argparse
 import base64
 import contextlib
 import errno
+import fnmatch
 import hashlib
 import io
 import json
@@ -105,19 +106,86 @@ SIDECARS = {".anchors.jsonl": "anchors", ".published.jsonl": "memo",
 SIDECAR_SUFFIXES = tuple(SIDECARS)
 
 
-def find_chains(root):
+class ClosedFolder(OSError):
+    """A folder a census had to list and could not (#431)."""
+
+
+def listed(folder, pattern, closed=None):
+    """Every path under `folder` that `pattern` matches, sorted: parts
+    split on `/`, as `Path.glob` reads a pattern. A part with a wildcard
+    is matched by fnmatch against what the folder above lists; a plain
+    name is looked up, never listed for, as `Path.glob` does, so a
+    system folder that refuses a listing but answers a lookup (Windows'
+    `System Volume Information`) is not named on every look. A folder on
+    the way that cannot be listed or looked into is never read as empty
+    (#431): it goes on `closed` as (folder, why), or, with no list given,
+    is raised as ClosedFolder. Nothing at a name, or a file where a
+    folder was looked for, is nothing found. `Path.glob` cannot serve:
+    it passes some closed folders in silence on every Python, and before
+    3.13 raises on others."""
+    found = [Path(folder)]
+    for part in pattern.split("/"):
+        deeper = []
+        for here in found:
+            try:
+                if any(c in part for c in "*?["):
+                    deeper += [here / name for name in os.listdir(here)
+                               if fnmatch.fnmatch(name, part)]
+                else:
+                    os.stat(here / part)
+                    deeper.append(here / part)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as error:
+                why = error.strerror or str(error)
+                if closed is None:
+                    raise ClosedFolder(error.errno, why, str(here)) from None
+                closed.append((here, why))
+        found = deeper
+    return sorted(found)
+
+
+UNKNOWN = "what it holds is unknown, and is never read as empty"
+
+
+def closed_words(unlisted):
+    """The scan's sentence for the folders its census could not list,
+    each a {"folder", "why"} (#431)."""
+    named = "; ".join(f"{c['folder']} ({c['why']})" for c in unlisted)
+    return (f"{len(unlisted)} folder(s) cannot be listed: {named} — "
+            f"{UNKNOWN}. Closing a folder is in the writer's reach, so this "
+            "is exit 5 on every look until it can be listed again "
+            "(ADR-0039)")
+
+
+def closed_refusal(error):
+    """A command's refusal for a folder it had to list and could not, 66:
+    it names the folder and does nothing (#431)."""
+    return refused(f"{Path(error.filename).as_posix()} cannot be listed: "
+                   f"{error.strerror} — {UNKNOWN}, so nothing was done",
+                   EX_NOINPUT)
+
+
+def chains_listed(folder, pattern, closed=None):
+    """`listed`, sidecars set aside: what a census counts as chains."""
+    return [p for p in listed(folder, pattern, closed)
+            if not p.name.endswith(SIDECAR_SUFFIXES)]
+
+
+def find_chains(root, closed=None):
     """Every receipt log under a legacy --root. Three shapes, because
     pre-store history has three shapes: the root itself being a repo,
     each sibling repo's receipts/, and chains stranded in worktrees by
     sessions that ran before the hook learned to log to the main repo.
-    The default census is not this one: it is a single glob over the
-    store's drawers, inline in scan_root (ADR-0011). Sidecars are files
-    about a chain, not chains."""
+    The default census is not this one: it lists the store's drawers,
+    inline in scan_root (ADR-0011). Sidecars are files about a chain,
+    not chains. A folder it cannot list goes on `closed`, or is raised
+    (`listed`)."""
     patterns = ("receipts/*.jsonl",
                 "*/receipts/*.jsonl",
                 "*/.claude/worktrees/*/receipts/*.jsonl")
-    return sorted(p for pattern in patterns for p in root.glob(pattern)
-                  if not p.name.endswith(SIDECAR_SUFFIXES))
+    return sorted(p for pattern in patterns
+                  for p in chains_listed(root, pattern, closed))
 
 
 def split_seq(stem):
@@ -3115,24 +3183,21 @@ def lifecycle_tier(last_grew, now):
     return tier, int(still)
 
 
-def store_session_ids():
+def store_session_ids(closed=None):
     """Every session id the store holds a chain for (ADR-0011). A legacy
     --root scan reads this to tell a session whose recording moved into
     the store from one that never recorded at all (#117); the store is
     the default universe, so an operator following older notes points
-    --root at a folder the chains have already left."""
-    receipts = Path(store_home()) / "receipts"
-    try:
-        return {log.name[len("receipts-"):-len(".jsonl")]
-                for log in receipts.glob("*/receipts-*.jsonl")
-                if not log.name.endswith(SIDECAR_SUFFIXES)}
-    except OSError:
-        return set()
+    --root at a folder the chains have already left. A store folder it
+    cannot list goes on `closed` (`listed`)."""
+    return {log.name[len("receipts-"):-len(".jsonl")]
+            for log in chains_listed(store_receipts(), "*/receipts-*.jsonl",
+                                     closed)}
 
 
 def watch_completeness(root, witness, families, everywhere=False,
                        calibration=None, sessionend=None,
-                       show_before_memory=False):
+                       show_before_memory=False, closed=None):
     """The completeness half of a tick: every census session paired with
     its transcript, plus witnessed sessions that never grew a chain at
     all — the disabled-hook case the census alone can never see.
@@ -3142,7 +3207,8 @@ def watch_completeness(root, witness, families, everywhere=False,
     coverage memory (ADR-0016); without one, this look's wired matchers
     are taken to have always been in force. `show_before_memory` lists
     the sessions ADR-0029 leaves unjudged instead of only counting
-    them — the "be upfront" half made operable rather than promised."""
+    them — the "be upfront" half made operable rather than promised.
+    A store folder it cannot list goes on `closed` (`listed`)."""
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
     unjudged = []
@@ -3340,7 +3406,7 @@ def watch_completeness(root, witness, families, everywhere=False,
     # #117: in legacy mode a transcript with no chain under this root
     # is one of two different things, and charging both the same way
     # fakes the flagship alarm out of a wrong invocation.
-    stored = set() if everywhere else store_session_ids()
+    stored = set() if everywhere else store_session_ids(closed)
     elsewhere = 0
     for stem, transcript in transcripts.items():
         folder = transcript.parent.name
@@ -3603,10 +3669,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # Walk in display order — repo, then session, then sibling sequence —
     # so the grouping below is plain insertion, no re-sorting.
     unfiled = {}
+    # Each folder the census could not list, as (folder, why): named, and
+    # exit 5, never read as empty (#431). Closing a drawer is the writer's
+    # lever to hide chains.
+    closed = []
     if store:
-        found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                        if not p.name.endswith(SIDECAR_SUFFIXES))
-                 if os.path.isdir(root) else [])
+        found = chains_listed(root, "*/receipts-*.jsonl", closed)
         census = sorted((store_identity(log), log) for log in found)
         # A drawer whose project record is not a file is labelled by its
         # own slug and claimed by no repository's worktrees: named, like
@@ -3620,7 +3688,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                     "drawer's own name, as no repository's history")
     else:
         census = sorted((chain_identity(root, log), log)
-                        for log in find_chains(root))
+                        for log in find_chains(root, closed))
     repos = {}
     worst = 0
     damaged = 0
@@ -3860,7 +3928,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                                       everywhere=store,
                                       calibration=judging,
                                       sessionend=sessionend,
-                                      show_before_memory=show_before_memory)
+                                      show_before_memory=show_before_memory,
+                                      closed=closed)
+    # One folder can be met by more than one pattern; it is named once.
+    unlisted = [{"folder": folder, "why": why} for folder, why in
+                sorted({(Path(f).as_posix(), why) for f, why in closed})]
+    if unlisted:
+        worst = max(worst, 5)
     # The keeper closes what the annotation reports — after the rows
     # are judged, so this scan says the truth it saw and the next scan
     # sees the tails committed.
@@ -3918,7 +3992,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     settings = witness.parent / "settings.json"
     unset = not_a_file(settings)
     report_note = None
-    if store and not repos:
+    if unlisted:
+        pass  # an empty census beside a closed folder is no empty store
+    elif store and not repos:
         # An empty store has two unlike causes and this note named only
         # one of them, so a reader who had just finished step 2 of
         # docs/START.md and scanned out of curiosity was told to run
@@ -3959,6 +4035,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                              f"harness settings: {unset} — read as none, "
                              "as if no hook were wired"}
            if unset else {}),
+        **({"closed": unlisted, "closed_note": closed_words(unlisted)}
+           if unlisted else {}),
         "baseline": baseline,
         "completeness": completeness,
         "consumption": consumption,
@@ -4140,11 +4218,15 @@ def say_memory(report):
     """The baseline's own trouble on stderr, for `export` and `package`:
     each takes a scan underneath and exits by a contract of its own, and
     a memory the scan could not read or keep is exit 5 to `scan`
-    (ADR-0039), so they say it rather than go quiet."""
+    (ADR-0039), as is a folder it could not list (#431), so they say it
+    rather than go quiet."""
     baseline = report.get("baseline") or {}
     if baseline.get("blind") or baseline.get("unkept"):
         print(f"note: the scan underneath this is exit 5: "
               f"{baseline.get('note')}", file=sys.stderr)
+    if report.get("closed"):
+        print(f"note: the scan underneath this is exit 5: "
+              f"{report['closed_note']}", file=sys.stderr)
 
 
 # --- Acknowledging a change (ADR-0039) -----------------------------------------
@@ -4173,11 +4255,10 @@ def refused(words, code=None):
 def census_logs(root, store):
     """Every chain the scan's census counts: the store's drawers, or a
     legacy root's three shapes (`find_chains`). The twin of the census
-    inline in scan_root; the two must agree."""
+    inline in scan_root; the two must agree. A folder it cannot list is
+    raised (`listed`): a memory started without it would forget it."""
     if store:
-        return (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                       if not p.name.endswith(SIDECAR_SUFFIXES))
-                if os.path.isdir(root) else [])
+        return chains_listed(root, "*/receipts-*.jsonl")
     return find_chains(root)
 
 
@@ -4236,10 +4317,8 @@ def cmd_acknowledge(args):
                            f"{change}, and it has gone since: look again "
                            "with `supervisor scan`")
         try:
-            os.listdir(chain.parent)
-        except (FileNotFoundError, NotADirectoryError):
-            pass
-        except OSError:
+            listed(chain.parent, "*")
+        except ClosedFolder:
             return refused(f"the folder holding {visible(log)} cannot be "
                            "looked into, so whether the chain is gone is "
                            "unknown: open it and look again with "
@@ -4489,11 +4568,10 @@ def mentions(entries, needle):
 def universe(root, store):
     """(repo, session, seq, log) for every chain in the serving
     universe: the store's drawers, or a legacy folder of repos under an
-    explicit --root (ADR-0011/0013)."""
+    explicit --root (ADR-0011/0013). A folder it cannot list is raised
+    (`listed`), and the page's view refuses by name."""
     if store:
-        found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                        if not p.name.endswith(SIDECAR_SUFFIXES))
-                 if os.path.isdir(root) else [])
+        found = chains_listed(root, "*/receipts-*.jsonl")
         return [(*store_identity(log), log) for log in found]
     return [(*chain_identity(root, log), log) for log in find_chains(root)]
 
@@ -4798,11 +4876,11 @@ ACTION_WIDTH = 110
 
 def repo_chains(repo):
     """Every chain belonging to one repo: its receipts/ plus chains
-    stranded in its own worktrees — still this repo's history."""
+    stranded in its own worktrees — still this repo's history. A folder
+    it cannot list is raised (`listed`)."""
     patterns = ("receipts/*.jsonl", ".claude/worktrees/*/receipts/*.jsonl")
     return sorted(p.resolve() for pattern in patterns
-                  for p in repo.glob(pattern)
-                  if not p.name.endswith(SIDECAR_SUFFIXES))
+                  for p in chains_listed(repo, pattern))
 
 
 def session_of(log):
@@ -4892,8 +4970,7 @@ def store_receipts():
 
 
 def drawer_chains(drawer):
-    return sorted(p for p in drawer.glob("receipts-*.jsonl")
-                  if not p.name.endswith(SIDECAR_SUFFIXES))
+    return chains_listed(drawer, "receipts-*.jsonl")
 
 
 def drawer_name(drawer):
@@ -4938,15 +5015,12 @@ def worktree_drawers(repo):
     (ADR-0023). A session that fell back to a worktree's own path, on
     this machine before the one-session-one-drawer rule or on any
     machine that ran v0.1.0, is still this repository's history. Narrow
-    on purpose: a sub-project elsewhere in the tree is its own memory."""
+    on purpose: a sub-project elsewhere in the tree is its own memory.
+    A store it cannot list is raised (`listed`)."""
     prefix = os.path.normcase(str(repo)).replace(os.sep, "/").rstrip("/") \
         + "/.claude/worktrees/"
     found = []
-    try:
-        drawers = sorted(p for p in store_receipts().iterdir()
-                         if os.path.isdir(p))
-    except OSError:
-        return found
+    drawers = [p for p in listed(store_receipts(), "*") if os.path.isdir(p)]
     for drawer in drawers:
         try:
             recorded = json.loads(read_whole(drawer / "project.json")).get(
@@ -5010,8 +5084,8 @@ def recall_scope(args):
     if logs:
         if getattr(args, "all", False):
             known = set(logs)
-            for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
-                if log.name.endswith(SIDECAR_SUFFIXES) or log in known:
+            for log in chains_listed(store_receipts(), "*/receipts-*.jsonl"):
+                if log in known:
                     continue
                 if os.path.exists(log.parent / UNLISTED_NAME) \
                         and log.parent != drawer:
@@ -5689,6 +5763,8 @@ def mcp_call(name, arguments, default_repo):
             code = command[name](ns)
         except SystemExit as stop:  # argparse-style exits inside a command
             code = stop.code if isinstance(stop.code, int) else 1
+        except ClosedFolder as error:
+            code = closed_refusal(error)
         except Exception as failure:  # never take the server down
             err.write(f"error: {failure}\n")
             code = 1
@@ -6301,9 +6377,9 @@ def sessions_of(chains):
 
 def store_sessions():
     """{session: [chains]} over every drawer in the store, siblings
-    included, drawer by drawer in the census's order."""
-    return sessions_of(log for log in store_receipts().glob("*/receipts-*.jsonl")
-                       if not log.name.endswith(SIDECAR_SUFFIXES))
+    included, drawer by drawer in the census's order. A folder it cannot
+    list is raised (`listed`)."""
+    return sessions_of(chains_listed(store_receipts(), "*/receipts-*.jsonl"))
 
 
 def drawer_sessions(repo):
@@ -7469,6 +7545,7 @@ def metrics_text(report, age_seconds):
           "4 the worst verify exit among the chains (a chain verify could "
           "not judge at all counts as 4), 5 the baseline saw a "
           "change appends cannot explain, or could not be read or kept, "
+          "or the census could not list a folder, "
           "6 a live session is behind its "
           "witness, 7 a chain's transcript commitments contradict each "
           "other", "witness verdict", [((), report.get("exit") or 0)])
@@ -7737,6 +7814,16 @@ class Face(BaseHTTPRequestHandler):
         return stranger
 
     def do_GET(self):
+        try:
+            self.answer_get()
+        except ClosedFolder as error:
+            # A view over a store folder this user may not list refuses
+            # by name; the status the page leads with names it too (#431).
+            self.send_error(503, "a store folder cannot be listed",
+                            f"{Path(error.filename).as_posix()} cannot be "
+                            f"listed: {error.strerror} — {UNKNOWN}")
+
+    def answer_get(self):
         if self.refused_off_machine():
             return
         url = urlparse(self.path)
@@ -9452,6 +9539,10 @@ function render(report) {
   if (report.baseline.note) {
     tripwire.appendChild(el("p", "claim", report.baseline.note));
   }
+  // A folder the census could not list: exit 5, never an empty store (#431).
+  if (report.closed_note) {
+    tripwire.appendChild(el("p", "claim", report.closed_note));
+  }
   // A memory the scan read as none, named beside the baseline's (#410):
   // an empty fortnight or an unwired coverage comes with its reason.
   for (const note of [report.history_note, report.marker_note,
@@ -10867,7 +10958,11 @@ def main(argv):
     if args.command != "serve" and cadence != anywhere:
         parser.error("--publish-every goes with --publish-url or "
                      "--publish-chain, and either of them with it")
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ClosedFolder as error:
+        # `scan` names such a folder and never raises it (#431).
+        return closed_refusal(error)
 
 
 if __name__ == "__main__":

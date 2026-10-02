@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Fixed
 
 - A project record holding no JSON object, or naming a gone project, no longer loses hook receipts or ends `verify --files` in a traceback; `run --file` refuses before its command; a non-UTF-8 `.git` leaves the project itself (#406).
+- A store folder the supervisor cannot list is no longer read as empty: `scan` names it and exits 5, never calling the store empty, and recall, `adopt` and `package` refuse by name with 66 (#431).
 - `supervisor scan` skips and names a day-book row holding a count that is not a number, and a keeper attempt time with no zone, where either ended every scan in a traceback (#430).
 - `supervisor adopt` into a drawer it may read but not write names the drawer and leaves the chain, instead of ending in a traceback (#430).
 - `supervisor drill` refuses a sandbox it cannot clear, exit 73, and a chain whose entry 1 is not JSON, exit 66 before writing anything, instead of ending in a traceback (#430).
