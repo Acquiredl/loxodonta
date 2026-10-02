@@ -25,6 +25,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `supervisor scan` reads a chain in a folder closed to it as `vanished`, exit 5, on every Python version, where on Python 3.13 and older one `chmod` ended every scan in a traceback (#419).
 - `supervisor` commands name a folder closed to the reader, a drawer, the store's receipts folder, the harness's or the recorder's, or read its chains as vanished, on every Python, where before 3.14 they ended in a traceback (#421).
 - `supervisor adopt` refuses a link to nowhere at a chain's or a sidecar's name in the drawer as a name already taken, where a move across two filesystems could copy through it (#422).
+- `log` and `run` in a folder that refuses the lock file say the chain could not be written, exit 73, as the hook does, instead of a traceback; a lock file the disk refuses its line is removed (#398).
 
 ## [0.10.3] - 2026-10-01
 
