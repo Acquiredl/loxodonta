@@ -243,19 +243,13 @@ class SignedPackageTest(AnchoredStoreCase):
             self.assertNotIn("residual trust", judged.stdout)
 
     def bare_path(self):
-        """The environment with PATH holding one folder with only the
-        interpreter in it, so ssh-keygen is not found; the rest stays.
-        Not the interpreter's own folder: on Ubuntu that is /usr/bin,
-        where ssh-keygen lives too (#408). A link where the machine
-        allows one, else a copy."""
+        """The environment with PATH holding one empty folder, so
+        ssh-keygen is not found; the rest stays. Not the interpreter's
+        own folder: on Ubuntu that is /usr/bin, where ssh-keygen lives
+        too (#408). The scripts run by their full interpreter path, so
+        nothing needs PATH to start them (#432)."""
         folder = self.root / "bare-bin"
-        if not folder.exists():
-            folder.mkdir()
-            alone = folder / os.path.basename(sys.executable)
-            try:
-                os.symlink(sys.executable, alone)
-            except OSError:
-                shutil.copy2(sys.executable, alone)
+        folder.mkdir(exist_ok=True)
         self.assertIsNone(shutil.which("ssh-keygen", path=str(folder)))
         return {**self.env, "PATH": str(folder)}
 
