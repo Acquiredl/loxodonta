@@ -116,7 +116,7 @@ writer hangs a tag on the hook beside it: a sidecar file created with
 `O_CREAT | O_EXCL` — *create, but fail if it exists*, atomically, with
 the operating system as referee. The acquire loop is a polite wait: try;
 if someone's tag is there, check staleness; nap 20 ms; give up after 10
-seconds (`RECEIPTS_LOCK_TIMEOUT`). Two deliberately ugly corners, reasons
+seconds (`LOXODONTA_LOCK_TIMEOUT`). Two deliberately ugly corners, reasons
 written beside them:
 
 - **The Windows branch.** Windows reports `EACCES` during the instant
