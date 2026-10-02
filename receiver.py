@@ -198,7 +198,8 @@ def kept_size(data):
     directory, read afresh each time, so a file the operator moves off
     the box frees its room at once."""
     with os.scandir(data) as entries:
-        return sum(entry.stat().st_size for entry in entries if entry.is_file())
+        return sum(entry.stat().st_size for entry in entries
+                   if os.path.isfile(entry))
 
 
 def head_line(body):
