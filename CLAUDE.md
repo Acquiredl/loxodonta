@@ -1,6 +1,6 @@
 # loxodonta — repo map
 
-**loxodonta**: a tamper-evident, hash-chained receipt log ("flight recorder") for AI agent pipelines. `loxodonta.py` is the recorder, and what it writes are *receipts* (ADR-0010); `supervisor.py` is the reader that scans, serves, and recalls; `receiver.py` is the far end of the published chain and the published head, run on a machine the writer cannot reach (ADR-0031). All three are stdlib-only, single-file Python. The elephant never forgets.
+**loxodonta**: a tamper-evident security record for AI agents, a hash-chained receipt log (the "flight recorder") built so that an agent covering its tracks shows (ADR-0002, addendum of 2026-10-01). `loxodonta.py` is the recorder, and what it writes are *receipts* (ADR-0010); `supervisor.py` is the reader that scans, serves, and recalls; `receiver.py` is the far end of the published chain and the published head, run on a machine the writer cannot reach (ADR-0031). All three are stdlib-only, single-file Python. The elephant never forgets.
 
 **Phase: public**, under the Acquiredl identity. `main` is the stable branch and every claim in the README must stay true of it; work happens on `dev` (see *Branching model*). The stage history (stages, dates, PR numbers) lives in `docs/HISTORY.md`; the changelog starts at `v0.1.0`, no backfill (ADR-0022).
 

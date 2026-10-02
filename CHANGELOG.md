@@ -16,6 +16,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Changed
 
+- The README leads with a tamper-evident security record, the flight recorder kept as its image: the problem first, what a clean verdict does not tell you, the evidence-strength ladder, and where it fits (#423). The ruling is an ADR-0002 addendum.
 - `supervisor scan` keeps a chain's remembered head when it reads `regressed`, `rewritten` or `vanished`, and says so on every look, exit 5, until the chain holds that head again or the change is acknowledged (#401).
 - A baseline the scan cannot read or keep, or one missing beside a day book, is exit 5 on every look and left as it lies, where it was a note and a fresh memory (#409).
 
