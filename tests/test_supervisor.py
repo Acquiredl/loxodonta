@@ -512,6 +512,37 @@ class AdoptTest(unittest.TestCase):
         self.assertTrue(log.exists(), "dry-run moves nothing")
         self.assertEqual(self.drawers(), [])
 
+    def test_dry_run_names_the_sidecars_the_move_would_leave(self):
+        # A sidecar that is not a file, and one whose name the drawer
+        # already holds, stay where they lie when the chain moves; the
+        # dry run says so in the real run's words (#422).
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_adopt(self.home, self.root)
+        (name,) = self.drawers()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-bbbb")
+        log.with_name(log.name + ".anchors.jsonl").mkdir()
+        taken = log.with_name(log.name + ".published.jsonl")
+        taken.write_text("{}\n", encoding="utf-8")
+        (self.home / "receipts" / name / taken.name).write_text(
+            "{}\n", encoding="utf-8")
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(planned.returncode, 0,
+                         planned.stdout + planned.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"would adopt alpha/receipts/{log.name} -> {name}/",
+                      planned.stdout)
+        left = sorted(line[len("left "):]
+                      for line in result.stdout.splitlines()
+                      if line.startswith("left sidecar "))
+        would = sorted(line[len("would leave "):]
+                       for line in planned.stdout.splitlines()
+                       if line.startswith("would leave sidecar "))
+        self.assertEqual(len(left), 2, result.stdout)
+        self.assertEqual(would, left)
+
     def test_adopted_chains_are_scanned_and_recalled(self):
         # The move is an end-to-end success only if the store's readers
         # pick the history up where it landed.
@@ -4869,13 +4900,19 @@ class ClosedFolderTest(unittest.TestCase):
                                              str(self.legacy))
                 finally:
                     os.chmod(closed, 0o755)
+                # The dry run refuses what the real run refuses (#422).
                 self.answered(planned, 0)
-                self.assertIn("would adopt", planned.stdout)
+                self.assertIn(refusal, planned.stdout)
+                self.assertNotIn("would adopt", planned.stdout)
                 self.answered(result, 0)
                 self.assertIn(refusal, result.stdout)
                 self.assertIn("not adopted; left as it lies", result.stdout)
                 self.assertNotIn("chain(s) adopted", result.stdout)
                 self.assertEqual(later.read_bytes(), before)
+                # The drawer by name, as the move names it: never the
+                # store's path (#422 review).
+                self.assertNotIn(self.store.as_posix(),
+                                 planned.stdout + result.stdout)
 
         # Open again, the same command moves it.
         result = self.supervisor("adopt", "--root", str(self.legacy))
@@ -4891,15 +4928,52 @@ class ClosedFolderTest(unittest.TestCase):
         before = later.read_bytes()
         os.chmod(self.drawer, 0o500)
         self.addCleanup(os.chmod, self.drawer, 0o755)
+        refusal = (f"refused alpha/receipts/{later.name}: cannot be moved "
+                   f"into {self.drawer.name}/: ")
 
+        planned = self.supervisor("adopt", "--root", str(self.legacy),
+                                  "--dry-run")
         result = self.supervisor("adopt", "--root", str(self.legacy))
 
+        # The dry run refuses what the real run refuses (#422).
+        self.answered(planned, 0)
+        self.assertIn(refusal, planned.stdout)
+        self.assertNotIn("would adopt", planned.stdout)
         self.answered(result, 0)
-        self.assertIn(f"refused alpha/receipts/{later.name}: cannot be "
-                      f"moved into {self.drawer.name}/: ", result.stdout)
+        self.assertIn(refusal, result.stdout)
         self.assertIn("not adopted; left as it lies", result.stdout)
         self.assertNotIn("chain(s) adopted", result.stdout)
         self.assertEqual(later.read_bytes(), before)
+
+    def test_adopt_out_of_a_legacy_folder_it_may_not_write_refuses(self):
+        # The move must take the chain out of its folder too (#430), so
+        # a folder that will not give it up is refused before the drawer
+        # is made, by the dry run alike (#422).
+        beta = self.legacy / "beta" / "receipts"
+        beta.mkdir(parents=True)
+        log = beta / "receipts-sess-cccc.jsonl"
+        self.recorder("init", "--log", str(log))
+        before = log.read_bytes()
+        drawers = sorted(p.name for p in (self.store / "receipts").iterdir())
+        os.chmod(beta, 0o500)
+        self.addCleanup(os.chmod, beta, 0o755)
+        refusal = (f"refused beta/receipts/{log.name}: cannot be moved out "
+                   "of beta/receipts/: ")
+
+        planned = self.supervisor("adopt", "--root", str(self.legacy),
+                                  "--dry-run")
+        result = self.supervisor("adopt", "--root", str(self.legacy))
+
+        self.answered(planned, 0)
+        self.assertIn(refusal, planned.stdout)
+        self.assertNotIn("would adopt", planned.stdout)
+        self.answered(result, 0)
+        self.assertIn(refusal, result.stdout)
+        self.assertNotIn("chain(s) adopted", result.stdout)
+        self.assertEqual(log.read_bytes(), before)
+        self.assertEqual(
+            sorted(p.name for p in (self.store / "receipts").iterdir()),
+            drawers, "no drawer is made for a chain that cannot move")
 
     def test_drill_refuses_a_chain_in_a_closed_drawer_by_name(self):
         self.close(self.drawer)

@@ -244,6 +244,18 @@ def start_not_http(case, reply=b"HELLO THERE\r\n\r\n"):
     return f"http://127.0.0.1:{listener.getsockname()[1]}"
 
 
+def redirect_to(location):
+    """A 302 reply naming `location`, for `start_not_http`."""
+    return (b"HTTP/1.1 302 Found\r\nLocation: " + location
+            + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+
+
+# Where a calendar may send the client on to: a port that is no number,
+# which urllib follows and http.client cannot send, and a host urllib's
+# own parse of the Location refuses before it follows (#422).
+REDIRECTS_ASTRAY = (b"http://127.0.0.1:notaport/x", b"http://[::1/x")
+
+
 class SessionEndAnchorTest(unittest.TestCase):
     """ADR-0024: a hook wired with --anchor anchors the session's chain
     head at SessionEnd, quietly and best-effort, and spends what is left
@@ -694,6 +706,43 @@ class AnchorTest(unittest.TestCase):
         self.assertNotIn("Traceback", upgrade.stderr)
         self.assertIn(f"warning: calendar {garbage}: ", upgrade.stderr)
         self.assertIn("upgraded: ", upgrade.stdout)
+
+    def test_a_calendar_redirecting_to_a_bad_address_is_one_that_failed(self):
+        # The address asked is good; the one the calendar names in its
+        # redirect is not one http can send (#422): the calendar failed,
+        # and neither the operator's address nor the row is blamed.
+        for location in REDIRECTS_ASTRAY:
+            with self.subTest(location=location):
+                if self.sidecar.exists():
+                    self.sidecar.unlink()
+                self.server.mode = "pending"
+                astray = start_not_http(self, redirect_to(location))
+
+                alone = run_receipts("anchor", "--calendar", astray,
+                                     cwd=self.workdir)
+
+                self.assertEqual(alone.returncode, 69, alone.stderr)
+                self.assertNotIn("Traceback", alone.stderr)
+                self.assertIn(f"warning: calendar {astray}: it redirected "
+                              "to an address http cannot send", alone.stderr)
+                self.assertNotIn("not a URL http can send", alone.stderr)
+                self.assertNotIn("Invalid IPv6 URL", alone.stderr)
+                self.assertFalse(self.sidecar.exists())
+
+                self.anchor()
+                self.repoint(astray)
+                self.server.mode = "complete"
+
+                upgrade = self.anchor("--upgrade")
+
+                self.assertEqual(upgrade.returncode, 69, upgrade.stderr)
+                self.assertNotIn("Traceback", upgrade.stderr)
+                self.assertIn(f"warning: calendar {astray}: it redirected "
+                              "to an address http cannot send",
+                              upgrade.stderr)
+                self.assertNotIn("not a URL this recorder can ask",
+                                 upgrade.stderr)
+                self.assertIn("upgraded: ", upgrade.stdout)
 
     def test_anchor_without_log_errors_cleanly(self):
         empty = self.workdir / "elsewhere"

@@ -14,6 +14,7 @@ the public CLI as an issuer or a recipient would.
 import base64
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,11 @@ import threading
 import unittest
 import zipfile
 from pathlib import Path
+
+try:
+    import resource
+except ImportError:  # Windows has no limit on file size to set
+    resource = None
 
 # This folder on sys.path, so the sibling imports below also resolve
 # when the module runs alone (`python -m unittest tests.test_package_anchor`).
@@ -37,6 +43,18 @@ from test_package import (LOXODONTA, SUPERVISOR, PackageCase, completed_anchor,
 
 SESSION = "d0d0d0d0-aaaa-bbbb-cccc-000000000001"
 SIDECAR = "manifest.json.anchors.jsonl"
+# Larger than any one chain the zip test makes, smaller than their zip.
+FILE_SIZE_CAP = 200_000
+
+
+class PlantingCalendarHandler(FakeCalendarHandler):
+    """A calendar that, asked for a proof, first puts a file of its own
+    at the server's `plant` path: something arriving at --out after
+    `package` looked there."""
+
+    def do_POST(self):
+        self.server.plant.write_bytes(b"planted")
+        super().do_POST()
 
 
 class AnchoredStoreCase(PackageCase):
@@ -459,6 +477,76 @@ class SealedPackageTest(AnchoredStoreCase):
             self.assertIn("nothing written", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
             self.assertEqual(list(self.work.iterdir()), [], shape)
+
+    def test_a_refused_package_removes_the_folders_it_made(self):
+        # The folders --out needed were made for this package, before the
+        # seal failed: removed with it, and named (#422).
+        closed = "http://127.0.0.1:9"  # discard port: nothing listens
+        made = self.work / "made"
+        for shape in (("--folder", "--out", str(made / "for" / "gone")),
+                      ("--out", str(made / "for" / "gone.zip"))):
+            with self.subTest(shape=shape[0]):
+                result = self.package(SESSION, *shape, "--anchor",
+                                      "--calendar", closed)
+
+                said = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 1, said)
+                self.assertNotIn("Traceback", said)
+                self.assertIn("; nothing written", result.stderr)
+                self.assertIn("removed what this package made: ",
+                              result.stderr)
+                self.assertIn(made.as_posix(), result.stderr)
+                self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_what_appears_at_out_while_the_seal_is_asked_is_kept(self):
+        # The look at --out is before the scan and the seal, so whatever
+        # stands there by the time the zip is made is met by the create
+        # alone: exclusive, it keeps it and refuses (#422). A zip opened
+        # with mode "w" would write over it.
+        out = self.work / "pkg.zip"
+        self.server.plant = out
+        self.server.RequestHandlerClass = PlantingCalendarHandler
+
+        result = self.package(SESSION, "--out", str(out), "--anchor",
+                              "--calendar", self.server.url)
+
+        said = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 73, said)  # EX_CANTCREAT
+        self.assertNotIn("Traceback", said)
+        self.assertIn("already exists; choose another --out", result.stderr)
+        self.assertEqual(out.read_bytes(), b"planted")
+
+    @unittest.skipIf(resource is None, "needs a limit on file size")
+    def test_a_zip_the_disk_will_not_finish_is_removed_with_its_folder(self):
+        # A full disk, played by a limit on how large a file may grow:
+        # every chain fits under it, the zip of all of them does not.
+        # The partial zip and the folder made for it go, and the create
+        # that failed is 73 (#422).
+        for seq in ("002", "003", "004"):
+            sibling = self.chain.with_name(f"receipts-{SESSION}-{seq}.jsonl")
+            run(LOXODONTA, "init", "--log", str(sibling), env=self.env)
+            for _ in range(2):
+                noise = base64.b64encode(os.urandom(45000)).decode("ascii")
+                logged = run(LOXODONTA, "log", "--log", str(sibling),
+                             "--actor", "agent", "--action", noise,
+                             env=self.env)
+                self.assertEqual(logged.returncode, 0, logged.stderr)
+        out = self.work / "made" / "pkg.zip"
+
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "package", "--witness",
+             str(self.witness), SESSION, "--out", str(out)],
+            cwd=str(self.work), capture_output=True, encoding="utf-8",
+            env={**self.env, "PYTHONIOENCODING": "utf-8"}, timeout=300,
+            preexec_fn=lambda: resource.setrlimit(
+                resource.RLIMIT_FSIZE, (FILE_SIZE_CAP, FILE_SIZE_CAP)))
+
+        said = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 73, said)  # EX_CANTCREAT
+        self.assertNotIn("Traceback", said)
+        self.assertIn(f"error: {out} could not be written: ", result.stderr)
+        self.assertIn("removed what this package made: ", result.stderr)
+        self.assertEqual(list(self.work.iterdir()), [])
 
     def test_the_sealed_zip_verifies_with_the_seal_judged(self):
         zipped = self.work / "sealed.zip"
