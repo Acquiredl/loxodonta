@@ -14,6 +14,16 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - The README leads with a tamper-evident security record, the flight recorder kept as its image: the problem first, what a clean verdict does not tell you, the evidence-strength ladder, and where it fits (#423). The ruling is an ADR-0002 addendum.
 
+### Fixed
+
+- `supervisor export` names any write the system refuses and exits 73, instead of ending in a traceback in a folder the user may not write in (#419).
+- `supervisor package` refuses an `--out` where a link to nowhere stands, where it wrote the package through the link, and names an `--out` it cannot create instead of ending in a traceback (#419).
+- `supervisor adopt` names a folder, a pipe or an unreadable file at a legacy chain's or sidecar's name and leaves it, where it moved a folder into the store as a chain and could end in a traceback (#419).
+- `anchor`, `anchor --upgrade` and the session end no longer stop at a calendar reply that is not HTTP, or a calendar address holding a space: that calendar fails, or that row is skipped, and the next is asked (#419).
+- `anchor` prints what a calendar refused with as `anchor --upgrade` does, control characters made visible (#419).
+- `supervisor scan` dates a session from its first call with a result, failed or not: one that began with a failed call before the supervisor's memory is left unjudged, as the rule says, where it was judged (#419).
+- `supervisor scan` reads a chain in a folder closed to it as `vanished`, exit 5, on every Python version, where on Python 3.13 and older one `chmod` ended every scan in a traceback (#419).
+
 ## [0.10.3] - 2026-10-01
 
 One family of faults, ended by a check. A test now walks the three scripts and fails on any call that opens, reads, writes or copies a file by path, unless it is the open that never waits, an exclusive create, or on a short list that gives each call a reason. Its first run found the coverage marker and the harness settings still opened waiting, and its review found `export` waiting on a pipe at its own output name and a calendar address fetched whatever its scheme. Three answers moved for scripts: `export` exits 73 for a name it cannot write; `install-hook` and `uninstall-hook` refuse a harness settings file that is not a file, exit 66, where it was a traceback; and an upgrade whose only pending row names an address that is not `http` or `https` exits 0 with a warning. A new export file is readable by its owner only. `verifier.py` moves with no verdict word or exit changed. The receipt format is untouched.

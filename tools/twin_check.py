@@ -130,7 +130,7 @@ TWINS = (
          "both print, the bare names its manifest may list, and which "
          "two names some system opens as one file (ADR-0026, #358)."),
     Twin("Reading a sidecar",
-         ("read_log", "sidecar_path", "published_path", "NOT_A_FOLDER",
+         ("read_log", "sidecar_path", "published_path", "IS_A_FOLDER",
           "NOT_REGULAR", "open_regular", "file_problem",
           "KeyGivenTwice", "object_with_each_key_once", "NotStrictJson",
           "not_json", "finite_float", "read_sidecar_records"),

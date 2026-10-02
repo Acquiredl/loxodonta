@@ -250,6 +250,8 @@ def run_adopt(store_home, root, *extra):
         [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root),
          *extra],
         capture_output=True, encoding="utf-8",
+        # Bounded: a pipe adopt opened would fail a test, not hang it.
+        timeout=120,
         env=isolated_env(Path(store_home).parent / "home",
                          LOXODONTA_HOME=str(store_home),
                          PYTHONIOENCODING="utf-8"))
@@ -357,6 +359,77 @@ class AdoptTest(unittest.TestCase):
         self.assertIn("sidecar", result.stdout.lower())
         self.assertEqual(squatter.read_text(encoding="utf-8"), "{}\n",
                          "the store copy is untouched")
+
+    def test_a_folder_where_a_legacy_chain_belongs_is_refused_and_left(self):
+        # No chain to move (#374): named, and left as it lies.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        folder = self.root / "alpha" / "receipts" / "receipts-sess-bbbb.jsonl"
+        folder.mkdir()
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
+                      "it is a folder, not a file", result.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertTrue(folder.is_dir(), "the folder stays put")
+        (name,) = self.drawers()
+        self.assertEqual(
+            sorted(p.name for p in (self.home / "receipts" / name).iterdir()),
+            ["project.json", "receipts-sess-aaaa.jsonl"])
+
+    def test_only_a_folder_at_a_chain_name_is_refused_and_no_drawer_made(self):
+        folder = self.root / "alpha" / "receipts" / "receipts-sess-bbbb.jsonl"
+        folder.mkdir(parents=True)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
+                      "it is a folder, not a file", result.stdout)
+        self.assertIn("not adopted; left as it lies", result.stdout)
+        self.assertNotIn("chain(s) adopted", result.stdout)
+        self.assertEqual(self.drawers(), [])
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a file this user may not read")
+    def test_a_chain_it_may_not_read_is_refused_and_left(self):
+        # A chain the supervisor cannot read is no use in the store.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        os.chmod(log, 0)
+        self.addCleanup(os.chmod, log, 0o644)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-aaaa.jsonl: ",
+                      result.stdout)
+        self.assertIn("not adopted; left as it lies", result.stdout)
+        self.assertTrue(log.exists(), "the refused chain stays put")
+        self.assertEqual(self.drawers(), [])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
+    def test_a_pipe_at_a_chain_or_a_sidecar_name_is_named_and_left(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        sidecar = log.with_name(log.name + ".anchors.jsonl")
+        os.mkfifo(sidecar)
+        chain = log.with_name("receipts-sess-bbbb.jsonl")
+        os.mkfifo(chain)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
+                      "it is not a regular file", result.stdout)
+        self.assertIn("left sidecar alpha/receipts/receipts-sess-aaaa.jsonl"
+                      ".anchors.jsonl: it is not a regular file",
+                      result.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertTrue(os.path.lexists(sidecar) and os.path.lexists(chain))
+        (name,) = self.drawers()
+        self.assertEqual(
+            sorted(p.name for p in (self.home / "receipts" / name).iterdir()),
+            ["project.json", "receipts-sess-aaaa.jsonl"])
 
     def test_adopt_twice_is_a_quiet_no_op(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
@@ -883,6 +956,25 @@ class BaselineTest(unittest.TestCase):
         changes = {e["session"]: e["change"] for e in self.events(result)}
         self.assertEqual(changes, {"sess-aaaa": "regressed",
                                    "sess-bbbb": "vanished"})
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not look into")
+    def test_a_chain_in_a_folder_closed_to_the_scan_reads_as_vanished(self):
+        # One chmod is in the writer's reach: it costs that chain an
+        # event, never the whole scan its report.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        run_scan(self.root, env=self.env)
+        closed = self.root / "alpha" / "receipts"
+        os.chmod(closed, 0)
+        self.addCleanup(os.chmod, closed, 0o755)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        changes = {e["session"]: e["change"] for e in self.events(result)}
+        self.assertEqual(changes, {"sess-aaaa": "vanished"})
 
     def test_alarm_language_investigates_and_never_claims_a_verdict(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
@@ -2818,6 +2910,27 @@ class BeforeMemoryTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0,
                          "no siren for history the supervisor never saw")
         self.assertEqual(self.watch(result)["before_memory"]["count"], 1)
+
+    def test_a_session_is_dated_from_its_first_call_even_a_failed_one(self):
+        # The first witnessed call decides (ADR-0029 ruling 2), whatever
+        # it owes: a call that failed before the memory began is still
+        # when the session started working.
+        self.scan()
+        store = Path(self.env["LOXODONTA_HOME"])
+        store.mkdir(parents=True)
+        (store / "coverage.json").write_text(json.dumps({
+            "purpose": "test fixture",
+            "epochs": [{"since": ago(500), "matchers": ["*"],
+                        "harness": "claude-code"}]}), encoding="utf-8")
+        write_transcript(self.witness, self.root / "alpha", "sess-straddle",
+                         event_times=[ago(400), ago(300)],
+                         error_times=[ago(600)],
+                         failure="refused before it ran")
+
+        watch = self.watch(self.scan())
+
+        self.assertEqual(watch["sessions"], [])
+        self.assertEqual(watch["before_memory"]["count"], 1)
 
     def test_the_rows_are_there_for_anyone_who_asks(self):
         self.scan()

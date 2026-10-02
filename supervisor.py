@@ -310,7 +310,7 @@ def write_whole(path, text):
     except FileNotFoundError:
         mode = stat.S_IFREG
     if stat.S_ISDIR(mode):
-        raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+        raise OSError(errno.EISDIR, IS_A_FOLDER, path)
     if not stat.S_ISREG(mode):
         raise OSError(errno.EINVAL, NOT_REGULAR, path)
     folder = os.path.dirname(path)
@@ -363,7 +363,7 @@ def not_a_file(path):
     `path`; None for a file, for nothing, and for a file this user may
     not open, which each reader here answers as it always has."""
     problem = file_problem(path)
-    return problem if problem in (NOT_A_FOLDER, NOT_REGULAR) else None
+    return problem if problem in (IS_A_FOLDER, NOT_REGULAR) else None
 
 
 def memory_unread(path, what, why):
@@ -420,7 +420,7 @@ def read_baseline(path):
     except (ValueError, KeyError, TypeError, AttributeError,
             json.JSONDecodeError, OSError) as error:
         why = getattr(error, "strerror", None)
-        if why in (NOT_A_FOLDER, NOT_REGULAR):
+        if why in (IS_A_FOLDER, NOT_REGULAR):
             return {}, {}, [], {}, memory_unread(path, "a baseline", why)
         return {}, {}, [], {}, ("the baseline could not be read — "
                                 "remembering afresh from this look; it "
@@ -1071,7 +1071,7 @@ def finite_float(text):
     if value != value or value in (float("inf"), float("-inf")):
         raise NotStrictJson(f"{text}, a number past what JSON holds")
     return value
-NOT_A_FOLDER = "it is a folder, not a file"
+IS_A_FOLDER = "it is a folder, not a file"
 NOT_REGULAR = "it is not a regular file"
 
 
@@ -1092,12 +1092,12 @@ def open_regular(path):
         # Windows refuses to open a folder at all, as a denied
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path)
         if not stat.S_ISREG(mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
         return os.fdopen(fd, "rb")
@@ -2642,12 +2642,13 @@ def read_witness(transcript, calibration):
     from a line naming none. `latest` is the liveness clock, the newest
     timestamped conversational record: chatter moves it, the harness's
     timestamp-less metadata records never do, or an old deficit comes
-    back as an immortal live alarm (#85). `first` is the earliest
-    working call, read before the coverage filter (ADR-0029 asks when
-    the session started working). `worded` counts the failed calls read
-    as owed, and `unworded` the failed Bash and PowerShell calls read as
-    `may_owe` because no `Exit code N` line opened them (#379); both are
-    counted for the canary in watch_completeness(), and neither moves
+    back as an immortal live alarm (#85). `first` is the earliest call
+    with a result, failed or not, read before the coverage filter
+    (ADR-0029 asks when the session started working). `worded` counts
+    the failed calls read as owed, and `unworded` the failed Bash and
+    PowerShell calls read as `may_owe` because no `Exit code N` line
+    opened them (#379); both are counted for the canary in
+    watch_completeness(), and neither moves
     the reading."""
     names = {}
     owed = []
@@ -2680,7 +2681,8 @@ def read_witness(transcript, calibration):
                 if not isinstance(blocks, list):
                     blocks = []
                 for block in blocks:
-                    if isinstance(block, dict)                             and block.get("type") == "tool_use":
+                    if isinstance(block, dict) \
+                            and block.get("type") == "tool_use":
                         names[block.get("id")] = block.get("name")
                 found = next((block for block in blocks
                               if isinstance(block, dict)
@@ -2705,6 +2707,10 @@ def read_witness(transcript, calibration):
                 witnessed.add(name)
                 when = record.get("timestamp")
                 epoch = epoch_at(calibration, when)
+                # Before every filter below: a call that failed, or one
+                # no matcher covered, is still the session at work.
+                if isinstance(when, str) and (first is None or when < first):
+                    first = when
                 if failed:
                     owes = failed_call_owes(record, found, name, epoch)
                     if owes == "may_owe":
@@ -2717,8 +2723,6 @@ def read_witness(transcript, calibration):
                     owed.append((when, name))
                 elif owes_receipt(name, epoch["matchers"]):
                     owed.append((when, name))
-                if isinstance(when, str) and (first is None or when < first):
-                    first = when
     # Merged across files, so order is no longer a given, and the
     # deficit clock reads the first unpaired call, which names the right
     # moment only in time order.
@@ -3564,7 +3568,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             family["home"] = (root / relpath).parent.as_posix()
 
     for relpath in remembered:
-        if relpath not in heads and not (root / relpath).exists():
+        # os.path.exists, which answers False for a folder this user
+        # may not look into: Path.exists raises there before Python
+        # 3.14, and one chmod would cost every chain its scan.
+        if relpath not in heads and not os.path.exists(root / relpath):
             repo_name, session, _ = (store_identity(root / relpath) if store
                                      else chain_identity(root, root / relpath))
             events.append({"repo": repo_name, "session": session,
@@ -3582,7 +3589,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             "sessionend": sessionend,
         }, indent=2) + "\n")
     except OSError as error:
-        if error.strerror not in (NOT_A_FOLDER, NOT_REGULAR):
+        if error.strerror not in (IS_A_FOLDER, NOT_REGULAR):
             raise
         note = memory_unread(baseline_path, "a baseline", error.strerror)
     if events:
@@ -3724,13 +3731,20 @@ def cmd_adopt(args):
     the plan. Empty legacy folders are left for the operator to
     prune."""
     root = Path(args.root).resolve()
-    moves, refused = [], []
+    moves, refused, not_files = [], [], []
     for log in find_chains(root):
+        problem = file_problem(log)
+        if problem is not None:
+            # A folder or a pipe where a chain belongs is no chain to
+            # move (#374), and a file this user may not read is no use
+            # in the store: named, and left as it lies.
+            not_files.append((log, problem))
+            continue
         project = adoption_project(root, log)
         drawer = store_receipts() / project_slug(project)
         (refused if (drawer / log.name).exists() else moves).append(
             (log, drawer, project))
-    if not moves and not refused:
+    if not moves and not refused and not not_files:
         print(f"nothing to adopt under {root.as_posix()}")
         return 0
     for log, drawer, project in moves:
@@ -3756,7 +3770,12 @@ def cmd_adopt(args):
             sidecar = log.parent / (log.name + suffix)
             if not sidecar.exists():
                 continue
-            if (drawer / sidecar.name).exists():
+            problem = file_problem(sidecar)
+            if problem is not None:
+                print(f"left sidecar "
+                      f"{sidecar.relative_to(root).as_posix()}: {problem} "
+                      "— not moved; reconcile by hand")
+            elif (drawer / sidecar.name).exists():
                 # Proofs left behind are still proofs; say so — silence
                 # here would read as "everything travelled".
                 print(f"left sidecar "
@@ -3780,6 +3799,9 @@ def cmd_adopt(args):
         print(f"refused {log.relative_to(root).as_posix()}: "
               f"{drawer.name}/{log.name} already exists in the store — "
               "evidence is never overwritten; reconcile by hand")
+    for log, problem in not_files:
+        print(f"refused {log.relative_to(root).as_posix()}: {problem} — "
+              "not adopted; left as it lies")
     if not args.dry_run and moves:
         print(f"{len(moves)} chain(s) adopted into "
               f"{store_receipts().as_posix()}")
@@ -4284,7 +4306,7 @@ def main_repo_of(project):
             common = read_whole(gitdir / "commondir").strip()
             root = Path(os.path.normpath(gitdir / common)).parent
         except OSError as error:
-            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+            if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
                 return project  # a folder or a pipe there: unexpected
             # A deregistered worktree (ADR-0023): the gitdir is gone, but
             # its path still spells <main>/.git/worktrees/<name>.
@@ -4684,7 +4706,8 @@ def cmd_digest(args):
     """The session-start injection: local by design ("all memory" means
     all reachable, never all injected), budget-capped, zero subprocess
     spawns — recall owns no verdicts, so nothing here runs verify."""
-    if getattr(args, "payload", False) and not args.repo             and not os.environ.get("CLAUDE_PROJECT_DIR"):
+    if getattr(args, "payload", False) and not args.repo \
+            and not os.environ.get("CLAUDE_PROJECT_DIR"):
         args.repo = payload_cwd()  # the environment wins when present
     repo = invoking_repo(args)
     families, rows = gather(project_chains(repo))
@@ -5493,16 +5516,16 @@ def write_export(path, data, then):
     or the refusal when a folder or a pipe stands at its name: the
     export's own name is a predictable one in the folder the command
     runs in, which is the writer's, and an ordinary open of a pipe
-    there waits for good (#405). `then` says what that leaves. Returns
-    None, or 73 with the refusal printed: sysexits' EX_CANTCREAT, which
-    no scan verdict uses."""
+    there waits for good (#405). Any other write the system refuses, a
+    folder this user may not write in, is named the same way, as the
+    recorder's `unwritable_log` names one. `then` says what that leaves.
+    Returns None, or 73 with the refusal printed: sysexits'
+    EX_CANTCREAT, which no scan verdict uses."""
     try:
         write_whole(path, data)
     except OSError as error:
-        if error.strerror not in (NOT_A_FOLDER, NOT_REGULAR):
-            raise
         print(f"error: {Path(path).name} could not be written: "
-              f"{error.strerror} — {then}", file=sys.stderr)
+              f"{error.strerror or error} — {then}", file=sys.stderr)
         return 73
     return None
 
@@ -6333,11 +6356,19 @@ def seal_package(stage, seals, calendars, keyfile, authority=None):
 
 def zip_package(stage, written, out):
     """The default shape: one zip, members in write order, so the
-    manifest is the last member too."""
+    manifest is the last member too. Created exclusively: whatever
+    stands at `out` by now is kept and never opened, a pipe or a link
+    to nowhere included. Returns the error when the zip could not be
+    created, for the caller to refuse by (`out_refused`), else None."""
     import zipfile
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
+    try:
+        package = zipfile.ZipFile(out, "x", zipfile.ZIP_DEFLATED)
+    except OSError as error:
+        return error
+    with package:
         for name in written:
             package.write(stage / name, name)
+    return None
 
 
 def select_session(selector, sessions):
@@ -6374,6 +6405,24 @@ def split_refusal(session, chains):
           f"({', '.join(d.name for d in drawers)}); packaging a split "
           "session is not built", file=sys.stderr)
     return True
+
+
+def out_refused(out, error=None):
+    """The refusal when --out cannot be created. Something stands there,
+    at the look or at the create after it, and a package never replaces
+    it; or the system would not make it, said in the system's words."""
+    if error is None or (isinstance(error, FileExistsError)
+                         and os.path.lexists(out)):
+        print(f"error: {out} already exists; choose another --out",
+              file=sys.stderr)
+        return 1
+    # The parent that is in the way, when it is not --out itself.
+    where = "" if error.filename in (None, str(out)) \
+        else f" at {error.filename}"
+    print(f"error: {out} could not be written: "
+          f"{error.strerror or error}{where}; no package written",
+          file=sys.stderr)
+    return 1
 
 
 def swapped_out(error):
@@ -6486,10 +6535,10 @@ def cmd_package(args):
     default = Path.cwd() / f"loxodonta-package-{stem}"
     out = Path(args.out) if args.out else (
         default if args.folder else default.with_name(default.name + ".zip"))
-    if out.exists():
-        print(f"error: {out} already exists; choose another --out",
-              file=sys.stderr)
-        return 1
+    if os.path.lexists(out):
+        # A link to nowhere stands there too: written through, the
+        # package would land where nobody named.
+        return out_refused(out)
     # A reading, not a tick (tick=False): the keepers stay quiet, so
     # packaging appends nothing to the chain it copies and sends nothing
     # off the machine; the baseline still remembers the look. Only the
@@ -6524,9 +6573,13 @@ def cmd_package(args):
     if problem:
         print(f"error: {problem}", file=sys.stderr)
         return 1
-    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if args.folder:
+            out.mkdir()
+    except OSError as error:
+        return out_refused(out, error)
     if args.folder:
-        out.mkdir()
         try:
             written = write_package(unit, sessions, drawer, report, out,
                                     packed, seals, transcripts)
@@ -6556,7 +6609,10 @@ def cmd_package(args):
             sealed, fingerprint, problem = seal_package(
                 Path(staging), seals, calendars, keyfile, args.stamp)
             if not problem:
-                zip_package(Path(staging), written + sealed, out)
+                refused = zip_package(Path(staging), written + sealed,
+                                      out)
+                if refused is not None:
+                    return out_refused(out, refused)
     if problem:
         print(f"error: {problem}; nothing written", file=sys.stderr)
         return 1
