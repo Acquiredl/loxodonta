@@ -828,6 +828,20 @@ class FortnightTest(ServerFixture):
         self.assertGreaterEqual(today["looks"], 2,
                                 "each opening of the page is a look")
 
+    def test_a_page_opened_before_the_first_scan_is_a_first_look(self):
+        # The page counts a look before any scan has run, so a day book
+        # can stand before the first baseline does: a fresh install, not
+        # a memory gone missing beside its day book (ADR-0039).
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        self.get("/")
+
+        _, _, body = self.get("/api/status")
+
+        report = json.loads(body)
+        self.assertEqual(report["exit"], 0, report["baseline"])
+        self.assertNotIn("blind", report["baseline"])
+
     def test_the_verdict_palette_survives_colour_vision_deficiency(self):
         self.serve()
 
@@ -933,6 +947,19 @@ class ServeTest(ServerFixture):
 
         self.assertIn("CHANGED SINCE LAST LOOK", page)
         self.assertIn('id="tripwire"', page)
+
+    def test_the_tripwire_draws_what_stands_and_what_was_accepted(self):
+        # ADR-0039: an alarm stands until it clears or is acknowledged,
+        # a memory the scan cannot read is its own alarm, and what an
+        # operator accepted is drawn plainly, as testimony.
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn("standing since", page)
+        self.assertIn("TRIPWIRE BLIND", page)
+        self.assertIn("report.baseline.acknowledged", page)
+        self.assertIn("an operator's word", page)
 
     def test_front_page_watches_completeness_in_its_own_voice(self):
         self.serve()

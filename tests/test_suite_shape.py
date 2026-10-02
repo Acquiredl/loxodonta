@@ -13,7 +13,7 @@ module names itself instead of taking the parent interpreter with it.
 The home guard is armed and says where a start came from (#242). The
 guard itself lives in tests/home_guard.py, which says what it covers;
 these tests hold it to refusing the six home-reading supervisor verbs and
-the four home-writing verbs (#274) when any one home is the machine's,
+the five home-writing verbs (#274) when any one home is the machine's,
 and to naming the line that made the start.
 
 The rules written in more than one of the three scripts, which never
@@ -149,7 +149,8 @@ class HomeGuardTest(unittest.TestCase):
 
 class WriterHomeGuardTest(unittest.TestCase):
     """The verbs that write into a home, the recorder's three and the
-    supervisor's `adopt`, under the same guard (#274). `--help` again, so
+    supervisor's `adopt` and `acknowledge`, under the same guard (#274).
+    `--help` again, so
     a probe past a disarmed guard writes nothing."""
 
     def command(self, verb):
@@ -177,6 +178,14 @@ class WriterHomeGuardTest(unittest.TestCase):
             subprocess.run([sys.executable, str(SUPERVISOR), "adopt",
                             "--help"], capture_output=True)
         self.assertIn("supervisor.py adopt started", str(refused.exception))
+
+    def test_acknowledge_is_refused_with_the_inherited_home(self):
+        # It writes the store's baseline when given no --root (ADR-0039).
+        with self.assertRaises(AssertionError) as refused:
+            subprocess.run([sys.executable, str(SUPERVISOR), "acknowledge",
+                            "--help"], capture_output=True)
+        self.assertIn("supervisor.py acknowledge started",
+                      str(refused.exception))
 
     def test_an_unset_store_or_codex_home_falls_back_inside_the_test(self):
         # The tools fall back to ~/.loxodonta and ~/.codex, so with the
