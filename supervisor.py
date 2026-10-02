@@ -7147,6 +7147,13 @@ def write_lines(path, lines):
         f.write("".join(line + "\n" for line in lines))
 
 
+def unreadable_drill(asked, why):
+    """The refusal of a chain the drill cannot read: the recorder's
+    words for an unreadable log, and its exit, 66 (ADR-0037)."""
+    return {"log": asked, "refused": f"{asked} cannot be read as a "
+            f"receipt log: {why}"}, EX_NOINPUT
+
+
 def run_drill(root, asked):
     """The battery. Returns (report, exit) — exit 0 only when every
     alarm fired; a refusal reports why and writes nothing."""
@@ -7154,11 +7161,19 @@ def run_drill(root, asked):
     if log is None:
         return None, 1
     try:
-        lines = read_lines(log, errors="strict")
+        lines = read_lines(log, errors="surrogateescape")
     except OSError as error:
-        # A folder or a pipe swapped in after the gate looked (#386).
-        return {"log": asked, "refused": f"{asked} cannot be read as a "
-                f"receipt log: {error.strerror or error}"}, 1
+        # A folder or a pipe swapped in after the gate looked (#386), or
+        # a chain this user may not read.
+        return unreadable_drill(asked, error.strerror or error)
+    for n, line in enumerate(lines):
+        # The copies must be the chain byte for byte, and a line that is
+        # not UTF-8 cannot be written back as text; refused by the
+        # walk's words, as an unreadable log (#407, ADR-0037).
+        try:
+            line.encode("utf-8")
+        except UnicodeEncodeError:
+            return unreadable_drill(asked, f"entry {n} is not valid UTF-8")
     if len(lines) < 3:
         return {"log": asked, "refused": "too short to drill — the "
                 "battery plays with middle entries; give it at least "
@@ -7244,6 +7259,8 @@ def cmd_drill(args):
               file=sys.stderr)
         return 1
     print(json.dumps(report, indent=None if args.json else 2))
+    if "refused" in report:
+        print(f"error: {report['refused']}", file=sys.stderr)
     return code
 
 
@@ -10374,7 +10391,7 @@ class VersionAction(argparse.Action):
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
-EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: `verify` found no chain to judge
+EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.

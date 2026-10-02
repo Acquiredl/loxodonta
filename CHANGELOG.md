@@ -34,6 +34,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403).
 - `docs/HOOK.md` and `docs/TOUR.md` named the lock wait `RECEIPTS_LOCK_TIMEOUT`, which nothing reads; they now name `LOXODONTA_LOCK_TIMEOUT`, and a test fails on any documented variable the code never reads (#397).
 - `tools/twin_check.py --page` leaves a current `docs/TWINS.md` untouched, so a run on a Windows checkout no longer reads as modified to `git status` with an empty diff (#402).
+- `supervisor drill` refuses a chain holding a byte that is not UTF-8, or one it may not read, by name and exit 66, where it ended in a traceback or exited 1; the page's drill shows the same refusal (#407).
 
 ## [0.10.3] - 2026-10-01
 
