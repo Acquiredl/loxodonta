@@ -3842,9 +3842,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         # 3.14, and one chmod would cost every chain its scan.
         if os.path.exists(root / relpath):
             # Something the census does not count stands at the name:
-            # its memory is kept as it was, never dropped unseen, and
-            # named; only a planted row gets here, so no exit (#432).
+            # its memory is kept as it was, never dropped unseen. In a
+            # folder the census could not list, the closed note names it
+            # and the exit is 5 (#431); anywhere else only a planted row
+            # gets here, so it is named, with no exit (#432).
             heads[relpath] = known
+            if any(Path(folder) in (root / relpath).parents
+                   for folder, _ in closed):
+                continue
             uncounted.append({"log": relpath,
                               "remembered": {"n": known["n"],
                                              "head": known["head"]},
