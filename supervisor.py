@@ -2807,10 +2807,11 @@ def read_witness(transcript, calibration):
     timestamp-less metadata records never do, or an old deficit comes
     back as an immortal live alarm (#85). `first` is the earliest call
     with a result, failed or not, read before the coverage filter
-    (ADR-0029 asks when the session started working). `worded` counts the failed calls read
-    as owed, and `unworded` the failed Bash and PowerShell calls read as
-    `may_owe` because no `Exit code N` line opened them (#379); both are
-    counted for the canary in watch_completeness(), and neither moves
+    (ADR-0029 asks when the session started working). `worded` counts
+    the failed calls read as owed, and `unworded` the failed Bash and
+    PowerShell calls read as `may_owe` because no `Exit code N` line
+    opened them (#379); both are counted for the canary in
+    watch_completeness(), and neither moves
     the reading."""
     names = {}
     owed = []
@@ -3742,7 +3743,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             continue
         # os.path.exists, which answers False for a folder this user
         # may not look into: Path.exists raises there before Python
-        # 3.13, and one chmod would cost every chain its scan.
+        # 3.14, and one chmod would cost every chain its scan.
         if os.path.exists(root / relpath):
             # Something the census does not count stands at the name:
             # its memory is kept as it was, never dropped unseen.
@@ -3941,7 +3942,8 @@ def cmd_adopt(args):
         problem = file_problem(log)
         if problem is not None:
             # A folder or a pipe where a chain belongs is no chain to
-            # move (#374): named, and left as it lies.
+            # move (#374), and a file this user may not read is no use
+            # in the store: named, and left as it lies.
             not_files.append((log, problem))
             continue
         project = adoption_project(root, log)
@@ -4005,7 +4007,7 @@ def cmd_adopt(args):
               "evidence is never overwritten; reconcile by hand")
     for log, problem in not_files:
         print(f"refused {log.relative_to(root).as_posix()}: {problem} — "
-              "no chain to adopt; left as it lies")
+              "not adopted; left as it lies")
     if not args.dry_run and moves:
         print(f"{len(moves)} chain(s) adopted into "
               f"{store_receipts().as_posix()}")

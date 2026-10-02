@@ -250,6 +250,8 @@ def run_adopt(store_home, root, *extra):
         [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root),
          *extra],
         capture_output=True, encoding="utf-8",
+        # Bounded: a pipe adopt opened would fail a test, not hang it.
+        timeout=120,
         env=isolated_env(Path(store_home).parent / "home",
                          LOXODONTA_HOME=str(store_home),
                          PYTHONIOENCODING="utf-8"))
@@ -385,7 +387,25 @@ class AdoptTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
                       "it is a folder, not a file", result.stdout)
-        self.assertNotIn("adopted", result.stdout)
+        self.assertIn("not adopted; left as it lies", result.stdout)
+        self.assertNotIn("chain(s) adopted", result.stdout)
+        self.assertEqual(self.drawers(), [])
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a file this user may not read")
+    def test_a_chain_it_may_not_read_is_refused_and_left(self):
+        # A chain the supervisor cannot read is no use in the store.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        os.chmod(log, 0)
+        self.addCleanup(os.chmod, log, 0o644)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-aaaa.jsonl: ",
+                      result.stdout)
+        self.assertIn("not adopted; left as it lies", result.stdout)
+        self.assertTrue(log.exists(), "the refused chain stays put")
         self.assertEqual(self.drawers(), [])
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
