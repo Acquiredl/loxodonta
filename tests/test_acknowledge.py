@@ -259,6 +259,42 @@ class StandingAlarmTest(LegacyRoot):
         self.assertEqual(report["lifecycle"]["events"], [])
 
 
+class UncountedKeyTest(LegacyRoot):
+    """A remembered name where something stands that the census does not
+    count (#432 item 1): a planted sidecar-named key, or one naming a
+    file that is no chain. Only a planted row reaches it; its memory is
+    kept as it was, and the report names it, with no event and no exit."""
+
+    def test_a_remembered_name_the_census_does_not_count_is_named(self):
+        self.look(0)
+        n, head = self.head()
+        # A sidecar's name beside no chain, so no verdict reads it.
+        planted = ("alpha/notes.txt",
+                   "alpha/receipts/receipts-sess-zzzz.jsonl.anchors.jsonl")
+        memory = json.loads(self.baseline.read_text(encoding="utf-8"))
+        for key in planted:
+            (self.root / key).write_text("not a chain\n", encoding="utf-8")
+            memory["chains"][key] = {"n": n, "head": head}
+        self.baseline.write_text(json.dumps(memory), encoding="utf-8")
+
+        for _ in range(2):
+            report = self.look(0)
+            self.assertEqual(report["baseline"]["events"], [])
+            named = report["baseline"]["uncounted"]
+            self.assertEqual(sorted(row["log"] for row in named),
+                             sorted(planted))
+            for row in named:
+                self.assertEqual(row["remembered"], {"n": n, "head": head})
+                self.assertIn("census does not count", row["words"])
+        kept = json.loads(self.baseline.read_text(encoding="utf-8"))
+        for key in planted:
+            self.assertEqual(kept["chains"][key], {"n": n, "head": head},
+                             "its memory is kept as it was")
+
+    def test_a_look_with_no_such_name_names_nothing(self):
+        self.assertNotIn("uncounted", self.look(0)["baseline"])
+
+
 class StoreFixture(unittest.TestCase):
     """The store, the default universe (ADR-0011): one drawer, one chain
     of five entries, and a home of the test's own."""
@@ -501,6 +537,15 @@ class AcknowledgeTest(LegacyRoot):
         self.assertEqual(event["found"], {"n": None, "head": None})
 
         self.assertIn("holds no entries", self.refused(LOG, head))
+
+    def test_the_help_says_the_baseline_replaced_is_evidence_to_copy(self):
+        # Said before the act, where an operator reads it (#432 item 3).
+        result = self.supervisor("acknowledge", "--help")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        said = " ".join(result.stdout.split())
+        self.assertIn("replaces the file that cannot be read, which is the "
+                      "evidence: copy it first", said)
 
     def test_the_command_spoken_wrong_is_a_usage_error(self):
         self.look(0)
@@ -803,6 +848,28 @@ class OtherReadersTest(LegacyRoot):
         self.look(5)
 
         self.assertIn("1 baseline alarm standing", self.last_scan())
+
+    def test_the_digest_counts_an_acknowledgement(self):
+        # A session-start reader sees that one was given (#432 item 2).
+        self.look(0)
+        self.cut()
+        (event,) = self.look(5)["baseline"]["events"]
+        self.assertNotIn("acknowledged", self.last_scan())
+
+        self.acknowledge(LOG, event["found"]["head"])
+        self.look(0)
+
+        line = self.last_scan()
+        self.assertIn("1 acknowledged", line)
+        self.assertNotIn("standing", line)
+
+    def test_the_digest_counts_an_acknowledged_baseline(self):
+        self.look(0)
+        self.baseline.write_text("{not json", encoding="utf-8")
+        self.acknowledge("--baseline")
+        self.look(0)
+
+        self.assertIn("1 acknowledged", self.last_scan())
 
     def test_the_digest_says_the_baseline_cannot_be_read(self):
         self.look(0)

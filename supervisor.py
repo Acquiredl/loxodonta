@@ -404,6 +404,12 @@ CHANGE_WORDS = {
 
 AFRESH = "`supervisor acknowledge --baseline` starts the memory afresh"
 
+UNCOUNTED = ("the baseline remembers a chain at this name, and what stands "
+             "there is something the census does not count: the row is "
+             "kept as it was and compared with nothing. A scan never "
+             "writes such a row; look at what stands there, and at the "
+             "baseline")
+
 
 def memory_paths(root, store):
     """(baseline, day book) for a root: beside the store's receipts
@@ -3759,6 +3765,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                     "transcript-commitment:"))
             family["home"] = (root / relpath).parent.as_posix()
 
+    uncounted = []
     for relpath, known in remembered.items():
         if relpath in heads:
             continue
@@ -3767,8 +3774,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         # 3.14, and one chmod would cost every chain its scan.
         if os.path.exists(root / relpath):
             # Something the census does not count stands at the name:
-            # its memory is kept as it was, never dropped unseen.
+            # its memory is kept as it was, never dropped unseen, and
+            # named; only a planted row gets here, so no exit (#432).
             heads[relpath] = known
+            uncounted.append({"log": relpath,
+                              "remembered": {"n": known["n"],
+                                             "head": known["head"]},
+                              "words": UNCOUNTED})
             continue
         repo_name, session, _ = (store_identity(root / relpath) if store
                                  else chain_identity(root, root / relpath))
@@ -3859,6 +3871,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     baseline = {"file": baseline_path.as_posix(), "events": events,
                 # Testimony: never raises the exit, never moves an event.
                 "acknowledged": memory["acknowledged"]}
+    if uncounted:
+        baseline["uncounted"] = uncounted
     if blind:
         baseline["blind"] = blind
     if unkept:
@@ -5110,8 +5124,11 @@ def scan_testimony(repo):
     remembers (ADR-0011), else the legacy spots (the repo itself, or
     the folder of repos above it). The baseline is trusted for nothing
     — which is exactly why recall may cite it: testimony citing
-    testimony. Returns (scanned, verdicts, standing alarms, unread),
-    `unread` naming a baseline that is there and cannot be read."""
+    testimony. Returns (scanned, verdicts, standing alarms,
+    acknowledgements, unread), `unread` naming a baseline that is there
+    and cannot be read. An acknowledgement counts when it names one of
+    this repo's chains, or the memory itself, which every chain in it
+    was started afresh from."""
     slugs = [project_slug(repo) + "/"] + [
         drawer.name + "/" for drawer in worktree_drawers(repo)]
 
@@ -5158,9 +5175,16 @@ def scan_testimony(repo):
                     for row in covered if "verdict" in row]
         standing = sum(1 for row in covered
                        if isinstance(row.get("alarm"), dict))
-        if verdicts or standing:
-            return scanned, verdicts, standing, unread
-    return None, [], 0, unread
+        records = data.get("acknowledged")
+        given = sum(1 for record in (records if isinstance(records, list)
+                                     else [])
+                    if isinstance(record, dict) and (
+                        "baseline" in record
+                        or isinstance(record.get("log"), str)
+                        and covers(record["log"], path.parent)))
+        if verdicts or standing or given:
+            return scanned, verdicts, standing, given, unread
+    return None, [], 0, 0, unread
 
 
 def payload_cwd():
@@ -5218,7 +5242,7 @@ def cmd_digest(args):
     if reached < total:
         memory += f"; showing last {reached} (search reaches the rest)"
     lines.append(memory)
-    scanned, verdicts, standing, unread = scan_testimony(repo)
+    scanned, verdicts, standing, given, unread = scan_testimony(repo)
     if scanned:
         counts = {}
         for verdict in verdicts:
@@ -5234,6 +5258,11 @@ def cmd_digest(args):
             summary = "; ".join(filter(None, [summary, (
                 f"{standing} baseline alarm{'' if standing == 1 else 's'} "
                 "standing")]))
+        if given:
+            # An acknowledgement is testimony too, and a session-start
+            # reader should see that one was given (#432).
+            summary = "; ".join(filter(None, [summary,
+                                              f"{given} acknowledged"]))
         # The baseline is a plain file the agent can write: its
         # words are escaped like receipt text.
         lines.append(f"last scan: {visible(scanned)} - {visible(summary)} "
@@ -10564,7 +10593,8 @@ def main(argv):
         "--baseline", action="store_true",
         help="acknowledge the memory itself, when the scan cannot read it "
              "or it is missing beside a day book: start it afresh from "
-             "every chain as it stands")
+             "every chain as it stands. This replaces the file that "
+             "cannot be read, which is the evidence: copy it first")
     acknowledge.add_argument(
         "--root", default=None,
         help="legacy/explicit mode: the folder of repos whose baseline "
