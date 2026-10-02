@@ -1608,6 +1608,27 @@ class DaybookTest(unittest.TestCase):
         watched = [r["day"] for r in rows if r["watched"]]
         self.assertIn(recent, watched, "a remembered day still paints")
 
+    def test_a_row_holding_a_claim_that_is_not_a_number_is_skipped(self):
+        # #430: one planted claim used to end every scan in a TypeError.
+        # The row is skipped and named, and today is counted afresh.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        first = run_scan(self.root, env=self.env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        book = json.loads(self.daybook.read_text(encoding="utf-8"))
+        book["days"][self.today()]["worst"] = "x"
+        self.daybook.write_text(json.dumps(book), encoding="utf-8")
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        note = json.loads(result.stdout)["history_note"]
+        self.assertIn(".supervisor-daybook.json", note)
+        self.assertIn(f"the row for {self.today()} is not one the book "
+                      "writes, a count in it not a number", note)
+        kept = json.loads(self.daybook.read_text(encoding="utf-8"))["days"]
+        self.assertEqual(kept[self.today()]["worst"], 0)
+
 
 class CompletenessTest(unittest.TestCase):
     """The flagship (issue #22): the ratified alarm state machine over
@@ -3808,6 +3829,61 @@ class DrillTest(unittest.TestCase):
         self.assertFalse((self.root / ".supervisor-drill").exists(),
                          "a refused drill writes nothing")
 
+    def test_a_chain_whose_entry_1_is_not_json_is_refused_by_name(self):
+        # #430: the battery rewrites entry 1, so a line there that is
+        # not a JSON object is refused as an unreadable log (66), before
+        # the sandbox is made, never a traceback.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        lines[1] = "not json"
+        log.write_text("".join(line + "\n" for line in lines),
+                       encoding="utf-8")
+        asked = "alpha/receipts/receipts-sess-aaaa.jsonl"
+
+        result = self.drill(asked)
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertIn(f"error: {asked} cannot be read as a receipt log: "
+                      "entry 1 is not valid JSON", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse((self.root / ".supervisor-drill").exists(),
+                         "a refused drill writes nothing")
+
+    def test_a_file_at_the_sandbox_name_is_refused_and_left(self):
+        # #430: the sandbox is remade on every drill, and what stands at
+        # its name that is not a folder is named and left, exit 73.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        sandbox = self.root / ".supervisor-drill"
+        sandbox.write_text("planted\n", encoding="utf-8")
+
+        result = self.drill("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("error: .supervisor-drill/ under the root cannot be "
+                      "made afresh: ", result.stderr)
+        self.assertEqual(sandbox.read_text(encoding="utf-8"), "planted\n")
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not look into")
+    def test_a_closed_sandbox_is_refused_by_name(self):
+        # #430: a sandbox folder closed to this user cannot be cleared.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        asked = "alpha/receipts/receipts-sess-aaaa.jsonl"
+        first = self.drill(asked)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        sandbox = self.root / ".supervisor-drill"
+        os.chmod(sandbox, 0)
+        self.addCleanup(os.chmod, sandbox, 0o755)
+
+        result = self.drill(asked)
+
+        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("error: .supervisor-drill/ under the root cannot be "
+                      "made afresh: ", result.stderr)
+
     def drill_from(self, cwd, root, log):
         """`drill` started in `cwd` with `--root` and `--log` spelled as
         a reader types them, relative to that folder (#297)."""
@@ -3922,6 +3998,31 @@ class WalkFindingsTest(unittest.TestCase):
         baseline = json.loads(
             (self.root / ".supervisor-baseline.json").read_text("utf-8"))
         self.assertLess(baseline["keeper"][relpath], "2099")
+
+    def test_keeper_skips_and_names_an_attempt_time_without_a_zone(self):
+        # #430: a time with no zone cannot be set against now, and used
+        # to end every scan in a traceback. It is skipped and named, and
+        # reads as no memory, so the keeper still takes its turn.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-zone")
+        write_pending_anchor(log, chain_head(log), "2026-08-22T09:00:00Z")
+        relpath = log.relative_to(self.root).as_posix()
+        (self.root / ".supervisor-baseline.json").write_text(json.dumps({
+            "chains": {},
+            "keeper": {relpath: "2026-08-22T09:00:00"}}), encoding="utf-8")
+
+        finished = run_scan(self.root, env=self.env)
+
+        self.assertNotIn("Traceback", finished.stderr)
+        report = json.loads(finished.stdout)
+        self.assertIn(f"the keeper's attempt time for {relpath} is not a "
+                      "time with a zone", report["baseline"]["note"])
+        self.assertIn(".supervisor-baseline.json",
+                      report["baseline"]["note"])
+        chain = chains_by_session(report)[("alpha", "sess-zone")][0]
+        self.assertIn("note", chain["anchors"], "the keeper took its turn")
+        baseline = json.loads(
+            (self.root / ".supervisor-baseline.json").read_text("utf-8"))
+        self.assertTrue(baseline["keeper"][relpath].endswith("Z"))
 
 
 class RecorderDriftTest(unittest.TestCase):
@@ -4750,6 +4851,24 @@ class ClosedFolderTest(unittest.TestCase):
         self.answered(result, 0)
         self.assertIn("1 chain(s) adopted", result.stdout)
         self.assertFalse(os.path.lexists(later))
+
+    def test_adopt_into_a_drawer_it_may_read_but_not_write_refuses(self):
+        # #430: the project record already there, the move is the first
+        # write the drawer refuses; named, and the chain left as it lies.
+        later = self.project / "receipts" / "receipts-sess-bbbb.jsonl"
+        self.recorder("init", "--log", str(later))
+        before = later.read_bytes()
+        os.chmod(self.drawer, 0o500)
+        self.addCleanup(os.chmod, self.drawer, 0o755)
+
+        result = self.supervisor("adopt", "--root", str(self.legacy))
+
+        self.answered(result, 0)
+        self.assertIn(f"refused alpha/receipts/{later.name}: cannot be "
+                      f"moved into {self.drawer.name}/: ", result.stdout)
+        self.assertIn("not adopted; left as it lies", result.stdout)
+        self.assertNotIn("chain(s) adopted", result.stdout)
+        self.assertEqual(later.read_bytes(), before)
 
     def test_drill_refuses_a_chain_in_a_closed_drawer_by_name(self):
         self.close(self.drawer)

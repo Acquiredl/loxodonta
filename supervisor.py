@@ -519,12 +519,18 @@ def baseline_problem(text, memory):
     if not (isinstance(acknowledged, list)
             and all(isinstance(record, dict) for record in acknowledged)):
         return "`acknowledged` is not a list of records"
-    keeper = data.get("keeper")
+    keeper = data.get("keeper") if isinstance(data.get("keeper"), dict) else {}
+    # An attempt time with no zone cannot be set against now: skipped,
+    # it reads as no memory, so the keeper takes its turn, the next
+    # write leaves it out, and `read_baseline` names it (#430).
+    unzoned = [key for key, when in keeper.items()
+               if getattr(parse_when(when), "tzinfo", None) is None]
     sessionend = data.get("sessionend")
     calibration = data.get("calibration")
     memory.update(
-        chains=data["chains"], acknowledged=acknowledged,
-        keeper=keeper if isinstance(keeper, dict) else {},
+        chains=data["chains"], acknowledged=acknowledged, unzoned=unzoned,
+        keeper={key: when for key, when in keeper.items()
+                if key not in unzoned},
         calibration=[epoch for epoch in (calibration if isinstance(
                          calibration, list) else [])
                      if isinstance(epoch, dict)
@@ -562,10 +568,12 @@ def read_baseline(path, daybook=None):
     words. It is reported on every look and never replaced by the scan,
     never repaired, never trusted (ADR-0039); a folder or a pipe at its
     name is named and left, since `write_whole` refuses to write over one
-    (#386). No file and no such day book is a first look."""
+    (#386). No file and no such day book is a first look. A keeper
+    attempt time with no zone is dropped and `skipped` names it (#430)."""
     memory = {"chains": {}, "keeper": {}, "calibration": [],
               "sessionend": {}, "acknowledged": [], "blind": None,
-              "note": None, "stood": None, "seen": None}
+              "note": None, "stood": None, "seen": None, "unzoned": [],
+              "skipped": None}
 
     def blind(why, stood, note):
         memory.update(blind=why, stood=stood, note=note)
@@ -600,7 +608,17 @@ def read_baseline(path, daybook=None):
         return unread("it is not UTF-8")
     memory["seen"] = seen
     problem = baseline_problem(seen, memory)
-    return unread(problem) if problem else memory
+    if problem:
+        return unread(problem)
+    unzoned = memory["unzoned"]
+    if unzoned:
+        named = ", ".join(clip(key, 80) for key in unzoned[:3])
+        more = f" and {len(unzoned) - 3} more" if len(unzoned) > 3 else ""
+        memory["skipped"] = (
+            f"{Path(path).name}: the keeper's attempt time for {named}{more} "
+            "is not a time with a zone — skipped, read as no attempt, and "
+            "left out of the next write")
+    return memory
 
 
 def unchanged_since(path, seen):
@@ -693,16 +711,44 @@ DAYBOOK_PURPOSE = ("the supervisor's day-by-day memory of its own looks — "
                    "writer-reachable, trusted for nothing")
 
 
-def read_daybook(path):
-    """The remembered days. A damaged book is read as empty and
-    replaced on the next write, never repaired; a folder or a pipe at
-    its name is read as none and kept, never written over (#386)."""
+def daybook_rows(path):
+    """(days, skipped): the remembered days, and the days whose row the
+    book does not write, a row that is not an object or holds a counted
+    claim that is not an integer. Those are skipped, read as unwatched
+    and left out of the next write, never repaired, so one planted claim
+    costs one day and never the scan (#430). A damaged book is read as
+    empty and replaced on the next write; a folder or a pipe at its name
+    is read as none and kept, never written over (#386)."""
     try:
         days = json.loads(read_whole(path))["days"]
-        return days if isinstance(days, dict) else {}
-    except (OSError, ValueError, KeyError, TypeError,
-            json.JSONDecodeError):
-        return {}
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return {}, []
+    if not isinstance(days, dict):
+        return {}, []
+    kept, skipped = {}, []
+    for day, row in days.items():
+        if isinstance(row, dict) and all(
+                isinstance(row.get(claim, 0), int)
+                and not isinstance(row.get(claim, 0), bool)
+                for claim in PAINTED + ("blind", "scans", "looks")):
+            kept[day] = row
+        else:
+            skipped.append(day)
+    return kept, skipped
+
+
+def read_daybook(path):
+    """The remembered days a tick can fold into (`daybook_rows`)."""
+    return daybook_rows(path)[0]
+
+
+def rows_skipped(path, skipped):
+    """The note naming the day book's rows `daybook_rows` skipped."""
+    named = ", ".join(clip(day, 40) for day in skipped[:3])
+    more = f" and {len(skipped) - 3} more" if len(skipped) > 3 else ""
+    return (f"{Path(path).name}: the row for {named}{more} is not one the "
+            "book writes, a count in it not a number — skipped, read as a "
+            "day nobody watched, and left out of the next write")
 
 
 def write_daybook(path, days, now):
@@ -3924,7 +3970,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # already standing does not mark every later day as watched
     # (ADR-0039); the day's worst is sticky, so a morning reader still
     # sees the day it was found, and every day somebody looks.
-    days = read_daybook(daybook)
+    days, skipped = daybook_rows(daybook)
     latest = days.get(max(days)) if days else None
     shown = isinstance(latest, dict) and latest.get("blind") == 1
     if remember or fresh or awakened or (blind and not shown):
@@ -3937,8 +3983,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         baseline["blind"] = blind
     if unkept:
         baseline["unkept"] = True
-    if note:
-        baseline["note"] = note
+    if note or memory["skipped"]:
+        baseline["note"] = "; ".join(
+            words for words in (note, memory["skipped"]) if words)
     shelf = not_a_file(daybook)
     marker = Path(store_home()) / COVERAGE_NAME
     unmarked = not_a_file(marker)
@@ -3978,7 +4025,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "exit": worst,
         "history": fortnight(days, now),
         **({"history_note": memory_unread(daybook, "a day book", shelf)}
-           if shelf else {}),
+           if shelf else {"history_note": rows_skipped(daybook, skipped)}
+           if skipped else {}),
         **({"marker_note": f"{marker.as_posix()} cannot be read as a "
                            f"coverage marker: {unmarked} — read as none, as "
                            "if install-hook had written nothing"}
@@ -4080,7 +4128,26 @@ def cmd_adopt(args):
                       "it lies")
                 continue
         marker = log.parent / UNLISTED_NAME
-        shutil.move(str(log), str(drawer / log.name))
+        try:
+            shutil.move(str(log), str(drawer / log.name))
+        except OSError as error:
+            why = error.strerror or error
+            if os.path.lexists(drawer / log.name):
+                # A move across two filesystems copies, then removes:
+                # what failed part way is said, never "left as it lies".
+                print(f"refused {log.relative_to(root).as_posix()}: the "
+                      f"move failed part way: {why} — "
+                      f"{drawer.name}/{log.name} may be a partial copy; "
+                      "reconcile by hand")
+            else:
+                # A drawer this user may read and not write, the record
+                # already in it, refuses the move itself (#430); on
+                # POSIX so does a legacy folder that may not be written,
+                # so the words blame neither.
+                print(f"refused {log.relative_to(root).as_posix()}: "
+                      f"cannot be moved into {drawer.name}/: {why} — not "
+                      "adopted; left as it lies")
+            continue
         for suffix in SIDECAR_SUFFIXES:
             sidecar = log.parent / (log.name + suffix)
             if not os.path.exists(sidecar):
@@ -4099,7 +4166,13 @@ def cmd_adopt(args):
                       "the store — evidence is never overwritten; "
                       "reconcile by hand")
             else:
-                shutil.move(str(sidecar), str(drawer / sidecar.name))
+                try:
+                    shutil.move(str(sidecar), str(drawer / sidecar.name))
+                except OSError as error:
+                    print(f"left sidecar "
+                          f"{sidecar.relative_to(root).as_posix()}: "
+                          f"{error.strerror or error} — not moved; "
+                          "reconcile by hand")
         if os.path.exists(marker) \
                 and not os.path.exists(drawer / UNLISTED_NAME):
             try:
@@ -7279,16 +7352,32 @@ def run_drill(root, asked):
         return {"log": asked, "refused": "too short to drill — the "
                 "battery plays with middle entries; give it at least "
                 "two receipts past genesis"}, 1
+    # The edit rewrites entry 1, so it is read before anything is
+    # written (#430).
+    try:
+        edited = json.loads(lines[1])
+    except (ValueError, RecursionError):
+        return unreadable_drill(asked, "entry 1 is not valid JSON")
+    if not isinstance(edited, dict):
+        return unreadable_drill(asked, "entry 1 is not a JSON object")
 
     sandbox = root / DRILL_DIR
-    if os.path.exists(sandbox):
-        shutil.rmtree(sandbox)
-    sandbox.mkdir()
-    write_lines(sandbox / "pristine.jsonl", lines)
+    try:
+        # lexists: whatever stands at the name, a file or a link
+        # included, is cleared or named, never drilled into.
+        if os.path.lexists(sandbox):
+            shutil.rmtree(sandbox)
+        sandbox.mkdir()
+        write_lines(sandbox / "pristine.jsonl", lines)
+    except OSError as error:
+        # A sandbox closed to this user, or a file at its name (#430):
+        # a folder the verb must make and cannot, 73 (ADR-0037).
+        return {"log": asked, "refused": f"{DRILL_DIR}/ under the root "
+                f"cannot be made afresh: {error.strerror or error} — "
+                "remove it by hand"}, EX_CANTCREAT
     known_head = receipts_cli(
         "head", "--log", str(sandbox / "pristine.jsonl")).stdout.strip()
 
-    edited = json.loads(lines[1])
     edited["action"] = "REHEARSAL: this text was rewritten after the fact"
     write_lines(sandbox / "edit.jsonl",
                 [lines[0], json.dumps(edited, sort_keys=True,
@@ -10514,6 +10603,7 @@ class VersionAction(argparse.Action):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
+EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no sandbox for the drill
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
