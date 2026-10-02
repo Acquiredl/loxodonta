@@ -439,6 +439,37 @@ class AdoptTest(unittest.TestCase):
         self.assertFalse(os.path.lexists(elsewhere),
                          "nothing is written through the link")
 
+    def test_a_link_to_nowhere_at_a_sidecar_name_leaves_the_sidecar(self):
+        # The sidecar's twin of the case above (#432): the chain moves,
+        # its proofs stay where they are, and the link is never replaced.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        first = run_adopt(self.home, self.root)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (name,) = self.drawers()
+        stranded = make_chain(self.root / "alpha" / "receipts", "sess-cccc")
+        write_completed_anchor(stranded, chain_head(stranded))
+        sidecar = stranded.with_name(stranded.name + ".anchors.jsonl")
+        before = sidecar.read_bytes()
+        elsewhere = Path(self._tmp.name).resolve() / "elsewhere.jsonl"
+        planted = self.home / "receipts" / name / sidecar.name
+        try:
+            os.symlink(str(elsewhere), str(planted))
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks cannot be created here")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"left sidecar alpha/receipts/{sidecar.name}: "
+                      f"{name}/{sidecar.name} already exists in the store",
+                      result.stdout)
+        self.assertEqual(sidecar.read_bytes(), before,
+                         "the refused sidecar stays put")
+        self.assertTrue(os.path.islink(planted),
+                        "the link is never replaced")
+        self.assertFalse(os.path.lexists(elsewhere),
+                         "nothing is written through the link")
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
     def test_a_pipe_at_a_chain_or_a_sidecar_name_is_named_and_left(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
@@ -480,6 +511,37 @@ class AdoptTest(unittest.TestCase):
         self.assertIn("sess-aaaa", result.stdout)
         self.assertTrue(log.exists(), "dry-run moves nothing")
         self.assertEqual(self.drawers(), [])
+
+    def test_dry_run_names_the_sidecars_the_move_would_leave(self):
+        # A sidecar that is not a file, and one whose name the drawer
+        # already holds, stay where they lie when the chain moves; the
+        # dry run says so in the real run's words (#422).
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_adopt(self.home, self.root)
+        (name,) = self.drawers()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-bbbb")
+        log.with_name(log.name + ".anchors.jsonl").mkdir()
+        taken = log.with_name(log.name + ".published.jsonl")
+        taken.write_text("{}\n", encoding="utf-8")
+        (self.home / "receipts" / name / taken.name).write_text(
+            "{}\n", encoding="utf-8")
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(planned.returncode, 0,
+                         planned.stdout + planned.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"would adopt alpha/receipts/{log.name} -> {name}/",
+                      planned.stdout)
+        left = sorted(line[len("left "):]
+                      for line in result.stdout.splitlines()
+                      if line.startswith("left sidecar "))
+        would = sorted(line[len("would leave "):]
+                       for line in planned.stdout.splitlines()
+                       if line.startswith("would leave sidecar "))
+        self.assertEqual(len(left), 2, result.stdout)
+        self.assertEqual(would, left)
 
     def test_adopted_chains_are_scanned_and_recalled(self):
         # The move is an end-to-end success only if the store's readers
@@ -1607,6 +1669,27 @@ class DaybookTest(unittest.TestCase):
         self.assertIn(recent, kept)
         watched = [r["day"] for r in rows if r["watched"]]
         self.assertIn(recent, watched, "a remembered day still paints")
+
+    def test_a_row_holding_a_claim_that_is_not_a_number_is_skipped(self):
+        # #430: one planted claim used to end every scan in a TypeError.
+        # The row is skipped and named, and today is counted afresh.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        first = run_scan(self.root, env=self.env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        book = json.loads(self.daybook.read_text(encoding="utf-8"))
+        book["days"][self.today()]["worst"] = "x"
+        self.daybook.write_text(json.dumps(book), encoding="utf-8")
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        note = json.loads(result.stdout)["history_note"]
+        self.assertIn(".supervisor-daybook.json", note)
+        self.assertIn(f"the row for {self.today()} is not one the book "
+                      "writes, a count in it not a number", note)
+        kept = json.loads(self.daybook.read_text(encoding="utf-8"))["days"]
+        self.assertEqual(kept[self.today()]["worst"], 0)
 
 
 class CompletenessTest(unittest.TestCase):
@@ -3808,6 +3891,61 @@ class DrillTest(unittest.TestCase):
         self.assertFalse((self.root / ".supervisor-drill").exists(),
                          "a refused drill writes nothing")
 
+    def test_a_chain_whose_entry_1_is_not_json_is_refused_by_name(self):
+        # #430: the battery rewrites entry 1, so a line there that is
+        # not a JSON object is refused as an unreadable log (66), before
+        # the sandbox is made, never a traceback.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        lines[1] = "not json"
+        log.write_text("".join(line + "\n" for line in lines),
+                       encoding="utf-8")
+        asked = "alpha/receipts/receipts-sess-aaaa.jsonl"
+
+        result = self.drill(asked)
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertIn(f"error: {asked} cannot be read as a receipt log: "
+                      "entry 1 is not valid JSON", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse((self.root / ".supervisor-drill").exists(),
+                         "a refused drill writes nothing")
+
+    def test_a_file_at_the_sandbox_name_is_refused_and_left(self):
+        # #430: the sandbox is remade on every drill, and what stands at
+        # its name that is not a folder is named and left, exit 73.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        sandbox = self.root / ".supervisor-drill"
+        sandbox.write_text("planted\n", encoding="utf-8")
+
+        result = self.drill("alpha/receipts/receipts-sess-aaaa.jsonl")
+
+        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("error: .supervisor-drill/ under the root cannot be "
+                      "made afresh: ", result.stderr)
+        self.assertEqual(sandbox.read_text(encoding="utf-8"), "planted\n")
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not look into")
+    def test_a_closed_sandbox_is_refused_by_name(self):
+        # #430: a sandbox folder closed to this user cannot be cleared.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+        asked = "alpha/receipts/receipts-sess-aaaa.jsonl"
+        first = self.drill(asked)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        sandbox = self.root / ".supervisor-drill"
+        os.chmod(sandbox, 0)
+        self.addCleanup(os.chmod, sandbox, 0o755)
+
+        result = self.drill(asked)
+
+        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("error: .supervisor-drill/ under the root cannot be "
+                      "made afresh: ", result.stderr)
+
     def drill_from(self, cwd, root, log):
         """`drill` started in `cwd` with `--root` and `--log` spelled as
         a reader types them, relative to that folder (#297)."""
@@ -3922,6 +4060,31 @@ class WalkFindingsTest(unittest.TestCase):
         baseline = json.loads(
             (self.root / ".supervisor-baseline.json").read_text("utf-8"))
         self.assertLess(baseline["keeper"][relpath], "2099")
+
+    def test_keeper_skips_and_names_an_attempt_time_without_a_zone(self):
+        # #430: a time with no zone cannot be set against now, and used
+        # to end every scan in a traceback. It is skipped and named, and
+        # reads as no memory, so the keeper still takes its turn.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-zone")
+        write_pending_anchor(log, chain_head(log), "2026-08-22T09:00:00Z")
+        relpath = log.relative_to(self.root).as_posix()
+        (self.root / ".supervisor-baseline.json").write_text(json.dumps({
+            "chains": {},
+            "keeper": {relpath: "2026-08-22T09:00:00"}}), encoding="utf-8")
+
+        finished = run_scan(self.root, env=self.env)
+
+        self.assertNotIn("Traceback", finished.stderr)
+        report = json.loads(finished.stdout)
+        self.assertIn(f"the keeper's attempt time for {relpath} is not a "
+                      "time with a zone", report["baseline"]["note"])
+        self.assertIn(".supervisor-baseline.json",
+                      report["baseline"]["note"])
+        chain = chains_by_session(report)[("alpha", "sess-zone")][0]
+        self.assertIn("note", chain["anchors"], "the keeper took its turn")
+        baseline = json.loads(
+            (self.root / ".supervisor-baseline.json").read_text("utf-8"))
+        self.assertTrue(baseline["keeper"][relpath].endswith("Z"))
 
 
 class RecorderDriftTest(unittest.TestCase):
@@ -4497,35 +4660,39 @@ class ClosedFolderTest(unittest.TestCase):
         self.assertEqual({e["session"]: e["change"] for e in events},
                          {"sess-aaaa": "vanished"})
 
-    def test_digest_reads_a_closed_receipts_folder_as_no_memory(self):
-        result = self.recall("digest")
-
-        self.answered(result, 0)
-        self.assertNotIn(self.address, result.stdout)
-
-    def test_show_refuses_an_address_behind_a_closed_receipts_folder(self):
-        result = self.recall("show", self.address)
-
-        self.answered(result, 1)
-        self.assertIn(f"matches {self.address}", result.stderr)
-
-    def test_search_finds_nothing_behind_a_closed_receipts_folder(self):
-        result = self.recall("search", "step")
-
-        self.answered(result, 0)
-        self.assertIn("matched 0", result.stdout)
-
-    def test_timeline_refuses_an_address_behind_a_closed_receipts_folder(self):
-        result = self.recall("timeline", self.address)
-
-        self.answered(result, 1)
-        self.assertIn(f"matches {self.address}", result.stderr)
-
-    def test_verify_refuses_an_address_behind_a_closed_receipts_folder(self):
-        result = self.recall("verify", self.address)
-
+    def refused_by_name(self, result, folder):
+        """`result` refused with 66, naming `folder` as one it cannot list,
+        and printed nothing else (#431)."""
         self.answered(result, 66)
-        self.assertIn(f"matches {self.address}", result.stderr)
+        self.assertIn(f"{folder.as_posix()} cannot be listed: ",
+                      result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def closed_named(self, report, folder):
+        """The scan's report names `folder`, and only it, as one it could
+        not list, and says nothing of an empty store (#431)."""
+        self.assertEqual([c["folder"] for c in report["closed"]],
+                         [folder.as_posix()])
+        self.assertIn(folder.as_posix(), report["closed_note"])
+        self.assertNotIn("note", report, "a closed folder is no empty store")
+
+    def test_recall_refuses_by_name_behind_a_closed_receipts_folder(self):
+        # A folder the reader cannot list is never read as empty (#431).
+        for args in (("digest",), ("show", self.address),
+                     ("search", "step"), ("timeline", self.address),
+                     ("verify", self.address), ("search", "step", "--all")):
+            with self.subTest(args=args):
+                self.refused_by_name(self.recall(*args),
+                                     self.store / "receipts")
+
+    def test_recall_refuses_by_name_behind_its_own_closed_drawer(self):
+        self.close(self.drawer)
+
+        for args in (("digest",), ("search", "step")):
+            with self.subTest(args=args):
+                self.refused_by_name(
+                    self.supervisor(*args, "--repo", str(self.project)),
+                    self.drawer)
 
     def test_package_of_the_repo_refuses_with_its_receipts_folder_closed(self):
         out = self.root / "package.zip"
@@ -4533,15 +4700,13 @@ class ClosedFolderTest(unittest.TestCase):
         result = self.recall("package", "--witness", str(self.witness),
                              "--out", str(out))
 
-        self.answered(result, 1)
-        self.assertIn("nothing to package", result.stderr)
+        self.refused_by_name(result, self.store / "receipts")
         self.assertFalse(os.path.lexists(out))
 
     def test_package_of_a_repo_whose_own_drawer_is_closed_refuses(self):
-        # Its worktree's drawer still holds a session (ADR-0023), so the
-        # package reaches the repo's project record, which a closed
-        # drawer will not say is there or not: refused by name, never
-        # shipped without it.
+        # Its worktree's drawer still holds a session (ADR-0023); the
+        # store's census cannot list the repo's own drawer, so the
+        # package is refused by name, never shipped without it.
         worktree = self.store / "receipts" / "wt-00000000"
         worktree.mkdir()
         (worktree / "project.json").write_text(json.dumps(
@@ -4556,10 +4721,157 @@ class ClosedFolderTest(unittest.TestCase):
                                  "--witness", str(self.witness),
                                  "--out", str(out))
 
-        self.answered(result, 1)
-        self.assertIn("error: project.json cannot be packed: ",
-                      result.stderr)
+        self.refused_by_name(result, self.drawer)
         self.assertFalse(os.path.lexists(out))
+
+    def test_package_of_a_session_refuses_with_the_store_home_closed(self):
+        self.close(self.store)
+        out = self.root / "package.zip"
+
+        result = self.supervisor("package", "sess-aaaa", "--witness",
+                                 str(self.witness), "--out", str(out))
+
+        self.refused_by_name(result, self.store / "receipts")
+        self.assertFalse(os.path.lexists(out))
+
+    def test_a_store_scan_names_a_closed_drawer_never_a_fresh_install(self):
+        self.close(self.drawer)
+
+        result = self.scan()
+
+        self.answered(result, 5)
+        self.closed_named(json.loads(result.stdout), self.drawer)
+
+    def test_a_closed_drawer_the_baseline_never_knew_is_exit_5(self):
+        later = self.store / "receipts" / "later-00000000"
+        later.mkdir()
+        self.recorder("init", "--log", str(later / "receipts-sess-dddd.jsonl"))
+        self.close(later)
+
+        result = self.scan()
+
+        self.answered(result, 5)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["baseline"]["events"], [])
+        self.assertEqual([c["folder"] for c in report["closed"]],
+                         [later.as_posix()])
+
+    def test_a_store_scan_names_a_closed_receipts_folder(self):
+        self.close(self.store / "receipts")
+
+        result = self.scan()
+
+        self.answered(result, 5)
+        self.closed_named(json.loads(result.stdout), self.store / "receipts")
+
+    def test_a_closed_store_home_is_exit_5_on_every_look_never_a_traceback(self):
+        self.close(self.store)
+
+        for _ in range(2):
+            result = self.scan()
+
+            self.answered(result, 5)
+            report = json.loads(result.stdout)
+            self.closed_named(report, self.store / "receipts")
+            self.assertEqual(report["baseline"]["blind"], "unreadable")
+
+    def test_a_legacy_scan_names_a_closed_repo_folder(self):
+        beta = self.legacy / "beta"
+        (beta / "receipts").mkdir(parents=True)
+        self.recorder("init", "--log",
+                      str(beta / "receipts" / "receipts-sess-eeee.jsonl"))
+        self.close(beta)
+
+        result = self.supervisor("scan", "--json", "--root", str(self.legacy),
+                                 "--witness", str(self.witness))
+
+        self.answered(result, 5)
+        report = json.loads(result.stdout)
+        self.closed_named(report, beta)
+
+    def test_a_legacy_scan_passes_a_folder_it_may_look_into_but_not_list(self):
+        # A plain name in the pattern is looked up, never listed for, as
+        # Path.glob does: a system folder that refuses a listing but
+        # answers a lookup is no closed repo, and is not named on every
+        # look (#431's review).
+        odd = self.legacy / "odd"
+        odd.mkdir()
+        os.chmod(odd, 0o311)
+        self.addCleanup(os.chmod, odd, 0o755)
+
+        result = self.supervisor("scan", "--json", "--root", str(self.legacy),
+                                 "--witness", str(self.witness))
+
+        self.answered(result, 0)
+        self.assertNotIn("closed", json.loads(result.stdout))
+
+    def test_export_names_a_closed_drawer_and_carries_exit_5(self):
+        self.close(self.drawer)
+        out = self.root / "export.json"
+
+        result = self.supervisor("export", "--witness", str(self.witness),
+                                 "--out", str(out))
+
+        self.answered(result, 0)
+        self.assertIn(f"cannot be listed: {self.drawer.as_posix()} (",
+                      result.stderr)
+        self.assertEqual(json.loads(out.read_text(encoding="utf-8"))
+                         ["machine"]["scan_exit"], 5)
+
+    def test_serve_names_a_closed_drawer_in_status_and_metrics(self):
+        self.close(self.drawer)
+        url = self.serve()
+
+        with OPENER.open(f"{url}/api/status", timeout=30) as status:
+            report = json.loads(status.read().decode("utf-8"))
+        with OPENER.open(f"{url}/metrics", timeout=30) as metrics:
+            text = metrics.read().decode("utf-8")
+
+        self.assertEqual(report["exit"], 5)
+        self.closed_named(report, self.drawer)
+        self.assertIn("\nloxodonta_scan_exit_code 5\n", text)
+
+    def test_serve_refuses_a_view_over_a_closed_drawer_by_name(self):
+        self.close(self.drawer)
+        url = self.serve()
+
+        for route in ("/api/recall", "/api/activity", "/api/search?q=step",
+                      "/api/shape?repo=alpha&session=sess-aaaa"):
+            with self.subTest(route=route):
+                with self.assertRaises(urllib.error.HTTPError) as refused:
+                    OPENER.open(url + route, timeout=30)
+                said = refused.exception.read().decode("utf-8")
+                refused.exception.close()
+                self.assertEqual(refused.exception.code, 503)
+                self.assertIn("cannot be listed", said)
+        with OPENER.open(f"{url}/api/status", timeout=30) as status:
+            self.assertEqual(status.status, 200)
+
+    def test_adopt_refuses_by_name_under_a_closed_legacy_repo_folder(self):
+        beta = self.legacy / "beta"
+        (beta / "receipts").mkdir(parents=True)
+        log = beta / "receipts" / "receipts-sess-eeee.jsonl"
+        self.recorder("init", "--log", str(log))
+        self.close(beta / "receipts")
+
+        for dry in ((), ("--dry-run",)):
+            with self.subTest(dry=dry):
+                result = self.supervisor("adopt", "--root", str(self.legacy),
+                                         *dry)
+
+                self.refused_by_name(result, beta / "receipts")
+        os.chmod(beta / "receipts", 0o755)
+        self.assertTrue(os.path.isfile(log), "the chain is left as it lies")
+
+    def test_acknowledging_the_baseline_refuses_over_a_closed_drawer(self):
+        baseline = self.store / "baseline.json"
+        baseline.write_text("{not json", encoding="utf-8")
+        self.close(self.drawer)
+
+        result = self.supervisor("acknowledge", "--baseline")
+
+        self.refused_by_name(result, self.drawer)
+        self.assertEqual(baseline.read_text(encoding="utf-8"), "{not json")
 
     def test_recall_reads_the_store_for_a_repo_in_a_closed_folder(self):
         # The drawer is named by the repo's path, so a closed parent
@@ -4588,19 +4900,80 @@ class ClosedFolderTest(unittest.TestCase):
                                              str(self.legacy))
                 finally:
                     os.chmod(closed, 0o755)
+                # The dry run refuses what the real run refuses (#422).
                 self.answered(planned, 0)
-                self.assertIn("would adopt", planned.stdout)
+                self.assertIn(refusal, planned.stdout)
+                self.assertNotIn("would adopt", planned.stdout)
                 self.answered(result, 0)
                 self.assertIn(refusal, result.stdout)
                 self.assertIn("not adopted; left as it lies", result.stdout)
                 self.assertNotIn("chain(s) adopted", result.stdout)
                 self.assertEqual(later.read_bytes(), before)
+                # The drawer by name, as the move names it: never the
+                # store's path (#422 review).
+                self.assertNotIn(self.store.as_posix(),
+                                 planned.stdout + result.stdout)
 
         # Open again, the same command moves it.
         result = self.supervisor("adopt", "--root", str(self.legacy))
         self.answered(result, 0)
         self.assertIn("1 chain(s) adopted", result.stdout)
         self.assertFalse(os.path.lexists(later))
+
+    def test_adopt_into_a_drawer_it_may_read_but_not_write_refuses(self):
+        # #430: the project record already there, the move is the first
+        # write the drawer refuses; named, and the chain left as it lies.
+        later = self.project / "receipts" / "receipts-sess-bbbb.jsonl"
+        self.recorder("init", "--log", str(later))
+        before = later.read_bytes()
+        os.chmod(self.drawer, 0o500)
+        self.addCleanup(os.chmod, self.drawer, 0o755)
+        refusal = (f"refused alpha/receipts/{later.name}: cannot be moved "
+                   f"into {self.drawer.name}/: ")
+
+        planned = self.supervisor("adopt", "--root", str(self.legacy),
+                                  "--dry-run")
+        result = self.supervisor("adopt", "--root", str(self.legacy))
+
+        # The dry run refuses what the real run refuses (#422).
+        self.answered(planned, 0)
+        self.assertIn(refusal, planned.stdout)
+        self.assertNotIn("would adopt", planned.stdout)
+        self.answered(result, 0)
+        self.assertIn(refusal, result.stdout)
+        self.assertIn("not adopted; left as it lies", result.stdout)
+        self.assertNotIn("chain(s) adopted", result.stdout)
+        self.assertEqual(later.read_bytes(), before)
+
+    def test_adopt_out_of_a_legacy_folder_it_may_not_write_refuses(self):
+        # The move must take the chain out of its folder too (#430), so
+        # a folder that will not give it up is refused before the drawer
+        # is made, by the dry run alike (#422).
+        beta = self.legacy / "beta" / "receipts"
+        beta.mkdir(parents=True)
+        log = beta / "receipts-sess-cccc.jsonl"
+        self.recorder("init", "--log", str(log))
+        before = log.read_bytes()
+        drawers = sorted(p.name for p in (self.store / "receipts").iterdir())
+        os.chmod(beta, 0o500)
+        self.addCleanup(os.chmod, beta, 0o755)
+        refusal = (f"refused beta/receipts/{log.name}: cannot be moved out "
+                   "of beta/receipts/: ")
+
+        planned = self.supervisor("adopt", "--root", str(self.legacy),
+                                  "--dry-run")
+        result = self.supervisor("adopt", "--root", str(self.legacy))
+
+        self.answered(planned, 0)
+        self.assertIn(refusal, planned.stdout)
+        self.assertNotIn("would adopt", planned.stdout)
+        self.answered(result, 0)
+        self.assertIn(refusal, result.stdout)
+        self.assertNotIn("chain(s) adopted", result.stdout)
+        self.assertEqual(log.read_bytes(), before)
+        self.assertEqual(
+            sorted(p.name for p in (self.store / "receipts").iterdir()),
+            drawers, "no drawer is made for a chain that cannot move")
 
     def test_drill_refuses_a_chain_in_a_closed_drawer_by_name(self):
         self.close(self.drawer)

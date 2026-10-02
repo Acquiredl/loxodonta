@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.11.0"
+TOOL_VERSION = "0.12.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -184,26 +184,30 @@ def files_base(log):
     amended v0.1.1, ADR-0012): the project named by a project record
     beside the log (a store chain), else the log's own directory (a
     local log at the project root — the two rules agree there).
-    Returns (base, problem): problem is the honest sentence when a
-    record exists but cannot lead anywhere."""
+    Returns (base, problem): problem is the honest sentence, naming the
+    record, when a record exists but cannot lead anywhere."""
     log_dir = os.path.dirname(os.path.abspath(log))
     record = os.path.join(log_dir, "project.json")
     if not os.path.exists(record):
         return log_dir, None
+    unread = f"{record} cannot be read as a project record"
     try:
         # The record sits beside the chain, in the writer's reach, so a
         # pipe there is refused by name rather than waited on (#386).
         with open_regular(record) as f:
-            path = json.loads(f.read().decode("utf-8")).get("path")
+            held = json.loads(f.read().decode("utf-8"))
     except OSError as error:
-        return None, (f"{record} cannot be read as a project record: "
-                      f"{error.strerror or error}")
-    except ValueError:
-        return None, f"project record unreadable: {record}"
+        return None, f"{unread}: {error.strerror or error}"
+    except (ValueError, RecursionError):
+        # Not UTF-8, not JSON, or nested past what the reader follows.
+        return None, f"{unread}: it is not JSON"
+    if not isinstance(held, dict):
+        # Valid JSON with no path in it, `[]` say (#406).
+        return None, f"{unread}: it holds no JSON object"
+    path = held.get("path")
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
-    return None, (f"project record points at a missing project "
-                  f"({visible(path)}) — references cannot be resolved")
+    return None, f"{record} points at a missing project ({visible(path)})"
 
 
 # --- The walk (SPEC §6) -------------------------------------------------------

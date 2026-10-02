@@ -38,7 +38,7 @@ through `getattr`.
 Every question a script asks of whether something is there goes
 through `os.path` (#421). Before Python 3.14, pathlib's `exists()`,
 `is_file()`, `is_dir()` and `is_symlink()` raise for a path in a folder
-the user may not look into, where `os.path`'s answer False, so one
+the user may not look into, where `os.path`'s functions answer False, so one
 `chmod` in the writer's reach ended a reader in a traceback. A second
 walk of each script fails on any such method call, naming its function
 and line, and spoils a copy to see it fail. It keeps no list: no call
@@ -247,7 +247,7 @@ POINTER = ("# Copy of loxodonta.py's; edit there, then run "
 
 def twin_check(*args):
     return subprocess.run([sys.executable, str(TWIN_CHECK), *args],
-                          capture_output=True, encoding="utf-8",
+                          capture_output=True, encoding="utf-8", timeout=300,
                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
 
@@ -758,7 +758,7 @@ ALLOWED_OPENS = {
            "whether it is a file (file_problem): a rename within one "
            "filesystem opens nothing, and across two shutil refuses a "
            "named pipe put there after the question"),
-    ("supervisor.py", "Face.do_GET"): (
+    ("supervisor.py", "Face.answer_get"): (
         1, "serves docs/FIRE-DRILL.md from the supervisor's own checkout"),
     ("receiver.py", "mint_token"): (1, RECEIVER_DATA),
     ("receiver.py", "current_token"): (1, RECEIVER_DATA),
@@ -891,14 +891,16 @@ def aliases(path):
     found = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
+            source = (f"from {'.' * node.level}{node.module or ''} "
+                      if isinstance(node, ast.ImportFrom) else "")
             for name in node.names:
                 if name.asname:
-                    found.append((node.lineno,
-                                  f"import {name.name} as {name.asname}"))
+                    found.append((node.lineno, f"{source}import {name.name} "
+                                               f"as {name.asname}"))
                 elif isinstance(node, ast.ImportFrom) \
                         and name.name in FILE_METHODS | SHUTIL_CALLS:
-                    found.append((node.lineno, f"from {node.module} "
-                                               f"import {name.name}"))
+                    found.append((node.lineno,
+                                  f"{source}import {name.name}"))
         elif isinstance(node, ast.Name) and node.id == "open" \
                 and id(node) not in called:
             found.append((node.lineno, "open, not called"))
@@ -1068,6 +1070,11 @@ class EveryOpenIsListedTest(SpoiledScript, unittest.TestCase):
                                    "import shutil as sh")
         self.assertEqual(found, [(line, "import shutil as sh")])
 
+    def test_a_renamed_from_import_is_named_as_it_is_written(self):
+        found, line = self.aliased("supervisor.py", "import shutil\n",
+                                   "from shutil import move as mv")
+        self.assertEqual(found, [(line, "from shutil import move as mv")])
+
     def test_open_held_as_a_value_is_named_and_a_call_is_not(self):
         old = "def anchors_path(log):\n"
         found, line = self.aliased("loxodonta.py", old,
@@ -1077,9 +1084,9 @@ class EveryOpenIsListedTest(SpoiledScript, unittest.TestCase):
 
 # What the existence walk collects (#421): a method call that asks
 # whether something is there, of anything but os.path. Before Python
-# 3.14 pathlib's raise PermissionError for a path in a folder this user
-# may not look into, as an os.DirEntry's do on every version; os.path's
-# answer False there on every version.
+# 3.14 pathlib's methods raise PermissionError for a path in a folder
+# this user may not look into, as an os.DirEntry's do on every version;
+# os.path's functions answer False there on every version.
 EXISTENCE_METHODS = {"exists", "is_file", "is_dir", "is_symlink"}
 
 
@@ -1130,6 +1137,80 @@ class ExistenceIsAskedThroughOsPathTest(SpoiledScript, unittest.TestCase):
             "    os.path.isdir(log)", "    os.path.islink(log)",
             "    os.path.lexists(log)", collects=asks_by_method)
         self.assertEqual(calls.opens, {})
+
+
+# What the listing walk collects (#431): a call that lists a folder.
+# pathlib's glob passes a folder it may not list in silence on every
+# Python, and before 3.13 raises on some others; os's listings raise.
+LISTING_METHODS = {"glob", "rglob", "iterdir"}
+OS_LISTINGS = {"listdir", "scandir", "walk"}
+
+WITNESS = "the harness's transcripts, which are not the store"
+
+# Every function of the supervisor that lists a folder:
+# function -> (how many such calls, and why).
+ALLOWED_LISTINGS = {
+    "listed": (1, "the one listing over the store: a folder it cannot list "
+                  "is named or raised, never read as empty (#431)"),
+    "witness_files": (1, WITNESS),
+    "watch_completeness": (1, WITNESS),
+}
+
+
+def lists_a_folder(call):
+    """Whether the listing walk collects `call`."""
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    base = func.value.id if isinstance(func.value, ast.Name) else None
+    return (func.attr in LISTING_METHODS
+            or (base == "os" and func.attr in OS_LISTINGS))
+
+
+def listings_beyond_the_list(calls):
+    """Each function making more listings than ALLOWED_LISTINGS allows
+    it, as (function, allowed, lines)."""
+    return [(where, ALLOWED_LISTINGS.get(where, (0, None))[0], lines)
+            for where, lines in sorted(calls.opens.items())
+            if len(lines) > ALLOWED_LISTINGS.get(where, (0, None))[0]]
+
+
+class EveryStoreListingIsNamedTest(SpoiledScript, unittest.TestCase):
+    """The rule of #431 as a check: the supervisor lists a folder of the
+    store only through `listed`, which names a folder it cannot list or
+    raises, and never reads it as empty, on every Python. The harness's
+    transcripts are listed on their own and are on the list. The
+    recorder and the receiver are not walked: the rule is the reader's.
+
+    What the walk does not see: a listing reached through `getattr`, or
+    inside a library call that lists a folder itself."""
+
+    def test_every_listing_in_the_supervisor_is_on_the_list(self):
+        found = [f"{where}, line {', '.join(map(str, lines))}: {len(lines)} "
+                 f"listing(s), and the list allows {allowed}"
+                 for where, allowed, lines in listings_beyond_the_list(
+                     file_calls(REPO_ROOT / "supervisor.py",
+                                lists_a_folder))]
+        self.assertEqual(found, [], "list the store through `listed`, which "
+                         "names a folder it cannot list (#431)")
+
+    def test_no_entry_on_the_list_is_stale(self):
+        calls = file_calls(REPO_ROOT / "supervisor.py", lists_a_folder)
+        for where, (count, why) in ALLOWED_LISTINGS.items():
+            with self.subTest(where=where):
+                self.assertTrue(why)
+                self.assertIn(where, calls.defined)
+                self.assertEqual(len(calls.opens.get(where, [])), count)
+
+    def test_a_glob_or_a_listdir_added_to_a_function_is_named(self):
+        old = "def store_receipts():\n"
+        added = ("    Path(store_home()).glob('*')",
+                 "    os.listdir(store_home())")
+        calls, text = self.spoiled("supervisor.py", old, old + "".join(
+            line + "\n" for line in added), lists_a_folder)
+        self.assertEqual(listings_beyond_the_list(calls),
+                         [("store_receipts", 0,
+                           [self.line_of(text, line) for line in added])])
 
 
 # The prefixes of the variables the scripts read for themselves; a name

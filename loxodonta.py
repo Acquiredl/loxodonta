@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.11.0"
+TOOL_VERSION = "0.12.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -177,26 +177,30 @@ def files_base(log):
     amended v0.1.1, ADR-0012): the project named by a project record
     beside the log (a store chain), else the log's own directory (a
     local log at the project root — the two rules agree there).
-    Returns (base, problem): problem is the honest sentence when a
-    record exists but cannot lead anywhere."""
+    Returns (base, problem): problem is the honest sentence, naming the
+    record, when a record exists but cannot lead anywhere."""
     log_dir = os.path.dirname(os.path.abspath(log))
     record = os.path.join(log_dir, "project.json")
     if not os.path.exists(record):
         return log_dir, None
+    unread = f"{record} cannot be read as a project record"
     try:
         # The record sits beside the chain, in the writer's reach, so a
         # pipe there is refused by name rather than waited on (#386).
         with open_regular(record) as f:
-            path = json.loads(f.read().decode("utf-8")).get("path")
+            held = json.loads(f.read().decode("utf-8"))
     except OSError as error:
-        return None, (f"{record} cannot be read as a project record: "
-                      f"{error.strerror or error}")
-    except ValueError:
-        return None, f"project record unreadable: {record}"
+        return None, f"{unread}: {error.strerror or error}"
+    except (ValueError, RecursionError):
+        # Not UTF-8, not JSON, or nested past what the reader follows.
+        return None, f"{unread}: it is not JSON"
+    if not isinstance(held, dict):
+        # Valid JSON with no path in it, `[]` say (#406).
+        return None, f"{unread}: it holds no JSON object"
+    path = held.get("path")
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
-    return None, (f"project record points at a missing project "
-                  f"({visible(path)}) — references cannot be resolved")
+    return None, f"{record} points at a missing project ({visible(path)})"
 
 
 # --- The walk (SPEC §6) -------------------------------------------------------
@@ -3478,6 +3482,13 @@ def cmd_run(args):
         return missing_log(args.log)
     except OSError as e:
         return unreadable_log(args.log, e)
+    # A project record that leads nowhere refuses every `--file`, so it
+    # is refused here too, before the work it could not record (#406).
+    if args.file:
+        _, problem = files_base(args.log)
+        if problem:
+            print(f"error: {problem}", file=sys.stderr)
+            return EX_NOINPUT
     command_line = " ".join(args.command_argv)
 
     # The first signal handled decides how the receipt ends (signals that
@@ -3646,6 +3657,23 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
     append_sidecar_record(anchors_path(log), record)
 
 
+class RedirectWatch(urllib.request.HTTPRedirectHandler):
+    """urllib's redirects, followed as before, and remembered from the
+    moment the 3xx arrives: after one, an address http cannot send is
+    the one the calendar named, not the one asked (#422). Not later:
+    urllib parses the Location before it asks to follow it, and a host
+    that parse refuses raises there."""
+
+    followed = False
+
+    def http_error_302(self, *args):
+        self.followed = True
+        return super().http_error_302(*args)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_302
+    http_error_308 = http_error_302
+
+
 def calendar_request(url, data=None, timeout=15):
     """One request to a calendar, and its reply. An address with any
     scheme but http or https raises ValueError, before anything is
@@ -3655,7 +3683,9 @@ def calendar_request(url, data=None, timeout=15):
     not send, a space in it say, is a ValueError too, and a reply that
     is not HTTP an OSError: urllib hands both on as http.client's own
     errors, which are neither, so one bad row or one bad calendar
-    would end the run for every calendar after it."""
+    would end the run for every calendar after it. A redirect to an
+    address http will not send is the calendar failing, an OSError
+    (#422)."""
     if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
         raise ValueError("not an http or https URL")
     request = urllib.request.Request(
@@ -3663,10 +3693,17 @@ def calendar_request(url, data=None, timeout=15):
         headers={"Accept": "application/vnd.opentimestamps.v1",
                  "User-Agent": "loxodonta"},
     )
+    redirects = RedirectWatch()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.build_opener(redirects).open(
+                request, timeout=timeout) as response:
             return response.read(MAX_PROOF_BYTES)
-    except http.client.InvalidURL:
+    except (http.client.InvalidURL, ValueError) as error:
+        if redirects.followed:
+            raise OSError("it redirected to an address http cannot "
+                          "send") from None
+        if isinstance(error, ValueError):
+            raise
         raise ValueError("not a URL http can send") from None
     except http.client.HTTPException as error:
         raise OSError("the reply was not HTTP "
@@ -3728,6 +3765,10 @@ def seal_session(log, transcript_path):
             return append_locked(log, "receipts", action, [])
     except LockTimeout:
         return locked_out(log)
+    except OSError:
+        # On POSIX a folder that refuses the lock file raises here
+        # rather than waiting (#398), and is skipped like the rest (#430).
+        return 0
 
 
 SESSION_END_BUDGET = 12.0   # seconds, under the installer's 20 s timeout
@@ -5229,7 +5270,8 @@ def main_repo_root(project):
             if root is None:
                 return project
         return root if os.path.isdir(root) else project
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a byte that is not UTF-8 in either file (#406).
         return project
 
 
@@ -5512,18 +5554,17 @@ def cmd_hook(args):
             continue
         file_paths.append(relative.replace(os.sep, "/"))
 
-    # A folder or a pipe where the project record belongs names no base,
-    # and the drawer is in the writer's reach: the hook takes the
-    # project it knows, as it does when it writes a new record, and
-    # says so rather than lose the receipt (#386).
-    record = os.path.join(os.path.dirname(log), "project.json")
-    unread = file_problem(record) if file_paths else None
-    if unread is not None:
-        print(f"warning: {record} cannot be read as a project record: "
-              f"{unread} — the files are fingerprinted against {base}",
-              file=sys.stderr)
+    # A project record that names no base, a folder or a pipe at its
+    # name (#386), or content that cannot be taken apart or names a
+    # project that is gone (#406), is in the writer's reach: the hook
+    # takes the project it knows, as it does when it writes a new
+    # record, and says so rather than lose the receipt (SPEC §8).
+    named, problem = files_base(log)
+    if problem and file_paths:
+        print(f"warning: {problem} — the files are fingerprinted against "
+              f"{base}", file=sys.stderr)
     files, code = build_references(
-        log, file_paths, base=base if unread is not None else None)
+        log, file_paths, base=base if problem else named)
     if files is None:
         return code
     # One lock for the receipt and any due transcript commitment: a

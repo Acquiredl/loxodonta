@@ -133,6 +133,9 @@ different case: that path is `docs/HOOK.md`, and the README says so.
 
 `main` is stable and every claim in the README is true of it. Work happens on
 `dev`; open pull requests against `dev`. `dev` reaches `main` at milestones.
+A green pull request into `dev` means the suite passed on
+`ubuntu-latest / py3.9` only; the push to `dev` that merges it runs all five
+targets, and a pull request into `main` waits on all five.
 
 ## What helps most right now
 

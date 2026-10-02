@@ -710,7 +710,7 @@ class DemoStorePackageTest(PackageCase):
         out = self.work / "pkg.zip"
         out.write_bytes(b"kept")
         result = self.package(BAD_DAY_SESSION, "--out", str(out))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
         self.assertIn("already exists; choose another --out", result.stderr)
         self.assertEqual(out.read_bytes(), b"kept")
 
@@ -726,7 +726,7 @@ class DemoStorePackageTest(PackageCase):
         for shape in ((), ("--folder",)):
             result = self.package(BAD_DAY_SESSION, *shape, "--out", str(out))
             said = result.stdout + result.stderr
-            self.assertEqual(result.returncode, 1, said)
+            self.assertEqual(result.returncode, 73, said)
             self.assertNotIn("Traceback", said)
             self.assertIn("already exists; choose another --out",
                           result.stderr)
@@ -740,7 +740,7 @@ class DemoStorePackageTest(PackageCase):
             result = self.package(BAD_DAY_SESSION, *shape, "--out",
                                   str(in_the_way / "pkg"))
             said = result.stdout + result.stderr
-            self.assertEqual(result.returncode, 1, said)
+            self.assertEqual(result.returncode, 73, said)
             self.assertNotIn("Traceback", said)
             self.assertIn("could not be written: ", result.stderr)
             self.assertIn("; no package written", result.stderr)
@@ -757,7 +757,7 @@ class DemoStorePackageTest(PackageCase):
             result = self.package(BAD_DAY_SESSION, *shape, "--out",
                                   str(closed / "pkg"))
             said = result.stdout + result.stderr
-            self.assertEqual(result.returncode, 1, said)
+            self.assertEqual(result.returncode, 73, said)
             self.assertNotIn("Traceback", said)
             self.assertIn("could not be written: ", result.stderr)
             self.assertIn("; no package written", result.stderr)

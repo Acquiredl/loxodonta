@@ -10,6 +10,26 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-02
+
+### Changed
+
+- `supervisor scan` names a remembered chain whose name holds something the census does not count; the digest's last-scan line counts acknowledgements; `acknowledge --help` says `--baseline` replaces the unreadable file, so copy it first (#432).
+- `supervisor package` exits 73 when it cannot create or finish `--out`, something already standing there included, where it exited 1 (#422).
+
+### Fixed
+
+- A project record holding no JSON object, or naming a gone project, no longer loses hook receipts or ends `verify --files` in a traceback; `run --file` refuses before its command; a non-UTF-8 `.git` leaves the project itself (#406).
+- A store folder the supervisor cannot list is no longer read as empty: `scan` names it and exits 5, never calling the store empty, and recall, `adopt` and `package` refuse by name with 66 (#431).
+- `supervisor scan` skips and names a day-book row holding a count that is not a number, and a keeper attempt time with no zone, where either ended every scan in a traceback (#430).
+- `supervisor adopt` into a drawer it may read but not write names the drawer and leaves the chain, instead of ending in a traceback (#430).
+- `supervisor drill` refuses a sandbox it cannot clear, exit 73, and a chain whose entry 1 is not JSON, exit 66 before writing anything, instead of ending in a traceback (#430).
+- The session end skips its seal silently in a folder that refuses the lock file, where it ended in a traceback, exit 70 (#430).
+- `anchor` and `anchor --upgrade` count a calendar that redirects to an address http cannot send as that calendar failing, where they blamed the operator's address or skipped the row (#422).
+- `supervisor package`, refused after it made folders for `--out` or part of a zip, removes them and names what it removed; a zip the disk will not finish is 73, not a traceback (#422).
+- `supervisor adopt --dry-run` asks the real run's refusals: it names each sidecar the move would leave behind and refuses a drawer closed to the user, where it said "would adopt" (#422).
+- On a disk that ignores case, a chain renamed by a change of case is compared with what the baseline remembers: cut short, it reads `regressed`, exit 5, not exit 0. A `.JSONL` name counts as a chain everywhere (#445).
+
 ## [0.11.0] - 2026-10-02
 
 ### Added
@@ -33,7 +53,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `supervisor scan` reads a chain in a folder closed to it as `vanished`, exit 5, on every Python version, where on Python 3.13 and older one `chmod` ended every scan in a traceback (#419).
 - `supervisor` commands name a folder closed to the reader, a drawer, the store's receipts folder, the harness's or the recorder's, or read its chains as vanished, on every Python, where before 3.14 they ended in a traceback (#421).
 - `supervisor adopt` refuses a link to nowhere at a chain's or a sidecar's name in the drawer as a name already taken, where a move across two filesystems could copy through it (#422).
-- A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403).
+- A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403, #422).
 - `docs/HOOK.md` and `docs/TOUR.md` named the lock wait `RECEIPTS_LOCK_TIMEOUT`, which nothing reads; they now name `LOXODONTA_LOCK_TIMEOUT`, and a test fails on any documented variable the code never reads (#397).
 - `tools/twin_check.py --page` leaves a current `docs/TWINS.md` untouched, so a run on a Windows checkout no longer reads as modified to `git status` with an empty diff (#402).
 - `log` and `run` in a folder that refuses the lock file say the chain could not be written, exit 73, as the hook does, instead of a traceback; a lock file the disk refuses its line is removed (#398).
@@ -320,7 +340,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.10.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.12.0...dev
+[0.12.0]: https://github.com/Acquiredl/loxodonta/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Acquiredl/loxodonta/compare/v0.10.3...v0.11.0
 [0.10.3]: https://github.com/Acquiredl/loxodonta/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/Acquiredl/loxodonta/compare/v0.10.1...v0.10.2

@@ -76,6 +76,14 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 `verify` exits 66 when there is no chain to judge, in the recorder and in the supervisor alike (ADR-0037).
 
+### A file the verb must make and cannot
+
+Names: `EX_CANTCREAT`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+A writer exits 73 when a file it must write cannot be, the supervisor's `drill` when its sandbox cannot be made, and `package` when it cannot create or finish `--out` (ADR-0037, #430, #422).
+
 ### Writing to the console
 
 Names: `speak_utf8`.

@@ -982,6 +982,27 @@ class TranscriptCommitmentTest(unittest.TestCase):
                 self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.commitments(), [])
 
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "a folder's write bit is POSIX")
+    def test_session_end_in_a_folder_that_refuses_the_lock_is_silent(self):
+        # #430: a folder made read-only after the chain exists refuses
+        # the lock file, and SessionEnd skips the seal without a word,
+        # as every other failure there, never a traceback and exit 70.
+        self.transcript.write_bytes(b"page one\n")
+        self.drive(3)
+        with open(self.transcript, "ab") as f:
+            f.write(b"the tail\n")
+        chain = self.workdir / "receipts-sess-1234abcd.jsonl"
+        before = chain.read_bytes()
+        os.chmod(self.workdir, 0o555)
+        self.addCleanup(os.chmod, self.workdir, 0o755)
+
+        result = run_hook(self.end_payload(), cwd=self.workdir, timeout=120)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(chain.read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()
