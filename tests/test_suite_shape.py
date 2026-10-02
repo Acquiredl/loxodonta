@@ -758,7 +758,7 @@ ALLOWED_OPENS = {
            "whether it is a file (file_problem): a rename within one "
            "filesystem opens nothing, and across two shutil refuses a "
            "named pipe put there after the question"),
-    ("supervisor.py", "Face.do_GET"): (
+    ("supervisor.py", "Face.answer_get"): (
         1, "serves docs/FIRE-DRILL.md from the supervisor's own checkout"),
     ("receiver.py", "mint_token"): (1, RECEIVER_DATA),
     ("receiver.py", "current_token"): (1, RECEIVER_DATA),

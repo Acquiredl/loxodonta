@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- A store folder the supervisor cannot list is no longer read as empty: `scan` names it and exits 5, never calling the store empty, and recall, `adopt` and `package` refuse by name with 66 (#431).
+
 ## [0.11.0] - 2026-10-02
 
 ### Added
