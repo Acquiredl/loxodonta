@@ -1056,6 +1056,27 @@ class DrillSurfaceTest(ServerFixture):
         self.assertEqual(len(report["drills"]), 4)
         self.assertIn("sandbox", report["rehearsal"])
 
+    def test_the_drill_route_refuses_a_chain_that_is_not_utf8(self):
+        # #407: the CLI's refusal, answered as a report, never a 500.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        log.write_bytes(log.read_bytes().replace(b'"step 1"',
+                                                 b'"step \xff1"'))
+        asked = "alpha/receipts/receipts-sess-aaaa.jsonl"
+        self.serve()
+
+        request = urllib.request.Request(
+            self.url + "/api/drill?log=" + urllib.parse.quote(asked),
+            method="POST")
+        with OPENER.open(request, timeout=60) as response:
+            report = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(report["refused"],
+                         f"{asked} cannot be read as a receipt log: "
+                         "entry 2 is not valid UTF-8")
+        self.assertNotIn("drills", report)
+        self.assertFalse((self.root / ".supervisor-drill").exists())
+
     def test_the_drill_route_never_reads_a_log_from_the_servers_folder(self):
         # The CLI's `drill --log` also reads a path from the folder it
         # runs in (#297); the page's route does not. A chain beside the
