@@ -263,6 +263,37 @@ class ScanAndTallyTest(MetricsFixture):
         self.assertEqual(scrape.value("loxodonta_store_chains"), 4)
 
 
+class AcknowledgementsTest(MetricsFixture):
+    """`loxodonta_baseline_acknowledgements`: the records the baseline
+    keeps of what an operator accepted (ADR-0039), counted from the
+    report, so a list that shrinks between scrapes is seen to."""
+
+    def test_acknowledgements_on_record_are_the_reports_count(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        self.scan()
+        lines = log.read_bytes().splitlines(keepends=True)
+        log.write_bytes(b"".join(lines[:-1]))
+        (event,) = self.scan()["baseline"]["events"]
+        accepted = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "supervisor.py"), "acknowledge",
+             event["log"], event["found"]["head"], "--root", str(self.root)],
+            capture_output=True, encoding="utf-8", timeout=120,
+            env={**self.env, **self.knobs, "PYTHONIOENCODING": "utf-8"})
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+        self.serve()
+
+        _, _, scrape = self.scrape()
+        report = self.scan()
+
+        self.assertEqual(scrape.value("loxodonta_baseline_acknowledgements"),
+                         len(report["baseline"]["acknowledged"]))
+        self.assertEqual(scrape.value("loxodonta_baseline_acknowledgements"),
+                         1)
+        self.assertEqual(report["exit"], 0)
+
+
 class SessionsByStateTest(MetricsFixture):
     """Sessions by completeness state and by lifecycle tier, and the
     consumption watch's hot sessions: labelled gauges, one sample per

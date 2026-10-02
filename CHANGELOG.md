@@ -10,9 +10,28 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `supervisor acknowledge LOG STATE` accepts the state a scan reported for one chain, and `--baseline` starts an unreadable memory afresh; each leaves a record every later report shows, and moves no verdict (#401).
+
 ### Changed
 
 - The README leads with a tamper-evident security record, the flight recorder kept as its image: the problem first, what a clean verdict does not tell you, the evidence-strength ladder, and where it fits (#423). The ruling is an ADR-0002 addendum.
+- `supervisor scan` keeps a chain's remembered head when it reads `regressed`, `rewritten` or `vanished`, and says so on every look, exit 5, until the chain holds that head again or the change is acknowledged (#401).
+- A baseline the scan cannot read or keep, or one missing beside a day book, is exit 5 on every look and left as it lies, where it was a note and a fresh memory (#409).
+
+### Fixed
+
+- `supervisor export` names any write the system refuses and exits 73, instead of ending in a traceback in a folder the user may not write in (#419).
+- `supervisor package` refuses an `--out` where a link to nowhere stands, where it wrote the package through the link, and names an `--out` it cannot create instead of ending in a traceback (#419).
+- `supervisor adopt` names a folder, a pipe or an unreadable file at a legacy chain's or sidecar's name and leaves it, where it moved a folder into the store as a chain and could end in a traceback (#419).
+- `anchor`, `anchor --upgrade` and the session end no longer stop at a calendar reply that is not HTTP, or a calendar address holding a space: that calendar fails, or that row is skipped, and the next is asked (#419).
+- `anchor` prints what a calendar refused with as `anchor --upgrade` does, control characters made visible (#419).
+- `supervisor scan` dates a session from its first call with a result, failed or not: one that began with a failed call before the supervisor's memory is left unjudged, as the rule says, where it was judged (#419).
+- `supervisor scan` reads a chain in a folder closed to it as `vanished`, exit 5, on every Python version, where on Python 3.13 and older one `chmod` ended every scan in a traceback (#419).
+- `supervisor` commands name a folder closed to the reader, a drawer, the store's receipts folder, the harness's or the recorder's, or read its chains as vanished, on every Python, where before 3.14 they ended in a traceback (#421).
+- `supervisor adopt` refuses a link to nowhere at a chain's or a sidecar's name in the drawer as a name already taken, where a move across two filesystems could copy through it (#422).
+- A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403).
 
 ### Fixed
 

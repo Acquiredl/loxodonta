@@ -9,6 +9,7 @@ and everything the supervisor holds is writer-reachable, so nothing
 here is a head record (GLOSSARY: Supervisor, Baseline).
 
   python supervisor.py scan --json              # one tick over the store
+  python supervisor.py acknowledge LOG STATE    # accept a change a scan reported
   python supervisor.py serve                    # the face
   python supervisor.py digest [--repo DIR]      # the session-start injection
   python supervisor.py show ADDRESS             # one entry, self-verifying
@@ -25,8 +26,9 @@ verdict for each, a baseline diff against the last look,
 machine-readable JSON on stdout, and an exit code cron can shout about —
 0 when nothing demands attention, 1–4 for the worst verify exit found
 (a chain verify could not judge at all, empty or unreadable, counts as
-4, the refusal), 5 when the baseline saw a change appends cannot explain (a reason to
-investigate, never a verdict), 6 when a session is demonstrably active
+4, the refusal), 5 when the baseline saw a change appends cannot explain,
+or cannot itself be read or kept (a reason to investigate, never a
+verdict; ADR-0039), 6 when a session is demonstrably active
 but its chain is behind the witness (the completeness alarm), 7 when a
 chain's transcript commitments contradict each other (verify's exit 5,
 ADR-0017 — renumbered in this fold because scan's 5 already means the
@@ -65,7 +67,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socketserver
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
@@ -268,24 +270,25 @@ def superseded(log, detail):
     tampering to shout about, sibling or not."""
     broken = [l for l in detail if l.startswith("BROKEN")]
     return (len(broken) == 1 and "torn tail" in broken[0]
-            and sibling_of(log).exists())
+            and os.path.exists(sibling_of(log)))
 
 
 # --- Writing state whole ------------------------------------------------------
 # The baseline, the day book and the views are rewritten whole, through a
-# swap: a rewrite in place has a moment where the file is empty, and an
-# unreadable baseline is replaced, so a crash there made the tripwire
-# forget every head it held (#300). Chains and sidecars only grow by
-# appended lines and follow the recorder's lock and torn-tail rules.
+# swap: a rewrite in place has a moment where the file is empty, and a
+# crash there left a baseline the next look could not read (#300).
+# Chains and sidecars only grow by appended lines and follow the
+# recorder's lock and torn-tail rules.
 #
-# Across processes (`serve`'s tick, a hand-run `scan`, `calibrate`) there
-# is no lock: each writer swaps in a whole file, so a reader sees one
-# version, never a splice, and the last to finish wins. What an
-# overwritten write loses is testimony (a day-book count, a keeper
-# attempt time); the heads come back on the next look. One known gap: a
-# `calibrate` seed made during another process's scan can be overwritten
-# by it; run the seed again. A lock held across a whole scan would close
-# that, but a stranded one would stop the supervisor looking.
+# Across processes (`serve`'s tick, a hand-run `scan`, `calibrate`,
+# `acknowledge`) there is no lock: each writer swaps in a whole file, so
+# a reader sees one version, never a splice. A scan does not write over
+# a baseline that changed since it read it (`unchanged_since`, ADR-0039),
+# so an acknowledgement or a seed made during a scan stands; what the
+# scan then loses is testimony (a keeper attempt time), and the heads
+# come back on the next look. A lock held across a whole scan would close
+# the last window, one read long, but a stranded one would stop the
+# supervisor looking.
 
 REPLACE_TRIES = 20  # Windows only; see write_whole
 REPLACE_PAUSE = 0.05  # seconds between tries, so a second at most
@@ -310,7 +313,7 @@ def write_whole(path, text):
     except FileNotFoundError:
         mode = stat.S_IFREG
     if stat.S_ISDIR(mode):
-        raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+        raise OSError(errno.EISDIR, IS_A_FOLDER, path)
     if not stat.S_ISREG(mode):
         raise OSError(errno.EINVAL, NOT_REGULAR, path)
     folder = os.path.dirname(path)
@@ -363,7 +366,7 @@ def not_a_file(path):
     `path`; None for a file, for nothing, and for a file this user may
     not open, which each reader here answers as it always has."""
     problem = file_problem(path)
-    return problem if problem in (NOT_A_FOLDER, NOT_REGULAR) else None
+    return problem if problem in (IS_A_FOLDER, NOT_REGULAR) else None
 
 
 def memory_unread(path, what, why):
@@ -384,47 +387,207 @@ def memory_unread(path, what, why):
 BASELINE_NAME = ".supervisor-baseline.json"
 
 INVESTIGATE = ("investigate — this memory is writer-reachable and decides "
-               "nothing; run loxodonta verify and check your anchors")
+               "nothing; run loxodonta verify and check your anchors. It "
+               "stands on every look until the chain holds the remembered "
+               "head again or `supervisor acknowledge` accepts what is "
+               "there")
 
 CHANGE_WORDS = {
-    "rewritten": "the head seen last look is no longer in this chain's "
-                 "history — change appends cannot explain; " + INVESTIGATE,
-    "regressed": "this chain is shorter than it was last look — receipts "
-                 "do not un-happen; " + INVESTIGATE,
-    "vanished": "this chain was here last look and is gone; " + INVESTIGATE,
+    "rewritten": "the head the baseline remembers is no longer in this "
+                 "chain's history — change appends cannot explain; "
+                 + INVESTIGATE,
+    "regressed": "this chain is shorter than the baseline remembers — "
+                 "receipts do not un-happen; " + INVESTIGATE,
+    "vanished": "the baseline remembers this chain and it is gone; "
+                + INVESTIGATE,
 }
 
+AFRESH = "`supervisor acknowledge --baseline` starts the memory afresh"
 
-def read_baseline(path):
-    """The remembered heads and the keeper's attempt times, plus a note
-    when the file could not be read. An unreadable memory is reported
-    and replaced, never repaired and never trusted — this look simply
-    remembers afresh. A folder or a pipe at its name is named and left
-    as it is, since `write_whole` refuses to write over one (#386)."""
+
+def memory_paths(root, store):
+    """(baseline, day book) for a root: beside the store's receipts
+    folder (ADR-0011), or inside a legacy root."""
+    if store:
+        return root.parent / "baseline.json", root.parent / "daybook.json"
+    return root / BASELINE_NAME, root / DAYBOOK_NAME
+
+
+def inside_root(key):
+    """Whether a row's name is a path the census could have written: one
+    relative to the root, in forward slashes, never stepping out of it."""
+    if not isinstance(key, str) or not key or "\\" in key:
+        return False
+    if PurePosixPath(key).is_absolute() or PureWindowsPath(key).drive:
+        return False
+    return ".." not in PurePosixPath(key).parts
+
+
+def remembered_head(row):
+    """A row the diff can trust the shape of: an integer `n`, never a
+    boolean, and a text `head` (#403)."""
+    return (isinstance(row, dict) and isinstance(row.get("n"), int)
+            and not isinstance(row.get("n"), bool)
+            and isinstance(row.get("head"), str))
+
+
+def baseline_problem(text, memory):
+    """Fill `memory` from the baseline's text and return None, or return
+    in words why the text is no baseline. One row of the wrong shape
+    makes the whole file unreadable, never a traceback (#403)."""
     try:
-        data = json.loads(read_whole(path))
-        chains = data["chains"]
-        if not all(isinstance(known, dict) and "head" in known
-                   and "n" in known for known in chains.values()):
-            raise ValueError("baseline rows must remember a head and an n")
-        keeper = data.get("keeper")
-        calibration = [epoch for epoch in data.get("calibration", [])
-                       if isinstance(epoch, dict)
-                       and isinstance(epoch.get("matchers"), list)]
-        sessionend = data.get("sessionend")
-        return (chains, keeper if isinstance(keeper, dict) else {},
-                calibration,
-                sessionend if isinstance(sessionend, dict) else {}, None)
+        data = json.loads(text)
+    except (ValueError, RecursionError):
+        return "it is not JSON"
+    if not isinstance(data, dict) or not isinstance(data.get("chains"), dict):
+        return "it is not a JSON object holding `chains`"
+    for key, row in data["chains"].items():
+        if not inside_root(key):
+            return f"a row's name is no path inside the root: {clip(key, 80)}"
+        if not remembered_head(row):
+            return (f"the row for {clip(key, 80)} does not remember an "
+                    "integer n and a text head")
+    acknowledged = data.get("acknowledged", [])
+    if not (isinstance(acknowledged, list)
+            and all(isinstance(record, dict) for record in acknowledged)):
+        return "`acknowledged` is not a list of records"
+    keeper = data.get("keeper")
+    sessionend = data.get("sessionend")
+    calibration = data.get("calibration")
+    memory.update(
+        chains=data["chains"], acknowledged=acknowledged,
+        keeper=keeper if isinstance(keeper, dict) else {},
+        calibration=[epoch for epoch in (calibration if isinstance(
+                         calibration, list) else [])
+                     if isinstance(epoch, dict)
+                     and isinstance(epoch.get("matchers"), list)],
+        sessionend=sessionend if isinstance(sessionend, dict) else {})
+    return None
+
+
+def daybook_records_a_scan(path):
+    """Whether what stands at the day book's name says a scan has run
+    here: anything that is not a readable book does, and so does a book
+    with a row that counts a scan. A book holding only page openings is
+    what a `serve` opened before its first scan leaves (`remember_look`),
+    and says nothing about a baseline (ADR-0039)."""
+    if not os.path.lexists(path):
+        return False
+    try:
+        days = json.loads(read_whole(path))["days"]
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return True
+    if not isinstance(days, dict):
+        return True
+    return any(isinstance(row, dict) and row.get("scans")
+               for row in days.values())
+
+
+def read_baseline(path, daybook=None):
+    """The supervisor's memory as a dict: the remembered rows (`chains`),
+    the keepers' attempt times, the calibration and session-end epochs,
+    the acknowledgements on record, and `seen`, the text read (None when
+    no file stood there), so a writer can tell whether the file moved
+    under it. A memory that cannot be read holds nothing and sets
+    `blind` (`unreadable`, or `missing` when no file stands beside a day
+    book that records a scan), `note` and `stood`, what was there in
+    words. It is reported on every look and never replaced by the scan,
+    never repaired, never trusted (ADR-0039); a folder or a pipe at its
+    name is named and left, since `write_whole` refuses to write over one
+    (#386). No file and no such day book is a first look."""
+    memory = {"chains": {}, "keeper": {}, "calibration": [],
+              "sessionend": {}, "acknowledged": [], "blind": None,
+              "note": None, "stood": None, "seen": None}
+
+    def blind(why, stood, note):
+        memory.update(blind=why, stood=stood, note=note)
+        return memory
+
+    def unread(stood):
+        return blind("unreadable", stood,
+                     f"the baseline could not be read ({stood}) — nothing "
+                     "is remembered and nothing is compared on this look, "
+                     "the keepers wait, and the file is left as it lies; "
+                     + AFRESH)
+
+    try:
+        seen = read_whole(path)
     except FileNotFoundError:
-        return {}, {}, [], {}, None  # cold start: seed silently
-    except (ValueError, KeyError, TypeError, AttributeError,
-            json.JSONDecodeError, OSError) as error:
-        why = getattr(error, "strerror", None)
-        if why in (NOT_A_FOLDER, NOT_REGULAR):
-            return {}, {}, [], {}, memory_unread(path, "a baseline", why)
-        return {}, {}, [], {}, ("the baseline could not be read — "
-                                "remembering afresh from this look; it "
-                                "was trusted for nothing either way")
+        if daybook is not None and daybook_records_a_scan(daybook):
+            return blind(
+                "missing", "no file, beside a day book that records a scan",
+                f"{Path(path).name} is missing beside a day book that "
+                "records a scan — nothing is remembered and nothing is "
+                "compared on this look, and the keepers wait; " + AFRESH)
+        return memory
+    except OSError as error:
+        why = error.strerror or str(error)
+        if why in (IS_A_FOLDER, NOT_REGULAR):
+            return blind("unreadable", why,
+                         memory_unread(path, "a baseline", why)
+                         + "; the tripwire is blind and the keepers wait "
+                         "until it is removed by hand, and then " + AFRESH)
+        return unread(why)
+    except ValueError:
+        return unread("it is not UTF-8")
+    memory["seen"] = seen
+    problem = baseline_problem(seen, memory)
+    return unread(problem) if problem else memory
+
+
+def unchanged_since(path, seen):
+    """Whether the baseline still holds the text a look read at its start
+    (`seen`, None for no file), so a scan never writes over one another
+    writer put there in the meantime: an acknowledgement typed while
+    `serve` scans, a calibration, another scan (ADR-0039). The window
+    between this question and the swap is not closed; it is the length
+    of one read, where it was the length of a scan."""
+    try:
+        return read_whole(path) == seen
+    except FileNotFoundError:
+        return seen is None
+    except (OSError, ValueError):
+        return False
+
+
+def newest_head(entries):
+    """(n, head) of the newest entry that has both as the format writes
+    them, or None: a row is remembered only in the shape the next look
+    can read (#403), whatever a garbled last line holds."""
+    for entry in reversed(entries):
+        if remembered_head({"n": entry.get("n"),
+                            "head": entry.get("entry_hash")}):
+            return entry["n"], entry["entry_hash"]
+    return None
+
+
+def standing(known, change, stamp):
+    """(row, new): the row a standing alarm keeps (ADR-0039), the
+    remembered head, number and stillness clock with a marker of the
+    change and when the look that first found it ran, which every later
+    look keeps; `new` when this look found the alarm or its change moved,
+    which a keeper turn writes the day book for. A row from before the
+    marker starts its alarm now."""
+    alarm = known.get("alarm") if isinstance(known.get("alarm"), dict) else {}
+    since = alarm.get("since")
+    row = {"n": known["n"], "head": known["head"]}
+    if known.get("last_grew"):
+        row["last_grew"] = known["last_grew"]
+    row["alarm"] = {"change": change,
+                    "since": since if isinstance(since, str) else stamp}
+    return row, alarm.get("change") != change
+
+
+def alarm_event(repo, session, relpath, row, found):
+    """One standing alarm as the report says it: since when it has stood,
+    what the baseline remembers and what this look found, None for a
+    chain that is not there, so the operator has the head `acknowledge`
+    accepts."""
+    change = row["alarm"]["change"]
+    return {"repo": repo, "session": session, "log": relpath,
+            "change": change, "since": row["alarm"]["since"],
+            "remembered": {"n": row["n"], "head": row["head"]},
+            "found": found, "investigate": CHANGE_WORDS[change]}
 
 
 def diff_baseline(remembered, relpath, entries):
@@ -1071,7 +1234,7 @@ def finite_float(text):
     if value != value or value in (float("inf"), float("-inf")):
         raise NotStrictJson(f"{text}, a number past what JSON holds")
     return value
-NOT_A_FOLDER = "it is a folder, not a file"
+IS_A_FOLDER = "it is a folder, not a file"
 NOT_REGULAR = "it is not a regular file"
 
 
@@ -1092,12 +1255,12 @@ def open_regular(path):
         # Windows refuses to open a folder at all, as a denied
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path)
         if not stat.S_ISREG(mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
         return os.fdopen(fd, "rb")
@@ -1507,7 +1670,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
-    if sidecar.is_file():
+    if os.path.isfile(sidecar):
         finished = run_verb(["anchor", "--upgrade", f"--log={log}"], env)
         attempted = True
         if finished is None:
@@ -2469,7 +2632,7 @@ def recorder_drift(witness):
     notice = {"state": "unknown", "path": script.as_posix(), "branch": None,
               "head": None, "dirty": False, "upstream": None,
               "ahead": None, "behind": None, "fetched": None, "note": None}
-    if not script.exists():
+    if not os.path.exists(script):
         notice["note"] = ("the wired recorder is not on disk — the hook "
                           "runs nothing, and a session that records "
                           "nothing looks exactly like a quiet one")
@@ -2642,12 +2805,13 @@ def read_witness(transcript, calibration):
     from a line naming none. `latest` is the liveness clock, the newest
     timestamped conversational record: chatter moves it, the harness's
     timestamp-less metadata records never do, or an old deficit comes
-    back as an immortal live alarm (#85). `first` is the earliest
-    working call, read before the coverage filter (ADR-0029 asks when
-    the session started working). `worded` counts the failed calls read
-    as owed, and `unworded` the failed Bash and PowerShell calls read as
-    `may_owe` because no `Exit code N` line opened them (#379); both are
-    counted for the canary in watch_completeness(), and neither moves
+    back as an immortal live alarm (#85). `first` is the earliest call
+    with a result, failed or not, read before the coverage filter
+    (ADR-0029 asks when the session started working). `worded` counts
+    the failed calls read as owed, and `unworded` the failed Bash and
+    PowerShell calls read as `may_owe` because no `Exit code N` line
+    opened them (#379); both are counted for the canary in
+    watch_completeness(), and neither moves
     the reading."""
     names = {}
     owed = []
@@ -2680,7 +2844,8 @@ def read_witness(transcript, calibration):
                 if not isinstance(blocks, list):
                     blocks = []
                 for block in blocks:
-                    if isinstance(block, dict)                             and block.get("type") == "tool_use":
+                    if isinstance(block, dict) \
+                            and block.get("type") == "tool_use":
                         names[block.get("id")] = block.get("name")
                 found = next((block for block in blocks
                               if isinstance(block, dict)
@@ -2705,6 +2870,10 @@ def read_witness(transcript, calibration):
                 witnessed.add(name)
                 when = record.get("timestamp")
                 epoch = epoch_at(calibration, when)
+                # Before every filter below: a call that failed, or one
+                # no matcher covered, is still the session at work.
+                if isinstance(when, str) and (first is None or when < first):
+                    first = when
                 if failed:
                     owes = failed_call_owes(record, found, name, epoch)
                     if owes == "may_owe":
@@ -2717,8 +2886,6 @@ def read_witness(transcript, calibration):
                     owed.append((when, name))
                 elif owes_receipt(name, epoch["matchers"]):
                     owed.append((when, name))
-                if isinstance(when, str) and (first is None or when < first):
-                    first = when
     # Merged across files, so order is no longer a given, and the
     # deficit clock reads the first unpaired call, which names the right
     # moment only in time order.
@@ -2965,13 +3132,13 @@ def watch_completeness(root, witness, families, everywhere=False,
                         "judged by one are judged on that word, not on "
                         "anything this supervisor watched")
     transcripts = {}
-    if witness.is_dir():
+    if os.path.isdir(witness):
         transcripts = {t.stem: t for t in sorted(witness.glob("*/*.jsonl"))}
     else:
         watch["note"] = (f"witness absent — no transcript layout at "
                          f"{witness.as_posix()}; completeness cannot be "
                          "watched this look")
-    if witness.is_dir() and not matchers:
+    if os.path.isdir(witness) and not matchers:
         watch["note"] = ("no recorder hook is wired into the harness "
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
@@ -3340,27 +3507,30 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
               authority=None, remember=True):
     """One tick without timers: census + verdicts + baseline diff +
     completeness watch as a report dict, what `scan` prints and what
-    the status endpoint serves. The baseline is remembered anew after
-    diffing, so an alarm belongs to the tick that caught it, save a
-    chain that reads as empty, which keeps its head and says so on every
-    tick while it stays that way (#387). One walk,
+    the status endpoint serves. A remembered chain that reads regressed,
+    rewritten or vanished keeps the head the baseline remembered, and
+    the look says so on every tick until the chain holds that head again
+    or `acknowledge` accepts what is there; a baseline the look cannot
+    read or keep is exit 5 on every tick (ADR-0039). One walk,
     two universes: the store (ADR-0011: root is its receipts folder,
     drawers name their repos, the baseline lives beside it) or a legacy
     folder of repos under --root. `remember=False` reads the day book
     instead of writing it, for `serve`'s keeper clock (#271): a machine
     talking to itself is not somebody looking (ADR-0014), and its rows
-    would silence the lapse line; the read-once exception is at the
-    call below."""
+    would silence the lapse line; the exception for what a turn finds
+    new is at the call below."""
     now = datetime.now(timezone.utc)
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     if store:
         os.makedirs(root.parent, exist_ok=True)
-        baseline_path = root.parent / "baseline.json"
-        daybook = root.parent / "daybook.json"
-    else:
-        baseline_path = root / BASELINE_NAME
-        daybook = root / DAYBOOK_NAME
-    (remembered, keeper, calibration, sessionend,
-     note) = read_baseline(baseline_path)
+    baseline_path, daybook = memory_paths(root, store)
+    memory = read_baseline(baseline_path, daybook)
+    remembered, keeper = memory["chains"], memory["keeper"]
+    calibration, sessionend = memory["calibration"], memory["sessionend"]
+    note, blind = memory["note"], memory["blind"]
+    # A blind look runs neither keeper: their throttle is in the file it
+    # could not read, and without it they would ask on every tick.
+    keeping = tick and not blind
     # Observe the wired matchers before anything is judged, so this
     # tick's own judgments use a memory that includes this tick's look.
     calibration = calibrate(calibration, witness, now)
@@ -3370,6 +3540,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     judging = merge_coverage(calibration, coverage_epochs())
     sessionend = sessionend_epoch(sessionend, witness, now)
     events = []
+    fresh = 0  # alarms this look found, or whose change moved
     awakened = {}
     heads = {}
     families = {}
@@ -3378,7 +3549,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if store:
         found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
                         if not p.name.endswith(SIDECAR_SUFFIXES))
-                 if root.is_dir() else [])
+                 if os.path.isdir(root) else [])
         census = sorted((store_identity(log), log) for log in found)
     else:
         census = sorted((chain_identity(root, log), log)
@@ -3395,11 +3566,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         attempted, keeper_note, anchor_failed = (
             keep_anchors(log, keeper.get(relpath), now, entries,
                          anchor_every, calendars, authority)
-            if tick else (False, None, False))
+            if keeping else (False, None, False))
         posted, publish_note, publish_failed = (
             keep_published(log, keeper.get("publish:" + relpath), now, entries,
                            publish_every, publish_url, publish_chain)
-            if tick else (False, None, False))
+            if keeping else (False, None, False))
         # One throttle per keeper: an anchor attempt never delays the
         # publish keeper's turn, nor the other way round.
         if attempted:
@@ -3460,23 +3631,35 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                 damaged += 1
 
         change = diff_baseline(remembered, relpath, entries)
+        known = remembered.get(relpath) or {}
+        newest = newest_head(entries)
         if change:
-            events.append({"repo": repo, "session": session, "log": relpath,
-                           "change": change,
-                           "investigate": CHANGE_WORDS[change]})
-        if entries:
+            # The baseline keeps what it remembered (ADR-0039): the head
+            # and number stay, so every look says so until the chain
+            # holds them again or `acknowledge` accepts what is found.
+            # The verdict is this look's, for the digest; the stillness
+            # clock keeps its time, since a change is no growth.
+            row, new = standing(known, change, stamp)
+            heads[relpath] = {**row, "verdict": verdict,
+                              "superseded": stood_down}
+            fresh += new
+            events.append(alarm_event(
+                repo, session, relpath, row,
+                {"n": newest[0], "head": newest[1]} if newest
+                else {"n": None, "head": None}))
+        elif newest:
             # The lifecycle's clock (ADR-0018): the reader's own diary
             # of when it last saw this head move. An unchanged head
             # carries its stamp forward; a new or moved head — or a
             # baseline that predates the field — stamps this look, so
             # stillness only exists once it has actually been observed.
-            known = remembered.get(relpath) or {}
+            # A blind look has observed nothing and stamps nothing.
             last_grew = (known.get("last_grew")
-                         if known.get("head") == entries[-1].get("entry_hash")
+                         if known.get("head") == newest[1]
                          and known.get("last_grew")
-                         else now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-            heads[relpath] = {"n": entries[-1].get("n"),
-                              "head": entries[-1].get("entry_hash"),
+                         else None if blind else stamp)
+            heads[relpath] = {"n": newest[0],
+                              "head": newest[1],
                               # For the digest's last-scan line (Stage E):
                               # a remembered verdict is testimony like the
                               # rest of this file, never the verdict itself.
@@ -3494,8 +3677,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             # writing commitments) is the recorder speaking, not the
             # session acting — it never wakes anything.
             woke = lifecycle_tier(known.get("last_grew"), now)
-            if (change is None and known.get("head")
-                    and entries[-1].get("entry_hash") != known.get("head")
+            if (known.get("head") and newest[1] != known.get("head")
                     and woke and woke[0] == "dormant"
                     and any(isinstance(e, dict)
                             and isinstance(e.get("n"), int)
@@ -3510,15 +3692,6 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                               "or someone riding an old session; yours "
                               "to tell apart"),
                 }
-        elif relpath in remembered:
-            # A chain that reads as no entries (empty, or a folder or a
-            # pipe at its name) keeps the head remembered for it, so each
-            # look says regressed while it reads as empty, and a shorter
-            # chain put back is diffed against that head and reads as one
-            # that shrank, not as a new one (#387). The verdict is this
-            # look's, for the digest.
-            heads[relpath] = {**remembered[relpath], "verdict": verdict,
-                              "superseded": stood_down}
 
         # The session's receipt tally for the completeness watch: the
         # whole sibling family counts, minus the recorder's own voice —
@@ -3554,8 +3727,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         # commitment (siblings sort after their parent, so the chain
         # seen last is the one still being written to).
         if entries:
-            grew = heads[relpath]["last_grew"]
-            if grew > (family.get("last_grew") or ""):
+            # None for a row from before the clock, under a standing
+            # alarm, or on a blind look: nothing observed, nothing told.
+            grew = (heads.get(relpath) or {}).get("last_grew")
+            if grew and grew > (family.get("last_grew") or ""):
                 family["last_grew"] = grew
             family["tail_committed"] = (
                 entries[-1].get("actor") == "receipts"
@@ -3563,29 +3738,55 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                     "transcript-commitment:"))
             family["home"] = (root / relpath).parent.as_posix()
 
-    for relpath in remembered:
-        if relpath not in heads and not (root / relpath).exists():
-            repo_name, session, _ = (store_identity(root / relpath) if store
-                                     else chain_identity(root, root / relpath))
-            events.append({"repo": repo_name, "session": session,
-                           "log": relpath, "change": "vanished",
-                           "investigate": CHANGE_WORDS["vanished"]})
+    for relpath, known in remembered.items():
+        if relpath in heads:
+            continue
+        # os.path.exists, which answers False for a folder this user
+        # may not look into: Path.exists raises there before Python
+        # 3.14, and one chmod would cost every chain its scan.
+        if os.path.exists(root / relpath):
+            # Something the census does not count stands at the name:
+            # its memory is kept as it was, never dropped unseen.
+            heads[relpath] = known
+            continue
+        repo_name, session, _ = (store_identity(root / relpath) if store
+                                 else chain_identity(root, root / relpath))
+        # Kept, not forgotten (ADR-0039): what is put back at the name
+        # later is diffed against the remembered head.
+        row, new = standing(known, "vanished", stamp)
+        heads[relpath] = row
+        fresh += new
+        events.append(alarm_event(repo_name, session, relpath, row, None))
 
-    try:
-        write_whole(baseline_path, json.dumps({
-            "purpose": "the supervisor's memory between looks — "
-                       "writer-reachable, trusted for nothing",
-            "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "chains": heads,
-            "keeper": keeper,
-            "calibration": calibration,
-            "sessionend": sessionend,
-        }, indent=2) + "\n")
-    except OSError as error:
-        if error.strerror not in (NOT_A_FOLDER, NOT_REGULAR):
-            raise
-        note = memory_unread(baseline_path, "a baseline", error.strerror)
-    if events:
+    unkept = None
+    if blind:
+        pass  # nothing remembered, nothing written: the file is evidence
+    elif not unchanged_since(baseline_path, memory["seen"]):
+        note = (f"{baseline_path.name} changed while this look ran (a "
+                "scan, a calibration or an acknowledgement wrote it): it "
+                "was left standing, and the next look reads it")
+    else:
+        try:
+            write_whole(baseline_path, json.dumps({
+                "purpose": "the supervisor's memory between looks — "
+                           "writer-reachable, trusted for nothing",
+                "scanned": stamp,
+                "chains": heads,
+                "keeper": keeper,
+                "calibration": calibration,
+                "sessionend": sessionend,
+                # Kept whole: rare acts by a person, testimony every
+                # report carries (ADR-0039).
+                "acknowledged": memory["acknowledged"],
+            }, indent=2) + "\n")
+        except OSError as error:
+            # Any refusal, a folder swapped in or one this user may not
+            # write in, is an alarm and never a traceback (ADR-0039).
+            unkept = error.strerror or str(error)
+            note = (f"{baseline_path.name} could not be written: {unkept} "
+                    "— what this look remembered is lost, and the next "
+                    "look reads whatever stands there")
+    if events or blind or unkept:
         worst = max(worst, 5)
 
     completeness = watch_completeness(root, witness, families,
@@ -3615,20 +3816,32 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "worst": worst, "chains": len(census), "broken": damaged,
         "events": len(events), "alarms": alarms,
         "reawakenings": len(awakened),
+        # Kept on the row, never painted (PAINTED): what tells a keeper
+        # turn that the book already shows a blind memory.
+        "blind": 1 if blind else 0,
     }
-    # An unasked turn stays out of the book while it has nothing to
+    # An unasked turn stays out of the book while it has nothing new to
     # report (ADR-0014): a machine asking itself every minute is not
-    # somebody looking. It goes in the moment it catches something
-    # read-once (a baseline event, a reawakening, both consumed by the
-    # diff, save the regression of a chain that reads as empty, which
-    # every look catches again, #387), or the event would be recorded
-    # nowhere and the day would paint quiet; the day's worst is sticky
-    # so a morning reader sees it.
-    caught = bool(events or awakened)
-    days = (remember_day(daybook, now, tally) if remember or caught
-            else read_daybook(daybook))
+    # somebody looking. It goes in when it finds what no row records yet,
+    # an alarm this look found or whose change moved, a reawakening, a
+    # blind memory the book's newest row does not show, or the finding
+    # would be recorded nowhere and the day would paint quiet. An alarm
+    # already standing does not mark every later day as watched
+    # (ADR-0039); the day's worst is sticky, so a morning reader still
+    # sees the day it was found, and every day somebody looks.
+    days = read_daybook(daybook)
+    latest = days.get(max(days)) if days else None
+    shown = isinstance(latest, dict) and latest.get("blind") == 1
+    if remember or fresh or awakened or (blind and not shown):
+        days = remember_day(daybook, now, tally)
 
-    baseline = {"file": baseline_path.as_posix(), "events": events}
+    baseline = {"file": baseline_path.as_posix(), "events": events,
+                # Testimony: never raises the exit, never moves an event.
+                "acknowledged": memory["acknowledged"]}
+    if blind:
+        baseline["blind"] = blind
+    if unkept:
+        baseline["unkept"] = True
     if note:
         baseline["note"] = note
     shelf = not_a_file(daybook)
@@ -3724,39 +3937,60 @@ def cmd_adopt(args):
     the plan. Empty legacy folders are left for the operator to
     prune."""
     root = Path(args.root).resolve()
-    moves, refused = [], []
+    moves, refused, not_files = [], [], []
     for log in find_chains(root):
+        problem = file_problem(log)
+        if problem is not None:
+            # A folder or a pipe where a chain belongs is no chain to
+            # move (#374), and a file this user may not read is no use
+            # in the store: named, and left as it lies.
+            not_files.append((log, problem))
+            continue
         project = adoption_project(root, log)
         drawer = store_receipts() / project_slug(project)
-        (refused if (drawer / log.name).exists() else moves).append(
+        # lexists: a link to nowhere at the name stands there too, and a
+        # move across two filesystems would copy through it (#422).
+        (refused if os.path.lexists(drawer / log.name) else moves).append(
             (log, drawer, project))
-    if not moves and not refused:
+    if not moves and not refused and not not_files:
         print(f"nothing to adopt under {root.as_posix()}")
         return 0
+    adopted = 0
     for log, drawer, project in moves:
         line = f"{log.relative_to(root).as_posix()} -> {drawer.name}/"
         if args.dry_run:
             print(f"would adopt {line}")
             continue
-        os.makedirs(drawer, exist_ok=True)
         record = drawer / "project.json"
         try:
+            os.makedirs(drawer, exist_ok=True)
             # Created only where nothing stands, so a pipe put at the
             # name is kept as it is and never opened (#405).
             with open(record, "x", encoding="utf-8") as f:
                 f.write(json.dumps(
                     {"path": str(project.resolve()).replace(os.sep, "/")})
                     + "\n")
-        except OSError:
+        except OSError as error:
             if not os.path.lexists(record):
-                raise
+                # A drawer, or the store around it, closed to this user
+                # (#421): named, and the chain left where it lies.
+                print(f"refused {log.relative_to(root).as_posix()}: "
+                      f"{drawer.name}/ cannot be written: "
+                      f"{error.strerror or error} — not adopted; left as "
+                      "it lies")
+                continue
         marker = log.parent / UNLISTED_NAME
         shutil.move(str(log), str(drawer / log.name))
         for suffix in SIDECAR_SUFFIXES:
             sidecar = log.parent / (log.name + suffix)
-            if not sidecar.exists():
+            if not os.path.exists(sidecar):
                 continue
-            if (drawer / sidecar.name).exists():
+            problem = file_problem(sidecar)
+            if problem is not None:
+                print(f"left sidecar "
+                      f"{sidecar.relative_to(root).as_posix()}: {problem} "
+                      "— not moved; reconcile by hand")
+            elif os.path.lexists(drawer / sidecar.name):
                 # Proofs left behind are still proofs; say so — silence
                 # here would read as "everything travelled".
                 print(f"left sidecar "
@@ -3766,7 +4000,8 @@ def cmd_adopt(args):
                       "reconcile by hand")
             else:
                 shutil.move(str(sidecar), str(drawer / sidecar.name))
-        if marker.exists() and not (drawer / UNLISTED_NAME).exists():
+        if os.path.exists(marker) \
+                and not os.path.exists(drawer / UNLISTED_NAME):
             try:
                 copy_regular(marker, drawer / UNLISTED_NAME)
             except OSError as error:
@@ -3776,12 +4011,16 @@ def cmd_adopt(args):
                       f"{error.strerror or error} — not copied, so "
                       f"{drawer.name}/ is listed; unlist it by hand")
         print(f"adopted {line}")
+        adopted += 1
     for log, drawer, _ in refused:
         print(f"refused {log.relative_to(root).as_posix()}: "
               f"{drawer.name}/{log.name} already exists in the store — "
               "evidence is never overwritten; reconcile by hand")
-    if not args.dry_run and moves:
-        print(f"{len(moves)} chain(s) adopted into "
+    for log, problem in not_files:
+        print(f"refused {log.relative_to(root).as_posix()}: {problem} — "
+              "not adopted; left as it lies")
+    if adopted:
+        print(f"{adopted} chain(s) adopted into "
               f"{store_receipts().as_posix()}")
     return 0
 
@@ -3800,6 +4039,222 @@ def cmd_scan(args):
                        show_before_memory=args.before_memory)
     print(json.dumps(report, indent=None if args.json else 2))
     return report["exit"]
+
+
+def say_memory(report):
+    """The baseline's own trouble on stderr, for `export` and `package`:
+    each takes a scan underneath and exits by a contract of its own, and
+    a memory the scan could not read or keep is exit 5 to `scan`
+    (ADR-0039), so they say it rather than go quiet."""
+    baseline = report.get("baseline") or {}
+    if baseline.get("blind") or baseline.get("unkept"):
+        print(f"note: the scan underneath this is exit 5: "
+              f"{baseline.get('note')}", file=sys.stderr)
+
+
+# --- Acknowledging a change (ADR-0039) -----------------------------------------
+# The one act that moves the baseline past a change appends cannot
+# explain. The operator names a chain and the state a scan reported, and
+# the memory takes exactly that or refuses, changing nothing and saying
+# what it found; or names the memory itself, when it cannot be read. A
+# record goes into the baseline and every later report. The supervisor
+# never acknowledges on its own behalf. The file is in the writer's
+# reach, and so is this verb: the record is testimony, and the anchor
+# and the published head stay the boundary (ADR-0002, ADR-0025).
+
+SHORTEST_HEAD = 12  # hex characters of a head the operator may name
+MOVES_NO_VERDICT = ("This moves no verdict: verify, the anchors and any "
+                    "published head judge {} as before.")
+
+
+def refused(words, code=None):
+    """A refusal: the words on stderr, nothing written. 64, as
+    `calibrate` answers every refusal of its own, unless `code` says
+    otherwise."""
+    print(f"error: {words}", file=sys.stderr)
+    return EX_USAGE if code is None else code
+
+
+def census_logs(root, store):
+    """Every chain the scan's census counts: the store's drawers, or a
+    legacy root's three shapes (`find_chains`). The twin of the census
+    inline in scan_root; the two must agree."""
+    if store:
+        return (sorted(p for p in root.glob("*/receipts-*.jsonl")
+                       if not p.name.endswith(SIDECAR_SUFFIXES))
+                if os.path.isdir(root) else [])
+    return find_chains(root)
+
+
+def cmd_acknowledge(args):
+    store = args.root is None
+    root = store_receipts() if store else Path(args.root).resolve()
+    path, daybook = memory_paths(root, store)
+    if args.baseline:
+        if args.log is not None or args.state is not None:
+            args.spoken_wrong("--baseline acknowledges the memory itself "
+                              "and takes no LOG or STATE")
+        return acknowledge_baseline(root, store, path, daybook)
+    if args.log is None or args.state is None:
+        args.spoken_wrong("name a chain and the state you accept (LOG "
+                          "STATE), or the memory itself (--baseline)")
+    state = args.state.strip().lower()
+    if state != "gone" and not (len(state) >= SHORTEST_HEAD and all(
+            c in "0123456789abcdef" for c in state)):
+        return refused(f"{visible(args.state)!r} is neither `gone` nor a "
+                       "head: name the head the scan's `found` printed, "
+                       f"whole or its first {SHORTEST_HEAD} hex characters "
+                       "or more")
+    memory = read_baseline(path, daybook)
+    if memory["blind"]:
+        return refused(f"{memory['note']}. A chain is acknowledged once the "
+                       "memory can be read: `supervisor acknowledge "
+                       "--baseline` comes first")
+    log = args.log.replace("\\", "/")
+    known = memory["chains"].get(log)
+    alarm = known.get("alarm") if isinstance(known, dict) else None
+    if not isinstance(alarm, dict) or alarm.get("change") not in CHANGE_WORDS:
+        return refused(f"no alarm stands for {visible(log)} in the baseline "
+                       f"at {path.as_posix()}: only a change a scan "
+                       "reported can be acknowledged; run `supervisor scan` "
+                       "and name the chain as its event's `log` prints it")
+    change = alarm["change"]
+    chain = root / log
+    entries = read_entries(chain)
+    if diff_baseline(memory["chains"], log, entries) is None:
+        return refused(f"{visible(log)} holds the remembered head again at "
+                       f"n {known['n']}: appends explain it, and the next "
+                       "look clears the alarm; nothing to acknowledge")
+    newest = newest_head(entries)
+    stands = os.path.lexists(chain)
+    # An acknowledgement accepts only the state a scan reported, never
+    # whatever is there by now (Tripwire's secure mode; #401's prior art).
+    if state == "gone":
+        if stands:
+            found = (f"n {newest[0]}, head {newest[1]}" if newest
+                     else file_problem(chain) or "a chain with no entries")
+            return refused(f"something stands at {visible(log)} ({found}); "
+                           "`gone` accepts only a chain that is not there: "
+                           "look again with `supervisor scan`")
+        if change != "vanished":
+            return refused(f"the last look found a chain at {visible(log)}, "
+                           f"{change}, and it has gone since: look again "
+                           "with `supervisor scan`")
+        try:
+            os.listdir(chain.parent)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError:
+            return refused(f"the folder holding {visible(log)} cannot be "
+                           "looked into, so whether the chain is gone is "
+                           "unknown: open it and look again with "
+                           "`supervisor scan`")
+        accepted = None
+    else:
+        if not stands:
+            return refused(f"nothing stands at {visible(log)}: acknowledge "
+                           "`gone`, or put the chain back")
+        if change == "vanished":
+            return refused(f"the last look found nothing at {visible(log)}, "
+                           "and something stands there now: look again "
+                           "with `supervisor scan`")
+        if newest is None:
+            return refused(f"{visible(log)} holds no entries to accept "
+                           f"({file_problem(chain) or 'an empty chain'}): "
+                           "remove it and acknowledge `gone`, or put the "
+                           "chain back")
+        if not newest[1].startswith(state):
+            return refused(f"{visible(log)}'s head is now {newest[1]} at "
+                           f"n {newest[0]}, not {state}: an acknowledgement "
+                           "accepts only the state a scan reported, so look "
+                           "again with `supervisor scan`")
+        accepted = {"n": newest[0], "head": newest[1]}
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = json.loads(memory["seen"])
+    if accepted is None:
+        del data["chains"][log]
+    else:
+        # The verdict fields stay the last look's, for the digest; the
+        # stillness clock starts at the next look, as for any new head.
+        data["chains"][log] = {
+            **accepted, **{field: known[field] for field in
+                           ("verdict", "superseded") if field in known}}
+    data["acknowledged"] = memory["acknowledged"] + [{
+        "ts": stamp, "log": log, "change": change,
+        "remembered": {"n": known["n"], "head": known["head"]},
+        "accepted": accepted}]
+    if not unchanged_since(path, memory["seen"]):
+        return refused(f"the baseline at {path.as_posix()} changed while "
+                       "this ran (a scan or another acknowledgement wrote "
+                       "it); nothing was written: run it again", 75)
+    try:
+        write_whole(path, json.dumps(data, indent=2) + "\n")
+    except OSError as error:
+        return refused(f"{path.name} could not be written: "
+                       f"{error.strerror or error}; nothing was "
+                       "acknowledged", 73)
+    now_remembers = (f"n {accepted['n']} at {accepted['head'][:16]}"
+                     if accepted else "nothing for it (gone)")
+    print(f"acknowledged: {visible(log)}, {change}; the baseline remembered "
+          f"n {known['n']} at {visible(known['head'][:16])} and now "
+          f"remembers {now_remembers}. "
+          + MOVES_NO_VERDICT.format("the chain"))
+    return 0
+
+
+def acknowledge_baseline(root, store, path, daybook):
+    """`acknowledge --baseline`: a memory the scan cannot read, or one
+    missing beside a day book that records a scan, started afresh from
+    every chain as it stands, with one record of what stood there. The
+    old file is replaced: the act is the operator's, and the record says
+    what it was."""
+    memory = read_baseline(path, daybook)
+    if not memory["blind"]:
+        if memory["seen"] is None:
+            return refused(f"there is no baseline at {path.as_posix()} and "
+                           "no day book beside it that records a scan: the "
+                           "next scan starts the memory itself; nothing to "
+                           "acknowledge")
+        return refused(f"the baseline at {path.as_posix()} reads fine; "
+                       "there is nothing to acknowledge (a chain's alarm "
+                       "is acknowledged by name: `supervisor acknowledge "
+                       "LOG STATE`)")
+    problem = not_a_file(path)
+    if problem:
+        return refused(f"{path.name} cannot be read as a baseline: "
+                       f"{problem}; remove it by hand, then run this "
+                       "again — nothing is ever written over it")
+    heads = {}
+    for log in census_logs(root, store):
+        newest = newest_head(read_entries(log))
+        if newest:
+            heads[log.relative_to(root).as_posix()] = {"n": newest[0],
+                                                       "head": newest[1]}
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    change = memory["blind"]
+    try:
+        write_whole(path, json.dumps({
+            "purpose": "the supervisor's memory between looks — "
+                       "writer-reachable, trusted for nothing",
+            "scanned": stamp, "chains": heads, "keeper": {},
+            "calibration": [], "sessionend": {},
+            "acknowledged": [{"ts": stamp, "baseline": path.name,
+                              "change": change, "stood": memory["stood"],
+                              "accepted": {"chains": len(heads)}}],
+        }, indent=2) + "\n")
+    except OSError as error:
+        return refused(f"{path.name} could not be written: "
+                       f"{error.strerror or error}; nothing was "
+                       "acknowledged", 73)
+    lost = ("whatever calibration memory the old file held is lost"
+            if change == "unreadable"
+            else "there was no calibration memory left to keep")
+    print(f"acknowledged: the baseline at {path.as_posix()} ({change}: "
+          f"{visible(memory['stood'])}); the memory starts afresh from "
+          f"{len(heads)} chain(s) as they stand now, and {lost}, so the "
+          "next scan stamps a new inception and sessions before it go "
+          "unjudged. " + MOVES_NO_VERDICT.format("every chain"))
+    return 0
 
 
 # --- Seeding the calibration memory -------------------------------------------
@@ -3943,7 +4398,7 @@ def universe(root, store):
     if store:
         found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
                         if not p.name.endswith(SIDECAR_SUFFIXES))
-                 if root.is_dir() else [])
+                 if os.path.isdir(root) else [])
         return [(*store_identity(log), log) for log in found]
     return [(*chain_identity(root, log), log) for log in find_chains(root)]
 
@@ -4165,7 +4620,7 @@ def resolve_chain(root, asked):
         return None
     if (not path.name.endswith(".jsonl")
             or path.name.endswith(SIDECAR_SUFFIXES)
-            or not path.is_file()):
+            or not os.path.isfile(path)):
         return None
     return path
 
@@ -4270,7 +4725,7 @@ def main_repo_of(project):
     returns `project` unchanged, since recall never fails over path
     layout."""
     dot_git = project / ".git"
-    if not dot_git.is_file():
+    if not os.path.isfile(dot_git):
         return project  # a normal checkout (.git/ dir), or not a repo
     try:
         # Read without waiting, as the recorder reads them (#386).
@@ -4284,7 +4739,7 @@ def main_repo_of(project):
             common = read_whole(gitdir / "commondir").strip()
             root = Path(os.path.normpath(gitdir / common)).parent
         except OSError as error:
-            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+            if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
                 return project  # a folder or a pipe there: unexpected
             # A deregistered worktree (ADR-0023): the gitdir is gone, but
             # its path still spells <main>/.git/worktrees/<name>.
@@ -4293,7 +4748,7 @@ def main_repo_of(project):
             if at <= 0:
                 return project
             root = Path(spelled[:at])
-        return root if root.is_dir() else project
+        return root if os.path.isdir(root) else project
     except OSError:
         return project
 
@@ -4373,7 +4828,8 @@ def repo_label(log):
     lives: a store drawer labels itself; a legacy path is named by the
     folder that holds its receipts/."""
     parent = log.parent
-    if (parent / "project.json").exists() or parent.parent == store_receipts():
+    if os.path.exists(parent / "project.json") \
+            or parent.parent == store_receipts():
         return drawer_name(parent)
     return parent.parent.name
 
@@ -4389,7 +4845,8 @@ def worktree_drawers(repo):
         + "/.claude/worktrees/"
     found = []
     try:
-        drawers = sorted(p for p in store_receipts().iterdir() if p.is_dir())
+        drawers = sorted(p for p in store_receipts().iterdir()
+                         if os.path.isdir(p))
     except OSError:
         return found
     for drawer in drawers:
@@ -4420,7 +4877,7 @@ def repo_drawers(repo):
     (ADR-0023). The one resolution `digest --repo`, `search --repo`,
     `timeline`, and `package --repo` all read a repository through."""
     drawer = store_receipts() / project_slug(repo)
-    found = [drawer] if drawer.is_dir() else []
+    found = [drawer] if os.path.isdir(drawer) else []
     found += [extra for extra in worktree_drawers(repo) if extra != drawer]
     return found
 
@@ -4458,7 +4915,7 @@ def recall_scope(args):
             for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
                 if log.name.endswith(SIDECAR_SUFFIXES) or log in known:
                     continue
-                if (log.parent / UNLISTED_NAME).exists() \
+                if os.path.exists(log.parent / UNLISTED_NAME) \
                         and log.parent != drawer:
                     continue
                 logs.append(log)
@@ -4477,7 +4934,7 @@ def legacy_recall_scope(args, repo):
             log = log.resolve()
             if log in known:
                 continue
-            if (log.parent / UNLISTED_NAME).exists():
+            if os.path.exists(log.parent / UNLISTED_NAME):
                 try:
                     repo.relative_to(log.parent.parent)
                 except ValueError:
@@ -4628,7 +5085,8 @@ def scan_testimony(repo):
     remembers (ADR-0011), else the legacy spots (the repo itself, or
     the folder of repos above it). The baseline is trusted for nothing
     — which is exactly why recall may cite it: testimony citing
-    testimony."""
+    testimony. Returns (scanned, verdicts, standing alarms, unread),
+    `unread` naming a baseline that is there and cannot be read."""
     slugs = [project_slug(repo) + "/"] + [
         drawer.name + "/" for drawer in worktree_drawers(repo)]
 
@@ -4644,26 +5102,40 @@ def scan_testimony(repo):
         except (ValueError, OSError):
             return False
 
-    sources = [(Path(store_home()) / "baseline.json", in_drawer),
-               (repo / BASELINE_NAME, under_repo),
-               (repo.parent / BASELINE_NAME, under_repo)]
-    for path, covers in sources:
+    sources = [(Path(store_home()) / "baseline.json",
+                Path(store_home()) / "daybook.json", in_drawer),
+               (repo / BASELINE_NAME, repo / DAYBOOK_NAME, under_repo),
+               (repo.parent / BASELINE_NAME, repo.parent / DAYBOOK_NAME,
+                under_repo)]
+    # A baseline that is there and cannot be read, or is missing beside a
+    # day book that records a scan, is named rather than read as none:
+    # the scan calls it exit 5 on every look (ADR-0039).
+    unread = None
+    for path, book, covers in sources:
         try:
             data = json.loads(read_whole(path))
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            if unread is None and daybook_records_a_scan(book):
+                unread = f"{path.name} is missing beside a day book"
             continue
-        scanned = data.get("scanned")
-        chains = data.get("chains")
+        except (OSError, ValueError, RecursionError):
+            unread = unread or f"{path.name} cannot be read"
+            continue
+        scanned = data.get("scanned") if isinstance(data, dict) else None
+        chains = data.get("chains") if isinstance(data, dict) else None
         if not isinstance(scanned, str) or not isinstance(chains, dict):
+            unread = unread or f"{path.name} cannot be read"
             continue
+        covered = [row for relpath, row in chains.items()
+                   if isinstance(row, dict) and covers(relpath, path.parent)]
         verdicts = [str(row["verdict"])
                     + (" (superseded)" if row.get("superseded") else "")
-                    for relpath, row in chains.items()
-                    if isinstance(row, dict) and "verdict" in row
-                    and covers(relpath, path.parent)]
-        if verdicts:
-            return scanned, verdicts
-    return None, []
+                    for row in covered if "verdict" in row]
+        standing = sum(1 for row in covered
+                       if isinstance(row.get("alarm"), dict))
+        if verdicts or standing:
+            return scanned, verdicts, standing, unread
+    return None, [], 0, unread
 
 
 def payload_cwd():
@@ -4684,7 +5156,8 @@ def cmd_digest(args):
     """The session-start injection: local by design ("all memory" means
     all reachable, never all injected), budget-capped, zero subprocess
     spawns — recall owns no verdicts, so nothing here runs verify."""
-    if getattr(args, "payload", False) and not args.repo             and not os.environ.get("CLAUDE_PROJECT_DIR"):
+    if getattr(args, "payload", False) and not args.repo \
+            and not os.environ.get("CLAUDE_PROJECT_DIR"):
         args.repo = payload_cwd()  # the environment wins when present
     repo = invoking_repo(args)
     families, rows = gather(project_chains(repo))
@@ -4720,7 +5193,7 @@ def cmd_digest(args):
     if reached < total:
         memory += f"; showing last {reached} (search reaches the rest)"
     lines.append(memory)
-    scanned, verdicts = scan_testimony(repo)
+    scanned, verdicts, standing, unread = scan_testimony(repo)
     if scanned:
         counts = {}
         for verdict in verdicts:
@@ -4730,10 +5203,20 @@ def cmd_digest(args):
         else:
             summary = ", ".join(f"{n} {v}"
                                 for v, n in sorted(counts.items()))
+        if standing:
+            # A change the baseline keeps until it clears or is
+            # acknowledged (ADR-0039): the verdicts alone would read clean.
+            summary = "; ".join(filter(None, [summary, (
+                f"{standing} baseline alarm{'' if standing == 1 else 's'} "
+                "standing")]))
         # The baseline is a plain file the agent can write: its
         # words are escaped like receipt text.
         lines.append(f"last scan: {visible(scanned)} - {visible(summary)} "
                      "(testimony; the verify line below judges a chain)")
+    elif unread:
+        lines.append(f"last scan: {visible(unread)} - the tripwire is "
+                     "blind until `supervisor acknowledge --baseline`; the "
+                     "verify line below judges a chain")
     else:
         lines.append("last scan: none recorded - "
                      "the verify line below judges a chain")
@@ -5411,10 +5894,10 @@ def build_export(report):
                                          "alarms", "reawakenings")}
                 for day in report.get("history", []) if isinstance(day, dict)]
     # The scan underneath just rewrote the store's baseline, calibration
-    # included; read it back the way the scan does (a tuple, not a
-    # dict — the first dry run shipped `matchers: null` for that).
-    _, _, calibration, _, _ = read_baseline(
-        Path(store_home()) / "baseline.json")
+    # included; read it back the way the scan does. A blind one reads as
+    # no calibration, as an unreadable one always has.
+    calibration = read_baseline(
+        Path(store_home()) / "baseline.json")["calibration"]
     # Judged the way the scan judged it, with the recorder's markers
     # merged in (ADR-0030). The baseline's own inception would date the
     # memory later than the boundary that actually decided which
@@ -5493,16 +5976,16 @@ def write_export(path, data, then):
     or the refusal when a folder or a pipe stands at its name: the
     export's own name is a predictable one in the folder the command
     runs in, which is the writer's, and an ordinary open of a pipe
-    there waits for good (#405). `then` says what that leaves. Returns
-    None, or 73 with the refusal printed: sysexits' EX_CANTCREAT, which
-    no scan verdict uses."""
+    there waits for good (#405). Any other write the system refuses, a
+    folder this user may not write in, is named the same way, as the
+    recorder's `unwritable_log` names one. `then` says what that leaves.
+    Returns None, or 73 with the refusal printed: sysexits'
+    EX_CANTCREAT, which no scan verdict uses."""
     try:
         write_whole(path, data)
     except OSError as error:
-        if error.strerror not in (NOT_A_FOLDER, NOT_REGULAR):
-            raise
         print(f"error: {Path(path).name} could not be written: "
-              f"{error.strerror} — {then}", file=sys.stderr)
+              f"{error.strerror or error} — {then}", file=sys.stderr)
         return 73
     return None
 
@@ -5566,6 +6049,7 @@ def cmd_export(args):
     ordinary tick: it remembers its baseline like any other."""
     root = store_receipts()
     report = scan_root(root, witness=Path(args.witness), store=True)
+    say_memory(report)
     data, ordinal, newest = build_export(report)
     stamp = str(report.get("scanned") or "")[:10] or "undated"
     out = (Path(args.out) if args.out
@@ -5755,11 +6239,11 @@ def chain_listing(log):
     anchors = log.with_name(log.name + ".anchors.jsonl")
     stamps = log.with_name(log.name + ".stamps.jsonl")
     return {"path": log.name, "head": head, "entries": len(lines),
-            "anchors": anchors.name if anchors.exists() else None,
+            "anchors": anchors.name if os.path.exists(anchors) else None,
             # The stamps sidecar travels as the anchors sidecar does
             # (ADR-0032 ruling 4): both are evidence about this chain,
             # and `verify-package` judges each with the chain it names.
-            "stamps": stamps.name if stamps.exists() else None}
+            "stamps": stamps.name if os.path.exists(stamps) else None}
 
 
 def copy_regular(source, target):
@@ -6126,6 +6610,10 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     transcript still on disk (ADR-0026 ruling 2). Returns the file names
     in the order they were written, which is the order the zip keeps."""
     record = drawer / "project.json"   # travels only when it exists
+    # Or when it cannot be asked about, in a drawer closed to this user
+    # (#421): the copy below then refuses the package by name, where it
+    # would have shipped without the record and said nothing.
+    carried = os.path.exists(record) or file_problem(record) is not None
     written = []
     listings = {}
     artifacts = []
@@ -6180,8 +6668,8 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
                 "repository's history (ADR-0023); its file references are "
                 "relative to that worktree"
                 + (", not to the path in `project.json`"
-                   if record.exists() else ""))
-    if record.exists():
+                   if carried else ""))
+    if carried:
         copy_regular(record, stage / "project.json")
         written.append("project.json")
         artifacts.append(artifact_listing(stage / "project.json"))
@@ -6191,7 +6679,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     written.append("witness.json")
     artifacts.append(artifact_listing(stage / "witness.json"))
     write_lf(stage / "README.md",
-             package_readme(unit, packed, listings, witness, record.exists(),
+             package_readme(unit, packed, listings, witness, carried,
                             notes, seals, shipped))
     written.append("README.md")
     artifacts.append(artifact_listing(stage / "README.md"))
@@ -6246,7 +6734,7 @@ def sign_manifest(stage, keyfile):
         return None, (f"the manifest was not signed (ssh-keygen exited "
                       f"{signed.returncode}; its words are above)")
     beside = keyfile.with_name(keyfile.name + ".pub")
-    if beside.is_file():
+    if os.path.isfile(beside):
         line = beside.read_text("utf-8", errors="replace")
     else:
         derived = subprocess.run(["ssh-keygen", "-y", "-f", str(keyfile)],
@@ -6272,7 +6760,7 @@ def sign_manifest(stage, keyfile):
     if verified.returncode != 0:
         reason = "; ".join(verified.stderr.strip().splitlines()) \
             or "ssh-keygen gave no reason"
-        source = beside if beside.is_file() else keyfile
+        source = beside if os.path.isfile(beside) else keyfile
         return None, (f"the signature does not verify under the public key "
                       f"{source} gave ({reason}); a stale .pub beside a "
                       "regenerated key looks like this: move it aside and "
@@ -6333,11 +6821,19 @@ def seal_package(stage, seals, calendars, keyfile, authority=None):
 
 def zip_package(stage, written, out):
     """The default shape: one zip, members in write order, so the
-    manifest is the last member too."""
+    manifest is the last member too. Created exclusively: whatever
+    stands at `out` by now is kept and never opened, a pipe or a link
+    to nowhere included. Returns the error when the zip could not be
+    created, for the caller to refuse by (`out_refused`), else None."""
     import zipfile
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
+    try:
+        package = zipfile.ZipFile(out, "x", zipfile.ZIP_DEFLATED)
+    except OSError as error:
+        return error
+    with package:
         for name in written:
             package.write(stage / name, name)
+    return None
 
 
 def select_session(selector, sessions):
@@ -6374,6 +6870,24 @@ def split_refusal(session, chains):
           f"({', '.join(d.name for d in drawers)}); packaging a split "
           "session is not built", file=sys.stderr)
     return True
+
+
+def out_refused(out, error=None):
+    """The refusal when --out cannot be created. Something stands there,
+    at the look or at the create after it, and a package never replaces
+    it; or the system would not make it, said in the system's words."""
+    if error is None or (isinstance(error, FileExistsError)
+                         and os.path.lexists(out)):
+        print(f"error: {out} already exists; choose another --out",
+              file=sys.stderr)
+        return 1
+    # The parent that is in the way, when it is not --out itself.
+    where = "" if error.filename in (None, str(out)) \
+        else f" at {error.filename}"
+    print(f"error: {out} could not be written: "
+          f"{error.strerror or error}{where}; no package written",
+          file=sys.stderr)
+    return 1
 
 
 def swapped_out(error):
@@ -6452,13 +6966,13 @@ def cmd_package(args):
                       "to package (a legacy receipts/ layout moves into the "
                       "store with `supervisor adopt`)", file=sys.stderr)
             return 1
-        project = drawer_name(drawer) if drawer.is_dir() else repo.name
+        project = drawer_name(drawer) if os.path.isdir(drawer) else repo.name
         unit = {"kind": "drawer", "project": project,
                 "sessions": len(sessions)}
         # The file is named for the drawer folder, the slug: safe on every
         # filesystem and hash-suffixed, so two projects of one name never
         # collide (ADR-0011). The README keeps the display name.
-        slug = drawer.name if drawer.is_dir() else project_slug(repo)
+        slug = drawer.name if os.path.isdir(drawer) else project_slug(repo)
         stem, label = slug, f"drawer {slug}, {len(sessions)} session(s)"
     for session in sessions:
         # Checked against the whole store, not the selection: half of a
@@ -6486,10 +7000,10 @@ def cmd_package(args):
     default = Path.cwd() / f"loxodonta-package-{stem}"
     out = Path(args.out) if args.out else (
         default if args.folder else default.with_name(default.name + ".zip"))
-    if out.exists():
-        print(f"error: {out} already exists; choose another --out",
-              file=sys.stderr)
-        return 1
+    if os.path.lexists(out):
+        # A link to nowhere stands there too: written through, the
+        # package would land where nobody named.
+        return out_refused(out)
     # A reading, not a tick (tick=False): the keepers stay quiet, so
     # packaging appends nothing to the chain it copies and sends nothing
     # off the machine; the baseline still remembers the look. Only the
@@ -6497,6 +7011,7 @@ def cmd_package(args):
     # manifest's 32-byte digest, to the calendars or to the authority.
     report = scan_root(store_receipts(), witness=Path(args.witness),
                        store=True, tick=False)
+    say_memory(report)
     # Declared in ADR-0007's ladder order, the two *when* seals before
     # the signature and the anchor before the authority timestamp, which
     # is the order the verifier judges and prints them; applied the
@@ -6524,9 +7039,13 @@ def cmd_package(args):
     if problem:
         print(f"error: {problem}", file=sys.stderr)
         return 1
-    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if args.folder:
+            out.mkdir()
+    except OSError as error:
+        return out_refused(out, error)
     if args.folder:
-        out.mkdir()
         try:
             written = write_package(unit, sessions, drawer, report, out,
                                     packed, seals, transcripts)
@@ -6556,7 +7075,10 @@ def cmd_package(args):
             sealed, fingerprint, problem = seal_package(
                 Path(staging), seals, calendars, keyfile, args.stamp)
             if not problem:
-                zip_package(Path(staging), written + sealed, out)
+                refused = zip_package(Path(staging), written + sealed,
+                                      out)
+                if refused is not None:
+                    return out_refused(out, refused)
     if problem:
         print(f"error: {problem}; nothing written", file=sys.stderr)
         return 1
@@ -6643,7 +7165,7 @@ def run_drill(root, asked):
                 "two receipts past genesis"}, 1
 
     sandbox = root / DRILL_DIR
-    if sandbox.exists():
+    if os.path.exists(sandbox):
         shutil.rmtree(sandbox)
     sandbox.mkdir()
     write_lines(sandbox / "pristine.jsonl", lines)
@@ -6815,13 +7337,22 @@ def metrics_text(report, age_seconds):
           "The last scan's exit code: 0 nothing demanding attention, 1 to "
           "4 the worst verify exit among the chains (a chain verify could "
           "not judge at all counts as 4), 5 the baseline saw a "
-          "change appends cannot explain, 6 a live session is behind its "
+          "change appends cannot explain, or could not be read or kept, "
+          "6 a live session is behind its "
           "witness, 7 a chain's transcript commitments contradict each "
           "other", "witness verdict", [((), report.get("exit") or 0)])
     gauge("loxodonta_scan_age_seconds",
           "Seconds since the scan these numbers come from; a gauge is as "
           "fresh as the last tick", "witness verdict",
           [((), max(0, age_seconds))])
+    # What an operator accepted with `acknowledge` (ADR-0039), kept in
+    # the writer-reachable baseline: a count a scrape keeps off the
+    # machine, so a list that shrinks is seen to.
+    gauge("loxodonta_baseline_acknowledgements",
+          "Acknowledgements on record in the baseline: changes an operator "
+          "accepted with supervisor acknowledge", "testimony",
+          [((), len((report.get("baseline") or {}).get("acknowledged")
+                    or []))])
 
     # The chains, by the verdict verify handed each. A torn tail a sibling
     # continued is BROKEN by verify's word and stood down by the scan
@@ -7133,7 +7664,7 @@ class Face(BaseHTTPRequestHandler):
                        "application/json")
         elif url.path == "/checklist":
             doc = HERE / "docs" / "FIRE-DRILL.md"
-            if not doc.is_file():
+            if not os.path.isfile(doc):
                 self.send_error(404)
                 return
             self.reply(doc.read_bytes(), "text/plain; charset=utf-8")
@@ -8230,6 +8761,8 @@ function renderStrip(report) {
   const broken = chains.filter(c => !c.superseded &&
                                     c.verdict === "BROKEN");
   const changes = report.baseline.events.length;
+  // A memory the scan could not read or keep is exit 5 too (ADR-0039).
+  const blind = report.baseline.blind || report.baseline.unkept;
   const quietEvidence = chains.filter(c => c.superseded).length;
   let colour;
   if (regenerated.length) {
@@ -8245,11 +8778,14 @@ function renderStrip(report) {
   } else if (broken.length || changes || report.exit !== 0) {
     colour = "damage";
     state.textContent = broken.length ? "HISTORY WAS ALTERED"
-                                      : "CHANGED SINCE LAST LOOK";
+                      : changes || !blind ? "CHANGED SINCE LAST LOOK"
+                      : "TRIPWIRE BLIND";
     why.textContent = (broken.length
       ? broken.length + " chain(s) fail verification — "
       : "") + (changes
       ? changes + " change(s) the baseline cannot explain as appends"
+      : blind
+      ? "the baseline could not be read or kept, so nothing was compared"
       : "details in the band below") +
       " (scan exit " + report.exit + ")";
   } else {
@@ -8324,6 +8860,12 @@ function attentionItems(report) {
     items.push({rank: "tripwire", tone: "damage",
       chip: "CHANGED SINCE LAST LOOK",
       text: event.repo + " · " + event.session + " — " + event.change,
+      tab: "evidence"});
+  }
+  if (report.baseline.blind || report.baseline.unkept) {
+    items.push({rank: "tripwire", tone: "damage",
+      chip: report.baseline.blind ? "TRIPWIRE BLIND" : "MEMORY NOT KEPT",
+      text: report.baseline.note || "the baseline could not be read",
       tab: "evidence"});
   }
   for (const s of (report.consumption || {sessions: []}).sessions) {
@@ -8754,6 +9296,10 @@ function render(report) {
 
   const tripwire = document.getElementById("tripwire");
   tripwire.replaceChildren();
+  // A record is the writer's reach too: read every field as text.
+  const seen = h => h && h.head
+    ? "n " + h.n + " at " + String(h.head).slice(0, 16)
+    : h ? "no entries" : "nothing there";
   for (const event of report.baseline.events) {
     const row = el("div", "trip");
     row.appendChild(el("span", "chip",
@@ -8761,11 +9307,31 @@ function render(report) {
     row.appendChild(el("span", "file",
                        event.repo + " · " + event.session +
                        " · " + event.log));
+    // A standing alarm (ADR-0039): when it began, and the head the
+    // baseline remembers beside the one this look found, which is what
+    // `supervisor acknowledge` accepts.
+    if (event.since) {
+      row.appendChild(el("p", "claim", "standing since " + event.since +
+        " · remembered " + seen(event.remembered) +
+        " · found " + seen(event.found)));
+    }
     row.appendChild(el("p", "claim", event.investigate));
     tripwire.appendChild(row);
   }
   if (report.baseline.note) {
     tripwire.appendChild(el("p", "claim", report.baseline.note));
+  }
+  // What an operator accepted, as kept in the baseline: testimony, drawn
+  // plainly, raising nothing.
+  for (const record of (report.baseline.acknowledged || [])) {
+    const what = record.log
+      ? record.log + " · " + record.change + " · remembered " +
+        seen(record.remembered) + " · accepted " + seen(record.accepted)
+      : "the baseline itself · " + record.change + " · " +
+        (record.stood || "") + " · started afresh";
+    tripwire.appendChild(el("p", "claim", "acknowledged " +
+      (record.ts || "") + " · " + what +
+      " (an operator's word, kept in a writer-reachable file)"));
   }
 
   // The completeness watch: only sessions worth a second look get a
@@ -9932,6 +10498,32 @@ def main(argv):
              "own statements: an observed epoch is what this supervisor "
              "saw and stands")
     calibrate_cmd.set_defaults(func=cmd_calibrate)
+    acknowledge = sub.add_parser(
+        "acknowledge",
+        help="accept the state a scan reported for one chain, or start a "
+             "baseline that cannot be read afresh (ADR-0039): one record "
+             "every later report shows; it moves no verdict")
+    acknowledge.add_argument(
+        "log", nargs="?", default=None, metavar="LOG",
+        help="the chain, as the scan's event prints its `log`")
+    acknowledge.add_argument(
+        "state", nargs="?", default=None, metavar="STATE",
+        help="what you accept: the head the event's `found` printed, whole "
+             f"or its first {SHORTEST_HEAD} hex characters or more, or "
+             "`gone` for a chain that is not there. Refused when the chain "
+             "is no longer in that state")
+    acknowledge.add_argument(
+        "--baseline", action="store_true",
+        help="acknowledge the memory itself, when the scan cannot read it "
+             "or it is missing beside a day book: start it afresh from "
+             "every chain as it stands")
+    acknowledge.add_argument(
+        "--root", default=None,
+        help="legacy/explicit mode: the folder of repos whose baseline "
+             "this writes, instead of the store's (default: the store, "
+             "ADR-0011)")
+    acknowledge.set_defaults(func=cmd_acknowledge,
+                             spoken_wrong=acknowledge.error)
     serve = sub.add_parser(
         "serve", parents=[watching],
         help="the face: status band on a localhost-only server")

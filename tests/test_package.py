@@ -706,6 +706,63 @@ class DemoStorePackageTest(PackageCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((self.work / "no" / "such" / "pkg.zip").exists())
 
+    def test_out_where_a_file_already_stands_is_refused_and_kept(self):
+        out = self.work / "pkg.zip"
+        out.write_bytes(b"kept")
+        result = self.package(BAD_DAY_SESSION, "--out", str(out))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("already exists; choose another --out", result.stderr)
+        self.assertEqual(out.read_bytes(), b"kept")
+
+    def test_out_at_a_link_to_nowhere_is_refused_in_both_shapes(self):
+        # A link whose target is missing still stands at the name: a
+        # package written through it would land where nobody named.
+        elsewhere = self.work / "elsewhere"
+        out = self.work / "pkg"
+        try:
+            os.symlink(str(elsewhere), str(out))
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks cannot be created here")
+        for shape in ((), ("--folder",)):
+            result = self.package(BAD_DAY_SESSION, *shape, "--out", str(out))
+            said = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 1, said)
+            self.assertNotIn("Traceback", said)
+            self.assertIn("already exists; choose another --out",
+                          result.stderr)
+            self.assertFalse(os.path.lexists(elsewhere), shape)
+            self.assertTrue(out.is_symlink(), shape)
+
+    def test_out_under_a_file_is_refused_by_name_in_both_shapes(self):
+        in_the_way = self.work / "a-file"
+        in_the_way.write_bytes(b"kept")
+        for shape in ((), ("--folder",)):
+            result = self.package(BAD_DAY_SESSION, *shape, "--out",
+                                  str(in_the_way / "pkg"))
+            said = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 1, said)
+            self.assertNotIn("Traceback", said)
+            self.assertIn("could not be written: ", result.stderr)
+            self.assertIn("; no package written", result.stderr)
+            self.assertEqual(in_the_way.read_bytes(), b"kept")
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not write in")
+    def test_out_in_a_folder_it_may_not_write_in_is_refused_by_name(self):
+        closed = self.work / "closed"
+        closed.mkdir()
+        os.chmod(closed, 0o555)
+        self.addCleanup(os.chmod, closed, 0o755)
+        for shape in ((), ("--folder",)):
+            result = self.package(BAD_DAY_SESSION, *shape, "--out",
+                                  str(closed / "pkg"))
+            said = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 1, said)
+            self.assertNotIn("Traceback", said)
+            self.assertIn("could not be written: ", result.stderr)
+            self.assertIn("; no package written", result.stderr)
+            self.assertEqual(list(closed.iterdir()), [])
+
     def test_readme_never_holds_the_manifest_hash_and_manifest_is_last(self):
         folder = self.folder_package()
         manifest = folder / "manifest.json"
