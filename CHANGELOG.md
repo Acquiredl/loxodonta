@@ -14,6 +14,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - The README leads with a tamper-evident security record, the flight recorder kept as its image: the problem first, what a clean verdict does not tell you, the evidence-strength ladder, and where it fits (#423). The ruling is an ADR-0002 addendum.
 
+### Fixed
+
+- `docs/HOOK.md` and `docs/TOUR.md` named the lock wait `RECEIPTS_LOCK_TIMEOUT`, which nothing reads; they now name `LOXODONTA_LOCK_TIMEOUT`, and a test fails on any documented variable the code never reads (#397).
+
 ## [0.10.3] - 2026-10-01
 
 One family of faults, ended by a check. A test now walks the three scripts and fails on any call that opens, reads, writes or copies a file by path, unless it is the open that never waits, an exclusive create, or on a short list that gives each call a reason. Its first run found the coverage marker and the harness settings still opened waiting, and its review found `export` waiting on a pipe at its own output name and a calendar address fetched whatever its scheme. Three answers moved for scripts: `export` exits 73 for a name it cannot write; `install-hook` and `uninstall-hook` refuse a harness settings file that is not a file, exit 66, where it was a traceback; and an upgrade whose only pending row names an address that is not `http` or `https` exits 0 with a warning. A new export file is readable by its owner only. `verifier.py` moves with no verdict word or exit changed. The receipt format is untouched.
