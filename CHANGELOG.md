@@ -10,6 +10,15 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `supervisor acknowledge LOG STATE` accepts the state a scan reported for one chain, and `--baseline` starts an unreadable memory afresh; each leaves a record every later report shows, and moves no verdict (#401).
+
+### Changed
+
+- `supervisor scan` keeps a chain's remembered head when it reads `regressed`, `rewritten` or `vanished`, and says so on every look, exit 5, until the chain holds that head again or the change is acknowledged (#401).
+- A baseline the scan cannot read or keep, or one missing beside a day book, is exit 5 on every look and left as it lies, where it was a note and a fresh memory (#409).
+
 ### Fixed
 
 - `supervisor export` names any write the system refuses and exits 73, instead of ending in a traceback in a folder the user may not write in.
@@ -18,6 +27,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `anchor`, `anchor --upgrade` and the session end count a calendar reply that is not HTTP, or a calendar address holding a space, as that calendar's failure and ask the next, where one ended the whole run.
 - `supervisor scan` dates a session from its first call with a result, failed or not: one that began with a failed call before the supervisor's memory is left unjudged, as the rule says, where it was judged.
 - `supervisor scan` reads a chain in a folder closed to it as `vanished`, exit 5, on every Python version, where on Python 3.12 and older one `chmod` ended every scan in a traceback.
+- A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403).
 
 ## [0.10.3] - 2026-10-01
 

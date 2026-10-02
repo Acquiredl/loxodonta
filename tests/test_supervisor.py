@@ -971,7 +971,7 @@ class BaselineTest(unittest.TestCase):
         self.assertNotIn("head record", baseline_words,
                          "the baseline is never called a head record")
 
-    def test_the_baseline_updates_each_tick_so_one_change_shouts_once(self):
+    def test_a_change_shouts_on_every_tick_until_it_clears(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root, env=self.env)
         lines = log.read_text(encoding="utf-8").splitlines()
@@ -979,14 +979,16 @@ class BaselineTest(unittest.TestCase):
                        encoding="utf-8")
         caught = run_scan(self.root, env=self.env)
 
-        settled = run_scan(self.root, env=self.env)
+        standing = run_scan(self.root, env=self.env)
 
         self.assertEqual(caught.returncode, 5)
-        self.assertEqual(settled.returncode, 0,
-                         settled.stdout + settled.stderr)
-        self.assertEqual(self.events(settled), [],
-                         "remembered anew after diffing — the alarm "
-                         "belongs to the tick that caught it")
+        self.assertEqual(standing.returncode, 5,
+                         standing.stdout + standing.stderr)
+        self.assertEqual([e["change"] for e in self.events(standing)],
+                         ["regressed"],
+                         "the baseline keeps what it remembered: the "
+                         "alarm stands until the chain holds that head "
+                         "again or it is acknowledged (ADR-0039)")
 
     def remembered(self, relpath):
         chains = json.loads(self.baseline.read_text(encoding="utf-8"))
@@ -1068,14 +1070,17 @@ class BaselineTest(unittest.TestCase):
 
         result = run_scan(self.root, env=self.env)
 
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         report = json.loads(result.stdout)
         self.assertIn("could not be read",
                       report["baseline"].get("note", ""))
         self.assertEqual(report["baseline"]["events"], [])
         after = run_scan(self.root, env=self.env)
-        self.assertNotIn("note", json.loads(after.stdout)["baseline"],
-                         "remembering resumes from the fresh look")
+        self.assertEqual(after.returncode, 5, after.stdout + after.stderr)
+        self.assertIn("could not be read",
+                      json.loads(after.stdout)["baseline"].get("note", ""),
+                      "the scan starts no memory of its own: the note "
+                      "stands until `acknowledge --baseline` (ADR-0039)")
 
 
 def hold(test, path):
@@ -1503,12 +1508,20 @@ class DaybookTest(unittest.TestCase):
              "--actor", "claude-code", "--action", "step 0"],
             capture_output=True, check=True)
         tripped = run_scan(self.root, env=self.env)
+        # The alarm stands until the operator accepts the new head
+        # (ADR-0039); after that, the wire is quiet again.
+        subprocess.run(
+            [sys.executable, str(SUPERVISOR), "acknowledge",
+             "alpha/receipts/receipts-sess-aaaa.jsonl", chain_head(log),
+             "--root", str(self.root)],
+            capture_output=True, encoding="utf-8", timeout=120, check=True,
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
         settled = run_scan(self.root, env=self.env)
 
         self.assertEqual(tripped.returncode, 5, tripped.stdout)
         self.assertEqual(settled.returncode, 0,
-                         "the wire is quiet again on the next look")
+                         "the wire is quiet again once acknowledged")
         self.assertEqual(self.rows(settled)[-1]["worst"], 5,
                          "the day still remembers what fired in it")
         self.assertEqual(self.rows(settled)[-1]["events"], 1)

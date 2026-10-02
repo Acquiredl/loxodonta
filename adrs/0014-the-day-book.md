@@ -82,6 +82,13 @@ The ratified shape, recorded because the trade-offs were argued:
   writes no row of its own, so a scraper's day is marked by its next
   scrape rather than that one, and the band's tooltip says the page was
   opened with no reading recorded instead of "nobody looked".)*
+  *(Addendum 2026-10-01, ADR-0039, for the author to confirm: a baseline
+  event is no longer consumed by the diff that finds it; it stands on
+  every look until the chain holds the remembered head again or it is
+  acknowledged. So a turn nobody asked for writes its row for an alarm
+  it found new, or whose change moved, and not for one already
+  standing: the alarm colours the day it was found and the days
+  somebody looks, and does not mark every later day as watched.)*
 - **Gaps only count after the first watched day.** A fresh install is
   not scolded for the fortnight before it existed.
 - **Bounded by date, not by row count.** A season (90 days). A book

@@ -1329,7 +1329,7 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
                                    LOXODONTA_HOME=str(self.home)),
                     "PYTHONIOENCODING": "utf-8"}
 
-    def scan(self, repo="alpha"):
+    def scan(self, repo="alpha", expect=0):
         # Bounded: a scan that waited on a pipe would fail here.
         result = subprocess.run(
             [sys.executable, str(SUPERVISOR), "scan", "--json",
@@ -1337,7 +1337,8 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
             capture_output=True, encoding="utf-8", timeout=BOUND,
             env=self.env)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, expect,
+                         result.stdout + result.stderr)
         report = json.loads(result.stdout)
         (chain,) = chains_by_session(report)[(repo, "sess-aaaa")]
         self.assertEqual(chain["verdict"], "VALID")
@@ -1384,37 +1385,51 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
     def test_a_pipe_where_a_project_record_belongs_is_read_past(self):
         self.assert_filed_under_its_slug(os.mkfifo)
 
-    def assert_memory_named(self, name, make, why, words, where):
+    def assert_memory_named(self, name, make, why, words, where, expect=0):
         memory = self.home / name
         make(memory)
         before = kind(memory)
 
-        first = self.scan()
-        second = self.scan()
+        first = self.scan(expect=expect)
+        second = self.scan(expect=expect)
 
         for report in (first, second):
             self.assertIn(f"{name} cannot be read as {words}: {why}",
                           where(report))
         self.assertEqual(kind(memory), before, "nothing written over it")
 
+    # A baseline that cannot be read is an alarm on every look, exit 5,
+    # and the scan starts no memory of its own (ADR-0039).
     def test_a_folder_where_the_baseline_belongs_is_named_and_kept(self):
         self.assert_memory_named("baseline.json", Path.mkdir, FOLDER,
                                  "a baseline",
-                                 lambda report: report["baseline"]["note"])
+                                 lambda report: report["baseline"]["note"],
+                                 expect=5)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_where_the_baseline_belongs_is_named_and_kept(self):
         self.assert_memory_named("baseline.json", os.mkfifo, PIPE,
                                  "a baseline",
-                                 lambda report: report["baseline"]["note"])
+                                 lambda report: report["baseline"]["note"],
+                                 expect=5)
+
+    def seeded_without_a_day_book(self):
+        """A baseline remembered by a first look, and its day book taken
+        away, so what stands at the book's name is all that is wrong: a
+        day book with no baseline beside it is a memory gone missing
+        (ADR-0039), a different finding."""
+        self.scan()
+        (self.home / "daybook.json").unlink()
 
     def test_a_folder_where_the_day_book_belongs_is_named_and_kept(self):
+        self.seeded_without_a_day_book()
         self.assert_memory_named("daybook.json", Path.mkdir, FOLDER,
                                  "a day book",
                                  lambda report: report["history_note"])
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_where_the_day_book_belongs_is_named_and_kept(self):
+        self.seeded_without_a_day_book()
         self.assert_memory_named("daybook.json", os.mkfifo, PIPE,
                                  "a day book",
                                  lambda report: report["history_note"])
