@@ -3739,6 +3739,10 @@ def seal_session(log, transcript_path):
             return append_locked(log, "receipts", action, [])
     except LockTimeout:
         return locked_out(log)
+    except OSError:
+        # On POSIX a folder that refuses the lock file raises here
+        # rather than waiting (#398), and is skipped like the rest (#430).
+        return 0
 
 
 SESSION_END_BUDGET = 12.0   # seconds, under the installer's 20 s timeout

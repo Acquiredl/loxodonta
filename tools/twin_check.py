@@ -114,6 +114,11 @@ TWINS = (
     Twin("No chain to judge", ("EX_NOINPUT",), ORIGINAL, SUPERVISOR,
          "`verify` exits 66 when there is no chain to judge, in the "
          "recorder and in the supervisor alike (ADR-0037)."),
+    Twin("A file the verb must make and cannot", ("EX_CANTCREAT",),
+         ORIGINAL, SUPERVISOR,
+         "A writer exits 73 when a file it must write cannot be, and the "
+         "supervisor's `drill` when its sandbox cannot be made (ADR-0037, "
+         "#430)."),
     Twin("Writing to the console", ("speak_utf8",), ORIGINAL, BOTH,
          "Every file can print text a Windows console's code page cannot "
          "hold, and none of them may die on it (#294)."),
