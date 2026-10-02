@@ -3742,7 +3742,9 @@ def cmd_adopt(args):
             continue
         project = adoption_project(root, log)
         drawer = store_receipts() / project_slug(project)
-        (refused if os.path.exists(drawer / log.name) else moves).append(
+        # lexists: a link to nowhere at the name stands there too, and a
+        # move across two filesystems would copy through it (#422).
+        (refused if os.path.lexists(drawer / log.name) else moves).append(
             (log, drawer, project))
     if not moves and not refused and not not_files:
         print(f"nothing to adopt under {root.as_posix()}")
@@ -3782,7 +3784,7 @@ def cmd_adopt(args):
                 print(f"left sidecar "
                       f"{sidecar.relative_to(root).as_posix()}: {problem} "
                       "— not moved; reconcile by hand")
-            elif os.path.exists(drawer / sidecar.name):
+            elif os.path.lexists(drawer / sidecar.name):
                 # Proofs left behind are still proofs; say so — silence
                 # here would read as "everything travelled".
                 print(f"left sidecar "
