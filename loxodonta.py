@@ -3658,15 +3658,20 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
 
 
 class RedirectWatch(urllib.request.HTTPRedirectHandler):
-    """urllib's redirects, followed as before, and remembered: after one,
-    an address http cannot send is the one the calendar named, not the
-    one asked (#422)."""
+    """urllib's redirects, followed as before, and remembered from the
+    moment the 3xx arrives: after one, an address http cannot send is
+    the one the calendar named, not the one asked (#422). Not later:
+    urllib parses the Location before it asks to follow it, and a host
+    that parse refuses raises there."""
 
     followed = False
 
-    def redirect_request(self, *args):
+    def http_error_302(self, *args):
         self.followed = True
-        return super().redirect_request(*args)
+        return super().http_error_302(*args)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_302
+    http_error_308 = http_error_302
 
 
 def calendar_request(url, data=None, timeout=15):
@@ -3693,10 +3698,12 @@ def calendar_request(url, data=None, timeout=15):
         with urllib.request.build_opener(redirects).open(
                 request, timeout=timeout) as response:
             return response.read(MAX_PROOF_BYTES)
-    except http.client.InvalidURL:
+    except (http.client.InvalidURL, ValueError) as error:
         if redirects.followed:
             raise OSError("it redirected to an address http cannot "
                           "send") from None
+        if isinstance(error, ValueError):
+            raise
         raise ValueError("not a URL http can send") from None
     except http.client.HTTPException as error:
         raise OSError("the reply was not HTTP "

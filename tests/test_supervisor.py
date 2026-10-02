@@ -4909,6 +4909,10 @@ class ClosedFolderTest(unittest.TestCase):
                 self.assertIn("not adopted; left as it lies", result.stdout)
                 self.assertNotIn("chain(s) adopted", result.stdout)
                 self.assertEqual(later.read_bytes(), before)
+                # The drawer by name, as the move names it: never the
+                # store's path (#422 review).
+                self.assertNotIn(self.store.as_posix(),
+                                 planned.stdout + result.stdout)
 
         # Open again, the same command moves it.
         result = self.supervisor("adopt", "--root", str(self.legacy))

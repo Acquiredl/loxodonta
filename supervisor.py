@@ -4136,29 +4136,29 @@ def adoption_project(root, log):
 
 def move_refused(root, log, drawer):
     """Why adopt cannot move `log` into `drawer`, or None, in the words
-    the real run refuses by. Asked before anything moves, so `--dry-run`
-    refuses what the real run will (#422): the drawer, or the nearest
-    folder above it that stands, is no folder this user may write into
-    (#421); or the drawer holds its project record and refuses only the
-    move (#430); or the legacy folder may not give the chain up. The
-    real run's own refusals stay behind this for what changes between."""
+    the real run refuses by: the drawer's name and the system's reason,
+    never a path of the store. Asked before anything moves, so
+    `--dry-run` refuses what the real run will (#422): the drawer, or
+    the nearest folder above it that stands, is no folder this user may
+    write into (#421); or the drawer holds its project record and
+    refuses only the move (#430); or the legacy folder may not give the
+    chain up. The real run's own refusals stay behind this for what
+    changes between."""
+    denied = os.strerror(errno.EACCES)
     here = Path(drawer)
     # A folder under a closed one does not stand to lexists either.
     while not os.path.lexists(here) and here.parent != here:
         here = here.parent
     if not os.path.isdir(here):
-        return (f"{drawer.name}/ cannot be written: {here.as_posix()} is "
-                "not a folder")
+        return (f"{drawer.name}/ cannot be written: "
+                f"{os.strerror(errno.ENOTDIR)}")
     if not os.access(here, os.W_OK | os.X_OK):
         if here == drawer and os.path.lexists(drawer / "project.json"):
-            return (f"cannot be moved into {drawer.name}/: this user may "
-                    "not write into it")
-        return (f"{drawer.name}/ cannot be written: this user may not "
-                f"write into {here.as_posix()}")
+            return f"cannot be moved into {drawer.name}/: {denied}"
+        return f"{drawer.name}/ cannot be written: {denied}"
     if not os.access(log.parent, os.W_OK | os.X_OK):
         return (f"cannot be moved out of "
-                f"{log.parent.relative_to(root).as_posix()}/: this user "
-                "may not write into it")
+                f"{log.parent.relative_to(root).as_posix()}/: {denied}")
     return None
 
 
