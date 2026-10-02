@@ -112,20 +112,28 @@ class ClosedFolder(OSError):
 
 def listed(folder, pattern, closed=None):
     """Every path under `folder` that `pattern` matches, sorted: parts
-    split on `/`, each matched by fnmatch against what the folder above
-    lists, as `Path.glob` reads a pattern. A folder on the way that
-    cannot be listed is never read as empty (#431): it goes on `closed`
-    as (folder, why), or, with no list given, is raised as ClosedFolder.
-    Nothing at a name, or a file where a folder was looked for, is
-    nothing found. `Path.glob` cannot serve: it passes some closed
-    folders in silence on every Python, and before 3.13 raises on
-    others."""
+    split on `/`, as `Path.glob` reads a pattern. A part with a wildcard
+    is matched by fnmatch against what the folder above lists; a plain
+    name is looked up, never listed for, as `Path.glob` does, so a
+    system folder that refuses a listing but answers a lookup (Windows'
+    `System Volume Information`) is not named on every look. A folder on
+    the way that cannot be listed or looked into is never read as empty
+    (#431): it goes on `closed` as (folder, why), or, with no list given,
+    is raised as ClosedFolder. Nothing at a name, or a file where a
+    folder was looked for, is nothing found. `Path.glob` cannot serve:
+    it passes some closed folders in silence on every Python, and before
+    3.13 raises on others."""
     found = [Path(folder)]
     for part in pattern.split("/"):
         deeper = []
         for here in found:
             try:
-                names = os.listdir(here)
+                if any(c in part for c in "*?["):
+                    deeper += [here / name for name in os.listdir(here)
+                               if fnmatch.fnmatch(name, part)]
+                else:
+                    os.stat(here / part)
+                    deeper.append(here / part)
             except (FileNotFoundError, NotADirectoryError):
                 continue
             except OSError as error:
@@ -133,9 +141,6 @@ def listed(folder, pattern, closed=None):
                 if closed is None:
                     raise ClosedFolder(error.errno, why, str(here)) from None
                 closed.append((here, why))
-                continue
-            deeper += [here / name for name in names
-                       if fnmatch.fnmatch(name, part)]
         found = deeper
     return sorted(found)
 
