@@ -17,23 +17,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Each platform runs the suite in three shards on three machines at once:
-  # one serial run took 20 to 34 minutes, nearly all of it Python starting
-  # the CLI. Separate machines, never parallel processes on one: the
-  # suite's timing tests miss their windows on a loaded machine.
+  # Two tiers (#418). A pull request into dev is the fast tier: the suite
+  # on ubuntu-latest / py3.9 alone, in six shards. Everything else (a push
+  # to dev or main, a pull request into main, a manual run) is the full
+  # tier: five targets in three shards each. A break that shows only on
+  # another target lands on dev and is caught by the push run its merge
+  # starts; a promotion to main still waits on all five. The test
+  #   github.event_name == 'pull_request' && github.base_ref == 'dev'
+  # is written out seven times (the target list, the shard list, SHARDS
+  # and four roll-ups below), since neither a matrix nor a job's `if` can
+  # read `env`; the seven must agree.
+  #
+  # Each shard runs on its own machine: one serial run took 20 to 34
+  # minutes, nearly all of it Python starting the CLI. Separate machines,
+  # never parallel processes on one: the suite's timing tests miss their
+  # windows on a loaded machine.
   suite:
     name: ${{ matrix.target.os }} / py${{ matrix.target.python }} / shard ${{ matrix.shard }}
     runs-on: ${{ matrix.target.os }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - {os: ubuntu-latest, python: "3.9"}
-          - {os: ubuntu-latest, python: "3.11"}
-          - {os: ubuntu-latest, python: "3.13"}
-          - {os: windows-latest, python: "3.13"}
-          - {os: macos-latest, python: "3.13"}
-        shard: [1, 2, 3]
+        target: >-
+          ${{ fromJSON(github.event_name == 'pull_request' && github.base_ref == 'dev'
+          && '[{"os": "ubuntu-latest", "python": "3.9"}]'
+          || '[{"os": "ubuntu-latest", "python": "3.9"},
+          {"os": "ubuntu-latest", "python": "3.11"},
+          {"os": "ubuntu-latest", "python": "3.13"},
+          {"os": "windows-latest", "python": "3.13"},
+          {"os": "macos-latest", "python": "3.13"}]') }}
+        shard: >-
+          ${{ fromJSON(github.event_name == 'pull_request' && github.base_ref == 'dev'
+          && '[1, 2, 3, 4, 5, 6]' || '[1, 2, 3]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,7 +62,8 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
           SHARD: ${{ matrix.shard }}
-          SHARDS: 3  # the length of the shard list above; the two must agree
+          # the length of the shard list above; the two must agree
+          SHARDS: ${{ github.event_name == 'pull_request' && github.base_ref == 'dev' && 6 || 3 }}
         shell: python
         run: |
           import os, subprocess, sys, unittest
@@ -76,24 +92,58 @@ jobs:
                                     *("tests." + n for n in mine)]))
 
   # The names branch protection requires, one per platform: each passes only
-  # when every shard of every platform passed. The shard jobs above say which
-  # one failed. These names, the target list above and the protection's
+  # when every shard that ran passed. The shard jobs above say which one
+  # failed. These names, the target list above and the protection's
   # required checks are one list kept three times. `always()`, never
   # `!cancelled()`: a required check that is skipped counts as passed, so a
   # cancelled run would leave these green with the suite unrun.
-  platform:
-    name: ${{ matrix.name }}
+  #
+  # One job per name, never a matrix: a matrix job its `if` skips reports
+  # under its unexpanded name, so a required per-target name would never
+  # report and the pull request would wait forever (#418). On a pull
+  # request into dev the four targets the fast tier does not run are
+  # skipped, which the protection on dev counts as passed.
+  py39:
+    name: ubuntu-latest / py3.9
     needs: suite
     if: ${{ always() }}
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        name:
-          - ubuntu-latest / py3.9
-          - ubuntu-latest / py3.11
-          - ubuntu-latest / py3.13
-          - windows-latest / py3.13
-          - macos-latest / py3.13
+    steps:
+      - name: every shard passed
+        run: test "${{ needs.suite.result }}" = success
+
+  py311:
+    name: ubuntu-latest / py3.11
+    needs: suite
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: every shard passed
+        run: test "${{ needs.suite.result }}" = success
+
+  py313:
+    name: ubuntu-latest / py3.13
+    needs: suite
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: every shard passed
+        run: test "${{ needs.suite.result }}" = success
+
+  windows:
+    name: windows-latest / py3.13
+    needs: suite
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: every shard passed
+        run: test "${{ needs.suite.result }}" = success
+
+  macos:
+    name: macos-latest / py3.13
+    needs: suite
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
+    runs-on: ubuntu-latest
     steps:
       - name: every shard passed
         run: test "${{ needs.suite.result }}" = success
