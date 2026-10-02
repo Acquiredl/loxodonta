@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- The README leads with a tamper-evident security record, the flight recorder kept as its image: the problem first, what a clean verdict does not tell you, the evidence-strength ladder, and where it fits (#423). The ruling is an ADR-0002 addendum.
+
 ### Fixed
 
 - `supervisor export` names any write the system refuses and exits 73, instead of ending in a traceback in a folder the user may not write in (#419).
