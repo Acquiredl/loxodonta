@@ -3646,6 +3646,18 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
     append_sidecar_record(anchors_path(log), record)
 
 
+class RedirectWatch(urllib.request.HTTPRedirectHandler):
+    """urllib's redirects, followed as before, and remembered: after one,
+    an address http cannot send is the one the calendar named, not the
+    one asked (#422)."""
+
+    followed = False
+
+    def redirect_request(self, *args):
+        self.followed = True
+        return super().redirect_request(*args)
+
+
 def calendar_request(url, data=None, timeout=15):
     """One request to a calendar, and its reply. An address with any
     scheme but http or https raises ValueError, before anything is
@@ -3655,7 +3667,9 @@ def calendar_request(url, data=None, timeout=15):
     not send, a space in it say, is a ValueError too, and a reply that
     is not HTTP an OSError: urllib hands both on as http.client's own
     errors, which are neither, so one bad row or one bad calendar
-    would end the run for every calendar after it."""
+    would end the run for every calendar after it. A redirect to an
+    address http will not send is the calendar failing, an OSError
+    (#422)."""
     if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
         raise ValueError("not an http or https URL")
     request = urllib.request.Request(
@@ -3663,10 +3677,15 @@ def calendar_request(url, data=None, timeout=15):
         headers={"Accept": "application/vnd.opentimestamps.v1",
                  "User-Agent": "loxodonta"},
     )
+    redirects = RedirectWatch()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.build_opener(redirects).open(
+                request, timeout=timeout) as response:
             return response.read(MAX_PROOF_BYTES)
     except http.client.InvalidURL:
+        if redirects.followed:
+            raise OSError("it redirected to an address http cannot "
+                          "send") from None
         raise ValueError("not a URL http can send") from None
     except http.client.HTTPException as error:
         raise OSError("the reply was not HTTP "
