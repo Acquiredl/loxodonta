@@ -294,6 +294,25 @@ class UncountedKeyTest(LegacyRoot):
     def test_a_look_with_no_such_name_names_nothing(self):
         self.assertNotIn("uncounted", self.look(0)["baseline"])
 
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may enter and not list")
+    def test_a_chain_in_a_folder_it_may_enter_but_not_list_is_closed(self):
+        # The chain still answers a lookup, so the row reaches the
+        # branch above; the folder is named as closed, exit 5, and the
+        # row is not called planted (#432 review, #431).
+        self.look(0)
+        n, head = self.head()
+        os.chmod(self.log.parent, 0o311)
+        self.addCleanup(os.chmod, self.log.parent, 0o755)
+
+        report = self.look(5)
+
+        self.assertEqual([row["folder"] for row in report["closed"]],
+                         [self.log.parent.as_posix()])
+        self.assertNotIn("uncounted", report["baseline"])
+        self.assertEqual((self.remembered()["n"], self.remembered()["head"]),
+                         (n, head), "its memory is kept as it was")
+
 
 class StoreFixture(unittest.TestCase):
     """The store, the default universe (ADR-0011): one drawer, one chain
@@ -860,7 +879,7 @@ class OtherReadersTest(LegacyRoot):
         self.look(0)
 
         line = self.last_scan()
-        self.assertIn("1 acknowledged", line)
+        self.assertIn("1 acknowledged on record", line)
         self.assertNotIn("standing", line)
 
     def test_the_digest_counts_an_acknowledged_baseline(self):
@@ -869,7 +888,7 @@ class OtherReadersTest(LegacyRoot):
         self.acknowledge("--baseline")
         self.look(0)
 
-        self.assertIn("1 acknowledged", self.last_scan())
+        self.assertIn("1 acknowledged on record", self.last_scan())
 
     def test_the_digest_says_the_baseline_cannot_be_read(self):
         self.look(0)
@@ -906,6 +925,74 @@ class StoreKeysTest(StoreFixture):
                     self.assertEqual(report["baseline"]["blind"],
                                      "unreadable")
                 self.assertEqual(path.read_bytes(), before)
+
+
+class StoreClosedDrawerTest(StoreFixture):
+    """The store's twin of the legacy case in UncountedKeyTest."""
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may enter and not list")
+    def test_a_drawer_it_may_enter_but_not_list_is_closed(self):
+        self.look(0)
+        drawer = self.log.parent
+        os.chmod(drawer, 0o311)
+        self.addCleanup(os.chmod, drawer, 0o755)
+
+        report = self.look(5)
+
+        self.assertEqual([row["folder"] for row in report["closed"]],
+                         [drawer.as_posix()])
+        self.assertNotIn("uncounted", report["baseline"])
+
+
+class DigestAcrossMemoriesTest(StoreFixture):
+    """A `--baseline` acknowledgement in the store's memory counts in the
+    digest only for a repo that memory remembers (#432 review): a repo
+    it holds no row for reads its own testimony, or none."""
+
+    def setUp(self):
+        super().setUp()
+        self.look(0)
+        (self.home / "baseline.json").write_text("{not json",
+                                                 encoding="utf-8")
+        acknowledged = self.run_supervisor("acknowledge", "--baseline")
+        self.assertEqual(acknowledged.returncode, 0, acknowledged.stderr)
+        self.look(0)
+        self.legacy = Path(self._tmp.name).resolve() / "legacy"
+        self.repo = self.legacy / "beta"
+        self.chain = self.repo / "receipts" / "receipts-sess-bbbb.jsonl"
+        self.chain.parent.mkdir(parents=True)
+        steps = [["init"]] + [["log", "--actor", "claude-code",
+                               "--action", f"other step {i}"]
+                              for i in range(3)]
+        for args in steps:
+            subprocess.run([sys.executable, str(LOXODONTA), args[0],
+                            "--log", str(self.chain), *args[1:]],
+                           capture_output=True, timeout=BOUND, check=True,
+                           env=self.env)
+
+    def last_scan(self):
+        result = self.run_supervisor("digest", "--repo", str(self.repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split("last scan:")[1].splitlines()[0]
+
+    def test_a_repo_the_memory_holds_no_row_for_reads_none_recorded(self):
+        line = self.last_scan()
+
+        self.assertIn("none recorded", line)
+        self.assertNotIn("acknowledged", line)
+
+    def test_a_pre_adopt_repo_reads_its_own_legacy_verdicts(self):
+        text = self.chain.read_text(encoding="utf-8")
+        self.chain.write_text(text.replace("other step 1", "other step X"),
+                              encoding="utf-8")
+        self.run_supervisor("scan", "--root", str(self.legacy), "--json",
+                            "--witness", str(self.witness))
+
+        line = self.last_scan()
+
+        self.assertIn("1 BROKEN", line)
+        self.assertNotIn("acknowledged", line)
 
 
 class StoreReadersTest(StoreFixture):

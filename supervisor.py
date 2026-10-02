@@ -5201,8 +5201,9 @@ def scan_testimony(repo):
     testimony. Returns (scanned, verdicts, standing alarms,
     acknowledgements, unread), `unread` naming a baseline that is there
     and cannot be read. An acknowledgement counts when it names one of
-    this repo's chains, or the memory itself, which every chain in it
-    was started afresh from."""
+    this repo's chains, or the memory itself while that memory holds a
+    row of this repo's: a memory that holds none is not this repo's
+    testimony, and the next source is read (#432)."""
     slugs = [project_slug(repo) + "/"] + [
         drawer.name + "/" for drawer in worktree_drawers(repo)]
 
@@ -5253,7 +5254,7 @@ def scan_testimony(repo):
         given = sum(1 for record in (records if isinstance(records, list)
                                      else [])
                     if isinstance(record, dict) and (
-                        "baseline" in record
+                        "baseline" in record and covered
                         or isinstance(record.get("log"), str)
                         and covers(record["log"], path.parent)))
         if verdicts or standing or given:
@@ -5334,9 +5335,10 @@ def cmd_digest(args):
                 "standing")]))
         if given:
             # An acknowledgement is testimony too, and a session-start
-            # reader should see that one was given (#432).
-            summary = "; ".join(filter(None, [summary,
-                                              f"{given} acknowledged"]))
+            # reader should see that one was given, ever, not this scan
+            # (#432).
+            summary = "; ".join(filter(None, [
+                summary, f"{given} acknowledged on record"]))
         # The baseline is a plain file the agent can write: its
         # words are escaped like receipt text.
         lines.append(f"last scan: {visible(scanned)} - {visible(summary)} "
