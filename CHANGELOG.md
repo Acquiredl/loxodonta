@@ -22,6 +22,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `supervisor adopt` into a drawer it may read but not write names the drawer and leaves the chain, instead of ending in a traceback (#430).
 - `supervisor drill` refuses a sandbox it cannot clear, exit 73, and a chain whose entry 1 is not JSON, exit 66 before writing anything, instead of ending in a traceback (#430).
 - The session end skips its seal silently in a folder that refuses the lock file, where it ended in a traceback, exit 70 (#430).
+- On a disk that ignores case, a chain renamed by a change of case is compared with what the baseline remembers: cut short, it reads `regressed`, exit 5, not exit 0. A `.JSONL` name counts as a chain everywhere (#445).
 
 ## [0.11.0] - 2026-10-02
 
