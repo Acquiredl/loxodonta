@@ -21,7 +21,8 @@ Since #274 it covers the verbs that write into a home as well: the
 recorder's `hook` (a drawer in the store, named by CLAUDE_PROJECT_DIR or
 the payload's `cwd`), `install-hook` and `uninstall-hook` (the harness
 settings, Codex's hooks file and the coverage marker), and the
-supervisor's `adopt` (chains moved into the store). What opened #274:
+supervisor's `adopt` (chains moved into the store) and `acknowledge`
+(the store's baseline, ADR-0039). What opened #274:
 with LOXODONTA_HOME and CODEX_HOME exported, one run of the suite wrote
 seven epochs into that coverage marker and a hooks.json into that Codex
 home. A `hook` is refused a CLAUDE_PROJECT_DIR the test did not choose
@@ -61,9 +62,9 @@ HOMES = ("LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME")
 # hands the audit hook one command line, elsewhere a list, which is
 # joined with spaces first, so one pattern reads both.
 SUPERVISOR_VERB = re.compile(r'(?:^|[\s"/\\])supervisor\.py"?\s+"?([a-z-]+)')
-# The verbs that write into a home (#274): the supervisor's one, and the
+# The verbs that write into a home (#274): the supervisor's two, and the
 # recorder's three, whose verb after `loxodonta.py` is read the same way.
-SUPERVISOR_WRITERS = {"adopt"}
+SUPERVISOR_WRITERS = {"adopt", "acknowledge"}
 RECORDER_WRITERS = {"hook", "install-hook", "uninstall-hook"}
 RECORDER_VERB = re.compile(r'(?:^|[\s"/\\])loxodonta\.py"?\s+"?([a-z-]+)')
 
