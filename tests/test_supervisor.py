@@ -1624,8 +1624,8 @@ class DaybookTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         note = json.loads(result.stdout)["history_note"]
         self.assertIn(".supervisor-daybook.json", note)
-        self.assertIn(f"the row for {self.today()} holds a claim that is "
-                      "not a number", note)
+        self.assertIn(f"the row for {self.today()} is not one the book "
+                      "writes, a count in it not a number", note)
         kept = json.loads(self.daybook.read_text(encoding="utf-8"))["days"]
         self.assertEqual(kept[self.today()]["worst"], 0)
 
