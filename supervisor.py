@@ -4097,19 +4097,31 @@ def adoption_project(root, log):
     return root / parts[0]
 
 
-def drawer_closed(drawer):
-    """Why adopt cannot write into `drawer`, or None: it, or the nearest
+def move_refused(root, log, drawer):
+    """Why adopt cannot move `log` into `drawer`, or None, in the words
+    the real run refuses by. Asked before anything moves, so `--dry-run`
+    refuses what the real run will (#422): the drawer, or the nearest
     folder above it that stands, is no folder this user may write into
-    (#421). Asked before any move, so `--dry-run` refuses what the real
-    run will (#422)."""
+    (#421); or the drawer holds its project record and refuses only the
+    move (#430); or the legacy folder may not give the chain up. The
+    real run's own refusals stay behind this for what changes between."""
     here = Path(drawer)
     # A folder under a closed one does not stand to lexists either.
     while not os.path.lexists(here) and here.parent != here:
         here = here.parent
     if not os.path.isdir(here):
-        return f"{here.as_posix()} is not a folder"
+        return (f"{drawer.name}/ cannot be written: {here.as_posix()} is "
+                "not a folder")
     if not os.access(here, os.W_OK | os.X_OK):
-        return f"this user may not write into {here.as_posix()}"
+        if here == drawer and os.path.lexists(drawer / "project.json"):
+            return (f"cannot be moved into {drawer.name}/: this user may "
+                    "not write into it")
+        return (f"{drawer.name}/ cannot be written: this user may not "
+                f"write into {here.as_posix()}")
+    if not os.access(log.parent, os.W_OK | os.X_OK):
+        return (f"cannot be moved out of "
+                f"{log.parent.relative_to(root).as_posix()}/: this user "
+                "may not write into it")
     return None
 
 
@@ -4154,9 +4166,9 @@ def cmd_adopt(args):
         if os.path.lexists(drawer / log.name):
             refused.append((log, drawer, project))
             continue
-        closed = drawer_closed(drawer)
-        if closed is not None:
-            stays.append((log, f"{drawer.name}/ cannot be written: {closed}"))
+        why = move_refused(root, log, drawer)
+        if why is not None:
+            stays.append((log, why))
             continue
         moves.append((log, drawer, project))
     if not moves and not refused and not stays:
