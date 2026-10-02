@@ -16,6 +16,7 @@ handshake and the 2026-07-28 per-request `_meta` form).
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -384,6 +385,26 @@ class ToolCallTest(McpBase):
         self.assertIn("hidden.py", wide)
         self.assertNotIn("shy.py", wide)
         c.close()
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not look into")
+    def test_a_folder_it_cannot_list_is_a_tool_error_by_name(self):
+        # Never read as no memory (#431), and the server stays up.
+        closed = self.repo / "receipts"
+        os.chmod(closed, 0)
+        self.addCleanup(os.chmod, closed, 0o755)
+        c = self.client()
+        c.initialize()
+
+        for name, arguments in (("digest", {}), ("search", {"text": "x"})):
+            with self.subTest(tool=name):
+                reply = c.call(name, arguments)
+                self.assertTrue(reply["result"]["isError"], reply)
+                self.assertIn(f"{closed.as_posix()} cannot be listed: ",
+                              text_of(reply))
+        self.assertEqual(c.request("ping")["result"], {})
+        code, _, err = c.close()
+        self.assertEqual(code, 0, err)
 
 
 class HostileReceiptTest(McpBase):

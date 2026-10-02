@@ -228,7 +228,10 @@ baseline is, so it gets the same answer: the scan names each folder its
 census cannot list and exits 5 on every look while it stays closed, and
 never calls the store empty beside it. Exit 5 now covers a change
 appends cannot explain, a baseline the scan cannot read or keep, and a
-folder the census cannot list. The other readers (recall, `adopt`,
-`package`, `acknowledge --baseline`) refuse by name with 66 rather than
-act on part of the store, and every listing of the store goes through
-one helper that names or raises such a folder, on every Python.
+folder the census cannot list. `export` carries it as the scan's exit 5
+and says it on stderr, its own exit unchanged. The other readers
+(recall, `adopt`, `package`, `acknowledge --baseline`) refuse by name
+with 66 rather than act on part of the store, and `serve`'s views over
+the store answer 503 by name. Every listing of the store by the
+supervisor goes through one helper that names or raises such a folder,
+on every Python.

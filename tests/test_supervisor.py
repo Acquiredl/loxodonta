@@ -4626,6 +4626,22 @@ class ClosedFolderTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.closed_named(report, beta)
 
+    def test_a_legacy_scan_passes_a_folder_it_may_look_into_but_not_list(self):
+        # A plain name in the pattern is looked up, never listed for, as
+        # Path.glob does: a system folder that refuses a listing but
+        # answers a lookup is no closed repo, and is not named on every
+        # look (#431's review).
+        odd = self.legacy / "odd"
+        odd.mkdir()
+        os.chmod(odd, 0o311)
+        self.addCleanup(os.chmod, odd, 0o755)
+
+        result = self.supervisor("scan", "--json", "--root", str(self.legacy),
+                                 "--witness", str(self.witness))
+
+        self.answered(result, 0)
+        self.assertNotIn("closed", json.loads(result.stdout))
+
     def test_export_names_a_closed_drawer_and_carries_exit_5(self):
         self.close(self.drawer)
         out = self.root / "export.json"
@@ -4656,7 +4672,8 @@ class ClosedFolderTest(unittest.TestCase):
         self.close(self.drawer)
         url = self.serve()
 
-        for route in ("/api/recall", "/api/activity", "/api/search?q=step"):
+        for route in ("/api/recall", "/api/activity", "/api/search?q=step",
+                      "/api/shape?repo=alpha&session=sess-aaaa"):
             with self.subTest(route=route):
                 with self.assertRaises(urllib.error.HTTPError) as refused:
                     OPENER.open(url + route, timeout=30)

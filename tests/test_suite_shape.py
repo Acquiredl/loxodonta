@@ -1173,7 +1173,7 @@ class EveryStoreListingIsNamedTest(SpoiledScript, unittest.TestCase):
     store only through `listed`, which names a folder it cannot list or
     raises, and never reads it as empty, on every Python. The harness's
     transcripts are listed on their own and are on the list. The
-    recorder and the receiver are not walked: neither reads the store.
+    recorder and the receiver are not walked: the rule is the reader's.
 
     What the walk does not see: a listing reached through `getattr`, or
     inside a library call that lists a folder itself."""
