@@ -4844,7 +4844,8 @@ def main_repo_of(project):
                 return project
             root = Path(spelled[:at])
         return root if os.path.isdir(root) else project
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a byte that is not UTF-8 in either file (#406).
         return project
 
 
@@ -4900,10 +4901,12 @@ def drawer_name(drawer):
     never the census."""
     try:
         record = json.loads(read_whole(Path(drawer) / "project.json"))
-        base = os.path.basename(str(record.get("path", "")).rstrip("/\\"))
-        return base or Path(drawer).name
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return Path(drawer).name
+    # Valid JSON that is not an object, `[]` say, names nothing (#406).
+    path = record.get("path", "") if isinstance(record, dict) else ""
+    base = os.path.basename(str(path).rstrip("/\\"))
+    return base or Path(drawer).name
 
 
 def store_identity(log):
@@ -4944,7 +4947,7 @@ def worktree_drawers(repo):
         try:
             recorded = json.loads(read_whole(drawer / "project.json")).get(
                 "path", "")
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError, AttributeError, RecursionError):
             continue
         spelled = os.path.normcase(str(recorded)).replace(os.sep, "/")
         if spelled.startswith(prefix) and not own_repository(recorded):
