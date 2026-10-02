@@ -12,7 +12,9 @@ The chain itself is in the same reach. `verify` and `head` call a chain
 path that is not a regular file no input, the scan names it and goes on,
 and `package` and `export` never copy it (SPEC section 6). The hook
 reads it as damage and keeps its receipt in a sibling, and the other
-writers refuse it as `verify` does (#385).
+writers refuse it as `verify` does (#385). A folder that refuses the
+lock file, or a lock file that will not take its line, is a file the
+writer must write and cannot, 73, the lock removed (#398).
 
 So is every other file the tools read there (#386): the transcript the
 hook commits and `verify --transcript` judges, a chain's project record,
@@ -458,6 +460,84 @@ class UnwritableChainTest(unittest.TestCase):
         self.assert_not_written(result)
         self.assertFalse(
             (self.workdir / f"receipts-{HOOKED}-002.jsonl").exists())
+
+
+@unittest.skipIf(os.name == "nt", "a folder's write bit is POSIX")
+class ReadOnlyFolderTest(UnwritableChainTest):
+    """The same three writers in a folder that refuses the lock file
+    beside the chain (#398): the lock is the first thing an append
+    creates, so the refusal comes there, and each says so as the
+    hook does, exit 73, never a traceback."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
+        first = fire_hook(self, self.workdir, "echo first")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.before = self.chain.read_bytes()
+        os.chmod(self.workdir, 0o555)
+        self.addCleanup(os.chmod, self.workdir, 0o755)
+
+
+def no_file_may_grow():
+    """In the child, before it starts: no file may grow past 0 bytes,
+    so the lock file is created and the line written into it is refused
+    (EFBIG; Python ignores SIGXFSZ, so the write fails, not the
+    process)."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+
+@unittest.skipIf(os.name == "nt", "no file size limit on Windows")
+class LockNotWrittenTest(unittest.TestCase):
+    """A lock file created and then refused its one line, as a full disk
+    would refuse it (#398). The writer removes the lock it made before
+    it says why, so the next append is not held off by it until the
+    stale break, and `log`, `run` and the hook each answer 73 with no
+    traceback, the chain as it was."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
+        first = fire_hook(self, self.workdir, "echo first")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.before = self.chain.read_bytes()
+
+    def limited(self, *args, payload=None):
+        env = isolated_env(home_outside(self), PYTHONIOENCODING="utf-8",
+                           PYTHONDONTWRITEBYTECODE="1")
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), *args], input=payload,
+            capture_output=True, encoding="utf-8", cwd=str(self.workdir),
+            env=env, timeout=BOUND, preexec_fn=no_file_may_grow)
+
+    def test_each_writer_removes_the_lock_it_made(self):
+        payload = json.dumps({"session_id": HOOKED,
+                              "hook_event_name": "PostToolUse",
+                              "tool_name": "Bash",
+                              "tool_input": {"command": "echo second"}})
+        writers = {
+            "log": ["log", "--log", str(self.chain),
+                    "--actor", "agent", "--action", "x"],
+            "run": ["run", "--log", str(self.chain), "--actor", "agent",
+                    "--", sys.executable, "-c", "pass"],
+            "hook": ["hook", "--log-dir", str(self.workdir)],
+        }
+        for verb, args in writers.items():
+            with self.subTest(verb=verb):
+                result = self.limited(*args, payload=payload)
+
+                self.assertEqual(result.returncode, 73,
+                                 result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn("could not be written", result.stderr)
+                self.assertIn("no entry was written", result.stderr)
+                self.assertEqual(self.chain.read_bytes(), self.before)
+                self.assertEqual(list(self.workdir.glob("*.lock")), [])
 
 
 class PackagedNotAFileTest(AnchoredStoreCase):
