@@ -346,6 +346,32 @@ class TwinCheckTest(unittest.TestCase):
             (self.root / "docs" / "TWINS.md").read_text(encoding="utf-8"),
             (REPO_ROOT / "docs" / "TWINS.md").read_text(encoding="utf-8"))
 
+    def test_page_writes_lf_whatever_the_checkout_holds(self):
+        page = self.root / "docs" / "TWINS.md"
+        page.write_bytes(b"stale\r\n")
+        done = twin_check("--page", "--root", str(self.root))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("wrote docs/TWINS.md", done.stdout)
+        written = page.read_bytes()
+        self.assertNotIn(b"\r", written)
+        self.assertEqual(written.decode("utf-8"),
+                         (REPO_ROOT / "docs" / "TWINS.md").read_text(
+                             encoding="utf-8"))
+
+    def test_page_with_nothing_changed_leaves_the_file_alone(self):
+        # A current page that a Windows checkout wrote with CRLF, rewritten
+        # as LF, reads as modified to git status with an empty diff (#402).
+        page = self.root / "docs" / "TWINS.md"
+        crlf = page.read_bytes().replace(b"\n", b"\r\n")
+        page.write_bytes(crlf)
+        done = twin_check("--page", "--root", str(self.root))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("docs/TWINS.md is current", done.stdout)
+        self.assertEqual(page.read_bytes(), crlf)
+        checked = self.check()
+        self.assertEqual(checked.returncode, 0,
+                         checked.stdout + checked.stderr)
+
     def test_write_on_a_clean_tree_changes_no_byte(self):
         before = self.snapshot()
         done = self.write()
