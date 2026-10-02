@@ -53,7 +53,7 @@ from urllib.parse import urlsplit
 # FORMAT_VERSION is the frozen receipt format of the chain files it
 # keeps (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.10.3"
+TOOL_VERSION = "0.11.0"
 FORMAT_VERSION = "0.1"
 
 DEFAULT_PORT = 8790
