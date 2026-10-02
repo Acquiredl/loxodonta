@@ -27,8 +27,8 @@ machine-readable JSON on stdout, and an exit code cron can shout about —
 0 when nothing demands attention, 1–4 for the worst verify exit found
 (a chain verify could not judge at all, empty or unreadable, counts as
 4, the refusal), 5 when the baseline saw a change appends cannot explain,
-or cannot itself be read or kept (a reason to investigate, never a
-verdict; ADR-0039), 6 when a session is demonstrably active
+or cannot itself be read or kept, or the census cannot list a folder
+(a reason to investigate, never a verdict; ADR-0039, #431), 6 when a session is demonstrably active
 but its chain is behind the witness (the completeness alarm), 7 when a
 chain's transcript commitments contradict each other (verify's exit 5,
 ADR-0017 — renumbered in this fold because scan's 5 already means the
@@ -49,6 +49,7 @@ import argparse
 import base64
 import contextlib
 import errno
+import fnmatch
 import hashlib
 import io
 import json
@@ -105,19 +106,86 @@ SIDECARS = {".anchors.jsonl": "anchors", ".published.jsonl": "memo",
 SIDECAR_SUFFIXES = tuple(SIDECARS)
 
 
-def find_chains(root):
+class ClosedFolder(OSError):
+    """A folder a census had to list and could not (#431)."""
+
+
+def listed(folder, pattern, closed=None):
+    """Every path under `folder` that `pattern` matches, sorted: parts
+    split on `/`, as `Path.glob` reads a pattern. A part with a wildcard
+    is matched by fnmatch against what the folder above lists; a plain
+    name is looked up, never listed for, as `Path.glob` does, so a
+    system folder that refuses a listing but answers a lookup (Windows'
+    `System Volume Information`) is not named on every look. A folder on
+    the way that cannot be listed or looked into is never read as empty
+    (#431): it goes on `closed` as (folder, why), or, with no list given,
+    is raised as ClosedFolder. Nothing at a name, or a file where a
+    folder was looked for, is nothing found. `Path.glob` cannot serve:
+    it passes some closed folders in silence on every Python, and before
+    3.13 raises on others."""
+    found = [Path(folder)]
+    for part in pattern.split("/"):
+        deeper = []
+        for here in found:
+            try:
+                if any(c in part for c in "*?["):
+                    deeper += [here / name for name in os.listdir(here)
+                               if fnmatch.fnmatch(name, part)]
+                else:
+                    os.stat(here / part)
+                    deeper.append(here / part)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as error:
+                why = error.strerror or str(error)
+                if closed is None:
+                    raise ClosedFolder(error.errno, why, str(here)) from None
+                closed.append((here, why))
+        found = deeper
+    return sorted(found)
+
+
+UNKNOWN = "what it holds is unknown, and is never read as empty"
+
+
+def closed_words(unlisted):
+    """The scan's sentence for the folders its census could not list,
+    each a {"folder", "why"} (#431)."""
+    named = "; ".join(f"{c['folder']} ({c['why']})" for c in unlisted)
+    return (f"{len(unlisted)} folder(s) cannot be listed: {named} — "
+            f"{UNKNOWN}. Closing a folder is in the writer's reach, so this "
+            "is exit 5 on every look until it can be listed again "
+            "(ADR-0039)")
+
+
+def closed_refusal(error):
+    """A command's refusal for a folder it had to list and could not, 66:
+    it names the folder and does nothing (#431)."""
+    return refused(f"{Path(error.filename).as_posix()} cannot be listed: "
+                   f"{error.strerror} — {UNKNOWN}, so nothing was done",
+                   EX_NOINPUT)
+
+
+def chains_listed(folder, pattern, closed=None):
+    """`listed`, sidecars set aside: what a census counts as chains."""
+    return [p for p in listed(folder, pattern, closed)
+            if not p.name.endswith(SIDECAR_SUFFIXES)]
+
+
+def find_chains(root, closed=None):
     """Every receipt log under a legacy --root. Three shapes, because
     pre-store history has three shapes: the root itself being a repo,
     each sibling repo's receipts/, and chains stranded in worktrees by
     sessions that ran before the hook learned to log to the main repo.
-    The default census is not this one: it is a single glob over the
-    store's drawers, inline in scan_root (ADR-0011). Sidecars are files
-    about a chain, not chains."""
+    The default census is not this one: it lists the store's drawers,
+    inline in scan_root (ADR-0011). Sidecars are files about a chain,
+    not chains. A folder it cannot list goes on `closed`, or is raised
+    (`listed`)."""
     patterns = ("receipts/*.jsonl",
                 "*/receipts/*.jsonl",
                 "*/.claude/worktrees/*/receipts/*.jsonl")
-    return sorted(p for pattern in patterns for p in root.glob(pattern)
-                  if not p.name.endswith(SIDECAR_SUFFIXES))
+    return sorted(p for pattern in patterns
+                  for p in chains_listed(root, pattern, closed))
 
 
 def split_seq(stem):
@@ -404,6 +472,13 @@ CHANGE_WORDS = {
 
 AFRESH = "`supervisor acknowledge --baseline` starts the memory afresh"
 
+UNCOUNTED = ("the baseline remembers a chain at this name, and what stands "
+             "there is something the census does not count: the row is "
+             "kept as it was and compared with nothing. A planted row, or "
+             "the chain renamed (on a disk that ignores case, a change of "
+             "case is enough); look at what stands there, and at the "
+             "baseline")
+
 
 def memory_paths(root, store):
     """(baseline, day book) for a root: beside the store's receipts
@@ -451,12 +526,18 @@ def baseline_problem(text, memory):
     if not (isinstance(acknowledged, list)
             and all(isinstance(record, dict) for record in acknowledged)):
         return "`acknowledged` is not a list of records"
-    keeper = data.get("keeper")
+    keeper = data.get("keeper") if isinstance(data.get("keeper"), dict) else {}
+    # An attempt time with no zone cannot be set against now: skipped,
+    # it reads as no memory, so the keeper takes its turn, the next
+    # write leaves it out, and `read_baseline` names it (#430).
+    unzoned = [key for key, when in keeper.items()
+               if getattr(parse_when(when), "tzinfo", None) is None]
     sessionend = data.get("sessionend")
     calibration = data.get("calibration")
     memory.update(
-        chains=data["chains"], acknowledged=acknowledged,
-        keeper=keeper if isinstance(keeper, dict) else {},
+        chains=data["chains"], acknowledged=acknowledged, unzoned=unzoned,
+        keeper={key: when for key, when in keeper.items()
+                if key not in unzoned},
         calibration=[epoch for epoch in (calibration if isinstance(
                          calibration, list) else [])
                      if isinstance(epoch, dict)
@@ -494,10 +575,12 @@ def read_baseline(path, daybook=None):
     words. It is reported on every look and never replaced by the scan,
     never repaired, never trusted (ADR-0039); a folder or a pipe at its
     name is named and left, since `write_whole` refuses to write over one
-    (#386). No file and no such day book is a first look."""
+    (#386). No file and no such day book is a first look. A keeper
+    attempt time with no zone is dropped and `skipped` names it (#430)."""
     memory = {"chains": {}, "keeper": {}, "calibration": [],
               "sessionend": {}, "acknowledged": [], "blind": None,
-              "note": None, "stood": None, "seen": None}
+              "note": None, "stood": None, "seen": None, "unzoned": [],
+              "skipped": None}
 
     def blind(why, stood, note):
         memory.update(blind=why, stood=stood, note=note)
@@ -532,7 +615,17 @@ def read_baseline(path, daybook=None):
         return unread("it is not UTF-8")
     memory["seen"] = seen
     problem = baseline_problem(seen, memory)
-    return unread(problem) if problem else memory
+    if problem:
+        return unread(problem)
+    unzoned = memory["unzoned"]
+    if unzoned:
+        named = ", ".join(clip(key, 80) for key in unzoned[:3])
+        more = f" and {len(unzoned) - 3} more" if len(unzoned) > 3 else ""
+        memory["skipped"] = (
+            f"{Path(path).name}: the keeper's attempt time for {named}{more} "
+            "is not a time with a zone — skipped, read as no attempt, and "
+            "left out of the next write")
+    return memory
 
 
 def unchanged_since(path, seen):
@@ -625,16 +718,44 @@ DAYBOOK_PURPOSE = ("the supervisor's day-by-day memory of its own looks — "
                    "writer-reachable, trusted for nothing")
 
 
-def read_daybook(path):
-    """The remembered days. A damaged book is read as empty and
-    replaced on the next write, never repaired; a folder or a pipe at
-    its name is read as none and kept, never written over (#386)."""
+def daybook_rows(path):
+    """(days, skipped): the remembered days, and the days whose row the
+    book does not write, a row that is not an object or holds a counted
+    claim that is not an integer. Those are skipped, read as unwatched
+    and left out of the next write, never repaired, so one planted claim
+    costs one day and never the scan (#430). A damaged book is read as
+    empty and replaced on the next write; a folder or a pipe at its name
+    is read as none and kept, never written over (#386)."""
     try:
         days = json.loads(read_whole(path))["days"]
-        return days if isinstance(days, dict) else {}
-    except (OSError, ValueError, KeyError, TypeError,
-            json.JSONDecodeError):
-        return {}
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return {}, []
+    if not isinstance(days, dict):
+        return {}, []
+    kept, skipped = {}, []
+    for day, row in days.items():
+        if isinstance(row, dict) and all(
+                isinstance(row.get(claim, 0), int)
+                and not isinstance(row.get(claim, 0), bool)
+                for claim in PAINTED + ("blind", "scans", "looks")):
+            kept[day] = row
+        else:
+            skipped.append(day)
+    return kept, skipped
+
+
+def read_daybook(path):
+    """The remembered days a tick can fold into (`daybook_rows`)."""
+    return daybook_rows(path)[0]
+
+
+def rows_skipped(path, skipped):
+    """The note naming the day book's rows `daybook_rows` skipped."""
+    named = ", ".join(clip(day, 40) for day in skipped[:3])
+    more = f" and {len(skipped) - 3} more" if len(skipped) > 3 else ""
+    return (f"{Path(path).name}: the row for {named}{more} is not one the "
+            "book writes, a count in it not a number — skipped, read as a "
+            "day nobody watched, and left out of the next write")
 
 
 def write_daybook(path, days, now):
@@ -3069,24 +3190,21 @@ def lifecycle_tier(last_grew, now):
     return tier, int(still)
 
 
-def store_session_ids():
+def store_session_ids(closed=None):
     """Every session id the store holds a chain for (ADR-0011). A legacy
     --root scan reads this to tell a session whose recording moved into
     the store from one that never recorded at all (#117); the store is
     the default universe, so an operator following older notes points
-    --root at a folder the chains have already left."""
-    receipts = Path(store_home()) / "receipts"
-    try:
-        return {log.name[len("receipts-"):-len(".jsonl")]
-                for log in receipts.glob("*/receipts-*.jsonl")
-                if not log.name.endswith(SIDECAR_SUFFIXES)}
-    except OSError:
-        return set()
+    --root at a folder the chains have already left. A store folder it
+    cannot list goes on `closed` (`listed`)."""
+    return {log.name[len("receipts-"):-len(".jsonl")]
+            for log in chains_listed(store_receipts(), "*/receipts-*.jsonl",
+                                     closed)}
 
 
 def watch_completeness(root, witness, families, everywhere=False,
                        calibration=None, sessionend=None,
-                       show_before_memory=False):
+                       show_before_memory=False, closed=None):
     """The completeness half of a tick: every census session paired with
     its transcript, plus witnessed sessions that never grew a chain at
     all — the disabled-hook case the census alone can never see.
@@ -3096,7 +3214,8 @@ def watch_completeness(root, witness, families, everywhere=False,
     coverage memory (ADR-0016); without one, this look's wired matchers
     are taken to have always been in force. `show_before_memory` lists
     the sessions ADR-0029 leaves unjudged instead of only counting
-    them — the "be upfront" half made operable rather than promised."""
+    them — the "be upfront" half made operable rather than promised.
+    A store folder it cannot list goes on `closed` (`listed`)."""
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
     unjudged = []
@@ -3294,7 +3413,7 @@ def watch_completeness(root, witness, families, everywhere=False,
     # #117: in legacy mode a transcript with no chain under this root
     # is one of two different things, and charging both the same way
     # fakes the flagship alarm out of a wrong invocation.
-    stored = set() if everywhere else store_session_ids()
+    stored = set() if everywhere else store_session_ids(closed)
     elsewhere = 0
     for stem, transcript in transcripts.items():
         folder = transcript.parent.name
@@ -3557,10 +3676,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # Walk in display order — repo, then session, then sibling sequence —
     # so the grouping below is plain insertion, no re-sorting.
     unfiled = {}
+    # Each folder the census could not list, as (folder, why): named, and
+    # exit 5, never read as empty (#431). Closing a drawer is the writer's
+    # lever to hide chains.
+    closed = []
     if store:
-        found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                        if not p.name.endswith(SIDECAR_SUFFIXES))
-                 if os.path.isdir(root) else [])
+        found = chains_listed(root, "*/receipts-*.jsonl", closed)
         census = sorted((store_identity(log), log) for log in found)
         # A drawer whose project record is not a file is labelled by its
         # own slug and claimed by no repository's worktrees: named, like
@@ -3574,7 +3695,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                     "drawer's own name, as no repository's history")
     else:
         census = sorted((chain_identity(root, log), log)
-                        for log in find_chains(root))
+                        for log in find_chains(root, closed))
     repos = {}
     worst = 0
     damaged = 0
@@ -3759,6 +3880,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                     "transcript-commitment:"))
             family["home"] = (root / relpath).parent.as_posix()
 
+    uncounted = []
     for relpath, known in remembered.items():
         if relpath in heads:
             continue
@@ -3767,8 +3889,19 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         # 3.14, and one chmod would cost every chain its scan.
         if os.path.exists(root / relpath):
             # Something the census does not count stands at the name:
-            # its memory is kept as it was, never dropped unseen.
+            # its memory is kept as it was, never dropped unseen. In a
+            # folder the census could not list, the closed note names it
+            # and the exit is 5 (#431). Anywhere else it is a planted
+            # row, or the chain renamed (on a disk that ignores case, a
+            # change of case is enough): named, with no exit (#432).
             heads[relpath] = known
+            if any(Path(folder) in (root / relpath).parents
+                   for folder, _ in closed):
+                continue
+            uncounted.append({"log": relpath,
+                              "remembered": {"n": known["n"],
+                                             "head": known["head"]},
+                              "words": UNCOUNTED})
             continue
         repo_name, session, _ = (store_identity(root / relpath) if store
                                  else chain_identity(root, root / relpath))
@@ -3814,7 +3947,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                                       everywhere=store,
                                       calibration=judging,
                                       sessionend=sessionend,
-                                      show_before_memory=show_before_memory)
+                                      show_before_memory=show_before_memory,
+                                      closed=closed)
+    # One folder can be met by more than one pattern; it is named once.
+    unlisted = [{"folder": folder, "why": why} for folder, why in
+                sorted({(Path(f).as_posix(), why) for f, why in closed})]
+    if unlisted:
+        worst = max(worst, 5)
     # The keeper closes what the annotation reports — after the rows
     # are judged, so this scan says the truth it saw and the next scan
     # sees the tails committed.
@@ -3850,7 +3989,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # already standing does not mark every later day as watched
     # (ADR-0039); the day's worst is sticky, so a morning reader still
     # sees the day it was found, and every day somebody looks.
-    days = read_daybook(daybook)
+    days, skipped = daybook_rows(daybook)
     latest = days.get(max(days)) if days else None
     shown = isinstance(latest, dict) and latest.get("blind") == 1
     if remember or fresh or awakened or (blind and not shown):
@@ -3859,19 +3998,24 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     baseline = {"file": baseline_path.as_posix(), "events": events,
                 # Testimony: never raises the exit, never moves an event.
                 "acknowledged": memory["acknowledged"]}
+    if uncounted:
+        baseline["uncounted"] = uncounted
     if blind:
         baseline["blind"] = blind
     if unkept:
         baseline["unkept"] = True
-    if note:
-        baseline["note"] = note
+    if note or memory["skipped"]:
+        baseline["note"] = "; ".join(
+            words for words in (note, memory["skipped"]) if words)
     shelf = not_a_file(daybook)
     marker = Path(store_home()) / COVERAGE_NAME
     unmarked = not_a_file(marker)
     settings = witness.parent / "settings.json"
     unset = not_a_file(settings)
     report_note = None
-    if store and not repos:
+    if unlisted:
+        pass  # an empty census beside a closed folder is no empty store
+    elif store and not repos:
         # An empty store has two unlike causes and this note named only
         # one of them, so a reader who had just finished step 2 of
         # docs/START.md and scanned out of curiosity was told to run
@@ -3902,7 +4046,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "exit": worst,
         "history": fortnight(days, now),
         **({"history_note": memory_unread(daybook, "a day book", shelf)}
-           if shelf else {}),
+           if shelf else {"history_note": rows_skipped(daybook, skipped)}
+           if skipped else {}),
         **({"marker_note": f"{marker.as_posix()} cannot be read as a "
                            f"coverage marker: {unmarked} — read as none, as "
                            "if install-hook had written nothing"}
@@ -3911,6 +4056,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                              f"harness settings: {unset} — read as none, "
                              "as if no hook were wired"}
            if unset else {}),
+        **({"closed": unlisted, "closed_note": closed_words(unlisted)}
+           if unlisted else {}),
         "baseline": baseline,
         "completeness": completeness,
         "consumption": consumption,
@@ -4047,7 +4194,26 @@ def cmd_adopt(args):
                       "it lies")
                 continue
         marker = log.parent / UNLISTED_NAME
-        shutil.move(str(log), str(drawer / log.name))
+        try:
+            shutil.move(str(log), str(drawer / log.name))
+        except OSError as error:
+            why = error.strerror or error
+            if os.path.lexists(drawer / log.name):
+                # A move across two filesystems copies, then removes:
+                # what failed part way is said, never "left as it lies".
+                print(f"refused {log.relative_to(root).as_posix()}: the "
+                      f"move failed part way: {why} — "
+                      f"{drawer.name}/{log.name} may be a partial copy; "
+                      "reconcile by hand")
+            else:
+                # A drawer this user may read and not write, the record
+                # already in it, refuses the move itself (#430); on
+                # POSIX so does a legacy folder that may not be written,
+                # so the words blame neither.
+                print(f"refused {log.relative_to(root).as_posix()}: "
+                      f"cannot be moved into {drawer.name}/: {why} — not "
+                      "adopted; left as it lies")
+            continue
         for suffix in SIDECAR_SUFFIXES:
             sidecar = log.parent / (log.name + suffix)
             if not os.path.exists(sidecar):
@@ -4057,7 +4223,13 @@ def cmd_adopt(args):
                 print(f"left sidecar "
                       f"{sidecar.relative_to(root).as_posix()}: {why}")
             else:
-                shutil.move(str(sidecar), str(drawer / sidecar.name))
+                try:
+                    shutil.move(str(sidecar), str(drawer / sidecar.name))
+                except OSError as error:
+                    print(f"left sidecar "
+                          f"{sidecar.relative_to(root).as_posix()}: "
+                          f"{error.strerror or error} — not moved; "
+                          "reconcile by hand")
         if os.path.exists(marker) \
                 and not os.path.exists(drawer / UNLISTED_NAME):
             try:
@@ -4103,11 +4275,15 @@ def say_memory(report):
     """The baseline's own trouble on stderr, for `export` and `package`:
     each takes a scan underneath and exits by a contract of its own, and
     a memory the scan could not read or keep is exit 5 to `scan`
-    (ADR-0039), so they say it rather than go quiet."""
+    (ADR-0039), as is a folder it could not list (#431), so they say it
+    rather than go quiet."""
     baseline = report.get("baseline") or {}
     if baseline.get("blind") or baseline.get("unkept"):
         print(f"note: the scan underneath this is exit 5: "
               f"{baseline.get('note')}", file=sys.stderr)
+    if report.get("closed"):
+        print(f"note: the scan underneath this is exit 5: "
+              f"{report['closed_note']}", file=sys.stderr)
 
 
 # --- Acknowledging a change (ADR-0039) -----------------------------------------
@@ -4136,11 +4312,10 @@ def refused(words, code=None):
 def census_logs(root, store):
     """Every chain the scan's census counts: the store's drawers, or a
     legacy root's three shapes (`find_chains`). The twin of the census
-    inline in scan_root; the two must agree."""
+    inline in scan_root; the two must agree. A folder it cannot list is
+    raised (`listed`): a memory started without it would forget it."""
     if store:
-        return (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                       if not p.name.endswith(SIDECAR_SUFFIXES))
-                if os.path.isdir(root) else [])
+        return chains_listed(root, "*/receipts-*.jsonl")
     return find_chains(root)
 
 
@@ -4199,10 +4374,8 @@ def cmd_acknowledge(args):
                            f"{change}, and it has gone since: look again "
                            "with `supervisor scan`")
         try:
-            os.listdir(chain.parent)
-        except (FileNotFoundError, NotADirectoryError):
-            pass
-        except OSError:
+            listed(chain.parent, "*")
+        except ClosedFolder:
             return refused(f"the folder holding {visible(log)} cannot be "
                            "looked into, so whether the chain is gone is "
                            "unknown: open it and look again with "
@@ -4452,11 +4625,10 @@ def mentions(entries, needle):
 def universe(root, store):
     """(repo, session, seq, log) for every chain in the serving
     universe: the store's drawers, or a legacy folder of repos under an
-    explicit --root (ADR-0011/0013)."""
+    explicit --root (ADR-0011/0013). A folder it cannot list is raised
+    (`listed`), and the page's view refuses by name."""
     if store:
-        found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
-                        if not p.name.endswith(SIDECAR_SUFFIXES))
-                 if os.path.isdir(root) else [])
+        found = chains_listed(root, "*/receipts-*.jsonl")
         return [(*store_identity(log), log) for log in found]
     return [(*chain_identity(root, log), log) for log in find_chains(root)]
 
@@ -4761,11 +4933,11 @@ ACTION_WIDTH = 110
 
 def repo_chains(repo):
     """Every chain belonging to one repo: its receipts/ plus chains
-    stranded in its own worktrees — still this repo's history."""
+    stranded in its own worktrees — still this repo's history. A folder
+    it cannot list is raised (`listed`)."""
     patterns = ("receipts/*.jsonl", ".claude/worktrees/*/receipts/*.jsonl")
     return sorted(p.resolve() for pattern in patterns
-                  for p in repo.glob(pattern)
-                  if not p.name.endswith(SIDECAR_SUFFIXES))
+                  for p in chains_listed(repo, pattern))
 
 
 def session_of(log):
@@ -4807,7 +4979,8 @@ def main_repo_of(project):
                 return project
             root = Path(spelled[:at])
         return root if os.path.isdir(root) else project
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a byte that is not UTF-8 in either file (#406).
         return project
 
 
@@ -4854,8 +5027,7 @@ def store_receipts():
 
 
 def drawer_chains(drawer):
-    return sorted(p for p in drawer.glob("receipts-*.jsonl")
-                  if not p.name.endswith(SIDECAR_SUFFIXES))
+    return chains_listed(drawer, "receipts-*.jsonl")
 
 
 def drawer_name(drawer):
@@ -4864,10 +5036,12 @@ def drawer_name(drawer):
     never the census."""
     try:
         record = json.loads(read_whole(Path(drawer) / "project.json"))
-        base = os.path.basename(str(record.get("path", "")).rstrip("/\\"))
-        return base or Path(drawer).name
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return Path(drawer).name
+    # Valid JSON that is not an object, `[]` say, names nothing (#406).
+    path = record.get("path", "") if isinstance(record, dict) else ""
+    base = os.path.basename(str(path).rstrip("/\\"))
+    return base or Path(drawer).name
 
 
 def store_identity(log):
@@ -4898,20 +5072,17 @@ def worktree_drawers(repo):
     (ADR-0023). A session that fell back to a worktree's own path, on
     this machine before the one-session-one-drawer rule or on any
     machine that ran v0.1.0, is still this repository's history. Narrow
-    on purpose: a sub-project elsewhere in the tree is its own memory."""
+    on purpose: a sub-project elsewhere in the tree is its own memory.
+    A store it cannot list is raised (`listed`)."""
     prefix = os.path.normcase(str(repo)).replace(os.sep, "/").rstrip("/") \
         + "/.claude/worktrees/"
     found = []
-    try:
-        drawers = sorted(p for p in store_receipts().iterdir()
-                         if os.path.isdir(p))
-    except OSError:
-        return found
+    drawers = [p for p in listed(store_receipts(), "*") if os.path.isdir(p)]
     for drawer in drawers:
         try:
             recorded = json.loads(read_whole(drawer / "project.json")).get(
                 "path", "")
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError, AttributeError, RecursionError):
             continue
         spelled = os.path.normcase(str(recorded)).replace(os.sep, "/")
         if spelled.startswith(prefix) and not own_repository(recorded):
@@ -4970,8 +5141,8 @@ def recall_scope(args):
     if logs:
         if getattr(args, "all", False):
             known = set(logs)
-            for log in sorted(store_receipts().glob("*/receipts-*.jsonl")):
-                if log.name.endswith(SIDECAR_SUFFIXES) or log in known:
+            for log in chains_listed(store_receipts(), "*/receipts-*.jsonl"):
+                if log in known:
                     continue
                 if os.path.exists(log.parent / UNLISTED_NAME) \
                         and log.parent != drawer:
@@ -5143,8 +5314,12 @@ def scan_testimony(repo):
     remembers (ADR-0011), else the legacy spots (the repo itself, or
     the folder of repos above it). The baseline is trusted for nothing
     — which is exactly why recall may cite it: testimony citing
-    testimony. Returns (scanned, verdicts, standing alarms, unread),
-    `unread` naming a baseline that is there and cannot be read."""
+    testimony. Returns (scanned, verdicts, standing alarms,
+    acknowledgements, unread), `unread` naming a baseline that is there
+    and cannot be read. An acknowledgement counts when it names one of
+    this repo's chains, or the memory itself while that memory holds a
+    row of this repo's: a memory that holds none is not this repo's
+    testimony, and the next source is read (#432)."""
     slugs = [project_slug(repo) + "/"] + [
         drawer.name + "/" for drawer in worktree_drawers(repo)]
 
@@ -5191,9 +5366,16 @@ def scan_testimony(repo):
                     for row in covered if "verdict" in row]
         standing = sum(1 for row in covered
                        if isinstance(row.get("alarm"), dict))
-        if verdicts or standing:
-            return scanned, verdicts, standing, unread
-    return None, [], 0, unread
+        records = data.get("acknowledged")
+        given = sum(1 for record in (records if isinstance(records, list)
+                                     else [])
+                    if isinstance(record, dict) and (
+                        "baseline" in record and covered
+                        or isinstance(record.get("log"), str)
+                        and covers(record["log"], path.parent)))
+        if verdicts or standing or given:
+            return scanned, verdicts, standing, given, unread
+    return None, [], 0, 0, unread
 
 
 def payload_cwd():
@@ -5251,7 +5433,7 @@ def cmd_digest(args):
     if reached < total:
         memory += f"; showing last {reached} (search reaches the rest)"
     lines.append(memory)
-    scanned, verdicts, standing, unread = scan_testimony(repo)
+    scanned, verdicts, standing, given, unread = scan_testimony(repo)
     if scanned:
         counts = {}
         for verdict in verdicts:
@@ -5267,6 +5449,12 @@ def cmd_digest(args):
             summary = "; ".join(filter(None, [summary, (
                 f"{standing} baseline alarm{'' if standing == 1 else 's'} "
                 "standing")]))
+        if given:
+            # An acknowledgement is testimony too, and a session-start
+            # reader should see that one was given, ever, not this scan
+            # (#432).
+            summary = "; ".join(filter(None, [
+                summary, f"{given} acknowledged on record"]))
         # The baseline is a plain file the agent can write: its
         # words are escaped like receipt text.
         lines.append(f"last scan: {visible(scanned)} - {visible(summary)} "
@@ -5649,6 +5837,8 @@ def mcp_call(name, arguments, default_repo):
             code = command[name](ns)
         except SystemExit as stop:  # argparse-style exits inside a command
             code = stop.code if isinstance(stop.code, int) else 1
+        except ClosedFolder as error:
+            code = closed_refusal(error)
         except Exception as failure:  # never take the server down
             err.write(f"error: {failure}\n")
             code = 1
@@ -6261,9 +6451,9 @@ def sessions_of(chains):
 
 def store_sessions():
     """{session: [chains]} over every drawer in the store, siblings
-    included, drawer by drawer in the census's order."""
-    return sessions_of(log for log in store_receipts().glob("*/receipts-*.jsonl")
-                       if not log.name.endswith(SIDECAR_SUFFIXES))
+    included, drawer by drawer in the census's order. A folder it cannot
+    list is raised (`listed`)."""
+    return sessions_of(chains_listed(store_receipts(), "*/receipts-*.jsonl"))
 
 
 def drawer_sessions(repo):
@@ -7287,16 +7477,32 @@ def run_drill(root, asked):
         return {"log": asked, "refused": "too short to drill — the "
                 "battery plays with middle entries; give it at least "
                 "two receipts past genesis"}, 1
+    # The edit rewrites entry 1, so it is read before anything is
+    # written (#430).
+    try:
+        edited = json.loads(lines[1])
+    except (ValueError, RecursionError):
+        return unreadable_drill(asked, "entry 1 is not valid JSON")
+    if not isinstance(edited, dict):
+        return unreadable_drill(asked, "entry 1 is not a JSON object")
 
     sandbox = root / DRILL_DIR
-    if os.path.exists(sandbox):
-        shutil.rmtree(sandbox)
-    sandbox.mkdir()
-    write_lines(sandbox / "pristine.jsonl", lines)
+    try:
+        # lexists: whatever stands at the name, a file or a link
+        # included, is cleared or named, never drilled into.
+        if os.path.lexists(sandbox):
+            shutil.rmtree(sandbox)
+        sandbox.mkdir()
+        write_lines(sandbox / "pristine.jsonl", lines)
+    except OSError as error:
+        # A sandbox closed to this user, or a file at its name (#430):
+        # a folder the verb must make and cannot, 73 (ADR-0037).
+        return {"log": asked, "refused": f"{DRILL_DIR}/ under the root "
+                f"cannot be made afresh: {error.strerror or error} — "
+                "remove it by hand"}, EX_CANTCREAT
     known_head = receipts_cli(
         "head", "--log", str(sandbox / "pristine.jsonl")).stdout.strip()
 
-    edited = json.loads(lines[1])
     edited["action"] = "REHEARSAL: this text was rewritten after the fact"
     write_lines(sandbox / "edit.jsonl",
                 [lines[0], json.dumps(edited, sort_keys=True,
@@ -7464,6 +7670,7 @@ def metrics_text(report, age_seconds):
           "4 the worst verify exit among the chains (a chain verify could "
           "not judge at all counts as 4), 5 the baseline saw a "
           "change appends cannot explain, or could not be read or kept, "
+          "or the census could not list a folder, "
           "6 a live session is behind its "
           "witness, 7 a chain's transcript commitments contradict each "
           "other", "witness verdict", [((), report.get("exit") or 0)])
@@ -7732,6 +7939,16 @@ class Face(BaseHTTPRequestHandler):
         return stranger
 
     def do_GET(self):
+        try:
+            self.answer_get()
+        except ClosedFolder as error:
+            # A view over a store folder this user may not list refuses
+            # by name; the status the page leads with names it too (#431).
+            self.send_error(503, "a store folder cannot be listed",
+                            f"{Path(error.filename).as_posix()} cannot be "
+                            f"listed: {error.strerror} — {UNKNOWN}")
+
+    def answer_get(self):
         if self.refused_off_machine():
             return
         url = urlparse(self.path)
@@ -9447,6 +9664,10 @@ function render(report) {
   if (report.baseline.note) {
     tripwire.appendChild(el("p", "claim", report.baseline.note));
   }
+  // A folder the census could not list: exit 5, never an empty store (#431).
+  if (report.closed_note) {
+    tripwire.appendChild(el("p", "claim", report.closed_note));
+  }
   // A memory the scan read as none, named beside the baseline's (#410):
   // an empty fortnight or an unwired coverage comes with its reason.
   for (const note of [report.history_note, report.marker_note,
@@ -10507,7 +10728,7 @@ class VersionAction(argparse.Action):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
-EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: a file to write cannot be
+EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no package
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
@@ -10649,7 +10870,8 @@ def main(argv):
         "--baseline", action="store_true",
         help="acknowledge the memory itself, when the scan cannot read it "
              "or it is missing beside a day book: start it afresh from "
-             "every chain as it stands")
+             "every chain as it stands. This replaces the file that "
+             "cannot be read, which is the evidence: copy it first")
     acknowledge.add_argument(
         "--root", default=None,
         help="legacy/explicit mode: the folder of repos whose baseline "
@@ -10862,7 +11084,11 @@ def main(argv):
     if args.command != "serve" and cadence != anywhere:
         parser.error("--publish-every goes with --publish-url or "
                      "--publish-chain, and either of them with it")
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ClosedFolder as error:
+        # `scan` names such a folder and never raises it (#431).
+        return closed_refusal(error)
 
 
 if __name__ == "__main__":

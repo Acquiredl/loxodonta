@@ -177,26 +177,30 @@ def files_base(log):
     amended v0.1.1, ADR-0012): the project named by a project record
     beside the log (a store chain), else the log's own directory (a
     local log at the project root — the two rules agree there).
-    Returns (base, problem): problem is the honest sentence when a
-    record exists but cannot lead anywhere."""
+    Returns (base, problem): problem is the honest sentence, naming the
+    record, when a record exists but cannot lead anywhere."""
     log_dir = os.path.dirname(os.path.abspath(log))
     record = os.path.join(log_dir, "project.json")
     if not os.path.exists(record):
         return log_dir, None
+    unread = f"{record} cannot be read as a project record"
     try:
         # The record sits beside the chain, in the writer's reach, so a
         # pipe there is refused by name rather than waited on (#386).
         with open_regular(record) as f:
-            path = json.loads(f.read().decode("utf-8")).get("path")
+            held = json.loads(f.read().decode("utf-8"))
     except OSError as error:
-        return None, (f"{record} cannot be read as a project record: "
-                      f"{error.strerror or error}")
-    except ValueError:
-        return None, f"project record unreadable: {record}"
+        return None, f"{unread}: {error.strerror or error}"
+    except (ValueError, RecursionError):
+        # Not UTF-8, not JSON, or nested past what the reader follows.
+        return None, f"{unread}: it is not JSON"
+    if not isinstance(held, dict):
+        # Valid JSON with no path in it, `[]` say (#406).
+        return None, f"{unread}: it holds no JSON object"
+    path = held.get("path")
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
-    return None, (f"project record points at a missing project "
-                  f"({visible(path)}) — references cannot be resolved")
+    return None, f"{record} points at a missing project ({visible(path)})"
 
 
 # --- The walk (SPEC §6) -------------------------------------------------------
@@ -3478,6 +3482,13 @@ def cmd_run(args):
         return missing_log(args.log)
     except OSError as e:
         return unreadable_log(args.log, e)
+    # A project record that leads nowhere refuses every `--file`, so it
+    # is refused here too, before the work it could not record (#406).
+    if args.file:
+        _, problem = files_base(args.log)
+        if problem:
+            print(f"error: {problem}", file=sys.stderr)
+            return EX_NOINPUT
     command_line = " ".join(args.command_argv)
 
     # The first signal handled decides how the receipt ends (signals that
@@ -3747,6 +3758,10 @@ def seal_session(log, transcript_path):
             return append_locked(log, "receipts", action, [])
     except LockTimeout:
         return locked_out(log)
+    except OSError:
+        # On POSIX a folder that refuses the lock file raises here
+        # rather than waiting (#398), and is skipped like the rest (#430).
+        return 0
 
 
 SESSION_END_BUDGET = 12.0   # seconds, under the installer's 20 s timeout
@@ -5248,7 +5263,8 @@ def main_repo_root(project):
             if root is None:
                 return project
         return root if os.path.isdir(root) else project
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a byte that is not UTF-8 in either file (#406).
         return project
 
 
@@ -5531,18 +5547,17 @@ def cmd_hook(args):
             continue
         file_paths.append(relative.replace(os.sep, "/"))
 
-    # A folder or a pipe where the project record belongs names no base,
-    # and the drawer is in the writer's reach: the hook takes the
-    # project it knows, as it does when it writes a new record, and
-    # says so rather than lose the receipt (#386).
-    record = os.path.join(os.path.dirname(log), "project.json")
-    unread = file_problem(record) if file_paths else None
-    if unread is not None:
-        print(f"warning: {record} cannot be read as a project record: "
-              f"{unread} — the files are fingerprinted against {base}",
-              file=sys.stderr)
+    # A project record that names no base, a folder or a pipe at its
+    # name (#386), or content that cannot be taken apart or names a
+    # project that is gone (#406), is in the writer's reach: the hook
+    # takes the project it knows, as it does when it writes a new
+    # record, and says so rather than lose the receipt (SPEC §8).
+    named, problem = files_base(log)
+    if problem and file_paths:
+        print(f"warning: {problem} — the files are fingerprinted against "
+              f"{base}", file=sys.stderr)
     files, code = build_references(
-        log, file_paths, base=base if unread is not None else None)
+        log, file_paths, base=base if problem else named)
     if files is None:
         return code
     # One lock for the receipt and any due transcript commitment: a
