@@ -35,6 +35,46 @@ This one reframing drove five v0.1 features, all decided in the same session:
 - **Auto-tracked head state file (e.g. `~/.receipts/heads`)** — rejected: anything the operator's machine stores, the agent on that machine can likely rewrite; false sense of security.
 - **Signatures for writer accountability** — already rejected in ADR-0001; unchanged. Anchoring (Stage B) closes the regeneration gap without keys.
 
+## Addendum, 2026-10-01: a security record, and the flight recorder stays the image
+
+The positioning line above called this "an accountability/forensic-integrity
+layer (flight recorder), **not** a detection or prevention feature", and
+ruled "security audit" phrasing an overclaim. The README now leads with
+*a tamper-evident security record for AI agents*. The author's ruling, in
+the author's words:
+
+> **The goal is a log an agent cannot hide the fact that it ran
+> something. The best case is that it records what the agent did to try
+> to cover its tracks from the logging system itself. Today that can be
+> confirmed for an agent that attacks the hooks or deletes the local
+> store, when the stronger settings are on: the remote copy, the
+> OpenTimestamps anchor, and the rest.**
+
+What this changes: *security* is now the word the tool leads with, because
+what it catches is a security event, an agent covering its tracks. The
+flight recorder stays as the image beneath the lead line.
+
+What it does not change:
+
+- **Still not prevention.** Nothing here stops an agent acting, or stops
+  it editing the record; the edit shows.
+- **It detects tampering with the record and with the recorder, not
+  attacks in general.** A prompt injection the agent acts on is recorded,
+  not detected. Write-time lies stay faithfully chained.
+- **The tiers stay stated.** On the agent's machine alone, a deleted or
+  regenerated store is caught only against a head kept elsewhere; the
+  author's "confirmed" holds with the `full` profile (a deleted store
+  survives at the receiver as of the last send) and the `timestamped`
+  profile (a regenerated one fails against a matured anchor).
+- **An attack on the hooks is seen in two ways, each with its limit.** The
+  call that removes the hook leaves its own receipt, because the harness
+  fires the hook after that call runs (the bad-day demo, entry 5). After
+  it the chain goes quiet, which the completeness alarm reads, for live
+  Claude Code sessions only, from a transcript the writer can also reach
+  (DIRECTION section 3).
+- **"Audit log" and "audit trail" stay anti-terms** (GLOSSARY). *Security
+  record* names what is kept, not a promise that everything was kept.
+
 ## References
 
 - Related ADRs: `0001-hash-chain-not-signatures.md` (the mechanism; this ADR names the adversary).
