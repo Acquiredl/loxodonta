@@ -49,6 +49,11 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+try:
+    import resource  # POSIX only; imported here, never in a forked child
+except ImportError:
+    resource = None
+
 # This folder on sys.path, so the sibling imports below also resolve
 # when the module runs alone (`python -m unittest tests.test_sidecar_not_a_file`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -481,16 +486,31 @@ class ReadOnlyFolderTest(UnwritableChainTest):
         self.addCleanup(os.chmod, self.workdir, 0o755)
 
 
+class MissingFolderTest(unittest.TestCase):
+    """`log` into a folder that is not there is a log that is not there,
+    66, as `run` says it, never the 73 of a lock refused (#398)."""
+
+    def test_log_into_a_missing_folder_is_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_receipts("log", "--log", "gone/receipts.jsonl",
+                                  "--actor", "agent", "--action", "x",
+                                  cwd=tmp)
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("not found", result.stderr)
+        self.assertIn("loxodonta init", result.stderr)
+
+
 def no_file_may_grow():
     """In the child, before it starts: no file may grow past 0 bytes,
     so the lock file is created and the line written into it is refused
     (EFBIG; Python ignores SIGXFSZ, so the write fails, not the
     process)."""
-    import resource
     resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
 
 
-@unittest.skipIf(os.name == "nt", "no file size limit on Windows")
+@unittest.skipIf(resource is None, "no file size limit here")
 class LockNotWrittenTest(unittest.TestCase):
     """A lock file created and then refused its one line, as a full disk
     would refuse it (#398). The writer removes the lock it made before

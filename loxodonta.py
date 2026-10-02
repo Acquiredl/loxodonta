@@ -3362,6 +3362,9 @@ def append_entry(log, actor, action, file_paths):
         lock.__enter__()
     except LockTimeout:
         return locked_out(log)
+    except FileNotFoundError:
+        # No folder, so no log either: `run` and a present folder say so.
+        return missing_log(log)
     except OSError as e:
         # On POSIX a folder that refuses the lock file is a denied
         # permission, not a wait, and the hook answers it so (#398).
