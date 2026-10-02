@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- A project record holding no JSON object, or naming a gone project, no longer loses hook receipts or ends `verify --files` in a traceback; `run --file` refuses before its command; a non-UTF-8 `.git` leaves the project itself (#406).
+
 ## [0.11.0] - 2026-10-02
 
 ### Added
