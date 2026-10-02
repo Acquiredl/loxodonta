@@ -1356,6 +1356,11 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
         self.assertEqual(row["state"], "UNWITNESSED")
         self.assertIn(f"sess-aaaa.jsonl cannot be read as a transcript: "
                       f"{why}", row["note"])
+        # The words travel in a package and the note does not (#410):
+        # true on their own, and without the path.
+        self.assertIn("cannot be read", row["words"])
+        self.assertNotIn("no transcript pairs", row["words"])
+        self.assertNotIn("sess-aaaa", row["words"])
 
     def test_a_folder_where_a_transcript_belongs_is_unwitnessed_with_why(self):
         self.assert_unwitnessed(Path.mkdir, FOLDER)
@@ -1364,7 +1369,7 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
     def test_a_pipe_where_a_transcript_belongs_is_unwitnessed_with_why(self):
         self.assert_unwitnessed(os.mkfifo, PIPE)
 
-    def assert_filed_under_its_slug(self, make):
+    def assert_filed_under_its_slug(self, make, why):
         # A drawer whose record cannot be read is filed under its own
         # slug, as one with a damaged record is.
         record = self.drawer / "project.json"
@@ -1376,14 +1381,18 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
 
         self.assertEqual([repo["repo"] for repo in report["repos"]],
                          ["alpha-11111111"])
+        # Named like every other non-file, not relabelled silently (#410).
+        (repo,) = report["repos"]
+        self.assertIn("alpha-11111111/project.json cannot be read as a "
+                      f"project record: {why}", repo["note"])
         self.assertEqual(kind(record), before)
 
     def test_a_folder_where_a_project_record_belongs_is_read_past(self):
-        self.assert_filed_under_its_slug(Path.mkdir)
+        self.assert_filed_under_its_slug(Path.mkdir, FOLDER)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_where_a_project_record_belongs_is_read_past(self):
-        self.assert_filed_under_its_slug(os.mkfifo)
+        self.assert_filed_under_its_slug(os.mkfifo, PIPE)
 
     def assert_memory_named(self, name, make, why, words, where, expect=0):
         memory = self.home / name

@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_supervisor import (assert_replaced_whole, hold, home_outside,
+                             read_line_within,
                              isolated_env)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -123,7 +124,7 @@ class ServerFixture(unittest.TestCase):
             env={**self.env, "PYTHONIOENCODING": "utf-8",
                  **(extra_env or {})})
         self.addCleanup(self._stop)
-        line = self.proc.stdout.readline()
+        line = read_line_within(self.proc.stdout)
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
@@ -165,7 +166,7 @@ class StoreServeTest(ServerFixture):
             env={**self.env, "PYTHONIOENCODING": "utf-8",
                  "LOXODONTA_HOME": str(self.home)})
         self.addCleanup(self._stop)
-        line = self.proc.stdout.readline()
+        line = read_line_within(self.proc.stdout)
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
@@ -762,7 +763,7 @@ class TranscriptRetentionPanelTest(ServerFixture):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
         self.addCleanup(self._stop)
-        line = self.proc.stdout.readline()
+        line = read_line_within(self.proc.stdout)
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
@@ -960,6 +961,18 @@ class ServeTest(ServerFixture):
         self.assertIn("TRIPWIRE BLIND", page)
         self.assertIn("report.baseline.acknowledged", page)
         self.assertIn("an operator's word", page)
+
+    def test_the_tripwire_draws_why_a_memory_was_read_as_none(self):
+        # A day book, a coverage marker or harness settings that cannot
+        # be read is named in the report; the page draws each beside the
+        # baseline's note, so an empty fortnight comes with its reason
+        # (#410).
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        for note in ("history_note", "marker_note", "settings_note"):
+            self.assertTrue("report." + note in page, note)
 
     def test_front_page_watches_completeness_in_its_own_voice(self):
         self.serve()

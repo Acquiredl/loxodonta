@@ -35,6 +35,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/HOOK.md` and `docs/TOUR.md` named the lock wait `RECEIPTS_LOCK_TIMEOUT`, which nothing reads; they now name `LOXODONTA_LOCK_TIMEOUT`, and a test fails on any documented variable the code never reads (#397).
 - `tools/twin_check.py --page` leaves a current `docs/TWINS.md` untouched, so a run on a Windows checkout no longer reads as modified to `git status` with an empty diff (#402).
 - `supervisor drill` refuses a chain holding a byte that is not UTF-8, or one it may not read, by name and exit 66, where it ended in a traceback or exited 1; the page's drill shows the same refusal (#407).
+- The `serve` page draws why a day book, a coverage marker or harness settings was read as none, beside the baseline's note, where an empty fortnight came with no reason (#410).
+- A session whose transcript cannot be read as one says so in its `UNWITNESSED` words, which travel in a package, where they said no transcript paired with it (#410).
+- `supervisor scan` names a drawer whose `project.json` is a folder or a pipe, filed under its own name, where it relabelled the drawer silently (#410).
 
 ## [0.10.3] - 2026-10-01
 

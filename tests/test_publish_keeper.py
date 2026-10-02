@@ -35,7 +35,8 @@ from test_stamp import GRANTED, NO_GRANTED_REPLY, reply, start_authority
 from test_supervisor import (BASELINE_NAME, ago, chain_head,
                              chains_by_session, home_outside,
                              install_witness_hook, isolated_env, keeper_env,
-                             make_chain, run_scan, write_attempt_row,
+                             make_chain, read_line_within, run_scan,
+                             write_attempt_row,
                              write_chain_row, write_completed_anchor,
                              write_pending_anchor)
 
@@ -1099,7 +1100,7 @@ class HeadlessKeeperTest(ReceiverFixture):
                    self.receiver.url, store=True, LOXODONTA_HOME=str(home),
                    SUPERVISOR_KEEPER_TICK_SECONDS="0.1",
                    SUPERVISOR_SCAN_TTL_SECONDS="0")
-        said = self.proc.stderr.readline()
+        said = read_line_within(self.proc.stderr)
         time.sleep(2)  # many more turns, each failing the same way
         alive = self.proc.poll() is None
         self.proc.kill()
@@ -1112,8 +1113,8 @@ class HeadlessKeeperTest(ReceiverFixture):
             said, r"^error: the keeper's scan did not finish: \w*Error")
         self.assertNotIn("Traceback", said)
         # The kind and the reason, never the exception whole: a failure
-        # carrying a command line would carry the remote's URL with it.
-        self.assertNotIn(BASELINE_NAME, said)
+        # carrying a command line would carry the remote's URL with it,
+        # and one carrying a path would carry the store's.
         self.assertNotIn(str(self.root), said)
         self.assertTrue(alive, "the failure took the server down")
         self.assertEqual(rest, "", "the same failure said on every tick")
