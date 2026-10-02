@@ -43,6 +43,9 @@ the user may not look into, where `os.path`'s answer False, so one
 walk of each script fails on any such method call, naming its function
 and line, and spoils a copy to see it fail. It keeps no list: no call
 needs one.
+
+Every LOXODONTA_*, RECEIPTS_*, SUPERVISOR_* or RECEIVER_* variable a
+page under docs/ or the README names is one the scripts read (#397).
 """
 
 import ast
@@ -1101,6 +1104,68 @@ class ExistenceIsAskedThroughOsPathTest(SpoiledScript, unittest.TestCase):
             "    os.path.isdir(log)", "    os.path.islink(log)",
             "    os.path.lexists(log)", collects=asks_by_method)
         self.assertEqual(calls.opens, {})
+
+
+# The prefixes of the variables the scripts read for themselves; a name
+# another program reads (CLAUDE_PROJECT_DIR, SSL_CERT_FILE) is not ours.
+ENV_NAME = re.compile(
+    r"\b(?:LOXODONTA|RECEIPTS|SUPERVISOR|RECEIVER)_[A-Z0-9_]*[A-Z0-9]\b")
+
+
+def env_names_read(paths):
+    """Every such name the scripts hold as a string: what os.environ is
+    asked for. A name only a comment or a docstring mentions is not
+    read, so it does not count."""
+    names = set()
+    for path in paths:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and ENV_NAME.fullmatch(node.value)):
+                names.add(node.value)
+    return names
+
+
+def env_names_unread(pages, code, root):
+    """(page relative to root, name) for each variable a page names that
+    the code never reads."""
+    read = env_names_read(code)
+    unread = set()
+    for page in pages:
+        text = Path(page).read_text(encoding="utf-8")
+        for name in ENV_NAME.findall(text):
+            if name not in read:
+                unread.add((Path(page).relative_to(root).as_posix(), name))
+    return sorted(unread)
+
+
+class DocumentedVariablesAreReadTest(unittest.TestCase):
+    """A variable the docs tell an operator to set is one the scripts
+    read (#397): two pages still named RECEIPTS_LOCK_TIMEOUT after the
+    rename to LOXODONTA_LOCK_TIMEOUT, so setting it changed nothing.
+    The ADRs are left out, since each records the names of its day."""
+
+    def test_every_documented_variable_is_read(self):
+        pages = sorted((REPO_ROOT / "docs").rglob("*.md"))
+        pages.append(REPO_ROOT / "README.md")
+        code = [RECORDER, SUPERVISOR, REPO_ROOT / "receiver.py"]
+        code += sorted((REPO_ROOT / "adapters").glob("*.py"))
+        self.assertEqual(env_names_unread(pages, code, REPO_ROOT), [])
+
+    def test_a_name_only_a_comment_mentions_is_unread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page = root / "PAGE.md"
+            page.write_text("Set `LOXODONTA_HOME` or `RECEIPTS_GONE`.\n",
+                            encoding="utf-8")
+            script = root / "script.py"
+            script.write_text(
+                "import os\n"
+                "# RECEIPTS_GONE was the old name.\n"
+                'HOME = os.environ.get("LOXODONTA_HOME")\n',
+                encoding="utf-8")
+            self.assertEqual(env_names_unread([page], [script], root),
+                             [("PAGE.md", "RECEIPTS_GONE")])
 
 
 if __name__ == "__main__":
