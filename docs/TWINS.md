@@ -94,7 +94,7 @@ The supervisor writes a package and the recorder, and the verifier cut from it, 
 
 ### Reading a sidecar
 
-Names: `read_log`, `sidecar_path`, `published_path`, `NOT_A_FOLDER`, `NOT_REGULAR`, `open_regular`, `file_problem`, `sidecar_lines`, `KeyGivenTwice`, `object_with_each_key_once`, `NotStrictJson`, `not_json`, `finite_float`, `read_sidecar_records`.
+Names: `read_log`, `sidecar_path`, `published_path`, `IS_A_FOLDER`, `NOT_REGULAR`, `open_regular`, `file_problem`, `KeyGivenTwice`, `object_with_each_key_once`, `NotStrictJson`, `not_json`, `finite_float`, `read_sidecar_records`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 

@@ -1,6 +1,6 @@
 # loxodonta — repo map
 
-**loxodonta**: a tamper-evident, hash-chained receipt log ("flight recorder") for AI agent pipelines. `loxodonta.py` is the recorder, and what it writes are *receipts* (ADR-0010); `supervisor.py` is the reader that scans, serves, and recalls; `receiver.py` is the far end of the published chain and the published head, run on a machine the writer cannot reach (ADR-0031). All three are stdlib-only, single-file Python. The elephant never forgets.
+**loxodonta**: a tamper-evident security record for AI agents, a hash-chained receipt log (the "flight recorder") built so that an agent covering its tracks shows (ADR-0002, addendum of 2026-10-01). `loxodonta.py` is the recorder, and what it writes are *receipts* (ADR-0010); `supervisor.py` is the reader that scans, serves, and recalls; `receiver.py` is the far end of the published chain and the published head, run on a machine the writer cannot reach (ADR-0031). All three are stdlib-only, single-file Python. The elephant never forgets.
 
 **Phase: public**, under the Acquiredl identity. `main` is the stable branch and every claim in the README must stay true of it; work happens on `dev` (see *Branching model*). The stage history (stages, dates, PR numbers) lives in `docs/HISTORY.md`; the changelog starts at `v0.1.0`, no backfill (ADR-0022).
 
@@ -15,7 +15,7 @@
 ## Where things live
 
 - `loxodonta.py` — the recorder: `init` / `log` / `run` / `head` / `verify` / `verify-package` / `report` / `anchor` / `publish` / `stamp` / `hook` / `explain` / `install-hook` / `uninstall-hook`.
-- `supervisor.py` — the reader: `scan` / `calibrate` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `verify` / `mcp` / `export` / `package`.
+- `supervisor.py` — the reader: `scan` / `calibrate` / `acknowledge` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `verify` / `mcp` / `export` / `package`.
 - `receiver.py` — the receiver: `serve`, one verb; the URL that can only add, never delete (ADR-0031, `docs/RECEIVER.md`).
 - `verifier.py` — the recipient's verifier: `head` / `verify` / `verify-package`. Generated: `tools/build_verifier.py` copies the fenced verify region of `loxodonta.py`; edit the recorder, never this file (ADR-0035).
 - `adapters/` — per-harness recorder adapters (ADR-0020).

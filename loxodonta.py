@@ -8,6 +8,7 @@ import argparse
 import base64
 import errno
 import hashlib
+import io
 import json
 import os
 import stat
@@ -22,7 +23,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.10.0"
+TOOL_VERSION = "0.11.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -111,7 +112,8 @@ def read_log(path):
     ending the whole read in a traceback: the walk refuses the one line
     it sits on by name (SPEC §6), and `tail_entry` calls a tail holding
     one damaged. The recorder only ever writes ASCII lines, so no line
-    it wrote is read any differently."""
+    it wrote is read any differently. Sidecars are read here too, where
+    `read_sidecar_records` calls such a line unreadable."""
     with open_regular(path) as f:
         return [line.decode("utf-8", "surrogateescape")
                 for line in split_lines(f.read())]
@@ -182,9 +184,14 @@ def files_base(log):
     if not os.path.exists(record):
         return log_dir, None
     try:
-        with open(record, encoding="utf-8") as f:
-            path = json.load(f).get("path")
-    except (OSError, ValueError):
+        # The record sits beside the chain, in the writer's reach, so a
+        # pipe there is refused by name rather than waited on (#386).
+        with open_regular(record) as f:
+            path = json.loads(f.read().decode("utf-8")).get("path")
+    except OSError as error:
+        return None, (f"{record} cannot be read as a project record: "
+                      f"{error.strerror or error}")
+    except ValueError:
         return None, f"project record unreadable: {record}"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
@@ -287,7 +294,8 @@ def shape_problem(entry):
     if not isinstance(files, list):
         return "files is not an array"
     for ref in files:
-        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}                 or not all(isinstance(value, str) for value in ref.values()):
+        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"} \
+                or not all(isinstance(value, str) for value in ref.values()):
             return "files holds something that is not a reference"
     for ref in files:
         how = path_leaving_base(ref["path"])
@@ -507,12 +515,19 @@ def judge_prefixes(marks, transcript_path):
         print("no transcript commitments in this chain — nothing to judge")
         return False
     try:
-        handle = open(transcript_path, "rb")
-    except OSError:
+        handle = open_regular(transcript_path)
+    except FileNotFoundError:
         # Absence is a note, never a verdict: the harness cleans
         # transcripts on a retention cycle (ADR-0017).
         print(f"TRANSCRIPT-UNRESOLVED: no transcript at {transcript_path} "
               "— commitments unjudgeable; chain verdict unaffected")
+        return False
+    except OSError as error:
+        # A folder, a pipe or a device in its place is named and never
+        # waited on or read (#386); a note like absence, never a verdict.
+        print(f"TRANSCRIPT-UNRESOLVED: {transcript_path} cannot be read as "
+              f"a transcript: {error.strerror or error} — commitments "
+              "unjudgeable; chain verdict unaffected")
         return False
     diverged = False
     with handle:
@@ -800,7 +815,7 @@ def anchors_path(log):
     return sidecar_path(log, ".anchors.jsonl")
 
 
-NOT_A_FOLDER = "it is a folder, not a file"
+IS_A_FOLDER = "it is a folder, not a file"
 NOT_REGULAR = "it is not a regular file"
 
 
@@ -820,12 +835,12 @@ def open_regular(path):
         # Windows refuses to open a folder at all, as a denied
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path)
         if not stat.S_ISREG(mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
         return os.fdopen(fd, "rb")
@@ -848,22 +863,12 @@ def file_problem(path):
         return error.strerror or str(error)
 
 
-def sidecar_lines(path):
-    """The lines of the sidecar at `path`, split and decoded as
-    `read_log` reads a chain's, from the one file `open_regular` opened:
-    FileNotFoundError when there is none, and an OSError naming why when
-    what is there is not a file."""
-    with open_regular(path) as f:
-        return [line.decode("utf-8", "surrogateescape")
-                for line in split_lines(f.read())]
-
-
 def read_sidecar_records(path):
     """The records of one sidecar, or None when the file does not exist
     (every sidecar is optional). A line that is not a JSON object reads
     as None, so a judge can name it rather than skip it, and so does a
     line the reader cannot take apart: a byte that is not UTF-8 (a lone
-    surrogate from `sidecar_lines`), an integer too long to read, nesting
+    surrogate from `read_log`), an integer too long to read, nesting
     too deep (#299). A line a strict JSON parser refuses is unreadable
     too, before its kind is read: a key given twice, as the walk refuses
     one in an entry, `NaN`, `Infinity` or `-Infinity`, and a number too
@@ -871,7 +876,7 @@ def read_sidecar_records(path):
     cannot be read as a file (`open_regular`) reads as one unreadable
     line, so no reader stops on it and a judge names it (#364)."""
     try:
-        lines = sidecar_lines(path)
+        lines = read_log(path)
     except FileNotFoundError:
         return None
     except OSError:
@@ -2411,11 +2416,15 @@ def judge_manifest_signature(folder):
             # the key's two tokens, type and key. The shipped file's own
             # tokens and nothing else, so what verifies is what shipped.
             allowed = os.path.join(scratch, "allowed_signers")
-            with open(public_key, encoding="utf-8", errors="replace") as f:
+            # The two files this verifier opens itself, read without
+            # waiting: a pipe put at either name since it was first looked
+            # at would otherwise hold the verifier for good.
+            with io.TextIOWrapper(open_regular(public_key), encoding="utf-8",
+                                  errors="replace") as f:
                 key = " ".join(f.readline().split()[:2])
             with open(allowed, "w", encoding="utf-8", newline="\n") as f:
                 f.write(f"{SIGNATURE_PRINCIPAL} {key}\n")
-            with open(manifest, "rb") as shipped:
+            with open_regular(manifest) as shipped:
                 verified = subprocess.run(
                     ["ssh-keygen", "-Y", "verify", "-f", allowed,
                      "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
@@ -2741,13 +2750,21 @@ def cmd_verify_package(args):
     if not os.path.isfile(path):
         print(f"error: {path} not found", file=sys.stderr)
         return EX_NOINPUT
-    if not zipfile.is_zipfile(path):
+    # Opened once, without waiting, and only that open file is read: a
+    # pipe put at the name since the look above is never waited on, and
+    # a file this cannot open reads as no zip, as is_zipfile reads one.
+    try:
+        handle = open_regular(path)
+    except OSError:
+        handle = io.BytesIO()
+    if not zipfile.is_zipfile(handle):
+        handle.close()
         print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
               "not a loxodonta package")
         return 4
-    with tempfile.TemporaryDirectory() as unpacked:
+    with handle, tempfile.TemporaryDirectory() as unpacked:
         try:
-            with zipfile.ZipFile(path) as package:
+            with zipfile.ZipFile(handle) as package:
                 declared = sum(info.file_size for info in package.infolist())
                 if declared > PACKAGE_MAX_BYTES:
                     print(f"UNSUPPORTED-FORMAT: {path} declares {declared} "
@@ -3030,6 +3047,7 @@ def run_main(main):
 # The imports only the writers use. They sit below the verifier so that
 # the copy a recipient runs imports nothing that opens a socket or starts
 # a thread (ADR-0035).
+import http.client
 import shlex
 import signal
 import socket
@@ -3046,8 +3064,9 @@ import urllib.request
 EX_DATAERR = 65      # the hook's stdin, or a settings file, is not what it must be
 EX_UNAVAILABLE = 69  # a calendar, a publish URL, an authority, or the
                      # narrating command did not do what was asked
-EX_CANTCREAT = 73    # a file this verb must create cannot be: a log that
-                     # already exists, a lock file, a granted token
+EX_CANTCREAT = 73    # a file this verb must write cannot be: a log that
+                     # already exists, a lock file, a granted token, a
+                     # line the chain or a sidecar would not take
 EX_TEMPFAIL = 75     # another writer holds the lock; try again
 
 
@@ -3083,9 +3102,27 @@ def write_line_to_disk(path, mode, line):
     "logged entry N" means the entry is there (SPEC §1): a lost receipt
     reads at the witness as a killed hook does, and an innocent loss
     should not wear that face (the cost: docs/DIRECTION.md). A failed
-    sync is said, never hidden; the line is still written."""
-    with open(path, mode, encoding="utf-8", newline="\n") as f:
-        f.write(line)
+    sync is said, never hidden; the line is still written.
+
+    `mode` is `open`'s "x", "w" or "a". The file is opened as
+    `open_regular` opens one to read: without waiting, since an ordinary
+    open of a pipe for writing waits for a reader that may never come,
+    and the hook waited there with its lock held (#385); and the type is
+    asked of the open file, so a pipe or a device at the name is
+    refused, as an OSError, before a byte reaches it."""
+    flags = {"x": os.O_CREAT | os.O_EXCL, "w": os.O_CREAT | os.O_TRUNC,
+             "a": os.O_CREAT | os.O_APPEND}[mode]
+    fd = os.open(path, os.O_WRONLY | flags | getattr(os, "O_NONBLOCK", 0)
+                 | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, NOT_REGULAR, path)
+        f = os.fdopen(fd, "ab")
+    except BaseException:
+        os.close(fd)
+        raise
+    with f:
+        f.write(line.encode("utf-8"))
         f.flush()
         try:
             os.fsync(f.fileno())
@@ -3120,7 +3157,7 @@ def lock_timeout():
 
 class ChainLock:
     """Exclusive lock over one log's read-tail-then-append: `O_EXCL` on a
-    sidecar file, since `fcntl` and `msvcrt` would fork this file in two
+    lock file beside it, since `fcntl` and `msvcrt` would fork this file in two
     (ADR-0004; the one Windows difference is in `__enter__`). The writer
     can reach the lock, so it prevents accidents, not adversaries
     (ADR-0002).
@@ -3134,10 +3171,7 @@ class ChainLock:
         deadline = time.monotonic() + lock_timeout()
         while True:
             try:
-                self.fd = os.open(self.path,
-                                  os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(self.fd, f"{os.getpid()} {now_ts()}\n".encode("utf-8"))
-                return self
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
                 self.break_if_stale()
             except PermissionError:
@@ -3148,6 +3182,21 @@ class ChainLock:
                 # (see locked_out) rather than guessed at now.
                 if os.name != "nt":
                     raise
+            else:
+                try:
+                    os.write(fd, f"{os.getpid()} {now_ts()}\n".encode("utf-8"))
+                except BaseException:
+                    # A lock this writer made and will never release
+                    # would hold every writer off until the stale break
+                    # (#398): a full disk refuses the line.
+                    os.close(fd)
+                    try:
+                        os.unlink(self.path)
+                    except OSError:
+                        pass
+                    raise
+                self.fd = fd
+                return self
             if time.monotonic() >= deadline:
                 raise LockTimeout(self.path)
             time.sleep(0.02)
@@ -3187,6 +3236,17 @@ def locked_out(log):
           "Retry; if nothing is running, delete the .lock file beside it.",
           file=sys.stderr)
     return EX_TEMPFAIL
+
+
+def unwritable_log(log, error):
+    """A line the chain would not take, 73, a file the verb must write
+    and cannot: a folder, a pipe or a device put at its name after the
+    read that would have refused it (#385), never waited on, or a write
+    the system refused."""
+    print(f"error: {log} could not be written: "
+          f"{unwritable_why(log, error)} — no entry was written",
+          file=sys.stderr)
+    return EX_CANTCREAT
 
 
 # --- Commands -----------------------------------------------------------------
@@ -3257,13 +3317,16 @@ def file_reference(base, raw_path):
     return {"path": stored, "sha256": sha256}
 
 
-def build_references(log, file_paths):
+def build_references(log, file_paths, base=None):
     """The sorted {path, sha256} list for an append, or (None, exit code)
     with the complaint printed — shared by `log`/`run`/`hook` so all
     three refuse the same ways. A path spelled against SPEC §3 (absolute,
     or with `..`) is the command spoken wrong, 64; a file, or a project
-    record, that cannot be read is no input, 66 (ADR-0037)."""
-    base, problem = files_base(log)
+    record, that cannot be read is no input, 66 (ADR-0037). `base`, when
+    given, stands in for the one the project record names."""
+    problem = None
+    if base is None:
+        base, problem = files_base(log)
     if problem and file_paths:
         print(f"error: {problem}", file=sys.stderr)
         return None, EX_NOINPUT
@@ -3292,11 +3355,24 @@ def append_entry(log, actor, action, file_paths):
     # From here the tail is read, extended, and written as one unit. A
     # racing writer that slips between the read and the write tears the
     # line or forks the chain at the same `n` (ADR-0004).
+    # Taken by hand, not by `with`, so the catch covers the lock alone: an
+    # OSError later is append_locked's to name, or a closed reader's 141.
+    lock = ChainLock(log)
     try:
-        with ChainLock(log):
-            return append_locked(log, actor, action, files)
+        lock.__enter__()
     except LockTimeout:
         return locked_out(log)
+    except FileNotFoundError:
+        # No folder, so no log either: `run` and a present folder say so.
+        return missing_log(log)
+    except OSError as e:
+        # On POSIX a folder that refuses the lock file is a denied
+        # permission, not a wait, and the hook answers it so (#398).
+        return unwritable_log(log, e)
+    try:
+        return append_locked(log, actor, action, files)
+    finally:
+        lock.__exit__(None, None, None)
 
 
 def referenced_paths(lines):
@@ -3364,7 +3440,10 @@ def append_locked(log, actor, action, files):
     # Single write of one complete line (SPEC §1): a crash can at worst
     # truncate this line, never damage earlier entries. Synced before it
     # is reported, so the report is true when it is printed.
-    write_line_to_disk(log, "a", entry_line(entry))
+    try:
+        write_line_to_disk(log, "a", entry_line(entry))
+    except OSError as e:
+        return unwritable_log(log, e)
     print(f"logged entry {entry['n']}")
     return 0
 
@@ -3390,9 +3469,15 @@ def run_signals():
 
 def cmd_run(args):
     # No log means no receipt could be written — refuse before the command
-    # runs, or the wrapper would execute work it cannot record.
-    if not os.path.exists(args.log):
+    # runs, or the wrapper would execute work it cannot record. A folder,
+    # a pipe or a device at its name is no log either (#385).
+    try:
+        with open_regular(args.log):
+            pass
+    except FileNotFoundError:
         return missing_log(args.log)
+    except OSError as e:
+        return unreadable_log(args.log, e)
     command_line = " ".join(args.command_argv)
 
     # The first signal handled decides how the receipt ends (signals that
@@ -3538,7 +3623,7 @@ def append_sidecar_record(path, record):
 
 
 def unwritable_why(path, error):
-    """Why an append to the sidecar at `path` failed, in words: what
+    """Why a write to the chain or a sidecar at `path` failed, in words: what
     `file_problem` says of the path, a folder in its place say, which
     Windows reports as a denied permission (#364); else the system's
     reason."""
@@ -3562,13 +3647,30 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
 
 
 def calendar_request(url, data=None, timeout=15):
+    """One request to a calendar, and its reply. An address with any
+    scheme but http or https raises ValueError, before anything is
+    asked: an upgrade takes the address from a sidecar row, in the
+    writer's reach, and urllib would read a `file:` one as a path on
+    this machine, a pipe there included (#414). An address http will
+    not send, a space in it say, is a ValueError too, and a reply that
+    is not HTTP an OSError: urllib hands both on as http.client's own
+    errors, which are neither, so one bad row or one bad calendar
+    would end the run for every calendar after it."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        raise ValueError("not an http or https URL")
     request = urllib.request.Request(
         url, data=data,
         headers={"Accept": "application/vnd.opentimestamps.v1",
                  "User-Agent": "loxodonta"},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read(MAX_PROOF_BYTES)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read(MAX_PROOF_BYTES)
+    except http.client.InvalidURL:
+        raise ValueError("not a URL http can send") from None
+    except http.client.HTTPException as error:
+        raise OSError("the reply was not HTTP "
+                      f"({type(error).__name__})") from None
 
 
 # --- Writing attempt records (#240) -------------------------------------------
@@ -4139,7 +4241,7 @@ def chain_cursor(log, url):
     try:
         # A folder or a pipe where the memo belongs (#364) is a memo
         # that cannot be read, raised as such, and never waited on.
-        lines = sidecar_lines(published_path(log))
+        lines = read_log(published_path(log))
     except FileNotFoundError:
         return -1
     mine = remote_id(url)
@@ -4740,8 +4842,9 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
         try:
             proof_bytes = calendar_request(url + "/digest", data=digest)
             judge_proof(head, proof_bytes)  # refuse to store what can't replay
-        except (OSError, ProofError) as e:
-            print(f"warning: calendar {url}: {e}", file=sys.stderr)
+        except (OSError, ProofError, ValueError) as e:
+            # What a calendar refused with is its own text (#349).
+            print(f"warning: calendar {url}: {visible(e)}", file=sys.stderr)
             continue
         try:
             append_anchor_record(target, head, n, url, proof_bytes)
@@ -5031,7 +5134,9 @@ def transcript_commitment_action(transcript_path):
     if not isinstance(transcript_path, str) or not transcript_path:
         return None
     try:
-        with open(transcript_path, "rb") as f:
+        # The transcript is the writer's file, and a pipe at its name
+        # would hold the hook, and the session with it (#386).
+        with open_regular(transcript_path) as f:
             data = f.read()
     except (OSError, ValueError):
         # ValueError: a path no filesystem can name, one holding a NUL
@@ -5051,7 +5156,8 @@ def commit_transcript_due(log, transcript_path):
     operator to turn the hook off."""
     try:
         last = tail_entry(read_log(log))
-    except FileNotFoundError:
+    except OSError:
+        # Gone, or a folder or a pipe in its place (#386).
         return
     if last is None or last["n"] == 0 or last["n"] % COMMITMENT_CADENCE:
         return
@@ -5099,20 +5205,23 @@ def main_repo_root(project):
     if not os.path.isfile(dot_git):
         return project  # a normal checkout (.git/ dir), or not a repo at all
     try:
-        with open(dot_git, encoding="utf-8") as f:
-            line = f.read().strip()
+        # Both files are in the writer's reach, and a pipe at either
+        # name would hold every tool call: read without waiting (#386).
+        with open_regular(dot_git) as f:
+            line = f.read().decode("utf-8").strip()
         if not line.startswith("gitdir:"):
             return project
         gitdir = line[len("gitdir:"):].strip()
         if not os.path.isabs(gitdir):
             gitdir = os.path.join(project, gitdir)
         try:
-            with open(os.path.join(gitdir, "commondir"),
-                      encoding="utf-8") as f:
-                common = f.read().strip()
+            with open_regular(os.path.join(gitdir, "commondir")) as f:
+                common = f.read().decode("utf-8").strip()
             common = os.path.normpath(os.path.join(gitdir, common))
             root = os.path.dirname(common)  # <main>/.git -> <main>
-        except OSError:
+        except OSError as error:
+            if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
+                return project  # a folder or a pipe there: unexpected
             # A worktree the harness already deregistered (ADR-0023): the
             # gitdir is gone, but the .git file still spells it as
             # <main>/.git/worktrees/<name>, and <main> is in that string.
@@ -5200,20 +5309,33 @@ def record_project(log_dir, project):
 
 
 def chain_is_damaged(log):
-    """True when the log exists but cannot be extended: a torn tail, or
-    a forked one (`tail_entry`)."""
+    """True when something is at the log's name that cannot be extended:
+    a torn tail, a forked one (`tail_entry`), or a folder, a pipe, a
+    device, a socket or a loop of links in the file's place, each one
+    command away (#385). A file this user may not read is not damage:
+    the append names it."""
     try:
         lines = read_log(log)
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError as error:
+        if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
+            return True
+        # A socket fails the open itself, and a loop of links cannot be
+        # followed, so `open_regular` never got to ask: the name is
+        # asked instead.
+        try:
+            return stat.S_ISSOCK(os.stat(log).st_mode)
+        except OSError as again:
+            return again.errno == errno.ELOOP
     return bool(lines) and tail_entry(lines) is None
 
 
 def writable_chain(log_dir, session):
-    """The chain this session writes to: its own, unless that chain's tail
-    is damaged, then the next sibling (ADR-0004). Damage ends a chain,
-    never the recording; the damaged chain is left exactly as it lies,
-    evidence with no repair path (ADR-0002).
+    """The chain this session writes to: its own, unless that chain is
+    damaged (`chain_is_damaged`), then the next sibling (ADR-0004).
+    Damage ends a chain, never the recording; the damaged chain is left
+    exactly as it lies, evidence with no repair path (ADR-0002).
     """
     log = os.path.join(log_dir, f"receipts-{session}.jsonl")
     n = 1
@@ -5347,6 +5469,8 @@ def cmd_hook(args):
         ensure_chain(log)
     except LockTimeout:
         return locked_out(log)
+    except OSError as e:
+        return unwritable_log(log, e)
 
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -5388,7 +5512,18 @@ def cmd_hook(args):
             continue
         file_paths.append(relative.replace(os.sep, "/"))
 
-    files, code = build_references(log, file_paths)
+    # A folder or a pipe where the project record belongs names no base,
+    # and the drawer is in the writer's reach: the hook takes the
+    # project it knows, as it does when it writes a new record, and
+    # says so rather than lose the receipt (#386).
+    record = os.path.join(os.path.dirname(log), "project.json")
+    unread = file_problem(record) if file_paths else None
+    if unread is not None:
+        print(f"warning: {record} cannot be read as a project record: "
+              f"{unread} — the files are fingerprinted against {base}",
+              file=sys.stderr)
+    files, code = build_references(
+        log, file_paths, base=base if unread is not None else None)
     if files is None:
         return code
     # One lock for the receipt and any due transcript commitment: a
@@ -5445,25 +5580,42 @@ def settings_shape_problem(settings):
 
 
 def load_settings(path):
-    """The user-level settings, or None with the complaint printed —
-    shared by install and uninstall so both refuse broken JSON, or JSON
-    of a shape they cannot read, the same way instead of clobbering it.
-    The file is left exactly as it was."""
+    """The user-level settings as (settings, None), or (None, the exit
+    code) with the complaint printed — shared by install and uninstall
+    so both refuse the same ways instead of clobbering anything: broken
+    JSON, or JSON of a shape they cannot read, 65; a folder, a pipe or
+    a device at the name, or a file this user may not open, 66. The
+    file is left exactly as it was."""
     if not os.path.exists(path):
-        return {}
+        return {}, None
     try:
-        with open(path, encoding="utf-8") as f:
+        # The settings are in the writer's reach, and an ordinary open
+        # of a pipe there would hold the installer for good (#405).
+        with io.TextIOWrapper(open_regular(path), encoding="utf-8") as f:
             settings = json.load(f)
+    except OSError as e:
+        return None, refuse_to_touch(path, e.strerror or str(e))
     except ValueError as e:  # not JSON, or not UTF-8
         print(f"refusing to touch {path}: it is not valid JSON ({e}) — "
               "fix it by hand first", file=sys.stderr)
-        return None
+        return None, EX_DATAERR
     problem = settings_shape_problem(settings)
     if problem:
         print(f"refusing to touch {path}: expected {SETTINGS_SHAPE}, but "
               f"{problem} — fix it by hand first", file=sys.stderr)
-        return None
-    return settings
+        return None, EX_DATAERR
+    return settings, None
+
+
+def refuse_to_touch(path, why):
+    """The refusal when a file install-hook or uninstall-hook reads
+    before writing anything cannot be read as a file: a folder, a pipe
+    or a device at its name, or a file this user may not open. Named,
+    never waited on, and nothing written (#405): no input, 66, as for a
+    log."""
+    print(f"refusing to touch {path}: {why} — fix it by hand first",
+          file=sys.stderr)
+    return EX_NOINPUT
 
 
 def replace_file(path, data, mode_of=None):
@@ -5507,15 +5659,22 @@ def backup_settings(path):
     written only when none exists yet (#293). Overwriting it on every
     run, as it once was, lost the original on the second run, since
     by then the file held the installer's own edit. Returns the
-    parenthesis the installer prints after the path it wrote."""
+    parenthesis the installer prints after the path it wrote, or None
+    with the refusal printed when a folder or a pipe has been put at
+    the name since `load_settings` read it, never waited on (#405)."""
     backup = path + ".bak"
     name = os.path.basename(backup)
     if not os.path.exists(path):
         return ""
     if os.path.exists(backup):
         return f" (the existing {name} was kept, not overwritten)"
-    with open(path, "rb") as f:
-        replace_file(backup, f.read(), mode_of=path)
+    try:
+        with open_regular(path) as f:
+            original = f.read()
+    except OSError as e:
+        refuse_to_touch(path, e.strerror or str(e))
+        return None
+    replace_file(backup, original, mode_of=path)
     return f" (previous version saved as {name})"
 
 
@@ -5855,9 +6014,9 @@ def install_codex_hooks(publish=None, profile="local",
     has no cursor to resume from, so the supervisor anchors instead.
     `profile` is written to the coverage marker (ADR-0031 ruling 1)."""
     path = codex_hooks_path()
-    settings = load_settings(path)
-    if settings is None:
-        return EX_DATAERR
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
     if publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
@@ -5911,18 +6070,19 @@ def install_codex_hooks(publish=None, profile="local",
     # first time a recorder that knows how walks past.
     wired = [block.get("matcher", ".*") for block in post
              if block_is_ours(block)]
-    marked = record_coverage(CODEX_ACTOR, wired, profile,
-                             remote=publish_chain or publish,
-                             authority=authority)
+    marked, unmarked = record_coverage(CODEX_ACTOR, wired, profile,
+                                       remote=publish_chain or publish,
+                                       authority=authority)
     tier = profile_notice(profile, wired, codex=True)
     if not installed and not healed:
         print(f"already installed in {path}")
-        if marked:
-            print(f"  coverage recorded in {coverage_path()}")
+        coverage_said(marked, unmarked)
         if tier:
             print(tier)
         return 0
     backup = backup_settings(path)
+    if backup is None:
+        return EX_NOINPUT
     write_hooks_file(path, settings)
     print(f"installed in {path}{backup}")
     for line in installed:
@@ -5930,8 +6090,7 @@ def install_codex_hooks(publish=None, profile="local",
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
               "moved — now pointing at this install")
-    if marked:
-        print(f"  coverage recorded in {coverage_path()}")
+    coverage_said(marked, unmarked)
     print("Codex asks you to review new hooks once: open Codex and run "
           "/hooks to trust them.")
     print("every NEW Codex session on this machine then leaves a chain in")
@@ -5982,8 +6141,11 @@ def record_coverage(harness, matchers, profile, remote=None,
     that wired it (an epoch without it wired none). The marker never
     travels (the export and the package leave it out), so unlike the
     publish memo it may hold a URL. Every failure is a silent skip: a
-    bookkeeping file is no reason to refuse an install. Returns whether
-    an entry was appended."""
+    bookkeeping file is no reason to refuse an install. A folder, a pipe
+    or a device at the marker's name is skipped too, never waited on,
+    but not silently, since it is something put there (#405): returned
+    in words for the installer to name beside the hook it wired.
+    Returns (whether an entry was appended, those words or None)."""
     entry = {"since": now_ts(), "matchers": list(matchers)}
     if failures:
         entry["failures"] = list(failures)
@@ -5992,12 +6154,18 @@ def record_coverage(harness, matchers, profile, remote=None,
         entry["remote"] = remote
     if authority:
         entry["authority"] = authority
+    marker = coverage_path()
     try:
         os.makedirs(store_home(), exist_ok=True)
         try:
-            with open(coverage_path(), encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
+            with open_regular(marker) as f:
+                data = json.loads(f.read().decode("utf-8"))
+        except OSError as error:
+            if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
+                return False, ("cannot be read as a coverage marker: "
+                               f"{error.strerror}")
+            data = {}
+        except ValueError:
             data = {}
         epochs = [epoch for epoch in data.get("epochs", [])
                   if isinstance(epoch, dict)
@@ -6009,14 +6177,30 @@ def record_coverage(harness, matchers, profile, remote=None,
                 and last.get("profile") == profile \
                 and last.get("remote") == entry.get("remote") \
                 and last.get("authority") == entry.get("authority"):
-            return False
+            return False, None
         body = json.dumps({"purpose": COVERAGE_PURPOSE,
                            "epochs": epochs + [entry]}, indent=2)
-        with open(coverage_path(), "w", encoding="utf-8", newline="\n") as f:
-            f.write(body + "\n")
-        return True
+        try:
+            write_line_to_disk(marker, "w", body + "\n")
+        except OSError:
+            why = file_problem(marker)
+            if why not in (IS_A_FOLDER, NOT_REGULAR):
+                raise
+            return False, f"could not be written: {why}"
+        return True, None
     except OSError:
-        return False
+        return False, None
+
+
+def coverage_said(marked, unmarked):
+    """The installer's word on the marker (record_coverage): where the
+    coverage was recorded, or on stderr what stands at the marker's name
+    instead, beside a hook that is wired all the same (#405)."""
+    if marked:
+        print(f"  coverage recorded in {coverage_path()}")
+    if unmarked:
+        print(f"warning: {coverage_path()} {unmarked} — the marker was not "
+              "written, and the hook is wired without it", file=sys.stderr)
 
 
 def cmd_install_hook(args):
@@ -6055,9 +6239,9 @@ def cmd_install_hook(args):
     digest = digest_command()
     path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 
-    settings = load_settings(path)
-    if settings is None:
-        return EX_DATAERR
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
     if args.publish_chain:
         # Said before anything is written (ADR-0031): what leaves, and
         # that action lines are command lines.
@@ -6166,22 +6350,23 @@ def cmd_install_hook(args):
 
     # ADR-0030: as on the Codex half, before the early return.
     wired = [block.get("matcher", "*") for block in post if ours(block)]
-    marked = record_coverage("claude-code", wired, args.profile,
-                             remote=(args.publish_chain
-                                     or args.publish_head),
-                             authority=args.authority,
-                             failures=[block.get("matcher", "*")
-                                       for block in failed if ours(block)])
+    marked, unmarked = record_coverage(
+        "claude-code", wired, args.profile,
+        remote=args.publish_chain or args.publish_head,
+        authority=args.authority,
+        failures=[block.get("matcher", "*") for block in failed
+                  if ours(block)])
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
-        if marked:
-            print(f"  coverage recorded in {coverage_path()}")
+        coverage_said(marked, unmarked)
         if tier:
             print(tier)
         return 0
 
     backup = backup_settings(path)
+    if backup is None:
+        return EX_NOINPUT
     write_hooks_file(path, settings)
     print(f"installed in {path}{backup}")
     for line in installed:
@@ -6189,8 +6374,7 @@ def cmd_install_hook(args):
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
               "moved — now pointing at this install")
-    if marked:
-        print(f"  coverage recorded in {coverage_path()}")
+    coverage_said(marked, unmarked)
     print("every NEW Claude Code session on this machine now leaves a chain")
     print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
     print("drawer per project. Restart open sessions.")
@@ -6229,9 +6413,9 @@ def cmd_uninstall_hook(args):
     path = (codex_hooks_path() if args.codex
             else os.path.join(os.path.expanduser("~"), ".claude",
                               "settings.json"))
-    settings = load_settings(path)
-    if settings is None:
-        return EX_DATAERR
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
     if not settings:
         print(f"nothing installed: no hooks file at {path}")
         return 0
@@ -6243,6 +6427,8 @@ def cmd_uninstall_hook(args):
         return 0
 
     backup = backup_settings(path)
+    if backup is None:
+        return EX_NOINPUT
     write_hooks_file(path, settings)
     print(f"removed from {path}: {', '.join(sorted(set(removed)))}{backup}")
     return 0

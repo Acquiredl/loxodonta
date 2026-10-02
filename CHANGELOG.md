@@ -10,6 +10,62 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-02
+
+### Added
+
+- `supervisor acknowledge LOG STATE` accepts the state a scan reported for one chain, and `--baseline` starts an unreadable memory afresh; each leaves a record every later report shows, and moves no verdict (#401).
+
+### Changed
+
+- The README leads with a tamper-evident security record, the flight recorder kept as its image: the problem first, what a clean verdict does not tell you, the evidence-strength ladder, and where it fits (#423). The ruling is an ADR-0002 addendum.
+- `supervisor scan` keeps a chain's remembered head when it reads `regressed`, `rewritten` or `vanished`, and says so on every look, exit 5, until the chain holds that head again or the change is acknowledged (#401).
+- A baseline the scan cannot read or keep, or one missing beside a day book, is exit 5 on every look and left as it lies, where it was a note and a fresh memory (#409).
+
+### Fixed
+
+- `supervisor export` names any write the system refuses and exits 73, instead of ending in a traceback in a folder the user may not write in (#419).
+- `supervisor package` refuses an `--out` where a link to nowhere stands, where it wrote the package through the link, and names an `--out` it cannot create instead of ending in a traceback (#419).
+- `supervisor adopt` names a folder, a pipe or an unreadable file at a legacy chain's or sidecar's name and leaves it, where it moved a folder into the store as a chain and could end in a traceback (#419).
+- `anchor`, `anchor --upgrade` and the session end no longer stop at a calendar reply that is not HTTP, or a calendar address holding a space: that calendar fails, or that row is skipped, and the next is asked (#419).
+- `anchor` prints what a calendar refused with as `anchor --upgrade` does, control characters made visible (#419).
+- `supervisor scan` dates a session from its first call with a result, failed or not: one that began with a failed call before the supervisor's memory is left unjudged, as the rule says, where it was judged (#419).
+- `supervisor scan` reads a chain in a folder closed to it as `vanished`, exit 5, on every Python version, where on Python 3.13 and older one `chmod` ended every scan in a traceback (#419).
+- `supervisor` commands name a folder closed to the reader, a drawer, the store's receipts folder, the harness's or the recorder's, or read its chains as vanished, on every Python, where before 3.14 they ended in a traceback (#421).
+- `supervisor adopt` refuses a link to nowhere at a chain's or a sidecar's name in the drawer as a name already taken, where a move across two filesystems could copy through it (#422).
+- A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403).
+- `docs/HOOK.md` and `docs/TOUR.md` named the lock wait `RECEIPTS_LOCK_TIMEOUT`, which nothing reads; they now name `LOXODONTA_LOCK_TIMEOUT`, and a test fails on any documented variable the code never reads (#397).
+- `tools/twin_check.py --page` leaves a current `docs/TWINS.md` untouched, so a run on a Windows checkout no longer reads as modified to `git status` with an empty diff (#402).
+- `log` and `run` in a folder that refuses the lock file say the chain could not be written, exit 73, as the hook does, instead of a traceback; a lock file the disk refuses its line is removed (#398).
+- `supervisor drill` refuses a chain holding a byte that is not UTF-8, or one it may not read, by name and exit 66, where it ended in a traceback or exited 1; the page's drill shows the same refusal (#407).
+- The `serve` page draws why a day book, a coverage marker or harness settings was read as none, beside the baseline's note, where an empty fortnight came with no reason (#410).
+- A session whose transcript cannot be read as one says so in its `UNWITNESSED` words, which travel in a package, where they said no transcript paired with it (#410).
+- `supervisor scan` names a drawer whose `project.json` is a folder or a pipe, filed under its own name, where it relabelled the drawer silently (#410).
+
+## [0.10.3] - 2026-10-01
+
+One family of faults, ended by a check. A test now walks the three scripts and fails on any call that opens, reads, writes or copies a file by path, unless it is the open that never waits, an exclusive create, or on a short list that gives each call a reason. Its first run found the coverage marker and the harness settings still opened waiting, and its review found `export` waiting on a pipe at its own output name and a calendar address fetched whatever its scheme. Three answers moved for scripts: `export` exits 73 for a name it cannot write; `install-hook` and `uninstall-hook` refuse a harness settings file that is not a file, exit 66, where it was a traceback; and an upgrade whose only pending row names an address that is not `http` or `https` exits 0 with a warning. A new export file is readable by its owner only. `verifier.py` moves with no verdict word or exit changed. The receipt format is untouched.
+
+### Fixed
+
+- A pipe where the harness settings, the coverage marker or an export belongs no longer hangs `scan`, `serve`, `install-hook` or `export`: settings and export are refused by name; the marker is named beside the wired hook (#405).
+- `anchor --upgrade` and the session end ask a calendar only at an http or https address: a sidecar row naming a `file:` one is skipped and never read (#414).
+
+## [0.10.2] - 2026-10-01
+
+The round after 0.10.1 cleared what its reviews had found. The hook keeps its receipt in a sibling when something that is not a file sits at its chain's name, a pipe at a transcript, a project record or the supervisor's memory is named or read past, and the baseline keeps a chain's remembered head while the chain reads as empty. Three answers moved for scripts: `run` refuses a chain that is not a file before its command runs, exit 66; a chain line that cannot be written is exit 73, where it was a traceback; and a transcript that is a link to a device reads `TRANSCRIPT-UNRESOLVED`, exit 0, where it read `TRANSCRIPT-DIVERGED`. `verifier.py` moves with the recorder's reads of a transcript and a project record. The receipt format is untouched.
+
+### Fixed
+
+- `tools/build_verifier.py` leaves a current `verifier.py` untouched, so a rebuild on a Windows checkout no longer reads as modified to `git status` with an empty diff (#389).
+- A pipe where a chain belongs no longer hangs the hook with its lock held: a pipe, folder or device there is damage, and the hook records in a sibling; `run` refuses before its command runs (#385).
+- `supervisor scan` keeps a chain's remembered head while the chain reads as empty, a folder or a pipe, and says `regressed` on every such look, so a shorter chain put back reads as one that shrank, not as new (#387).
+- A pipe where a transcript, a project record, a worktree's `commondir` or the supervisor's baseline, day book or views belongs no longer hangs `scan`, `serve`, `verify --transcript`, `log --file` or the hook (#386).
+
+## [0.10.1] - 2026-09-30
+
+Three fixes from the round that followed 0.10.0, each found in a review of that round's own pull requests. A pipe or a folder where a chain belongs is named and never waited on, the witness reads a shell refusal without an `Exit code N` line as one that may owe a receipt, and `twin_check --write` handles four unusual layouts. The receipt format is untouched; `verifier.py` moves because the recorder's read of a chain did.
+
 ### Fixed
 
 - A pipe where a chain belongs no longer hangs `verify`, `head`, `supervisor scan`, `package` or `export`, and `log --file` names a folder as one on every platform (#374, #270's directory half).
@@ -265,6 +321,10 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
 [Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.10.0...dev
+[0.11.0]: https://github.com/Acquiredl/loxodonta/compare/v0.10.3...v0.11.0
+[0.10.3]: https://github.com/Acquiredl/loxodonta/compare/v0.10.2...v0.10.3
+[0.10.2]: https://github.com/Acquiredl/loxodonta/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/Acquiredl/loxodonta/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Acquiredl/loxodonta/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Acquiredl/loxodonta/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Acquiredl/loxodonta/compare/v0.8.0...v0.8.1

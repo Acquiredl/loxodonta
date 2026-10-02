@@ -66,8 +66,9 @@ is writer-reachable and decides nothing*. That is ADR-0002's posture in
 one sentence. The baseline detects; `verify` judges what exists; only
 an **anchor** proves what existed — a regenerated chain verifies VALID,
 and a vanished chain cannot be verified at all. An unreadable baseline
-is replaced, never repaired: the supervisor builds no repair paths,
-even for its own files.
+is left as it lies and reported on every look, exit 5, until
+`supervisor acknowledge --baseline` starts the memory afresh: the
+supervisor builds no repair paths, even for its own files.
 
 **The day book (ADR-0014).** One row per UTC day, a 90-day season, a
 14-day band on the front page. The day's `worst` is sticky — a tripwire
@@ -274,15 +275,17 @@ count equals receipts owed.
 The exit ladder is a `max()`, worst wins: 1–4 the gravest verify exit
 (a stood-down tear contributes nothing — ADR-0004 already handled it;
 a chain verify could not judge at all counts as 4, ADR-0037),
-5 a baseline event appends cannot explain, 6 a *live* completeness
+5 a baseline event appends cannot explain, or a baseline that cannot be
+read or kept, 6 a *live* completeness
 alarm. Only live alarms raise the exit: an ended deficit is evidence,
 and a siren that never stops sounding trains the operator to ignore
 the band (the dogfood's lesson). The recorder notice never raises it —
 drift is the operator's to resolve, deliberately.
 
-Two subtleties. Baseline events are **one-shot**: the baseline is
-remembered anew after diffing, so an alarm belongs to the tick that
-caught it, and the next tick reads quiet — the day book's sticky
+Two subtleties. Baseline events **stand**: the baseline keeps the head
+it remembered, so an alarm sounds on every tick until the chain holds
+that head again or `supervisor acknowledge` accepts what is there
+(ADR-0039) — the day book's sticky
 `worst` is what keeps the day honest. And the day book's `broken`
 counts only damage that *demands attention* (stood-down tears are
 excluded), while the chain list and the digest's testimony line count

@@ -38,6 +38,7 @@ import secrets
 import socket
 import socketserver
 import ssl
+import stat
 import subprocess
 import sys
 import threading
@@ -52,7 +53,7 @@ from urllib.parse import urlsplit
 # FORMAT_VERSION is the frozen receipt format of the chain files it
 # keeps (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.10.0"
+TOOL_VERSION = "0.11.0"
 FORMAT_VERSION = "0.1"
 
 DEFAULT_PORT = 8790
@@ -196,9 +197,20 @@ def size_of(path):
 def kept_size(data):
     """Every byte the receiver keeps: the sizes of the files in its data
     directory, read afresh each time, so a file the operator moves off
-    the box frees its room at once."""
+    the box frees its room at once. A link to nowhere keeps nothing; a
+    link into a folder this user may not look into raises, and the
+    write is refused, where os.path.isfile would leave its bytes out of
+    the count unsaid (#421)."""
+    kept = 0
     with os.scandir(data) as entries:
-        return sum(entry.stat().st_size for entry in entries if entry.is_file())
+        for entry in entries:
+            try:
+                found = entry.stat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(found.st_mode):
+                kept += found.st_size
+    return kept
 
 
 def head_line(body):
