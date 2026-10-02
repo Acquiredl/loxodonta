@@ -626,8 +626,9 @@ DAYBOOK_PURPOSE = ("the supervisor's day-by-day memory of its own looks — "
 
 
 def read_daybook(path):
-    """The remembered days. An unreadable book is replaced, never
-    repaired — the same posture the baseline takes."""
+    """The remembered days. A damaged book is read as empty and
+    replaced on the next write, never repaired; a folder or a pipe at
+    its name is read as none and kept, never written over (#386)."""
     try:
         days = json.loads(read_whole(path))["days"]
         return days if isinstance(days, dict) else {}
@@ -732,8 +733,10 @@ def clean_view(raw):
 
 
 def read_views(path):
-    """The saved views. An unreadable file is replaced, never repaired
-    — the same posture the baseline and the day book take."""
+    """The saved views. A damaged file is read as empty and replaced on
+    the next write, never repaired; a folder or a pipe at its name is
+    read as none and kept, never written over (#386), as the day book
+    is."""
     try:
         views = json.loads(read_whole(path))["views"]
     except (OSError, ValueError, KeyError, TypeError,
@@ -2059,6 +2062,10 @@ WATCH_WORDS = {
                      "is called missing (ADR-0029). `calibrate --since` "
                      "seeds what you know of that time.",
 }
+UNREADABLE_TRANSCRIPT_WORDS = (
+    "a transcript pairs with this session and cannot be read as one — "
+    "completeness cannot be watched for it; nothing is assumed either "
+    "way.")
 
 
 def munge(path):
@@ -3242,6 +3249,9 @@ def watch_completeness(root, witness, families, everywhere=False,
             # honestly, and why (#386): completeness cannot be watched,
             # nothing assumed.
             row = add(repo, session, "UNWITNESSED", 0, receipts, spans)
+            # The words travel in a package and the note does not, so
+            # each must be true alone; the path stays local (#410).
+            row["words"] = UNREADABLE_TRANSCRIPT_WORDS
             row["note"] = (f"{Path(error.filename or transcript).as_posix()}"
                            " cannot be read as a transcript: "
                            f"{error.strerror or error}")
@@ -3546,11 +3556,22 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     families = {}
     # Walk in display order — repo, then session, then sibling sequence —
     # so the grouping below is plain insertion, no re-sorting.
+    unfiled = {}
     if store:
         found = (sorted(p for p in root.glob("*/receipts-*.jsonl")
                         if not p.name.endswith(SIDECAR_SUFFIXES))
                  if os.path.isdir(root) else [])
         census = sorted((store_identity(log), log) for log in found)
+        # A drawer whose project record is not a file is labelled by its
+        # own slug and claimed by no repository's worktrees: named, like
+        # every other non-file the scan reads past (#410).
+        for drawer in sorted({log.parent for log in found}):
+            problem = file_problem(drawer / "project.json")
+            if problem is not None:
+                unfiled[drawer.name] = (
+                    f"{drawer.name}/project.json cannot be read as a "
+                    f"project record: {problem} — filed under the "
+                    "drawer's own name, as no repository's history")
     else:
         census = sorted((chain_identity(root, log), log)
                         for log in find_chains(root))
@@ -3907,6 +3928,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "published": published_reading(witness, [log for _, log in census]),
         "repos": [
             {"repo": repo,
+             **({"note": unfiled[repo]} if repo in unfiled else {}),
              "sessions": [{"session": session, "chains": chains}
                           for session, chains in sessions.items()]}
             for repo, sessions in repos.items()
@@ -7147,6 +7169,13 @@ def write_lines(path, lines):
         f.write("".join(line + "\n" for line in lines))
 
 
+def unreadable_drill(asked, why):
+    """The refusal of a chain the drill cannot read: the recorder's
+    words for an unreadable log, and its exit, 66 (ADR-0037)."""
+    return {"log": asked, "refused": f"{asked} cannot be read as a "
+            f"receipt log: {why}"}, EX_NOINPUT
+
+
 def run_drill(root, asked):
     """The battery. Returns (report, exit) — exit 0 only when every
     alarm fired; a refusal reports why and writes nothing."""
@@ -7154,11 +7183,19 @@ def run_drill(root, asked):
     if log is None:
         return None, 1
     try:
-        lines = read_lines(log, errors="strict")
+        lines = read_lines(log, errors="surrogateescape")
     except OSError as error:
-        # A folder or a pipe swapped in after the gate looked (#386).
-        return {"log": asked, "refused": f"{asked} cannot be read as a "
-                f"receipt log: {error.strerror or error}"}, 1
+        # A folder or a pipe swapped in after the gate looked (#386), or
+        # a chain this user may not read.
+        return unreadable_drill(asked, error.strerror or error)
+    for n, line in enumerate(lines):
+        # The copies must be the chain byte for byte, and a line that is
+        # not UTF-8 cannot be written back as text; refused by the
+        # walk's words, as an unreadable log (#407, ADR-0037).
+        try:
+            line.encode("utf-8")
+        except UnicodeEncodeError:
+            return unreadable_drill(asked, f"entry {n} is not valid UTF-8")
     if len(lines) < 3:
         return {"log": asked, "refused": "too short to drill — the "
                 "battery plays with middle entries; give it at least "
@@ -7244,6 +7281,8 @@ def cmd_drill(args):
               file=sys.stderr)
         return 1
     print(json.dumps(report, indent=None if args.json else 2))
+    if "refused" in report:
+        print(f"error: {report['refused']}", file=sys.stderr)
     return code
 
 
@@ -9321,6 +9360,12 @@ function render(report) {
   if (report.baseline.note) {
     tripwire.appendChild(el("p", "claim", report.baseline.note));
   }
+  // A memory the scan read as none, named beside the baseline's (#410):
+  // an empty fortnight or an unwired coverage comes with its reason.
+  for (const note of [report.history_note, report.marker_note,
+                      report.settings_note]) {
+    if (note) tripwire.appendChild(el("p", "claim", note));
+  }
   // What an operator accepted, as kept in the baseline: testimony, drawn
   // plainly, raising nothing.
   for (const record of (report.baseline.acknowledged || [])) {
@@ -10374,7 +10419,7 @@ class VersionAction(argparse.Action):
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
-EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: `verify` found no chain to judge
+EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.

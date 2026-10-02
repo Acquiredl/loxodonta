@@ -5157,7 +5157,7 @@ def commit_transcript_due(log, transcript_path):
     try:
         last = tail_entry(read_log(log))
     except OSError:
-        # Gone, or a folder or a pipe in its place (#374).
+        # Gone, or a folder or a pipe in its place (#386).
         return
     if last is None or last["n"] == 0 or last["n"] % COMMITMENT_CADENCE:
         return

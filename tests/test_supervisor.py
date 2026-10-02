@@ -1134,6 +1134,18 @@ class BaselineTest(unittest.TestCase):
                       "stands until `acknowledge --baseline` (ADR-0039)")
 
 
+def read_line_within(stream, bound=60):
+    """One line from a child's pipe, read on a thread joined to a bound:
+    a child that never says it is the empty string, a failure the test
+    names, where a plain readline would hang the suite (#410)."""
+    said = []
+    reader = threading.Thread(target=lambda: said.append(stream.readline()),
+                              daemon=True)
+    reader.start()
+    reader.join(bound)
+    return said[0] if said else ""
+
+
 def hold(test, path):
     """A second name for the file at `path` right now: what a reader that
     opened it before the next write is holding, and what a crash
@@ -3691,7 +3703,7 @@ class DrillTest(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(SUPERVISOR), "drill", "--root",
              str(self.root), "--log", str(log), "--json"],
-            capture_output=True, encoding="utf-8",
+            capture_output=True, encoding="utf-8", timeout=300,
             env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
     def test_the_four_way_battery_fires_every_expected_alarm(self):
@@ -3756,6 +3768,45 @@ class DrillTest(unittest.TestCase):
         result = self.drill(elsewhere / "receipts-nope.jsonl")
 
         self.assertEqual(result.returncode, 1)
+
+    def test_a_chain_holding_a_byte_that_is_not_utf8_is_refused_by_name(self):
+        # #407: the copies must be the chain byte for byte, and a line
+        # that is not UTF-8 cannot be copied as text, so the drill
+        # refuses the chain as an unreadable log (66, ADR-0037), never
+        # a traceback.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        log.write_bytes(log.read_bytes().replace(b'"step 1"',
+                                                 b'"step \xff1"'))
+        asked = "alpha/receipts/receipts-sess-aaaa.jsonl"
+
+        result = self.drill(asked)
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertIn(f"error: {asked} cannot be read as a receipt log: "
+                      "entry 2 is not valid UTF-8", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse((self.root / ".supervisor-drill").exists(),
+                         "a refused drill writes nothing")
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a file this user may not read")
+    def test_a_chain_it_may_not_read_is_refused_by_name(self):
+        # The other unreadable log (#407): same words, same exit.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        os.chmod(log, 0)
+        self.addCleanup(os.chmod, log, 0o644)
+        asked = "alpha/receipts/receipts-sess-aaaa.jsonl"
+
+        result = self.drill(asked)
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertIn(f"error: {asked} cannot be read as a receipt log: ",
+                      result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse((self.root / ".supervisor-drill").exists(),
+                         "a refused drill writes nothing")
 
     def drill_from(self, cwd, root, log):
         """`drill` started in `cwd` with `--root` and `--log` spelled as
