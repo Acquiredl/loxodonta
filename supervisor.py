@@ -6162,6 +6162,10 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     transcript still on disk (ADR-0026 ruling 2). Returns the file names
     in the order they were written, which is the order the zip keeps."""
     record = drawer / "project.json"   # travels only when it exists
+    # Or when it cannot be asked about, in a drawer closed to this user
+    # (#421): the copy below then refuses the package by name, where it
+    # would have shipped without the record and said nothing.
+    carried = os.path.exists(record) or file_problem(record) is not None
     written = []
     listings = {}
     artifacts = []
@@ -6216,8 +6220,8 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
                 "repository's history (ADR-0023); its file references are "
                 "relative to that worktree"
                 + (", not to the path in `project.json`"
-                   if os.path.exists(record) else ""))
-    if os.path.exists(record):
+                   if carried else ""))
+    if carried:
         copy_regular(record, stage / "project.json")
         written.append("project.json")
         artifacts.append(artifact_listing(stage / "project.json"))
@@ -6227,8 +6231,7 @@ def write_package(unit, sessions, drawer, report, stage, packed, seals,
     written.append("witness.json")
     artifacts.append(artifact_listing(stage / "witness.json"))
     write_lf(stage / "README.md",
-             package_readme(unit, packed, listings, witness,
-                            os.path.exists(record),
+             package_readme(unit, packed, listings, witness, carried,
                             notes, seals, shipped))
     written.append("README.md")
     artifacts.append(artifact_listing(stage / "README.md"))

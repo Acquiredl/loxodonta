@@ -4473,6 +4473,30 @@ class ClosedFolderTest(unittest.TestCase):
         self.assertIn("nothing to package", result.stderr)
         self.assertFalse(os.path.lexists(out))
 
+    def test_package_of_a_repo_whose_own_drawer_is_closed_refuses(self):
+        # Its worktree's drawer still holds a session (ADR-0023), so the
+        # package reaches the repo's project record, which a closed
+        # drawer will not say is there or not: refused by name, never
+        # shipped without it.
+        worktree = self.store / "receipts" / "wt-00000000"
+        worktree.mkdir()
+        (worktree / "project.json").write_text(json.dumps(
+            {"path": str(self.project / ".claude" / "worktrees" / "wt")}),
+            encoding="utf-8")
+        self.recorder("init", "--log",
+                      str(worktree / "receipts-sess-cccc.jsonl"))
+        self.close(self.drawer)
+        out = self.root / "package.zip"
+
+        result = self.supervisor("package", "--repo", str(self.project),
+                                 "--witness", str(self.witness),
+                                 "--out", str(out))
+
+        self.answered(result, 1)
+        self.assertIn("error: project.json cannot be packed: ",
+                      result.stderr)
+        self.assertFalse(os.path.lexists(out))
+
     def test_recall_reads_the_store_for_a_repo_in_a_closed_folder(self):
         # The drawer is named by the repo's path, so a closed parent
         # costs recall nothing: only whether the repo is a worktree is

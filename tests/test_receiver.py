@@ -637,6 +637,32 @@ class CapTest(ReceiverFixture):
             {name: (self.data / name).read_bytes() for name in self.stored()},
             before)
 
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not look into")
+    def test_a_link_the_count_cannot_follow_refuses_the_write(self):
+        # The kept size is what the receiver can read: a link into a
+        # folder closed to it is a write refused by name, never bytes
+        # left out of the count unsaid (#421). A link to nowhere keeps
+        # nothing.
+        proc = self.start()
+        closed = self.root / "closed"
+        closed.mkdir()
+        (closed / "held.jsonl").write_bytes(b"x\n")
+        try:
+            os.symlink(str(self.root / "nowhere"), str(self.data / "gone"))
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks cannot be created here")
+        status, answer = self.send(proc, filler(0, 1))
+        self.assertEqual(status, 200, answer)
+
+        os.symlink(str(closed / "held.jsonl"), str(self.data / "held"))
+        os.chmod(closed, 0)
+        self.addCleanup(os.chmod, closed, 0o755)
+        status, answer = self.send(proc, filler(1, 1))
+
+        self.assertEqual(status, 500, answer)
+        self.assertIn(b"could not write: ", answer)
+
     def test_a_cap_that_is_not_a_whole_number_of_mebibytes_is_a_usage_error(self):
         for flag in ("--file-cap", "--total-cap"):
             for value in ("0", "-1", "1.5", "lots"):
