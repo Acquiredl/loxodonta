@@ -481,6 +481,37 @@ class AdoptTest(unittest.TestCase):
         self.assertTrue(log.exists(), "dry-run moves nothing")
         self.assertEqual(self.drawers(), [])
 
+    def test_dry_run_names_the_sidecars_the_move_would_leave(self):
+        # A sidecar that is not a file, and one whose name the drawer
+        # already holds, stay where they lie when the chain moves; the
+        # dry run says so in the real run's words (#422).
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run_adopt(self.home, self.root)
+        (name,) = self.drawers()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-bbbb")
+        log.with_name(log.name + ".anchors.jsonl").mkdir()
+        taken = log.with_name(log.name + ".published.jsonl")
+        taken.write_text("{}\n", encoding="utf-8")
+        (self.home / "receipts" / name / taken.name).write_text(
+            "{}\n", encoding="utf-8")
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(planned.returncode, 0,
+                         planned.stdout + planned.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"would adopt alpha/receipts/{log.name} -> {name}/",
+                      planned.stdout)
+        left = sorted(line[len("left "):]
+                      for line in result.stdout.splitlines()
+                      if line.startswith("left sidecar "))
+        would = sorted(line[len("would leave "):]
+                       for line in planned.stdout.splitlines()
+                       if line.startswith("would leave sidecar "))
+        self.assertEqual(len(left), 2, result.stdout)
+        self.assertEqual(would, left)
+
     def test_adopted_chains_are_scanned_and_recalled(self):
         # The move is an end-to-end success only if the store's readers
         # pick the history up where it landed.
@@ -4588,8 +4619,10 @@ class ClosedFolderTest(unittest.TestCase):
                                              str(self.legacy))
                 finally:
                     os.chmod(closed, 0o755)
+                # The dry run refuses what the real run refuses (#422).
                 self.answered(planned, 0)
-                self.assertIn("would adopt", planned.stdout)
+                self.assertIn(refusal, planned.stdout)
+                self.assertNotIn("would adopt", planned.stdout)
                 self.answered(result, 0)
                 self.assertIn(refusal, result.stdout)
                 self.assertIn("not adopted; left as it lies", result.stdout)
