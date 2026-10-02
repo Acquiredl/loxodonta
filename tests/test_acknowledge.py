@@ -262,8 +262,9 @@ class StandingAlarmTest(LegacyRoot):
 class UncountedKeyTest(LegacyRoot):
     """A remembered name where something stands that the census does not
     count (#432 item 1): a planted sidecar-named key, or one naming a
-    file that is no chain. Only a planted row reaches it; its memory is
-    kept as it was, and the report names it, with no event and no exit."""
+    file that is no chain, or a chain renamed, as a change of case does
+    on a disk that ignores case. Its memory is kept as it was, and the
+    report names it, with no event."""
 
     def test_a_remembered_name_the_census_does_not_count_is_named(self):
         self.look(0)
@@ -290,6 +291,31 @@ class UncountedKeyTest(LegacyRoot):
         for key in planted:
             self.assertEqual(kept["chains"][key], {"n": n, "head": head},
                              "its memory is kept as it was")
+
+    def test_a_chain_put_back_under_its_name_in_capitals_is_named(self):
+        # The second review's repro of #432: on a disk that ignores case
+        # the old name still answers, and the census counts the new one
+        # under a key of its own (or, on macOS, not at all). Whether this
+        # should alarm is the author's to rule; the exit is not held here.
+        self.look(0)
+        n, head = self.head()
+        lines = self.log.read_bytes().splitlines(keepends=True)
+        self.log.unlink()
+        renamed = self.log.with_name(self.log.name.upper())
+        renamed.write_bytes(b"".join(lines[:3]))
+        if not os.path.exists(self.log):
+            self.skipTest("this disk tells names apart by case")
+
+        for _ in range(2):
+            result = self.supervisor("scan", "--root", str(self.root),
+                                     "--json")
+            report = json.loads(result.stdout)
+            named = {row["log"]: row
+                     for row in report["baseline"].get("uncounted", [])}
+            self.assertIn(LOG, named, result.stdout)
+            self.assertEqual(named[LOG]["remembered"],
+                             {"n": n, "head": head})
+            self.assertIn("a change of case is enough", named[LOG]["words"])
 
     def test_a_look_with_no_such_name_names_nothing(self):
         self.assertNotIn("uncounted", self.look(0)["baseline"])

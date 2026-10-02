@@ -474,8 +474,9 @@ AFRESH = "`supervisor acknowledge --baseline` starts the memory afresh"
 
 UNCOUNTED = ("the baseline remembers a chain at this name, and what stands "
              "there is something the census does not count: the row is "
-             "kept as it was and compared with nothing. A scan never "
-             "writes such a row; look at what stands there, and at the "
+             "kept as it was and compared with nothing. A planted row, or "
+             "the chain renamed (on a disk that ignores case, a change of "
+             "case is enough); look at what stands there, and at the "
              "baseline")
 
 
@@ -3890,8 +3891,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             # Something the census does not count stands at the name:
             # its memory is kept as it was, never dropped unseen. In a
             # folder the census could not list, the closed note names it
-            # and the exit is 5 (#431); anywhere else only a planted row
-            # gets here, so it is named, with no exit (#432).
+            # and the exit is 5 (#431). Anywhere else it is a planted
+            # row, or the chain renamed (on a disk that ignores case, a
+            # change of case is enough): named, with no exit (#432).
             heads[relpath] = known
             if any(Path(folder) in (root / relpath).parents
                    for folder, _ in closed):
