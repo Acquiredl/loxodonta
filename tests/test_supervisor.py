@@ -1134,6 +1134,18 @@ class BaselineTest(unittest.TestCase):
                       "stands until `acknowledge --baseline` (ADR-0039)")
 
 
+def read_line_within(stream, bound=60):
+    """One line from a child's pipe, read on a thread joined to a bound:
+    a child that never says it is the empty string, a failure the test
+    names, where a plain readline would hang the suite (#410)."""
+    said = []
+    reader = threading.Thread(target=lambda: said.append(stream.readline()),
+                              daemon=True)
+    reader.start()
+    reader.join(bound)
+    return said[0] if said else ""
+
+
 def hold(test, path):
     """A second name for the file at `path` right now: what a reader that
     opened it before the next write is holding, and what a crash

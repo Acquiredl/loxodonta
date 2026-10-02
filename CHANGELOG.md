@@ -32,6 +32,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `supervisor` commands name a folder closed to the reader, a drawer, the store's receipts folder, the harness's or the recorder's, or read its chains as vanished, on every Python, where before 3.14 they ended in a traceback (#421).
 - `supervisor adopt` refuses a link to nowhere at a chain's or a sidecar's name in the drawer as a name already taken, where a move across two filesystems could copy through it (#422).
 - A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403).
+- The `serve` page draws why a day book, a coverage marker or harness settings was read as none, beside the baseline's note, where an empty fortnight came with no reason (#410).
+- A session whose transcript cannot be read as one says so in its `UNWITNESSED` words, which travel in a package, where they said no transcript paired with it (#410).
+- `supervisor scan` names a drawer whose `project.json` is a folder or a pipe, filed under its own name, where it relabelled the drawer silently (#410).
 
 ## [0.10.3] - 2026-10-01
 
