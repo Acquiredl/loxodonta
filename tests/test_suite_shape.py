@@ -13,7 +13,7 @@ module names itself instead of taking the parent interpreter with it.
 The home guard is armed and says where a start came from (#242). The
 guard itself lives in tests/home_guard.py, which says what it covers;
 these tests hold it to refusing the six home-reading supervisor verbs and
-the four home-writing verbs (#274) when any one home is the machine's,
+the five home-writing verbs (#274) when any one home is the machine's,
 and to naming the line that made the start.
 
 The rules written in more than one of the three scripts, which never
@@ -34,6 +34,18 @@ one line of why, so a call added beside a listed one fails too. It
 sees the calls it names and no others, and its class says which it
 does not: a path handed to another program, an alias, a call made
 through `getattr`.
+
+Every question a script asks of whether something is there goes
+through `os.path` (#421). Before Python 3.14, pathlib's `exists()`,
+`is_file()`, `is_dir()` and `is_symlink()` raise for a path in a folder
+the user may not look into, where `os.path`'s answer False, so one
+`chmod` in the writer's reach ended a reader in a traceback. A second
+walk of each script fails on any such method call, naming its function
+and line, and spoils a copy to see it fail. It keeps no list: no call
+needs one.
+
+Every LOXODONTA_*, RECEIPTS_*, SUPERVISOR_* or RECEIVER_* variable a
+page under docs/ or the README names is one the scripts read (#397).
 """
 
 import ast
@@ -140,7 +152,8 @@ class HomeGuardTest(unittest.TestCase):
 
 class WriterHomeGuardTest(unittest.TestCase):
     """The verbs that write into a home, the recorder's three and the
-    supervisor's `adopt`, under the same guard (#274). `--help` again, so
+    supervisor's `adopt` and `acknowledge`, under the same guard (#274).
+    `--help` again, so
     a probe past a disarmed guard writes nothing."""
 
     def command(self, verb):
@@ -168,6 +181,14 @@ class WriterHomeGuardTest(unittest.TestCase):
             subprocess.run([sys.executable, str(SUPERVISOR), "adopt",
                             "--help"], capture_output=True)
         self.assertIn("supervisor.py adopt started", str(refused.exception))
+
+    def test_acknowledge_is_refused_with_the_inherited_home(self):
+        # It writes the store's baseline when given no --root (ADR-0039).
+        with self.assertRaises(AssertionError) as refused:
+            subprocess.run([sys.executable, str(SUPERVISOR), "acknowledge",
+                            "--help"], capture_output=True)
+        self.assertIn("supervisor.py acknowledge started",
+                      str(refused.exception))
 
     def test_an_unset_store_or_codex_home_falls_back_inside_the_test(self):
         # The tools fall back to ~/.loxodonta and ~/.codex, so with the
@@ -345,6 +366,32 @@ class TwinCheckTest(unittest.TestCase):
         self.assertEqual(
             (self.root / "docs" / "TWINS.md").read_text(encoding="utf-8"),
             (REPO_ROOT / "docs" / "TWINS.md").read_text(encoding="utf-8"))
+
+    def test_page_writes_lf_whatever_the_checkout_holds(self):
+        page = self.root / "docs" / "TWINS.md"
+        page.write_bytes(b"stale\r\n")
+        done = twin_check("--page", "--root", str(self.root))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("wrote docs/TWINS.md", done.stdout)
+        written = page.read_bytes()
+        self.assertNotIn(b"\r", written)
+        self.assertEqual(written.decode("utf-8"),
+                         (REPO_ROOT / "docs" / "TWINS.md").read_text(
+                             encoding="utf-8"))
+
+    def test_page_with_nothing_changed_leaves_the_file_alone(self):
+        # A current page that a Windows checkout wrote with CRLF, rewritten
+        # as LF, reads as modified to git status with an empty diff (#402).
+        page = self.root / "docs" / "TWINS.md"
+        crlf = page.read_bytes().replace(b"\n", b"\r\n")
+        page.write_bytes(crlf)
+        done = twin_check("--page", "--root", str(self.root))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("docs/TWINS.md is current", done.stdout)
+        self.assertEqual(page.read_bytes(), crlf)
+        checked = self.check()
+        self.assertEqual(checked.returncode, 0,
+                         checked.stdout + checked.stderr)
 
     def test_write_on_a_clean_tree_changes_no_byte(self):
         before = self.snapshot()
@@ -698,9 +745,8 @@ ALLOWED_OPENS = {
         1, "builds the raw archive in memory; write_export puts it at its "
            "name"),
     ("supervisor.py", "zip_package"): (
-        1, "the package's zip at --out, which cmd_package refuses "
-           "beforehand when anything stands there: only a pipe put there "
-           "between that look and this open would be waited on"),
+        1, "the package's zip at --out, created exclusively (mode x): "
+           "whatever stands there is kept and never opened"),
     ("supervisor.py", "sign_manifest"): (
         2, "the .pub beside the issuer's key, out of the writer's reach "
            "(ADR-0008), and the manifest it has just staged"),
@@ -708,9 +754,10 @@ ALLOWED_OPENS = {
         1, "writes the drill's copies into the sandbox it has just made "
            "afresh"),
     ("supervisor.py", "cmd_adopt"): (
-        2, "moves a legacy chain and its sidecars: a rename within one "
+        2, "moves a legacy chain and its sidecars, each asked first "
+           "whether it is a file (file_problem): a rename within one "
            "filesystem opens nothing, and across two shutil refuses a "
-           "named pipe at either end"),
+           "named pipe put there after the question"),
     ("supervisor.py", "Face.do_GET"): (
         1, "serves docs/FIRE-DRILL.md from the supervisor's own checkout"),
     ("receiver.py", "mint_token"): (1, RECEIVER_DATA),
@@ -776,9 +823,12 @@ def opens_a_file(call):
 class FileCalls(ast.NodeVisitor):
     """One script's walk. `opens` maps each function, named with the
     classes and functions around it (`Face.do_GET`), to the lines of
-    the calls collected in it; `defined` holds every such name."""
+    the calls collected in it; `defined` holds every such name.
+    `collects` says which calls are collected: by default those that
+    open a file."""
 
-    def __init__(self):
+    def __init__(self, collects=opens_a_file):
+        self.collects = collects
         self.scope, self.opens, self.defined = [], {}, set()
 
     def visit_FunctionDef(self, node):
@@ -790,15 +840,15 @@ class FileCalls(ast.NodeVisitor):
     visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
 
     def visit_Call(self, node):
-        if opens_a_file(node):
+        if self.collects(node):
             where = ".".join(self.scope) or "<module>"
             self.opens.setdefault(where, []).append(node.lineno)
         self.generic_visit(node)
 
 
-def file_calls(path):
+def file_calls(path, collects=opens_a_file):
     """The walk of the script at `path`."""
-    calls = FileCalls()
+    calls = FileCalls(collects)
     calls.visit(ast.parse(Path(path).read_bytes()))
     return calls
 
@@ -829,7 +879,70 @@ def stale_entries(walks, allowed=ALLOWED_OPENS):
     return stale
 
 
-class EveryOpenIsListedTest(unittest.TestCase):
+def aliases(path):
+    """Each way the script at `path` could reach a call the walk
+    collects by a name the walk does not match, as (line, what): a
+    `from` import of a name it collects, any import renamed with `as`,
+    and the builtin `open` named anywhere but as the function of a
+    call."""
+    tree = ast.parse(Path(path).read_bytes())
+    called = {id(node.func) for node in ast.walk(tree)
+              if isinstance(node, ast.Call)}
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for name in node.names:
+                if name.asname:
+                    found.append((node.lineno,
+                                  f"import {name.name} as {name.asname}"))
+                elif isinstance(node, ast.ImportFrom) \
+                        and name.name in FILE_METHODS | SHUTIL_CALLS:
+                    found.append((node.lineno, f"from {node.module} "
+                                               f"import {name.name}"))
+        elif isinstance(node, ast.Name) and node.id == "open" \
+                and id(node) not in called:
+            found.append((node.lineno, "open, not called"))
+    return sorted(found)
+
+
+class SpoiledScript:
+    """A copy of one of the three scripts with one edit made, for a
+    check to be seen failing on it."""
+
+    def spoiled_copy(self, name, old, new):
+        """A copy of script `name` with `old`, which it holds once, made
+        `new`."""
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        self.assertEqual(text.count(old), 1, f"{old!r} in {name}")
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        copy = Path(scratch.name) / name
+        copy.write_bytes(text.replace(old, new).encode())
+        return copy
+
+    def spoiled(self, name, old, new, collects=opens_a_file):
+        """The walk of a copy of script `name` with `old` made `new`, and
+        the copy's text, to find the lines in."""
+        copy = self.spoiled_copy(name, old, new)
+        return file_calls(copy, collects), copy.read_text(encoding="utf-8")
+
+    def line_of(self, text, line):
+        """The number of the one line of `text` that is `line`."""
+        found = [number for number, said in enumerate(text.split("\n"), 1)
+                 if said == line]
+        self.assertEqual(len(found), 1, line)
+        return found[0]
+
+    def added_to_anchors_path(self, *lines, collects=opens_a_file):
+        """The walk of the recorder with `lines` added to anchors_path,
+        which the list does not name, and the line numbers they got."""
+        old = "def anchors_path(log):\n"
+        calls, text = self.spoiled("loxodonta.py", old, old + "".join(
+            line + "\n" for line in lines), collects)
+        return calls, [self.line_of(text, line) for line in lines]
+
+
+class EveryOpenIsListedTest(SpoiledScript, unittest.TestCase):
     """The rule of #364, #374, #385, #386 and #405 as a check: a call
     that opens, reads, writes, copies or moves a file by its name goes
     through `open_regular`, or its function is on ALLOWED_OPENS with
@@ -839,12 +952,15 @@ class EveryOpenIsListedTest(unittest.TestCase):
     equal.
 
     What the walk does not see: a path handed by name to another
-    program (ssh-keygen opens a package's `.pub` and `.sig` itself); a
+    program (ssh-keygen opens a package's `.pub` and `.sig` itself), or
+    to a library method that opens it itself (a zip's `write` and
+    `extractall`, which today read and fill only a folder the script
+    has just made, and the receiver's `load_cert_chain`); a
     renamed import or an alias, `from shutil import copyfile` or
-    `opener = open`, none of which the three scripts hold today; and a
-    call reached through `getattr`, `functools.partial` or `map`. An
-    entry holds how many such calls its function makes, not which: one
-    swapped for another at the same count passes."""
+    `opener = open`, which a test here holds the three scripts free of;
+    and a call reached through `getattr`, `functools.partial` or `map`.
+    An entry holds how many such calls its function makes, not which:
+    one swapped for another at the same count passes."""
 
     def test_every_file_call_on_the_tree_is_listed_at_its_count(self):
         found = [f"{name} {where}, line {', '.join(map(str, lines))}: "
@@ -873,32 +989,6 @@ class EveryOpenIsListedTest(unittest.TestCase):
                          ["receiver.py no longer defines no_such_function",
                           "receiver.py token_path makes 0 call(s), and the "
                           "list allows 1"])
-
-    def spoiled(self, name, old, new):
-        """The walk of a copy of script `name` with `old` made `new`, and
-        the copy's text, to find the lines in."""
-        text = (REPO_ROOT / name).read_text(encoding="utf-8")
-        self.assertEqual(text.count(old), 1, f"{old!r} in {name}")
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        copy = Path(scratch.name) / name
-        copy.write_bytes(text.replace(old, new).encode())
-        return file_calls(copy), copy.read_text(encoding="utf-8")
-
-    def line_of(self, text, line):
-        """The number of the one line of `text` that is `line`."""
-        found = [number for number, said in enumerate(text.split("\n"), 1)
-                 if said == line]
-        self.assertEqual(len(found), 1, line)
-        return found[0]
-
-    def added_to_anchors_path(self, *lines):
-        """The walk of the recorder with `lines` added to anchors_path,
-        which the list does not name, and the line numbers they got."""
-        old = "def anchors_path(log):\n"
-        calls, text = self.spoiled("loxodonta.py", old, old + "".join(
-            line + "\n" for line in lines))
-        return calls, [self.line_of(text, line) for line in lines]
 
     def test_a_plain_read_added_to_a_function_is_named_at_its_line(self):
         calls, lines = self.added_to_anchors_path(
@@ -952,6 +1042,156 @@ class EveryOpenIsListedTest(unittest.TestCase):
             '    open(log, **{"mode": "x"}).close()')
         self.assertEqual(beyond_the_list("loxodonta.py", calls),
                          [("anchors_path", 0, lines)])
+
+    def test_no_script_reaches_a_collected_call_by_another_name(self):
+        found = [f"{name}, line {line}: {what}"
+                 for name in SCRIPTS
+                 for line, what in aliases(REPO_ROOT / name)]
+        self.assertEqual(found, [], "the walk knows a call by the name it "
+                         "collects: import the module and call it by that "
+                         "name, and only ever call open (#421)")
+
+    def aliased(self, name, old, added):
+        """The aliases of a copy of script `name` with the line `added`
+        put after `old`, and the line number it got."""
+        copy = self.spoiled_copy(name, old, old + added + "\n")
+        text = copy.read_text(encoding="utf-8")
+        return aliases(copy), self.line_of(text, added)
+
+    def test_a_from_import_of_a_collected_name_is_named_at_its_line(self):
+        found, line = self.aliased("supervisor.py", "import shutil\n",
+                                   "from shutil import copyfile")
+        self.assertEqual(found, [(line, "from shutil import copyfile")])
+
+    def test_a_renamed_import_is_named_at_its_line(self):
+        found, line = self.aliased("receiver.py", "import json\n",
+                                   "import shutil as sh")
+        self.assertEqual(found, [(line, "import shutil as sh")])
+
+    def test_open_held_as_a_value_is_named_and_a_call_is_not(self):
+        old = "def anchors_path(log):\n"
+        found, line = self.aliased("loxodonta.py", old,
+                                   "    opener = open")
+        self.assertEqual(found, [(line, "open, not called")])
+
+
+# What the existence walk collects (#421): a method call that asks
+# whether something is there, of anything but os.path. Before Python
+# 3.14 pathlib's raise PermissionError for a path in a folder this user
+# may not look into, as an os.DirEntry's do on every version; os.path's
+# answer False there on every version.
+EXISTENCE_METHODS = {"exists", "is_file", "is_dir", "is_symlink"}
+
+
+def asks_by_method(call):
+    """Whether the existence walk collects `call` (EXISTENCE_METHODS)."""
+    func = call.func
+    return (isinstance(func, ast.Attribute)
+            and func.attr in EXISTENCE_METHODS
+            and ast.unparse(func.value) != "os.path")
+
+
+class ExistenceIsAskedThroughOsPathTest(SpoiledScript, unittest.TestCase):
+    """The rule of #421 as a check: the three scripts ask whether
+    something is there through `os.path.exists`, `isfile`, `isdir`,
+    `islink` and `lexists`, never through a method named `exists`,
+    `is_file`, `is_dir` or `is_symlink` of anything else, so a folder
+    closed to the reader reads as nothing there on every Python. No
+    call needs a list. The walk cannot tell a Path from an os.DirEntry,
+    whose methods raise there too, and holds both. `verifier.py` is not
+    walked: it is copied from the recorder, which asks none of these by
+    method. `tools/` and `tests/` are not walked either: they read the
+    repository and folders of their own, never the writer's.
+
+    What the walk does not see: the same question asked inside the
+    standard library, as `Path.glob` asks `is_dir` of the folder it
+    starts from before Python 3.13; and a method reached through
+    `getattr`."""
+
+    def test_every_script_asks_through_os_path(self):
+        found = [f"{name} {where}, line {', '.join(map(str, lines))}"
+                 for name in SCRIPTS
+                 for where, lines in sorted(file_calls(
+                     REPO_ROOT / name, asks_by_method).opens.items())]
+        self.assertEqual(found, [], "ask through os.path.exists, isfile, "
+                         "isdir, islink or lexists, which answer False for "
+                         "a folder this user may not look into (#421)")
+
+    def test_a_method_asking_whether_a_path_is_there_is_named(self):
+        calls, lines = self.added_to_anchors_path(
+            "    Path(log).exists()", "    Path(log).is_file()",
+            "    Path(log).is_dir()", "    Path(log).is_symlink()",
+            collects=asks_by_method)
+        self.assertEqual(calls.opens, {"anchors_path": lines})
+
+    def test_the_same_questions_through_os_path_pass(self):
+        calls, _ = self.added_to_anchors_path(
+            "    os.path.exists(log)", "    os.path.isfile(log)",
+            "    os.path.isdir(log)", "    os.path.islink(log)",
+            "    os.path.lexists(log)", collects=asks_by_method)
+        self.assertEqual(calls.opens, {})
+
+
+# The prefixes of the variables the scripts read for themselves; a name
+# another program reads (CLAUDE_PROJECT_DIR, SSL_CERT_FILE) is not ours.
+ENV_NAME = re.compile(
+    r"\b(?:LOXODONTA|RECEIPTS|SUPERVISOR|RECEIVER)_[A-Z0-9_]*[A-Z0-9]\b")
+
+
+def env_names_read(paths):
+    """Every such name the scripts hold as a string: what os.environ is
+    asked for. A name only a comment or a docstring mentions is not
+    read, so it does not count."""
+    names = set()
+    for path in paths:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and ENV_NAME.fullmatch(node.value)):
+                names.add(node.value)
+    return names
+
+
+def env_names_unread(pages, code, root):
+    """(page relative to root, name) for each variable a page names that
+    the code never reads."""
+    read = env_names_read(code)
+    unread = set()
+    for page in pages:
+        text = Path(page).read_text(encoding="utf-8")
+        for name in ENV_NAME.findall(text):
+            if name not in read:
+                unread.add((Path(page).relative_to(root).as_posix(), name))
+    return sorted(unread)
+
+
+class DocumentedVariablesAreReadTest(unittest.TestCase):
+    """A variable the docs tell an operator to set is one the scripts
+    read (#397): two pages still named RECEIPTS_LOCK_TIMEOUT after the
+    rename to LOXODONTA_LOCK_TIMEOUT, so setting it changed nothing.
+    The ADRs are left out, since each records the names of its day."""
+
+    def test_every_documented_variable_is_read(self):
+        pages = sorted((REPO_ROOT / "docs").rglob("*.md"))
+        pages.append(REPO_ROOT / "README.md")
+        code = [RECORDER, SUPERVISOR, REPO_ROOT / "receiver.py"]
+        code += sorted((REPO_ROOT / "adapters").glob("*.py"))
+        self.assertEqual(env_names_unread(pages, code, REPO_ROOT), [])
+
+    def test_a_name_only_a_comment_mentions_is_unread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            page = root / "PAGE.md"
+            page.write_text("Set `LOXODONTA_HOME` or `RECEIPTS_GONE`.\n",
+                            encoding="utf-8")
+            script = root / "script.py"
+            script.write_text(
+                "import os\n"
+                "# RECEIPTS_GONE was the old name.\n"
+                'HOME = os.environ.get("LOXODONTA_HOME")\n',
+                encoding="utf-8")
+            self.assertEqual(env_names_unread([page], [script], root),
+                             [("PAGE.md", "RECEIPTS_GONE")])
 
 
 if __name__ == "__main__":

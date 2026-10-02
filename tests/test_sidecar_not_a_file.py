@@ -12,7 +12,9 @@ The chain itself is in the same reach. `verify` and `head` call a chain
 path that is not a regular file no input, the scan names it and goes on,
 and `package` and `export` never copy it (SPEC section 6). The hook
 reads it as damage and keeps its receipt in a sibling, and the other
-writers refuse it as `verify` does (#385).
+writers refuse it as `verify` does (#385). A folder that refuses the
+lock file, or a lock file that will not take its line, is a file the
+writer must write and cannot, 73, the lock removed (#398).
 
 So is every other file the tools read there (#386): the transcript the
 hook commits and `verify --transcript` judges, a chain's project record,
@@ -46,6 +48,11 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+try:
+    import resource  # POSIX only; imported here, never in a forked child
+except ImportError:
+    resource = None
 
 # This folder on sys.path, so the sibling imports below also resolve
 # when the module runs alone (`python -m unittest tests.test_sidecar_not_a_file`).
@@ -458,6 +465,99 @@ class UnwritableChainTest(unittest.TestCase):
         self.assert_not_written(result)
         self.assertFalse(
             (self.workdir / f"receipts-{HOOKED}-002.jsonl").exists())
+
+
+@unittest.skipIf(os.name == "nt", "a folder's write bit is POSIX")
+class ReadOnlyFolderTest(UnwritableChainTest):
+    """The same three writers in a folder that refuses the lock file
+    beside the chain (#398): the lock is the first thing an append
+    creates, so the refusal comes there, and each says so as the
+    hook does, exit 73, never a traceback."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
+        first = fire_hook(self, self.workdir, "echo first")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.before = self.chain.read_bytes()
+        os.chmod(self.workdir, 0o555)
+        self.addCleanup(os.chmod, self.workdir, 0o755)
+
+
+class MissingFolderTest(unittest.TestCase):
+    """`log` into a folder that is not there is a log that is not there,
+    66, as `run` says it, never the 73 of a lock refused (#398)."""
+
+    def test_log_into_a_missing_folder_is_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_receipts("log", "--log", "gone/receipts.jsonl",
+                                  "--actor", "agent", "--action", "x",
+                                  cwd=tmp)
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("not found", result.stderr)
+        self.assertIn("loxodonta init", result.stderr)
+
+
+def no_file_may_grow():
+    """In the child, before it starts: no file may grow past 0 bytes,
+    so the lock file is created and the line written into it is refused
+    (EFBIG; Python ignores SIGXFSZ, so the write fails, not the
+    process)."""
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+
+@unittest.skipIf(resource is None, "no file size limit here")
+class LockNotWrittenTest(unittest.TestCase):
+    """A lock file created and then refused its one line, as a full disk
+    would refuse it (#398). The writer removes the lock it made before
+    it says why, so the next append is not held off by it until the
+    stale break, and `log`, `run` and the hook each answer 73 with no
+    traceback, the chain as it was."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
+        first = fire_hook(self, self.workdir, "echo first")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.before = self.chain.read_bytes()
+
+    def limited(self, *args, payload=None):
+        env = isolated_env(home_outside(self), PYTHONIOENCODING="utf-8",
+                           PYTHONDONTWRITEBYTECODE="1")
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), *args], input=payload,
+            capture_output=True, encoding="utf-8", cwd=str(self.workdir),
+            env=env, timeout=BOUND, preexec_fn=no_file_may_grow)
+
+    def test_each_writer_removes_the_lock_it_made(self):
+        payload = json.dumps({"session_id": HOOKED,
+                              "hook_event_name": "PostToolUse",
+                              "tool_name": "Bash",
+                              "tool_input": {"command": "echo second"}})
+        writers = {
+            "log": ["log", "--log", str(self.chain),
+                    "--actor", "agent", "--action", "x"],
+            "run": ["run", "--log", str(self.chain), "--actor", "agent",
+                    "--", sys.executable, "-c", "pass"],
+            "hook": ["hook", "--log-dir", str(self.workdir)],
+        }
+        for verb, args in writers.items():
+            with self.subTest(verb=verb):
+                result = self.limited(*args, payload=payload)
+
+                self.assertEqual(result.returncode, 73,
+                                 result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn("could not be written", result.stderr)
+                self.assertIn("no entry was written", result.stderr)
+                self.assertEqual(self.chain.read_bytes(), self.before)
+                self.assertEqual(list(self.workdir.glob("*.lock")), [])
 
 
 class PackagedNotAFileTest(AnchoredStoreCase):
@@ -1329,7 +1429,7 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
                                    LOXODONTA_HOME=str(self.home)),
                     "PYTHONIOENCODING": "utf-8"}
 
-    def scan(self, repo="alpha"):
+    def scan(self, repo="alpha", expect=0):
         # Bounded: a scan that waited on a pipe would fail here.
         result = subprocess.run(
             [sys.executable, str(SUPERVISOR), "scan", "--json",
@@ -1337,7 +1437,8 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
             capture_output=True, encoding="utf-8", timeout=BOUND,
             env=self.env)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, expect,
+                         result.stdout + result.stderr)
         report = json.loads(result.stdout)
         (chain,) = chains_by_session(report)[(repo, "sess-aaaa")]
         self.assertEqual(chain["verdict"], "VALID")
@@ -1355,6 +1456,11 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
         self.assertEqual(row["state"], "UNWITNESSED")
         self.assertIn(f"sess-aaaa.jsonl cannot be read as a transcript: "
                       f"{why}", row["note"])
+        # The words travel in a package and the note does not (#410):
+        # true on their own, and without the path.
+        self.assertIn("cannot be read", row["words"])
+        self.assertNotIn("no transcript pairs", row["words"])
+        self.assertNotIn("sess-aaaa", row["words"])
 
     def test_a_folder_where_a_transcript_belongs_is_unwitnessed_with_why(self):
         self.assert_unwitnessed(Path.mkdir, FOLDER)
@@ -1363,7 +1469,7 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
     def test_a_pipe_where_a_transcript_belongs_is_unwitnessed_with_why(self):
         self.assert_unwitnessed(os.mkfifo, PIPE)
 
-    def assert_filed_under_its_slug(self, make):
+    def assert_filed_under_its_slug(self, make, why):
         # A drawer whose record cannot be read is filed under its own
         # slug, as one with a damaged record is.
         record = self.drawer / "project.json"
@@ -1375,46 +1481,64 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
 
         self.assertEqual([repo["repo"] for repo in report["repos"]],
                          ["alpha-11111111"])
+        # Named like every other non-file, not relabelled silently (#410).
+        (repo,) = report["repos"]
+        self.assertIn("alpha-11111111/project.json cannot be read as a "
+                      f"project record: {why}", repo["note"])
         self.assertEqual(kind(record), before)
 
     def test_a_folder_where_a_project_record_belongs_is_read_past(self):
-        self.assert_filed_under_its_slug(Path.mkdir)
+        self.assert_filed_under_its_slug(Path.mkdir, FOLDER)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_where_a_project_record_belongs_is_read_past(self):
-        self.assert_filed_under_its_slug(os.mkfifo)
+        self.assert_filed_under_its_slug(os.mkfifo, PIPE)
 
-    def assert_memory_named(self, name, make, why, words, where):
+    def assert_memory_named(self, name, make, why, words, where, expect=0):
         memory = self.home / name
         make(memory)
         before = kind(memory)
 
-        first = self.scan()
-        second = self.scan()
+        first = self.scan(expect=expect)
+        second = self.scan(expect=expect)
 
         for report in (first, second):
             self.assertIn(f"{name} cannot be read as {words}: {why}",
                           where(report))
         self.assertEqual(kind(memory), before, "nothing written over it")
 
+    # A baseline that cannot be read is an alarm on every look, exit 5,
+    # and the scan starts no memory of its own (ADR-0039).
     def test_a_folder_where_the_baseline_belongs_is_named_and_kept(self):
         self.assert_memory_named("baseline.json", Path.mkdir, FOLDER,
                                  "a baseline",
-                                 lambda report: report["baseline"]["note"])
+                                 lambda report: report["baseline"]["note"],
+                                 expect=5)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_where_the_baseline_belongs_is_named_and_kept(self):
         self.assert_memory_named("baseline.json", os.mkfifo, PIPE,
                                  "a baseline",
-                                 lambda report: report["baseline"]["note"])
+                                 lambda report: report["baseline"]["note"],
+                                 expect=5)
+
+    def seeded_without_a_day_book(self):
+        """A baseline remembered by a first look, and its day book taken
+        away, so what stands at the book's name is all that is wrong: a
+        day book with no baseline beside it is a memory gone missing
+        (ADR-0039), a different finding."""
+        self.scan()
+        (self.home / "daybook.json").unlink()
 
     def test_a_folder_where_the_day_book_belongs_is_named_and_kept(self):
+        self.seeded_without_a_day_book()
         self.assert_memory_named("daybook.json", Path.mkdir, FOLDER,
                                  "a day book",
                                  lambda report: report["history_note"])
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_where_the_day_book_belongs_is_named_and_kept(self):
+        self.seeded_without_a_day_book()
         self.assert_memory_named("daybook.json", os.mkfifo, PIPE,
                                  "a day book",
                                  lambda report: report["history_note"])
@@ -1718,6 +1842,26 @@ class ExportedNameNotAFileTest(ExportBase):
     @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
     def test_a_pipe_at_either_name_is_never_waited_on(self):
         self.assert_both_refused(os.mkfifo, PIPE)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not write in")
+    def test_a_folder_it_may_not_write_in_is_refused_by_name(self):
+        """Any write the system refuses is named with exit 73, as the
+        recorder names one (`unwritable_log`): never a traceback."""
+        os.chmod(self.work, 0o555)
+        self.addCleanup(os.chmod, self.work, 0o755)
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "export",
+             "--witness", str(self.witness)],
+            capture_output=True, cwd=str(self.work),
+            env={**self.env, "PYTHONIOENCODING": "utf-8"}, timeout=BOUND)
+        err = result.stderr.decode("utf-8", "replace")
+
+        self.assertEqual(result.returncode, 73, err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("could not be written: ", err)
+        self.assertIn("— nothing was written", err)
+        self.assertEqual(list(self.work.iterdir()), [])
 
 
 def misdirected(sidecar, nonce, away):

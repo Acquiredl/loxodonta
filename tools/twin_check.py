@@ -8,7 +8,7 @@ written twice, and every name the files share that is not a twin. The
 recorder holds the original of every twin; a copy is its text again,
 docstring included, under one comment line naming its original.
 
-    python tools/twin_check.py --page    write docs/TWINS.md from the list
+    python tools/twin_check.py --page    write docs/TWINS.md, if stale
     python tools/twin_check.py --write   copy each original over its copies
     python tools/twin_check.py --check   exit 1 on drift, naming each problem
     ... --root DIR                       work on the files under DIR instead
@@ -130,7 +130,7 @@ TWINS = (
          "both print, the bare names its manifest may list, and which "
          "two names some system opens as one file (ADR-0026, #358)."),
     Twin("Reading a sidecar",
-         ("read_log", "sidecar_path", "published_path", "NOT_A_FOLDER",
+         ("read_log", "sidecar_path", "published_path", "IS_A_FOLDER",
           "NOT_REGULAR", "open_regular", "file_problem",
           "KeyGivenTwice", "object_with_each_key_once", "NotStrictJson",
           "not_json", "finite_float", "read_sidecar_records"),
@@ -762,10 +762,18 @@ def main(argv):
         root = Path(args[at + 1])
         del args[at:at + 2]
     if args == ["--page"]:
-        written = root / PAGE
-        # LF on every checkout, so the check reads the same text back.
-        # Bytes, since write_text takes no newline before Python 3.10.
-        written.write_bytes(page().encode("utf-8"))
+        written, text = root / PAGE, page()
+        # Text mode, so a checkout's line endings are not a difference. A
+        # current page is left alone rather than rewritten: a Windows
+        # checkout holds it with CRLF, and the same text written back as
+        # LF reads as modified to git status with an empty diff (#402).
+        current = (written.read_text(encoding="utf-8")
+                   if written.exists() else None)
+        if current == text:
+            print(f"{PAGE.as_posix()} is current")
+            return 0
+        # LF, as bytes, since write_text takes no newline before Python 3.10.
+        written.write_bytes(text.encode("utf-8"))
         print(f"wrote {PAGE.as_posix()}")
         return 0
     if args == ["--write"]:

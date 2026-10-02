@@ -19,6 +19,9 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -250,6 +253,8 @@ def run_adopt(store_home, root, *extra):
         [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root),
          *extra],
         capture_output=True, encoding="utf-8",
+        # Bounded: a pipe adopt opened would fail a test, not hang it.
+        timeout=120,
         env=isolated_env(Path(store_home).parent / "home",
                          LOXODONTA_HOME=str(store_home),
                          PYTHONIOENCODING="utf-8"))
@@ -357,6 +362,105 @@ class AdoptTest(unittest.TestCase):
         self.assertIn("sidecar", result.stdout.lower())
         self.assertEqual(squatter.read_text(encoding="utf-8"), "{}\n",
                          "the store copy is untouched")
+
+    def test_a_folder_where_a_legacy_chain_belongs_is_refused_and_left(self):
+        # No chain to move (#374): named, and left as it lies.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        folder = self.root / "alpha" / "receipts" / "receipts-sess-bbbb.jsonl"
+        folder.mkdir()
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
+                      "it is a folder, not a file", result.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertTrue(folder.is_dir(), "the folder stays put")
+        (name,) = self.drawers()
+        self.assertEqual(
+            sorted(p.name for p in (self.home / "receipts" / name).iterdir()),
+            ["project.json", "receipts-sess-aaaa.jsonl"])
+
+    def test_only_a_folder_at_a_chain_name_is_refused_and_no_drawer_made(self):
+        folder = self.root / "alpha" / "receipts" / "receipts-sess-bbbb.jsonl"
+        folder.mkdir(parents=True)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
+                      "it is a folder, not a file", result.stdout)
+        self.assertIn("not adopted; left as it lies", result.stdout)
+        self.assertNotIn("chain(s) adopted", result.stdout)
+        self.assertEqual(self.drawers(), [])
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a file this user may not read")
+    def test_a_chain_it_may_not_read_is_refused_and_left(self):
+        # A chain the supervisor cannot read is no use in the store.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        os.chmod(log, 0)
+        self.addCleanup(os.chmod, log, 0o644)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-aaaa.jsonl: ",
+                      result.stdout)
+        self.assertIn("not adopted; left as it lies", result.stdout)
+        self.assertTrue(log.exists(), "the refused chain stays put")
+        self.assertEqual(self.drawers(), [])
+
+    def test_a_link_to_nowhere_at_the_chain_name_refuses_the_move(self):
+        # A link whose target is missing stands at the name: across two
+        # filesystems the move would copy the chain through it (#422).
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        first = run_adopt(self.home, self.root)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (name,) = self.drawers()
+        legacy = make_chain(self.root / "alpha" / "receipts", "sess-bbbb")
+        before = legacy.read_bytes()
+        elsewhere = Path(self._tmp.name).resolve() / "elsewhere.jsonl"
+        planted = self.home / "receipts" / name / legacy.name
+        try:
+            os.symlink(str(elsewhere), str(planted))
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks cannot be created here")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"refused alpha/receipts/{legacy.name}: "
+                      f"{name}/{legacy.name} already exists in the store",
+                      result.stdout)
+        self.assertEqual(legacy.read_bytes(), before,
+                         "the refused chain stays put")
+        self.assertTrue(os.path.islink(planted))
+        self.assertFalse(os.path.lexists(elsewhere),
+                         "nothing is written through the link")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
+    def test_a_pipe_at_a_chain_or_a_sidecar_name_is_named_and_left(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        sidecar = log.with_name(log.name + ".anchors.jsonl")
+        os.mkfifo(sidecar)
+        chain = log.with_name("receipts-sess-bbbb.jsonl")
+        os.mkfifo(chain)
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused alpha/receipts/receipts-sess-bbbb.jsonl: "
+                      "it is not a regular file", result.stdout)
+        self.assertIn("left sidecar alpha/receipts/receipts-sess-aaaa.jsonl"
+                      ".anchors.jsonl: it is not a regular file",
+                      result.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertTrue(os.path.lexists(sidecar) and os.path.lexists(chain))
+        (name,) = self.drawers()
+        self.assertEqual(
+            sorted(p.name for p in (self.home / "receipts" / name).iterdir()),
+            ["project.json", "receipts-sess-aaaa.jsonl"])
 
     def test_adopt_twice_is_a_quiet_no_op(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
@@ -884,6 +988,25 @@ class BaselineTest(unittest.TestCase):
         self.assertEqual(changes, {"sess-aaaa": "regressed",
                                    "sess-bbbb": "vanished"})
 
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not look into")
+    def test_a_chain_in_a_folder_closed_to_the_scan_reads_as_vanished(self):
+        # One chmod is in the writer's reach: it costs that chain an
+        # event, never the whole scan its report.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        run_scan(self.root, env=self.env)
+        closed = self.root / "alpha" / "receipts"
+        os.chmod(closed, 0)
+        self.addCleanup(os.chmod, closed, 0o755)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        changes = {e["session"]: e["change"] for e in self.events(result)}
+        self.assertEqual(changes, {"sess-aaaa": "vanished"})
+
     def test_alarm_language_investigates_and_never_claims_a_verdict(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root, env=self.env)
@@ -899,7 +1022,7 @@ class BaselineTest(unittest.TestCase):
         self.assertNotIn("head record", baseline_words,
                          "the baseline is never called a head record")
 
-    def test_the_baseline_updates_each_tick_so_one_change_shouts_once(self):
+    def test_a_change_shouts_on_every_tick_until_it_clears(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root, env=self.env)
         lines = log.read_text(encoding="utf-8").splitlines()
@@ -907,14 +1030,16 @@ class BaselineTest(unittest.TestCase):
                        encoding="utf-8")
         caught = run_scan(self.root, env=self.env)
 
-        settled = run_scan(self.root, env=self.env)
+        standing = run_scan(self.root, env=self.env)
 
         self.assertEqual(caught.returncode, 5)
-        self.assertEqual(settled.returncode, 0,
-                         settled.stdout + settled.stderr)
-        self.assertEqual(self.events(settled), [],
-                         "remembered anew after diffing — the alarm "
-                         "belongs to the tick that caught it")
+        self.assertEqual(standing.returncode, 5,
+                         standing.stdout + standing.stderr)
+        self.assertEqual([e["change"] for e in self.events(standing)],
+                         ["regressed"],
+                         "the baseline keeps what it remembered: the "
+                         "alarm stands until the chain holds that head "
+                         "again or it is acknowledged (ADR-0039)")
 
     def remembered(self, relpath):
         chains = json.loads(self.baseline.read_text(encoding="utf-8"))
@@ -996,14 +1121,29 @@ class BaselineTest(unittest.TestCase):
 
         result = run_scan(self.root, env=self.env)
 
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         report = json.loads(result.stdout)
         self.assertIn("could not be read",
                       report["baseline"].get("note", ""))
         self.assertEqual(report["baseline"]["events"], [])
         after = run_scan(self.root, env=self.env)
-        self.assertNotIn("note", json.loads(after.stdout)["baseline"],
-                         "remembering resumes from the fresh look")
+        self.assertEqual(after.returncode, 5, after.stdout + after.stderr)
+        self.assertIn("could not be read",
+                      json.loads(after.stdout)["baseline"].get("note", ""),
+                      "the scan starts no memory of its own: the note "
+                      "stands until `acknowledge --baseline` (ADR-0039)")
+
+
+def read_line_within(stream, bound=60):
+    """One line from a child's pipe, read on a thread joined to a bound:
+    a child that never says it is the empty string, a failure the test
+    names, where a plain readline would hang the suite (#410)."""
+    said = []
+    reader = threading.Thread(target=lambda: said.append(stream.readline()),
+                              daemon=True)
+    reader.start()
+    reader.join(bound)
+    return said[0] if said else ""
 
 
 def hold(test, path):
@@ -1431,12 +1571,20 @@ class DaybookTest(unittest.TestCase):
              "--actor", "claude-code", "--action", "step 0"],
             capture_output=True, check=True)
         tripped = run_scan(self.root, env=self.env)
+        # The alarm stands until the operator accepts the new head
+        # (ADR-0039); after that, the wire is quiet again.
+        subprocess.run(
+            [sys.executable, str(SUPERVISOR), "acknowledge",
+             "alpha/receipts/receipts-sess-aaaa.jsonl", chain_head(log),
+             "--root", str(self.root)],
+            capture_output=True, encoding="utf-8", timeout=120, check=True,
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
         settled = run_scan(self.root, env=self.env)
 
         self.assertEqual(tripped.returncode, 5, tripped.stdout)
         self.assertEqual(settled.returncode, 0,
-                         "the wire is quiet again on the next look")
+                         "the wire is quiet again once acknowledged")
         self.assertEqual(self.rows(settled)[-1]["worst"], 5,
                          "the day still remembers what fired in it")
         self.assertEqual(self.rows(settled)[-1]["events"], 1)
@@ -2819,6 +2967,27 @@ class BeforeMemoryTest(unittest.TestCase):
                          "no siren for history the supervisor never saw")
         self.assertEqual(self.watch(result)["before_memory"]["count"], 1)
 
+    def test_a_session_is_dated_from_its_first_call_even_a_failed_one(self):
+        # The first witnessed call decides (ADR-0029 ruling 2), whatever
+        # it owes: a call that failed before the memory began is still
+        # when the session started working.
+        self.scan()
+        store = Path(self.env["LOXODONTA_HOME"])
+        store.mkdir(parents=True)
+        (store / "coverage.json").write_text(json.dumps({
+            "purpose": "test fixture",
+            "epochs": [{"since": ago(500), "matchers": ["*"],
+                        "harness": "claude-code"}]}), encoding="utf-8")
+        write_transcript(self.witness, self.root / "alpha", "sess-straddle",
+                         event_times=[ago(400), ago(300)],
+                         error_times=[ago(600)],
+                         failure="refused before it ran")
+
+        watch = self.watch(self.scan())
+
+        self.assertEqual(watch["sessions"], [])
+        self.assertEqual(watch["before_memory"]["count"], 1)
+
     def test_the_rows_are_there_for_anyone_who_asks(self):
         self.scan()
         write_transcript(self.witness, self.root / "alpha", "sess-old",
@@ -3534,7 +3703,7 @@ class DrillTest(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(SUPERVISOR), "drill", "--root",
              str(self.root), "--log", str(log), "--json"],
-            capture_output=True, encoding="utf-8",
+            capture_output=True, encoding="utf-8", timeout=300,
             env={**self.env, "PYTHONIOENCODING": "utf-8"})
 
     def test_the_four_way_battery_fires_every_expected_alarm(self):
@@ -3599,6 +3768,45 @@ class DrillTest(unittest.TestCase):
         result = self.drill(elsewhere / "receipts-nope.jsonl")
 
         self.assertEqual(result.returncode, 1)
+
+    def test_a_chain_holding_a_byte_that_is_not_utf8_is_refused_by_name(self):
+        # #407: the copies must be the chain byte for byte, and a line
+        # that is not UTF-8 cannot be copied as text, so the drill
+        # refuses the chain as an unreadable log (66, ADR-0037), never
+        # a traceback.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        log.write_bytes(log.read_bytes().replace(b'"step 1"',
+                                                 b'"step \xff1"'))
+        asked = "alpha/receipts/receipts-sess-aaaa.jsonl"
+
+        result = self.drill(asked)
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertIn(f"error: {asked} cannot be read as a receipt log: "
+                      "entry 2 is not valid UTF-8", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse((self.root / ".supervisor-drill").exists(),
+                         "a refused drill writes nothing")
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a file this user may not read")
+    def test_a_chain_it_may_not_read_is_refused_by_name(self):
+        # The other unreadable log (#407): same words, same exit.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        os.chmod(log, 0)
+        self.addCleanup(os.chmod, log, 0o644)
+        asked = "alpha/receipts/receipts-sess-aaaa.jsonl"
+
+        result = self.drill(asked)
+
+        self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+        self.assertIn(f"error: {asked} cannot be read as a receipt log: ",
+                      result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse((self.root / ".supervisor-drill").exists(),
+                         "a refused drill writes nothing")
 
     def drill_from(self, cwd, root, log):
         """`drill` started in `cwd` with `--root` and `--log` spelled as
@@ -4171,3 +4379,298 @@ class UsageExitTest(unittest.TestCase):
         self.assertIn("anchor-every", result.stderr)
         self.assertIn("not a cadence", result.stderr)
         self.assertEqual(result.stdout, "")
+
+
+# Straight to 127.0.0.1, never through a proxy someone's shell configured.
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+@unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                 "needs a folder this user may not look into")
+class ClosedFolderTest(unittest.TestCase):
+    """A folder closed to the reader (#421). One chmod on a drawer, on
+    the store's receipts folder, on the harness's folder, on the
+    recorder's or on a project's parent is in the writer's reach, and
+    before Python 3.14 pathlib's exists(), is_file(), is_dir() and
+    is_symlink() raise there. Each command asks through os.path, and
+    answers as it does for a folder it cannot read: a refusal by name or
+    an event, never a traceback."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.store = self.root / "store"
+        self.home = self.root / "home"
+        self.witness = self.home / ".claude" / "projects"
+        self.witness.mkdir(parents=True)
+        self.legacy = self.root / "legacy"
+        self.project = self.legacy / "alpha"
+        log = self.project / "receipts" / "receipts-sess-aaaa.jsonl"
+        log.parent.mkdir(parents=True)
+        self.recorder("init", "--log", str(log))
+        for step in ("step 0", "step 1"):
+            self.recorder("log", "--log", str(log), "--actor",
+                          "claude-code", "--action", step)
+        self.address = self.recorder(
+            "head", "--log", str(log)).stdout.strip()[:8]
+        moved = self.supervisor("adopt", "--root", str(self.legacy))
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        (self.drawer,) = (self.store / "receipts").iterdir()
+        first = self.scan()  # the baseline remembers the chain
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+    def recorder(self, *args):
+        return subprocess.run(
+            [sys.executable, str(LOXODONTA), *args], capture_output=True,
+            encoding="utf-8", check=True, timeout=60,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+    def env(self):
+        return isolated_env(self.home, LOXODONTA_HOME=str(self.store),
+                            PYTHONIOENCODING="utf-8")
+
+    def supervisor(self, *args):
+        """One supervisor command, bounded, so a regression that waits
+        fails the test and never hangs the suite."""
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR), *args], cwd=str(self.root),
+            capture_output=True, encoding="utf-8", timeout=120,
+            env=self.env())
+
+    def scan(self):
+        return self.supervisor("scan", "--json", "--witness",
+                               str(self.witness))
+
+    def close(self, folder):
+        os.chmod(folder, 0)
+        self.addCleanup(os.chmod, folder, 0o755)
+
+    def answered(self, result, code):
+        """`result` exited `code` with no traceback."""
+        self.assertNotIn("Traceback", result.stderr, result.stderr)
+        self.assertEqual(result.returncode, code,
+                         result.stdout + result.stderr)
+
+    def recall(self, *args):
+        """A recall command on the project, the store's receipts folder
+        closed: it reads as a drawer that holds nothing it can read."""
+        self.close(self.store / "receipts")
+        return self.supervisor(*args, "--repo", str(self.project))
+
+    def wire_recorder(self):
+        """A stand-in recorder wired in the harness settings, in a folder
+        of its own; returns the folder."""
+        folder = self.root / "recorder"
+        folder.mkdir()
+        script = folder / "loxodonta.py"
+        script.write_text("# stand-in recorder\n", encoding="utf-8")
+        install_witness_hook(self.witness, matcher="*",
+                             command=f'python "{script.as_posix()}" hook')
+        return folder
+
+    def serve(self):
+        """`serve` over the store on an ephemeral port; its address."""
+        server = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
+             "--witness", str(self.witness)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", env=self.env())
+        # Bounded: a server that never announces fails, never hangs.
+        timer = threading.Timer(120, server.kill)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        self.addCleanup(server.communicate)
+        self.addCleanup(server.kill)
+        line = server.stdout.readline()
+        found = re.search(r"http://127\.0\.0\.1:\d+", line)
+        self.assertIsNotNone(found, line)
+        return found.group()
+
+    def test_a_store_scan_reads_a_closed_drawer_as_its_chain_vanished(self):
+        self.close(self.drawer)
+
+        result = self.scan()
+
+        self.answered(result, 5)
+        events = json.loads(result.stdout)["baseline"]["events"]
+        self.assertEqual({e["session"]: e["change"] for e in events},
+                         {"sess-aaaa": "vanished"})
+
+    def test_digest_reads_a_closed_receipts_folder_as_no_memory(self):
+        result = self.recall("digest")
+
+        self.answered(result, 0)
+        self.assertNotIn(self.address, result.stdout)
+
+    def test_show_refuses_an_address_behind_a_closed_receipts_folder(self):
+        result = self.recall("show", self.address)
+
+        self.answered(result, 1)
+        self.assertIn(f"matches {self.address}", result.stderr)
+
+    def test_search_finds_nothing_behind_a_closed_receipts_folder(self):
+        result = self.recall("search", "step")
+
+        self.answered(result, 0)
+        self.assertIn("matched 0", result.stdout)
+
+    def test_timeline_refuses_an_address_behind_a_closed_receipts_folder(self):
+        result = self.recall("timeline", self.address)
+
+        self.answered(result, 1)
+        self.assertIn(f"matches {self.address}", result.stderr)
+
+    def test_verify_refuses_an_address_behind_a_closed_receipts_folder(self):
+        result = self.recall("verify", self.address)
+
+        self.answered(result, 66)
+        self.assertIn(f"matches {self.address}", result.stderr)
+
+    def test_package_of_the_repo_refuses_with_its_receipts_folder_closed(self):
+        out = self.root / "package.zip"
+
+        result = self.recall("package", "--witness", str(self.witness),
+                             "--out", str(out))
+
+        self.answered(result, 1)
+        self.assertIn("nothing to package", result.stderr)
+        self.assertFalse(os.path.lexists(out))
+
+    def test_package_of_a_repo_whose_own_drawer_is_closed_refuses(self):
+        # Its worktree's drawer still holds a session (ADR-0023), so the
+        # package reaches the repo's project record, which a closed
+        # drawer will not say is there or not: refused by name, never
+        # shipped without it.
+        worktree = self.store / "receipts" / "wt-00000000"
+        worktree.mkdir()
+        (worktree / "project.json").write_text(json.dumps(
+            {"path": str(self.project / ".claude" / "worktrees" / "wt")}),
+            encoding="utf-8")
+        self.recorder("init", "--log",
+                      str(worktree / "receipts-sess-cccc.jsonl"))
+        self.close(self.drawer)
+        out = self.root / "package.zip"
+
+        result = self.supervisor("package", "--repo", str(self.project),
+                                 "--witness", str(self.witness),
+                                 "--out", str(out))
+
+        self.answered(result, 1)
+        self.assertIn("error: project.json cannot be packed: ",
+                      result.stderr)
+        self.assertFalse(os.path.lexists(out))
+
+    def test_recall_reads_the_store_for_a_repo_in_a_closed_folder(self):
+        # The drawer is named by the repo's path, so a closed parent
+        # costs recall nothing: only whether the repo is a worktree is
+        # asked there.
+        self.close(self.legacy)
+
+        result = self.supervisor("digest", "--repo", str(self.project))
+
+        self.answered(result, 0)
+        self.assertIn(self.address, result.stdout)
+
+    def test_adopt_into_a_closed_drawer_or_store_refuses_by_name(self):
+        later = self.project / "receipts" / "receipts-sess-bbbb.jsonl"
+        self.recorder("init", "--log", str(later))
+        before = later.read_bytes()
+        refusal = (f"refused alpha/receipts/{later.name}: "
+                   f"{self.drawer.name}/ cannot be written: ")
+        for closed in (self.drawer, self.store / "receipts"):
+            with self.subTest(closed=closed.name):
+                os.chmod(closed, 0)
+                try:
+                    planned = self.supervisor("adopt", "--root",
+                                              str(self.legacy), "--dry-run")
+                    result = self.supervisor("adopt", "--root",
+                                             str(self.legacy))
+                finally:
+                    os.chmod(closed, 0o755)
+                self.answered(planned, 0)
+                self.assertIn("would adopt", planned.stdout)
+                self.answered(result, 0)
+                self.assertIn(refusal, result.stdout)
+                self.assertIn("not adopted; left as it lies", result.stdout)
+                self.assertNotIn("chain(s) adopted", result.stdout)
+                self.assertEqual(later.read_bytes(), before)
+
+        # Open again, the same command moves it.
+        result = self.supervisor("adopt", "--root", str(self.legacy))
+        self.answered(result, 0)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertFalse(os.path.lexists(later))
+
+    def test_drill_refuses_a_chain_in_a_closed_drawer_by_name(self):
+        self.close(self.drawer)
+        asked = f"{self.drawer.name}/receipts-sess-aaaa.jsonl"
+
+        result = self.supervisor("drill", "--root",
+                                 str(self.store / "receipts"),
+                                 "--log", asked, "--json")
+
+        self.answered(result, 1)
+        self.assertIn(f"{asked} is not a chain under", result.stderr)
+
+    def test_serve_answers_a_chain_in_a_closed_drawer_with_404(self):
+        self.close(self.drawer)
+        url = self.serve()
+        asked = urllib.parse.quote(
+            f"{self.drawer.name}/receipts-sess-aaaa.jsonl")
+
+        with self.assertRaises(urllib.error.HTTPError) as refused:
+            OPENER.open(f"{url}/api/chain?log={asked}", timeout=30)
+        refused.exception.close()
+
+        self.assertEqual(refused.exception.code, 404)
+        with OPENER.open(f"{url}/api/status", timeout=30) as status:
+            self.assertEqual(status.status, 200)
+
+    def test_scan_with_the_harness_folder_closed_says_so_and_runs(self):
+        self.close(self.home / ".claude")
+
+        result = self.scan()
+
+        self.answered(result, 0)
+        self.assertIn("witness absent",
+                      json.loads(result.stdout)["completeness"]["note"])
+
+    def test_scan_with_the_recorder_folder_closed_says_so_and_runs(self):
+        self.close(self.wire_recorder())
+
+        result = self.scan()
+
+        self.answered(result, 0)
+        self.assertIn("not on disk",
+                      json.loads(result.stdout)["recorder"]["note"])
+
+    def test_export_runs_with_the_harness_folder_closed(self):
+        self.close(self.home / ".claude")
+        out = self.root / "export.json"
+
+        result = self.supervisor("export", "--witness", str(self.witness),
+                                 "--out", str(out))
+
+        self.answered(result, 0)
+        self.assertTrue(os.path.isfile(out))
+
+    def test_package_runs_with_the_recorder_folder_closed(self):
+        self.close(self.wire_recorder())
+        out = self.root / "package.zip"
+
+        result = self.supervisor("package", "sess-aaaa", "--witness",
+                                 str(self.witness), "--out", str(out))
+
+        self.answered(result, 0)
+        self.assertTrue(os.path.isfile(out))
+
+    def test_serve_status_answers_with_the_harness_folder_closed(self):
+        self.close(self.home / ".claude")
+        url = self.serve()
+
+        with OPENER.open(f"{url}/api/status", timeout=30) as status:
+            report = json.loads(status.read().decode("utf-8"))
+
+        self.assertEqual(report["exit"], 0)
+        self.assertIn("witness absent", report["completeness"]["note"])

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.10.3"
+TOOL_VERSION = "0.11.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -294,7 +294,8 @@ def shape_problem(entry):
     if not isinstance(files, list):
         return "files is not an array"
     for ref in files:
-        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}                 or not all(isinstance(value, str) for value in ref.values()):
+        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"} \
+                or not all(isinstance(value, str) for value in ref.values()):
             return "files holds something that is not a reference"
     for ref in files:
         how = path_leaving_base(ref["path"])
@@ -814,7 +815,7 @@ def anchors_path(log):
     return sidecar_path(log, ".anchors.jsonl")
 
 
-NOT_A_FOLDER = "it is a folder, not a file"
+IS_A_FOLDER = "it is a folder, not a file"
 NOT_REGULAR = "it is not a regular file"
 
 
@@ -834,12 +835,12 @@ def open_regular(path):
         # Windows refuses to open a folder at all, as a denied
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path) from None
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
-            raise OSError(errno.EISDIR, NOT_A_FOLDER, path)
+            raise OSError(errno.EISDIR, IS_A_FOLDER, path)
         if not stat.S_ISREG(mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
         return os.fdopen(fd, "rb")
@@ -3046,6 +3047,7 @@ def run_main(main):
 # The imports only the writers use. They sit below the verifier so that
 # the copy a recipient runs imports nothing that opens a socket or starts
 # a thread (ADR-0035).
+import http.client
 import shlex
 import signal
 import socket
@@ -3062,8 +3064,9 @@ import urllib.request
 EX_DATAERR = 65      # the hook's stdin, or a settings file, is not what it must be
 EX_UNAVAILABLE = 69  # a calendar, a publish URL, an authority, or the
                      # narrating command did not do what was asked
-EX_CANTCREAT = 73    # a file this verb must create cannot be: a log that
-                     # already exists, a lock file, a granted token
+EX_CANTCREAT = 73    # a file this verb must write cannot be: a log that
+                     # already exists, a lock file, a granted token, a
+                     # line the chain or a sidecar would not take
 EX_TEMPFAIL = 75     # another writer holds the lock; try again
 
 
@@ -3154,7 +3157,7 @@ def lock_timeout():
 
 class ChainLock:
     """Exclusive lock over one log's read-tail-then-append: `O_EXCL` on a
-    sidecar file, since `fcntl` and `msvcrt` would fork this file in two
+    lock file beside it, since `fcntl` and `msvcrt` would fork this file in two
     (ADR-0004; the one Windows difference is in `__enter__`). The writer
     can reach the lock, so it prevents accidents, not adversaries
     (ADR-0002).
@@ -3168,10 +3171,7 @@ class ChainLock:
         deadline = time.monotonic() + lock_timeout()
         while True:
             try:
-                self.fd = os.open(self.path,
-                                  os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(self.fd, f"{os.getpid()} {now_ts()}\n".encode("utf-8"))
-                return self
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
                 self.break_if_stale()
             except PermissionError:
@@ -3182,6 +3182,21 @@ class ChainLock:
                 # (see locked_out) rather than guessed at now.
                 if os.name != "nt":
                     raise
+            else:
+                try:
+                    os.write(fd, f"{os.getpid()} {now_ts()}\n".encode("utf-8"))
+                except BaseException:
+                    # A lock this writer made and will never release
+                    # would hold every writer off until the stale break
+                    # (#398): a full disk refuses the line.
+                    os.close(fd)
+                    try:
+                        os.unlink(self.path)
+                    except OSError:
+                        pass
+                    raise
+                self.fd = fd
+                return self
             if time.monotonic() >= deadline:
                 raise LockTimeout(self.path)
             time.sleep(0.02)
@@ -3340,11 +3355,24 @@ def append_entry(log, actor, action, file_paths):
     # From here the tail is read, extended, and written as one unit. A
     # racing writer that slips between the read and the write tears the
     # line or forks the chain at the same `n` (ADR-0004).
+    # Taken by hand, not by `with`, so the catch covers the lock alone: an
+    # OSError later is append_locked's to name, or a closed reader's 141.
+    lock = ChainLock(log)
     try:
-        with ChainLock(log):
-            return append_locked(log, actor, action, files)
+        lock.__enter__()
     except LockTimeout:
         return locked_out(log)
+    except FileNotFoundError:
+        # No folder, so no log either: `run` and a present folder say so.
+        return missing_log(log)
+    except OSError as e:
+        # On POSIX a folder that refuses the lock file is a denied
+        # permission, not a wait, and the hook answers it so (#398).
+        return unwritable_log(log, e)
+    try:
+        return append_locked(log, actor, action, files)
+    finally:
+        lock.__exit__(None, None, None)
 
 
 def referenced_paths(lines):
@@ -3595,7 +3623,7 @@ def append_sidecar_record(path, record):
 
 
 def unwritable_why(path, error):
-    """Why an append to the sidecar at `path` failed, in words: what
+    """Why a write to the chain or a sidecar at `path` failed, in words: what
     `file_problem` says of the path, a folder in its place say, which
     Windows reports as a denied permission (#364); else the system's
     reason."""
@@ -3623,7 +3651,11 @@ def calendar_request(url, data=None, timeout=15):
     scheme but http or https raises ValueError, before anything is
     asked: an upgrade takes the address from a sidecar row, in the
     writer's reach, and urllib would read a `file:` one as a path on
-    this machine, a pipe there included (#414)."""
+    this machine, a pipe there included (#414). An address http will
+    not send, a space in it say, is a ValueError too, and a reply that
+    is not HTTP an OSError: urllib hands both on as http.client's own
+    errors, which are neither, so one bad row or one bad calendar
+    would end the run for every calendar after it."""
     if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
         raise ValueError("not an http or https URL")
     request = urllib.request.Request(
@@ -3631,8 +3663,14 @@ def calendar_request(url, data=None, timeout=15):
         headers={"Accept": "application/vnd.opentimestamps.v1",
                  "User-Agent": "loxodonta"},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read(MAX_PROOF_BYTES)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read(MAX_PROOF_BYTES)
+    except http.client.InvalidURL:
+        raise ValueError("not a URL http can send") from None
+    except http.client.HTTPException as error:
+        raise OSError("the reply was not HTTP "
+                      f"({type(error).__name__})") from None
 
 
 # --- Writing attempt records (#240) -------------------------------------------
@@ -4805,7 +4843,8 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
             proof_bytes = calendar_request(url + "/digest", data=digest)
             judge_proof(head, proof_bytes)  # refuse to store what can't replay
         except (OSError, ProofError, ValueError) as e:
-            print(f"warning: calendar {url}: {e}", file=sys.stderr)
+            # What a calendar refused with is its own text (#349).
+            print(f"warning: calendar {url}: {visible(e)}", file=sys.stderr)
             continue
         try:
             append_anchor_record(target, head, n, url, proof_bytes)
@@ -5118,7 +5157,7 @@ def commit_transcript_due(log, transcript_path):
     try:
         last = tail_entry(read_log(log))
     except OSError:
-        # Gone, or a folder or a pipe in its place (#374).
+        # Gone, or a folder or a pipe in its place (#386).
         return
     if last is None or last["n"] == 0 or last["n"] % COMMITMENT_CADENCE:
         return
@@ -5181,7 +5220,7 @@ def main_repo_root(project):
             common = os.path.normpath(os.path.join(gitdir, common))
             root = os.path.dirname(common)  # <main>/.git -> <main>
         except OSError as error:
-            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+            if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
                 return project  # a folder or a pipe there: unexpected
             # A worktree the harness already deregistered (ADR-0023): the
             # gitdir is gone, but the .git file still spells it as
@@ -5280,7 +5319,7 @@ def chain_is_damaged(log):
     except FileNotFoundError:
         return False
     except OSError as error:
-        if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+        if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
             return True
         # A socket fails the open itself, and a loop of links cannot be
         # followed, so `open_regular` never got to ask: the name is
@@ -6122,7 +6161,7 @@ def record_coverage(harness, matchers, profile, remote=None,
             with open_regular(marker) as f:
                 data = json.loads(f.read().decode("utf-8"))
         except OSError as error:
-            if error.strerror in (NOT_A_FOLDER, NOT_REGULAR):
+            if error.strerror in (IS_A_FOLDER, NOT_REGULAR):
                 return False, ("cannot be read as a coverage marker: "
                                f"{error.strerror}")
             data = {}
@@ -6145,7 +6184,7 @@ def record_coverage(harness, matchers, profile, remote=None,
             write_line_to_disk(marker, "w", body + "\n")
         except OSError:
             why = file_problem(marker)
-            if why not in (NOT_A_FOLDER, NOT_REGULAR):
+            if why not in (IS_A_FOLDER, NOT_REGULAR):
                 raise
             return False, f"could not be written: {why}"
         return True, None

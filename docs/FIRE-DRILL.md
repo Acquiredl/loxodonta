@@ -50,8 +50,10 @@ Once per drill session, walk through:
    superseded torn tail sits quiet while fresh damage shouts.
 4. **The tripwire** (optional, uses a scratch root): regenerate a scratch
    chain between two `scan` ticks and watch the baseline raise its
-   change event (scan exit 5). The drill's own sandbox is deliberately
-   invisible to the census, so this rehearsal needs a scratch root.
+   change event (scan exit 5), which stands on every tick until
+   `supervisor acknowledge` accepts it. The drill's own sandbox is
+   deliberately invisible to the census, so this rehearsal needs a
+   scratch root.
 
 When an item fails, that is the drill doing its job: investigate before
 relying on the alarm it rehearses.

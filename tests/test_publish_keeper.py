@@ -12,6 +12,7 @@ ever, and never internals.
 
 import base64
 import json
+import os
 import re
 import subprocess
 import sys
@@ -34,7 +35,8 @@ from test_stamp import GRANTED, NO_GRANTED_REPLY, reply, start_authority
 from test_supervisor import (BASELINE_NAME, ago, chain_head,
                              chains_by_session, home_outside,
                              install_witness_hook, isolated_env, keeper_env,
-                             make_chain, run_scan, write_attempt_row,
+                             make_chain, read_line_within, run_scan,
+                             write_attempt_row,
                              write_chain_row, write_completed_anchor,
                              write_pending_anchor)
 
@@ -1026,6 +1028,58 @@ class HeadlessKeeperTest(ReceiverFixture):
         self.assertNotEqual(row["worst"], 0,
                             "the day the tripwire fired paints quiet")
 
+    def test_a_standing_alarm_paints_the_day_once_not_on_every_turn(self):
+        # ADR-0039: an alarm now stands on every look, so a turn nobody
+        # asked for writes the book for the alarm it finds new and not
+        # for one already standing; otherwise every turn would count the
+        # day as watched for as long as the chain stays changed.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-standing")
+        book = self.root / ".supervisor-daybook.json"
+        baseline = self.root / BASELINE_NAME
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # The shorter chain is made beside the census and swapped in
+        # whole, so no turn can catch the name empty and then refilled,
+        # which would be two findings rather than one.
+        shorter = make_chain(self.root / "scratch", "sess-standing",
+                             entries=1)
+
+        self.serve("--publish-every", "1d", "--publish-url",
+                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        self.wait_for(baseline.exists, missing="no turn ever walked the store")
+
+        def swapped():
+            try:
+                os.replace(shorter, log)
+            except OSError:
+                return False  # a turn holds the chain open, on Windows
+            return True
+
+        self.wait_for(swapped, within=30, missing="the chain was not swapped")
+        self.wait_for(book.is_file, missing="the day book stayed unwritten")
+        caught = json.loads(book.read_text(encoding="utf-8"))["days"][today]
+
+        def turned_twice_since():
+            # Every turn rewrites the baseline's stamp; two seconds past
+            # the catching turn is several turns at half a second each.
+            try:
+                memory = json.loads(baseline.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            later = datetime.strptime(memory["scanned"], "%Y-%m-%dT%H:%M:%SZ")
+            first = datetime.strptime(caught["last"], "%Y-%m-%dT%H:%M:%SZ")
+            return (later - first).total_seconds() >= 2
+
+        self.wait_for(turned_twice_since, within=60,
+                      missing="the clock stopped turning")
+        self._stop()
+
+        row = json.loads(book.read_text(encoding="utf-8"))["days"][today]
+        self.assertEqual(row["worst"], 5)
+        self.assertEqual(row["scans"], 1,
+                         "a turn wrote the day book for an alarm already "
+                         "standing")
+
     def test_a_scan_that_cannot_finish_is_said_once_and_the_clock_runs_on(self):
         # A keeper step that fails leaves an attempt row beside the
         # chain and a note in the next scan's report. A scan that cannot
@@ -1046,7 +1100,7 @@ class HeadlessKeeperTest(ReceiverFixture):
                    self.receiver.url, store=True, LOXODONTA_HOME=str(home),
                    SUPERVISOR_KEEPER_TICK_SECONDS="0.1",
                    SUPERVISOR_SCAN_TTL_SECONDS="0")
-        said = self.proc.stderr.readline()
+        said = read_line_within(self.proc.stderr)
         time.sleep(2)  # many more turns, each failing the same way
         alive = self.proc.poll() is None
         self.proc.kill()
@@ -1059,8 +1113,8 @@ class HeadlessKeeperTest(ReceiverFixture):
             said, r"^error: the keeper's scan did not finish: \w*Error")
         self.assertNotIn("Traceback", said)
         # The kind and the reason, never the exception whole: a failure
-        # carrying a command line would carry the remote's URL with it.
-        self.assertNotIn(BASELINE_NAME, said)
+        # carrying a command line would carry the remote's URL with it,
+        # and one carrying a path would carry the store's.
         self.assertNotIn(str(self.root), said)
         self.assertTrue(alive, "the failure took the server down")
         self.assertEqual(rest, "", "the same failure said on every tick")
