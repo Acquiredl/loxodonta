@@ -262,9 +262,9 @@ class StandingAlarmTest(LegacyRoot):
 class UncountedKeyTest(LegacyRoot):
     """A remembered name where something stands that the census does not
     count (#432 item 1): a planted sidecar-named key, or one naming a
-    file that is no chain, or a chain renamed, as a change of case does
-    on a disk that ignores case. Its memory is kept as it was, and the
-    report names it, with no event."""
+    file that is no chain. Its memory is kept as it was, and the report
+    names it, with no event. A chain renamed by a change of case is no
+    such row: it is the chain remembered (CaseTest)."""
 
     def test_a_remembered_name_the_census_does_not_count_is_named(self):
         self.look(0)
@@ -292,31 +292,6 @@ class UncountedKeyTest(LegacyRoot):
             self.assertEqual(kept["chains"][key], {"n": n, "head": head},
                              "its memory is kept as it was")
 
-    def test_a_chain_put_back_under_its_name_in_capitals_is_named(self):
-        # The second review's repro of #432: on a disk that ignores case
-        # the old name still answers, and the census counts the new one
-        # under a key of its own (or, on macOS, not at all). Whether this
-        # should alarm is the author's to rule; the exit is not held here.
-        self.look(0)
-        n, head = self.head()
-        lines = self.log.read_bytes().splitlines(keepends=True)
-        self.log.unlink()
-        renamed = self.log.with_name(self.log.name.upper())
-        renamed.write_bytes(b"".join(lines[:3]))
-        if not os.path.exists(self.log):
-            self.skipTest("this disk tells names apart by case")
-
-        for _ in range(2):
-            result = self.supervisor("scan", "--root", str(self.root),
-                                     "--json")
-            report = json.loads(result.stdout)
-            named = {row["log"]: row
-                     for row in report["baseline"].get("uncounted", [])}
-            self.assertIn(LOG, named, result.stdout)
-            self.assertEqual(named[LOG]["remembered"],
-                             {"n": n, "head": head})
-            self.assertIn("a change of case is enough", named[LOG]["words"])
-
     def test_a_look_with_no_such_name_names_nothing(self):
         self.assertNotIn("uncounted", self.look(0)["baseline"])
 
@@ -338,6 +313,106 @@ class UncountedKeyTest(LegacyRoot):
         self.assertNotIn("uncounted", report["baseline"])
         self.assertEqual((self.remembered()["n"], self.remembered()["head"]),
                          (n, head), "its memory is kept as it was")
+
+
+def ignores_case(folder):
+    """Whether the disk under `folder` ignores case, asked of the disk:
+    a name written in small letters, looked up in capitals."""
+    probe = Path(tempfile.mkdtemp(prefix="case-", dir=folder))
+    try:
+        (probe / "probe").write_bytes(b"")
+        return os.path.exists(probe / "PROBE")
+    finally:
+        os.remove(probe / "probe")
+        probe.rmdir()
+
+
+class CaseTest(LegacyRoot):
+    """A change of case in a chain's name (#445). On a disk that ignores
+    case, a chain renamed that way is the chain the baseline remembers,
+    compared with what it remembers. On a disk that tells case apart,
+    two names that differ only by case are two chains. A name in
+    capitals counts as a chain on every platform."""
+
+    def renamed(self, keep):
+        """The chain deleted and its first `keep` lines written under its
+        name in capitals, the writer's move in #445; skipped on a disk
+        that tells case apart, where that is another chain."""
+        if not ignores_case(self.root):
+            self.skipTest("this disk tells names apart by case")
+        lines = self.log.read_bytes().splitlines(keepends=True)
+        self.log.unlink()
+        upper = self.log.with_name(self.log.name.upper())
+        upper.write_bytes(b"".join(lines[:keep]))
+        return upper
+
+    def counted(self, report):
+        return sorted(Path(chain["log"]).relative_to(self.root).as_posix()
+                      for repo in report["repos"]
+                      for session in repo["sessions"]
+                      for chain in session["chains"])
+
+    def test_a_chain_renamed_by_case_and_cut_short_reads_regressed(self):
+        # The issue's steps, which read exit 0 with no event on every
+        # look before the ruling.
+        self.look(0)
+        n, head = self.head()
+        self.renamed(3)
+
+        for _ in range(2):
+            report = self.look(5)
+            (event,) = report["baseline"]["events"]
+            self.assertEqual((event["log"], event["change"]),
+                             (LOG, "regressed"))
+            self.assertEqual(event["remembered"], {"n": n, "head": head})
+            self.assertEqual(event["found"]["n"], 2)
+            self.assertNotIn("uncounted", report["baseline"])
+        self.assertEqual((self.remembered()["n"], self.remembered()["head"]),
+                         (n, head), "its memory is kept as it was")
+
+        self.acknowledge(LOG, event["found"]["head"])
+        self.assertEqual(self.look(0)["baseline"]["events"], [])
+
+    def test_a_chain_renamed_by_case_is_the_chain_remembered(self):
+        self.look(0)
+        upper = self.renamed(5)
+        self.logged("step 4", log=upper)
+
+        report = self.look(0)
+
+        self.assertNotIn("uncounted", report["baseline"])
+        memory = json.loads(self.baseline.read_text(encoding="utf-8"))
+        self.assertEqual(list(memory["chains"]), [LOG],
+                         "one chain, under the name remembered")
+        self.assertEqual(memory["chains"][LOG]["n"], 5)
+
+    def test_a_chain_named_in_capitals_is_counted(self):
+        capitals = self.log.with_name("RECEIPTS-SESS-BBBB.JSONL")
+        capitals.write_bytes(self.log.read_bytes())
+
+        report = self.look(0)
+
+        self.assertEqual(self.counted(report),
+                         sorted([LOG, capitals.relative_to(self.root)
+                                 .as_posix()]))
+
+    def test_on_a_disk_that_tells_case_apart_two_names_are_two_chains(self):
+        if ignores_case(self.root):
+            self.skipTest("this disk ignores case")
+        self.look(0)
+        lines = self.log.read_bytes().splitlines(keepends=True)
+        upper = self.log.with_name(self.log.name.upper())
+        upper.write_bytes(b"".join(lines[:3]))
+
+        report = self.look(0)
+
+        self.assertEqual(report["baseline"]["events"], [])
+        self.assertEqual(self.counted(report),
+                         sorted([LOG, upper.relative_to(self.root)
+                                 .as_posix()]))
+        memory = json.loads(self.baseline.read_text(encoding="utf-8"))
+        self.assertEqual(memory["chains"][LOG]["n"], 4,
+                         "the chain remembered is not the other one")
 
 
 class StoreFixture(unittest.TestCase):
@@ -928,6 +1003,25 @@ class OtherReadersTest(LegacyRoot):
         self.baseline.unlink()
 
         self.assertIn("missing beside a day book", self.last_scan())
+
+
+class StoreCaseTest(StoreFixture):
+    """CaseTest's first case in the store universe (#445)."""
+
+    def test_a_store_chain_renamed_by_case_and_cut_short_reads_regressed(self):
+        if not ignores_case(self.home):
+            self.skipTest("this disk tells names apart by case")
+        self.look(0)
+        lines = self.log.read_bytes().splitlines(keepends=True)
+        self.log.unlink()
+        self.log.with_name(self.log.name.upper()).write_bytes(
+            b"".join(lines[:3]))
+
+        for _ in range(2):
+            (event,) = self.look(5)["baseline"]["events"]
+            self.assertEqual(
+                (event["log"], event["change"]),
+                (f"alpha-11111111/receipts-{SESSION}.jsonl", "regressed"))
 
 
 class StoreKeysTest(StoreFixture):

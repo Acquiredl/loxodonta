@@ -113,7 +113,9 @@ class ClosedFolder(OSError):
 def listed(folder, pattern, closed=None):
     """Every path under `folder` that `pattern` matches, sorted: parts
     split on `/`, as `Path.glob` reads a pattern. A part with a wildcard
-    is matched by fnmatch against what the folder above lists; a plain
+    is matched by fnmatch against what the folder above lists, in any
+    case on every system, as Windows always matched it, so a `.JSONL`
+    is a chain on macOS and Linux too (#445); a plain
     name is looked up, never listed for, as `Path.glob` does, so a
     system folder that refuses a listing but answers a lookup (Windows'
     `System Volume Information`) is not named on every look. A folder on
@@ -130,7 +132,8 @@ def listed(folder, pattern, closed=None):
             try:
                 if any(c in part for c in "*?["):
                     deeper += [here / name for name in os.listdir(here)
-                               if fnmatch.fnmatch(name, part)]
+                               if fnmatch.fnmatchcase(name.lower(),
+                                                      part.lower())]
                 else:
                     os.stat(here / part)
                     deeper.append(here / part)
@@ -475,8 +478,8 @@ AFRESH = "`supervisor acknowledge --baseline` starts the memory afresh"
 UNCOUNTED = ("the baseline remembers a chain at this name, and what stands "
              "there is something the census does not count: the row is "
              "kept as it was and compared with nothing. A planted row, or "
-             "the chain renamed (on a disk that ignores case, a change of "
-             "case is enough); look at what stands there, and at the "
+             "the chain renamed to a spelling this disk still answers at "
+             "the old name; look at what stands there, and at the "
              "baseline")
 
 
@@ -681,6 +684,37 @@ def alarm_event(repo, session, relpath, row, found):
             "change": change, "since": row["alarm"]["since"],
             "remembered": {"n": row["n"], "head": row["head"]},
             "found": found, "investigate": CHANGE_WORDS[change]}
+
+
+def remembered_names(root, found, remembered):
+    """{chain: the name the scan keys it by}: its own path under root,
+    or a remembered name the census did not count that folds to the same
+    (`landing_name`, case among the rest) and that the disk answers with
+    this very file. So on a disk that ignores case, a chain renamed by a
+    change of case is compared with what the baseline remembers of it
+    (#445); on a disk that tells case apart, the remembered name is
+    nothing or another file, and the two stay two chains. The disk is
+    asked, never the platform: one volume can hold folders of both
+    kinds."""
+    keys = {log: log.relative_to(root).as_posix() for log in found}
+    spoken = set(keys.values())
+    folded = {}
+    for key in remembered:
+        if key not in spoken:
+            folded.setdefault(landing_name(key), []).append(key)
+    for log, relpath in keys.items():
+        if relpath in remembered:
+            continue
+        for key in folded.get(landing_name(relpath), []):
+            try:
+                same = os.path.samefile(root / key, log)
+            except (OSError, ValueError):
+                same = False
+            if same:
+                keys[log] = key
+                folded[landing_name(relpath)].remove(key)
+                break
+    return keys
 
 
 def diff_baseline(remembered, relpath, entries):
@@ -3682,7 +3716,6 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     closed = []
     if store:
         found = chains_listed(root, "*/receipts-*.jsonl", closed)
-        census = sorted((store_identity(log), log) for log in found)
         # A drawer whose project record is not a file is labelled by its
         # own slug and claimed by no repository's worktrees: named, like
         # every other non-file the scan reads past (#410).
@@ -3694,13 +3727,16 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                     f"project record: {problem} — filed under the "
                     "drawer's own name, as no repository's history")
     else:
-        census = sorted((chain_identity(root, log), log)
-                        for log in find_chains(root, closed))
+        found = find_chains(root, closed)
+    keys = remembered_names(root, found, remembered)
+    census = sorted(((store_identity(root / keys[log]) if store
+                      else chain_identity(root, root / keys[log])), log)
+                    for log in found)
     repos = {}
     worst = 0
     damaged = 0
     for (repo, session, _), log in census:
-        relpath = log.relative_to(root).as_posix()
+        relpath = keys[log]
         entries = read_entries(log)
         # `tick=False` is a reading: both keepers stay quiet, so a reader
         # that copies a chain (package) appends nothing to it and sends
@@ -3892,8 +3928,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             # its memory is kept as it was, never dropped unseen. In a
             # folder the census could not list, the closed note names it
             # and the exit is 5 (#431). Anywhere else it is a planted
-            # row, or the chain renamed (on a disk that ignores case, a
-            # change of case is enough): named, with no exit (#432).
+            # row, or the chain renamed to a spelling the disk answers
+            # and `remembered_names` does not fold (a change of case it
+            # does fold, #445): named, with no exit (#432).
             heads[relpath] = known
             if any(Path(folder) in (root / relpath).parents
                    for folder, _ in closed):
