@@ -4634,7 +4634,7 @@ class ClosedFolderTest(unittest.TestCase):
                                  "--out", str(out))
 
         self.answered(result, 0)
-        self.assertIn(f"{self.drawer.as_posix()} cannot be listed",
+        self.assertIn(f"cannot be listed: {self.drawer.as_posix()} (",
                       result.stderr)
         self.assertEqual(json.loads(out.read_text(encoding="utf-8"))
                          ["machine"]["scan_exit"], 5)
