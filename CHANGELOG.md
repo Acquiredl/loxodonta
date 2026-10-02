@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- `supervisor calibrate` refuses a baseline `scan` reads as blind and leaves it as it lies, pointing at `acknowledge --baseline`, where it advised a scan or ended in a traceback; a refused write is 73.
+
 ## [0.12.0] - 2026-10-02
 
 ### Changed

@@ -4570,19 +4570,23 @@ def cmd_calibrate(args):
               "remove one with --forget", file=sys.stderr)
         return 64
     # Both universes, as `scan` has them (ADR-0011): the store by
-    # default, a legacy folder of repos under an explicit --root.
-    path = (Path(store_home()) / "baseline.json" if args.root is None
-            else Path(args.root).resolve() / BASELINE_NAME)
-    try:
-        data = json.loads(read_whole(path))
-    except (OSError, ValueError):
-        print(f"error: no readable baseline at {path.as_posix()} — run "
-              "`supervisor scan` once so the supervisor stamps its own "
-              "inception, then seed what came before it", file=sys.stderr)
-        return 64
-    calibration = [epoch for epoch in data.get("calibration", [])
-                   if isinstance(epoch, dict)
-                   and isinstance(epoch.get("matchers"), list)]
+    # default, a legacy folder of repos under an explicit --root. Read
+    # as the scan reads it, so a blind memory is left as it lies
+    # (ADR-0039).
+    store = args.root is None
+    root = store_receipts() if store else Path(args.root).resolve()
+    path, daybook = memory_paths(root, store)
+    memory = read_baseline(path, daybook)
+    if memory["blind"]:
+        return refused(f"{memory['note']}. A seed is stated once the memory "
+                       "can be read: `supervisor acknowledge --baseline` "
+                       "comes first")
+    if memory["seen"] is None:
+        return refused(f"no baseline at {path.as_posix()} — run `supervisor "
+                       "scan` once so the supervisor stamps its own "
+                       "inception, then seed what came before it")
+    data = json.loads(memory["seen"])
+    calibration = memory["calibration"]
     observed = [epoch.get("since") for epoch in calibration
                 if epoch.get("source") != "operator" and epoch.get("since")]
     if not observed:
@@ -4607,7 +4611,12 @@ def cmd_calibrate(args):
                   "is what this supervisor saw", file=sys.stderr)
             return 64
         data["calibration"] = kept
-        write_whole(path, json.dumps(data, indent=2))
+        try:
+            write_whole(path, json.dumps(data, indent=2) + "\n")
+        except OSError as error:
+            return refused(f"{path.name} could not be written: "
+                           f"{error.strerror or error}; nothing was "
+                           "forgotten", 73)
         print(f"forgotten: your statement about {args.forget} is gone; "
               "sessions it covered fall back to whatever epoch now "
               "precedes them, or to BEFORE-MEMORY")
@@ -4627,7 +4636,11 @@ def cmd_calibrate(args):
     restated = len(kept) != len(calibration)
     data["calibration"] = sorted(kept + [seeded],
                                  key=lambda epoch: epoch.get("since") or "")
-    write_whole(path, json.dumps(data, indent=2))
+    try:
+        write_whole(path, json.dumps(data, indent=2) + "\n")
+    except OSError as error:
+        return refused(f"{path.name} could not be written: "
+                       f"{error.strerror or error}; nothing was seeded", 73)
     print(f"{'restated' if restated else 'seeded'}: from {args.since}, "
           f"coverage was {' '.join(args.matchers)} — your word, not this "
           "supervisor's observation, and marked as such wherever it judges")
