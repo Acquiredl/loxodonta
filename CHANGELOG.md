@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- `supervisor scan` names a remembered chain whose name holds something the census does not count; the digest's last-scan line counts acknowledgements; `acknowledge --help` says `--baseline` replaces the unreadable file, so copy it first (#432).
+
 ### Fixed
 
 - A project record holding no JSON object, or naming a gone project, no longer loses hook receipts or ends `verify --files` in a traceback; `run --file` refuses before its command; a non-UTF-8 `.git` leaves the project itself (#406).
@@ -37,7 +41,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `supervisor scan` reads a chain in a folder closed to it as `vanished`, exit 5, on every Python version, where on Python 3.13 and older one `chmod` ended every scan in a traceback (#419).
 - `supervisor` commands name a folder closed to the reader, a drawer, the store's receipts folder, the harness's or the recorder's, or read its chains as vanished, on every Python, where before 3.14 they ended in a traceback (#421).
 - `supervisor adopt` refuses a link to nowhere at a chain's or a sidecar's name in the drawer as a name already taken, where a move across two filesystems could copy through it (#422).
-- A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403).
+- A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403, #422).
 - `docs/HOOK.md` and `docs/TOUR.md` named the lock wait `RECEIPTS_LOCK_TIMEOUT`, which nothing reads; they now name `LOXODONTA_LOCK_TIMEOUT`, and a test fails on any documented variable the code never reads (#397).
 - `tools/twin_check.py --page` leaves a current `docs/TWINS.md` untouched, so a run on a Windows checkout no longer reads as modified to `git status` with an empty diff (#402).
 - `log` and `run` in a folder that refuses the lock file say the chain could not be written, exit 73, as the hook does, instead of a traceback; a lock file the disk refuses its line is removed (#398).

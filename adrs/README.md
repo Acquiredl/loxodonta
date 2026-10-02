@@ -42,4 +42,4 @@ Each ADR records a decision that is hard to reverse and why it was made; filenam
 | 0036 | [The hashing is frozen across format versions](0036-the-hashing-is-frozen-across-format-versions.md) | accepted |
 | 0037 | [Exit 1 means BROKEN and nothing else](0037-exit-1-means-broken-and-nothing-else.md) | accepted |
 | 0038 | [Every sidecar row names its kind](0038-every-sidecar-row-names-its-kind.md) | accepted |
-| 0039 | [The baseline keeps what it remembered until it is acknowledged](0039-the-baseline-keeps-what-it-remembered-until-acknowledged.md) | proposed |
+| 0039 | [The baseline keeps what it remembered until the chain holds it again or the operator accepts the change](0039-the-baseline-keeps-what-it-remembered-until-acknowledged.md) | proposed |

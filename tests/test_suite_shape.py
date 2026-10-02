@@ -38,7 +38,7 @@ through `getattr`.
 Every question a script asks of whether something is there goes
 through `os.path` (#421). Before Python 3.14, pathlib's `exists()`,
 `is_file()`, `is_dir()` and `is_symlink()` raise for a path in a folder
-the user may not look into, where `os.path`'s answer False, so one
+the user may not look into, where `os.path`'s functions answer False, so one
 `chmod` in the writer's reach ended a reader in a traceback. A second
 walk of each script fails on any such method call, naming its function
 and line, and spoils a copy to see it fail. It keeps no list: no call
@@ -247,7 +247,7 @@ POINTER = ("# Copy of loxodonta.py's; edit there, then run "
 
 def twin_check(*args):
     return subprocess.run([sys.executable, str(TWIN_CHECK), *args],
-                          capture_output=True, encoding="utf-8",
+                          capture_output=True, encoding="utf-8", timeout=300,
                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
 
@@ -891,14 +891,16 @@ def aliases(path):
     found = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
+            source = (f"from {'.' * node.level}{node.module or ''} "
+                      if isinstance(node, ast.ImportFrom) else "")
             for name in node.names:
                 if name.asname:
-                    found.append((node.lineno,
-                                  f"import {name.name} as {name.asname}"))
+                    found.append((node.lineno, f"{source}import {name.name} "
+                                               f"as {name.asname}"))
                 elif isinstance(node, ast.ImportFrom) \
                         and name.name in FILE_METHODS | SHUTIL_CALLS:
-                    found.append((node.lineno, f"from {node.module} "
-                                               f"import {name.name}"))
+                    found.append((node.lineno,
+                                  f"{source}import {name.name}"))
         elif isinstance(node, ast.Name) and node.id == "open" \
                 and id(node) not in called:
             found.append((node.lineno, "open, not called"))
@@ -1068,6 +1070,11 @@ class EveryOpenIsListedTest(SpoiledScript, unittest.TestCase):
                                    "import shutil as sh")
         self.assertEqual(found, [(line, "import shutil as sh")])
 
+    def test_a_renamed_from_import_is_named_as_it_is_written(self):
+        found, line = self.aliased("supervisor.py", "import shutil\n",
+                                   "from shutil import move as mv")
+        self.assertEqual(found, [(line, "from shutil import move as mv")])
+
     def test_open_held_as_a_value_is_named_and_a_call_is_not(self):
         old = "def anchors_path(log):\n"
         found, line = self.aliased("loxodonta.py", old,
@@ -1077,9 +1084,9 @@ class EveryOpenIsListedTest(SpoiledScript, unittest.TestCase):
 
 # What the existence walk collects (#421): a method call that asks
 # whether something is there, of anything but os.path. Before Python
-# 3.14 pathlib's raise PermissionError for a path in a folder this user
-# may not look into, as an os.DirEntry's do on every version; os.path's
-# answer False there on every version.
+# 3.14 pathlib's methods raise PermissionError for a path in a folder
+# this user may not look into, as an os.DirEntry's do on every version;
+# os.path's functions answer False there on every version.
 EXISTENCE_METHODS = {"exists", "is_file", "is_dir", "is_symlink"}
 
 

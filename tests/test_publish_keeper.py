@@ -735,7 +735,7 @@ class DashboardLeftTest(ReceiverFixture):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env=self.env)
         self.addCleanup(self._stop)
-        line = self.proc.stdout.readline()
+        line = read_line_within(self.proc.stdout)
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
@@ -825,14 +825,14 @@ class HeadlessKeeperTest(ReceiverFixture):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env={**self.env, "PYTHONIOENCODING": "utf-8", **knobs})
         self.addCleanup(self._stop)
-        line = self.proc.stdout.readline()
+        line = read_line_within(self.proc.stdout)
         found = re.search(r"http://127\.0\.0\.1:\d+", line)
         if found is None:
             self.proc.kill()
             _, err = self.proc.communicate()
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = found.group()
-        self.said = self.proc.stdout.readline()
+        self.said = read_line_within(self.proc.stdout)
 
     def _stop(self):
         if self.proc.poll() is None:
@@ -1221,7 +1221,7 @@ class ProfileKeeperTest(unittest.TestCase):
             env=isolated_env(self.home, LOXODONTA_HOME=str(self.store),
                              PYTHONIOENCODING="utf-8", **knobs))
         self.addCleanup(self._stop)
-        line = self.proc.stdout.readline()
+        line = read_line_within(self.proc.stdout)
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
@@ -1246,7 +1246,7 @@ class ProfileKeeperTest(unittest.TestCase):
         as two flushes, and a kill sent the instant the first arrives can
         land before the second is written, which is what CI on Linux and
         macOS showed; the line is deterministic, the race was the test's."""
-        line = self.proc.stdout.readline()
+        line = read_line_within(self.proc.stdout)
         self.proc.kill()
         self.proc.communicate()
         return line
