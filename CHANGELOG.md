@@ -12,12 +12,13 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
-- `supervisor export` names any write the system refuses and exits 73, instead of ending in a traceback in a folder the user may not write in.
-- `supervisor package` refuses an `--out` where a link to nowhere stands, where it wrote the package through the link, and names an `--out` it cannot create instead of ending in a traceback.
-- `supervisor adopt` names a folder or a pipe at a legacy chain's or sidecar's name and leaves it, where it moved a folder into the store as a chain and could end in a traceback on a pipe.
-- `anchor`, `anchor --upgrade` and the session end count a calendar reply that is not HTTP, or a calendar address holding a space, as that calendar's failure and ask the next, where one ended the whole run.
-- `supervisor scan` dates a session from its first call with a result, failed or not: one that began with a failed call before the supervisor's memory is left unjudged, as the rule says, where it was judged.
-- `supervisor scan` reads a chain in a folder closed to it as `vanished`, exit 5, on every Python version, where on Python 3.12 and older one `chmod` ended every scan in a traceback.
+- `supervisor export` names any write the system refuses and exits 73, instead of ending in a traceback in a folder the user may not write in (#419).
+- `supervisor package` refuses an `--out` where a link to nowhere stands, where it wrote the package through the link, and names an `--out` it cannot create instead of ending in a traceback (#419).
+- `supervisor adopt` names a folder, a pipe or an unreadable file at a legacy chain's or sidecar's name and leaves it, where it moved a folder into the store as a chain and could end in a traceback (#419).
+- `anchor`, `anchor --upgrade` and the session end no longer stop at a calendar reply that is not HTTP, or a calendar address holding a space: that calendar fails, or that row is skipped, and the next is asked (#419).
+- `anchor` prints what a calendar refused with as `anchor --upgrade` does, control characters made visible (#419).
+- `supervisor scan` dates a session from its first call with a result, failed or not: one that began with a failed call before the supervisor's memory is left unjudged, as the rule says, where it was judged (#419).
+- `supervisor scan` reads a chain in a folder closed to it as `vanished`, exit 5, on every Python version, where on Python 3.13 and older one `chmod` ended every scan in a traceback (#419).
 
 ## [0.10.3] - 2026-10-01
 

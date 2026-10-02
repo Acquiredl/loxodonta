@@ -194,10 +194,33 @@ class StallingCalendarHandler(FakeCalendarHandler):
         super().do_POST()
 
 
-def start_not_http(case):
-    """A listener that answers every request with one line that is not
-    HTTP, and its address: what http.client calls a bad status line,
-    and no OSError."""
+def whole_request(connection):
+    """Read one HTTP request to its end, headers and then the body its
+    Content-Length names: a POST sends the two apart, and an answer
+    sent between them reaches the client as a reset, not as a reply."""
+    request = b""
+    while b"\r\n\r\n" not in request:
+        more = connection.recv(65536)
+        if not more:
+            return
+        request += more
+    head, _, body = request.partition(b"\r\n\r\n")
+    length = 0
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            length = int(value)
+    while len(body) < length:
+        more = connection.recv(65536)
+        if not more:
+            return
+        body += more
+
+
+def start_not_http(case, reply=b"HELLO THERE\r\n\r\n"):
+    """A listener that answers every request with `reply`, by default
+    one line that is not HTTP, and its address: what http.client calls
+    a bad status line, and no OSError."""
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(5)
@@ -209,8 +232,12 @@ def start_not_http(case):
             except OSError:
                 return  # closed: the test is over
             with connection:
-                connection.recv(65536)
-                connection.sendall(b"HELLO THERE\r\n\r\n")
+                connection.settimeout(10)
+                try:
+                    whole_request(connection)
+                    connection.sendall(reply)
+                except OSError:
+                    pass  # the client left first
 
     threading.Thread(target=answer, daemon=True).start()
     case.addCleanup(listener.close)
@@ -623,6 +650,16 @@ class AnchorTest(unittest.TestCase):
         self.assertIn("warning: calendar ", result.stderr)
         self.assertFalse(self.sidecar.exists())
         self.assertEqual(self.server.submitted, [])
+
+    def test_a_calendar_refusal_reaches_the_terminal_escaped(self):
+        # The reason phrase is the calendar's own text, printed here.
+        loud = start_not_http(self, b"HTTP/1.0 500 \x1b[31mred\r\n\r\n")
+
+        result = run_receipts("anchor", "--calendar", loud, cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 69, result.stderr)
+        self.assertIn("warning: calendar ", result.stderr)
+        self.assertNotIn("\x1b", result.stderr)
 
     def repoint(self, calendar):
         """The sidecar with a copy of its one row put first, naming
