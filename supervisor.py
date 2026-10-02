@@ -4063,9 +4063,11 @@ def cmd_adopt(args):
                       "reconcile by hand")
             else:
                 # A drawer this user may read and not write, the record
-                # already in it, refuses the move itself (#430).
+                # already in it, refuses the move itself (#430); on
+                # POSIX so does a legacy folder that may not be written,
+                # so the words blame neither.
                 print(f"refused {log.relative_to(root).as_posix()}: "
-                      f"{drawer.name}/ cannot be written: {why} — not "
+                      f"cannot be moved into {drawer.name}/: {why} — not "
                       "adopted; left as it lies")
             continue
         for suffix in SIDECAR_SUFFIXES:
@@ -7221,9 +7223,6 @@ def cmd_package(args):
 # broken-on-purpose copies never alarm).
 
 DRILL_DIR = ".supervisor-drill"
-# sysexits(3) EX_CANTCREAT, as ADR-0037 gives it: a sandbox the drill
-# must make and cannot (#430).
-NO_SANDBOX = 73
 
 DRILL_EXPECTED = {"edit": ("BROKEN", 1), "delete": ("BROKEN", 1),
                   "reorder": ("BROKEN", 1),
@@ -7299,7 +7298,7 @@ def run_drill(root, asked):
         # a folder the verb must make and cannot, 73 (ADR-0037).
         return {"log": asked, "refused": f"{DRILL_DIR}/ under the root "
                 f"cannot be made afresh: {error.strerror or error} — "
-                "remove it by hand"}, NO_SANDBOX
+                "remove it by hand"}, EX_CANTCREAT
     known_head = receipts_cli(
         "head", "--log", str(sandbox / "pristine.jsonl")).stdout.strip()
 
@@ -10513,6 +10512,7 @@ class VersionAction(argparse.Action):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
+EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no sandbox for the drill
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.

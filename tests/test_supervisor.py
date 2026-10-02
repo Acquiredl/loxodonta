@@ -4715,9 +4715,8 @@ class ClosedFolderTest(unittest.TestCase):
         result = self.supervisor("adopt", "--root", str(self.legacy))
 
         self.answered(result, 0)
-        self.assertIn(f"refused alpha/receipts/{later.name}: "
-                      f"{self.drawer.name}/ cannot be written: ",
-                      result.stdout)
+        self.assertIn(f"refused alpha/receipts/{later.name}: cannot be "
+                      f"moved into {self.drawer.name}/: ", result.stdout)
         self.assertIn("not adopted; left as it lies", result.stdout)
         self.assertNotIn("chain(s) adopted", result.stdout)
         self.assertEqual(later.read_bytes(), before)
