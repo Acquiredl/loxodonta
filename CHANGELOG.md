@@ -34,6 +34,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A baseline row of the wrong shape or named by a path outside the root, or a baseline that is no JSON object, reads as unreadable, exit 5, where each ended `scan` or `digest` in a traceback (#403).
 - `docs/HOOK.md` and `docs/TOUR.md` named the lock wait `RECEIPTS_LOCK_TIMEOUT`, which nothing reads; they now name `LOXODONTA_LOCK_TIMEOUT`, and a test fails on any documented variable the code never reads (#397).
 - `tools/twin_check.py --page` leaves a current `docs/TWINS.md` untouched, so a run on a Windows checkout no longer reads as modified to `git status` with an empty diff (#402).
+- `log` and `run` in a folder that refuses the lock file say the chain could not be written, exit 73, as the hook does, instead of a traceback; a lock file the disk refuses its line is removed (#398).
 - `supervisor drill` refuses a chain holding a byte that is not UTF-8, or one it may not read, by name and exit 66, where it ended in a traceback or exited 1; the page's drill shows the same refusal (#407).
 - The `serve` page draws why a day book, a coverage marker or harness settings was read as none, beside the baseline's note, where an empty fortnight came with no reason (#410).
 - A session whose transcript cannot be read as one says so in its `UNWITNESSED` words, which travel in a package, where they said no transcript paired with it (#410).

@@ -3171,10 +3171,7 @@ class ChainLock:
         deadline = time.monotonic() + lock_timeout()
         while True:
             try:
-                self.fd = os.open(self.path,
-                                  os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(self.fd, f"{os.getpid()} {now_ts()}\n".encode("utf-8"))
-                return self
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
                 self.break_if_stale()
             except PermissionError:
@@ -3185,6 +3182,21 @@ class ChainLock:
                 # (see locked_out) rather than guessed at now.
                 if os.name != "nt":
                     raise
+            else:
+                try:
+                    os.write(fd, f"{os.getpid()} {now_ts()}\n".encode("utf-8"))
+                except BaseException:
+                    # A lock this writer made and will never release
+                    # would hold every writer off until the stale break
+                    # (#398): a full disk refuses the line.
+                    os.close(fd)
+                    try:
+                        os.unlink(self.path)
+                    except OSError:
+                        pass
+                    raise
+                self.fd = fd
+                return self
             if time.monotonic() >= deadline:
                 raise LockTimeout(self.path)
             time.sleep(0.02)
@@ -3343,11 +3355,24 @@ def append_entry(log, actor, action, file_paths):
     # From here the tail is read, extended, and written as one unit. A
     # racing writer that slips between the read and the write tears the
     # line or forks the chain at the same `n` (ADR-0004).
+    # Taken by hand, not by `with`, so the catch covers the lock alone: an
+    # OSError later is append_locked's to name, or a closed reader's 141.
+    lock = ChainLock(log)
     try:
-        with ChainLock(log):
-            return append_locked(log, actor, action, files)
+        lock.__enter__()
     except LockTimeout:
         return locked_out(log)
+    except FileNotFoundError:
+        # No folder, so no log either: `run` and a present folder say so.
+        return missing_log(log)
+    except OSError as e:
+        # On POSIX a folder that refuses the lock file is a denied
+        # permission, not a wait, and the hook answers it so (#398).
+        return unwritable_log(log, e)
+    try:
+        return append_locked(log, actor, action, files)
+    finally:
+        lock.__exit__(None, None, None)
 
 
 def referenced_paths(lines):
