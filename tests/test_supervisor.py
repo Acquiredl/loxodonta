@@ -439,6 +439,37 @@ class AdoptTest(unittest.TestCase):
         self.assertFalse(os.path.lexists(elsewhere),
                          "nothing is written through the link")
 
+    def test_a_link_to_nowhere_at_a_sidecar_name_leaves_the_sidecar(self):
+        # The sidecar's twin of the case above (#432): the chain moves,
+        # its proofs stay where they are, and the link is never replaced.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        first = run_adopt(self.home, self.root)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (name,) = self.drawers()
+        stranded = make_chain(self.root / "alpha" / "receipts", "sess-cccc")
+        write_completed_anchor(stranded, chain_head(stranded))
+        sidecar = stranded.with_name(stranded.name + ".anchors.jsonl")
+        before = sidecar.read_bytes()
+        elsewhere = Path(self._tmp.name).resolve() / "elsewhere.jsonl"
+        planted = self.home / "receipts" / name / sidecar.name
+        try:
+            os.symlink(str(elsewhere), str(planted))
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks cannot be created here")
+
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"left sidecar alpha/receipts/{sidecar.name}: "
+                      f"{name}/{sidecar.name} already exists in the store",
+                      result.stdout)
+        self.assertEqual(sidecar.read_bytes(), before,
+                         "the refused sidecar stays put")
+        self.assertTrue(os.path.islink(planted),
+                        "the link is never replaced")
+        self.assertFalse(os.path.lexists(elsewhere),
+                         "nothing is written through the link")
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
     def test_a_pipe_at_a_chain_or_a_sidecar_name_is_named_and_left(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")

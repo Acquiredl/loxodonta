@@ -4026,7 +4026,7 @@ def cmd_adopt(args):
                 print(f"left sidecar "
                       f"{sidecar.relative_to(root).as_posix()}: {problem} "
                       "— not moved; reconcile by hand")
-            elif os.path.lexists(drawer / sidecar.name):
+            elif os.path.exists(drawer / sidecar.name):
                 # Proofs left behind are still proofs; say so — silence
                 # here would read as "everything travelled".
                 print(f"left sidecar "
