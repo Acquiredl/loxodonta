@@ -215,3 +215,23 @@ book that records no scan.
   silences; Nagios acknowledgements; Samhain; OSSEC syscheck;
   `auditd.conf.5`; NIST SP 800-53 AU-5.
 - Glossary terms **sharpened**: *Baseline*.
+
+## Addendum, 2026-10-02: a folder the scan cannot list is exit 5 too
+
+*Drafted for the author to confirm (#431).* Part 4 made a memory the
+scan cannot read or keep an alarm; the census beside it still read a
+store folder this user may not list as empty. A drawer or the receipts
+folder closed with `chmod 000` hid its chains, said nothing of the
+folder, and the "store empty" note was printed beside the events it
+caused. Closing a folder is in the writer's reach, as deleting the
+baseline is, so it gets the same answer: the scan names each folder its
+census cannot list and exits 5 on every look while it stays closed, and
+never calls the store empty beside it. Exit 5 now covers a change
+appends cannot explain, a baseline the scan cannot read or keep, and a
+folder the census cannot list. `export` carries it as the scan's exit 5
+and says it on stderr, its own exit unchanged. The other readers
+(recall, `adopt`, `package`, `acknowledge --baseline`) refuse by name
+with 66 rather than act on part of the store, and `serve`'s views over
+the store answer 503 by name. Every listing of the store by the
+supervisor goes through one helper that names or raises such a folder,
+on every Python.

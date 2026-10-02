@@ -4528,35 +4528,39 @@ class ClosedFolderTest(unittest.TestCase):
         self.assertEqual({e["session"]: e["change"] for e in events},
                          {"sess-aaaa": "vanished"})
 
-    def test_digest_reads_a_closed_receipts_folder_as_no_memory(self):
-        result = self.recall("digest")
-
-        self.answered(result, 0)
-        self.assertNotIn(self.address, result.stdout)
-
-    def test_show_refuses_an_address_behind_a_closed_receipts_folder(self):
-        result = self.recall("show", self.address)
-
-        self.answered(result, 1)
-        self.assertIn(f"matches {self.address}", result.stderr)
-
-    def test_search_finds_nothing_behind_a_closed_receipts_folder(self):
-        result = self.recall("search", "step")
-
-        self.answered(result, 0)
-        self.assertIn("matched 0", result.stdout)
-
-    def test_timeline_refuses_an_address_behind_a_closed_receipts_folder(self):
-        result = self.recall("timeline", self.address)
-
-        self.answered(result, 1)
-        self.assertIn(f"matches {self.address}", result.stderr)
-
-    def test_verify_refuses_an_address_behind_a_closed_receipts_folder(self):
-        result = self.recall("verify", self.address)
-
+    def refused_by_name(self, result, folder):
+        """`result` refused with 66, naming `folder` as one it cannot list,
+        and printed nothing else (#431)."""
         self.answered(result, 66)
-        self.assertIn(f"matches {self.address}", result.stderr)
+        self.assertIn(f"{folder.as_posix()} cannot be listed: ",
+                      result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def closed_named(self, report, folder):
+        """The scan's report names `folder`, and only it, as one it could
+        not list, and says nothing of an empty store (#431)."""
+        self.assertEqual([c["folder"] for c in report["closed"]],
+                         [folder.as_posix()])
+        self.assertIn(folder.as_posix(), report["closed_note"])
+        self.assertNotIn("note", report, "a closed folder is no empty store")
+
+    def test_recall_refuses_by_name_behind_a_closed_receipts_folder(self):
+        # A folder the reader cannot list is never read as empty (#431).
+        for args in (("digest",), ("show", self.address),
+                     ("search", "step"), ("timeline", self.address),
+                     ("verify", self.address), ("search", "step", "--all")):
+            with self.subTest(args=args):
+                self.refused_by_name(self.recall(*args),
+                                     self.store / "receipts")
+
+    def test_recall_refuses_by_name_behind_its_own_closed_drawer(self):
+        self.close(self.drawer)
+
+        for args in (("digest",), ("search", "step")):
+            with self.subTest(args=args):
+                self.refused_by_name(
+                    self.supervisor(*args, "--repo", str(self.project)),
+                    self.drawer)
 
     def test_package_of_the_repo_refuses_with_its_receipts_folder_closed(self):
         out = self.root / "package.zip"
@@ -4564,15 +4568,13 @@ class ClosedFolderTest(unittest.TestCase):
         result = self.recall("package", "--witness", str(self.witness),
                              "--out", str(out))
 
-        self.answered(result, 1)
-        self.assertIn("nothing to package", result.stderr)
+        self.refused_by_name(result, self.store / "receipts")
         self.assertFalse(os.path.lexists(out))
 
     def test_package_of_a_repo_whose_own_drawer_is_closed_refuses(self):
-        # Its worktree's drawer still holds a session (ADR-0023), so the
-        # package reaches the repo's project record, which a closed
-        # drawer will not say is there or not: refused by name, never
-        # shipped without it.
+        # Its worktree's drawer still holds a session (ADR-0023); the
+        # store's census cannot list the repo's own drawer, so the
+        # package is refused by name, never shipped without it.
         worktree = self.store / "receipts" / "wt-00000000"
         worktree.mkdir()
         (worktree / "project.json").write_text(json.dumps(
@@ -4587,10 +4589,157 @@ class ClosedFolderTest(unittest.TestCase):
                                  "--witness", str(self.witness),
                                  "--out", str(out))
 
-        self.answered(result, 1)
-        self.assertIn("error: project.json cannot be packed: ",
-                      result.stderr)
+        self.refused_by_name(result, self.drawer)
         self.assertFalse(os.path.lexists(out))
+
+    def test_package_of_a_session_refuses_with_the_store_home_closed(self):
+        self.close(self.store)
+        out = self.root / "package.zip"
+
+        result = self.supervisor("package", "sess-aaaa", "--witness",
+                                 str(self.witness), "--out", str(out))
+
+        self.refused_by_name(result, self.store / "receipts")
+        self.assertFalse(os.path.lexists(out))
+
+    def test_a_store_scan_names_a_closed_drawer_never_a_fresh_install(self):
+        self.close(self.drawer)
+
+        result = self.scan()
+
+        self.answered(result, 5)
+        self.closed_named(json.loads(result.stdout), self.drawer)
+
+    def test_a_closed_drawer_the_baseline_never_knew_is_exit_5(self):
+        later = self.store / "receipts" / "later-00000000"
+        later.mkdir()
+        self.recorder("init", "--log", str(later / "receipts-sess-dddd.jsonl"))
+        self.close(later)
+
+        result = self.scan()
+
+        self.answered(result, 5)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["baseline"]["events"], [])
+        self.assertEqual([c["folder"] for c in report["closed"]],
+                         [later.as_posix()])
+
+    def test_a_store_scan_names_a_closed_receipts_folder(self):
+        self.close(self.store / "receipts")
+
+        result = self.scan()
+
+        self.answered(result, 5)
+        self.closed_named(json.loads(result.stdout), self.store / "receipts")
+
+    def test_a_closed_store_home_is_exit_5_on_every_look_never_a_traceback(self):
+        self.close(self.store)
+
+        for _ in range(2):
+            result = self.scan()
+
+            self.answered(result, 5)
+            report = json.loads(result.stdout)
+            self.closed_named(report, self.store / "receipts")
+            self.assertEqual(report["baseline"]["blind"], "unreadable")
+
+    def test_a_legacy_scan_names_a_closed_repo_folder(self):
+        beta = self.legacy / "beta"
+        (beta / "receipts").mkdir(parents=True)
+        self.recorder("init", "--log",
+                      str(beta / "receipts" / "receipts-sess-eeee.jsonl"))
+        self.close(beta)
+
+        result = self.supervisor("scan", "--json", "--root", str(self.legacy),
+                                 "--witness", str(self.witness))
+
+        self.answered(result, 5)
+        report = json.loads(result.stdout)
+        self.closed_named(report, beta)
+
+    def test_a_legacy_scan_passes_a_folder_it_may_look_into_but_not_list(self):
+        # A plain name in the pattern is looked up, never listed for, as
+        # Path.glob does: a system folder that refuses a listing but
+        # answers a lookup is no closed repo, and is not named on every
+        # look (#431's review).
+        odd = self.legacy / "odd"
+        odd.mkdir()
+        os.chmod(odd, 0o311)
+        self.addCleanup(os.chmod, odd, 0o755)
+
+        result = self.supervisor("scan", "--json", "--root", str(self.legacy),
+                                 "--witness", str(self.witness))
+
+        self.answered(result, 0)
+        self.assertNotIn("closed", json.loads(result.stdout))
+
+    def test_export_names_a_closed_drawer_and_carries_exit_5(self):
+        self.close(self.drawer)
+        out = self.root / "export.json"
+
+        result = self.supervisor("export", "--witness", str(self.witness),
+                                 "--out", str(out))
+
+        self.answered(result, 0)
+        self.assertIn(f"cannot be listed: {self.drawer.as_posix()} (",
+                      result.stderr)
+        self.assertEqual(json.loads(out.read_text(encoding="utf-8"))
+                         ["machine"]["scan_exit"], 5)
+
+    def test_serve_names_a_closed_drawer_in_status_and_metrics(self):
+        self.close(self.drawer)
+        url = self.serve()
+
+        with OPENER.open(f"{url}/api/status", timeout=30) as status:
+            report = json.loads(status.read().decode("utf-8"))
+        with OPENER.open(f"{url}/metrics", timeout=30) as metrics:
+            text = metrics.read().decode("utf-8")
+
+        self.assertEqual(report["exit"], 5)
+        self.closed_named(report, self.drawer)
+        self.assertIn("\nloxodonta_scan_exit_code 5\n", text)
+
+    def test_serve_refuses_a_view_over_a_closed_drawer_by_name(self):
+        self.close(self.drawer)
+        url = self.serve()
+
+        for route in ("/api/recall", "/api/activity", "/api/search?q=step",
+                      "/api/shape?repo=alpha&session=sess-aaaa"):
+            with self.subTest(route=route):
+                with self.assertRaises(urllib.error.HTTPError) as refused:
+                    OPENER.open(url + route, timeout=30)
+                said = refused.exception.read().decode("utf-8")
+                refused.exception.close()
+                self.assertEqual(refused.exception.code, 503)
+                self.assertIn("cannot be listed", said)
+        with OPENER.open(f"{url}/api/status", timeout=30) as status:
+            self.assertEqual(status.status, 200)
+
+    def test_adopt_refuses_by_name_under_a_closed_legacy_repo_folder(self):
+        beta = self.legacy / "beta"
+        (beta / "receipts").mkdir(parents=True)
+        log = beta / "receipts" / "receipts-sess-eeee.jsonl"
+        self.recorder("init", "--log", str(log))
+        self.close(beta / "receipts")
+
+        for dry in ((), ("--dry-run",)):
+            with self.subTest(dry=dry):
+                result = self.supervisor("adopt", "--root", str(self.legacy),
+                                         *dry)
+
+                self.refused_by_name(result, beta / "receipts")
+        os.chmod(beta / "receipts", 0o755)
+        self.assertTrue(os.path.isfile(log), "the chain is left as it lies")
+
+    def test_acknowledging_the_baseline_refuses_over_a_closed_drawer(self):
+        baseline = self.store / "baseline.json"
+        baseline.write_text("{not json", encoding="utf-8")
+        self.close(self.drawer)
+
+        result = self.supervisor("acknowledge", "--baseline")
+
+        self.refused_by_name(result, self.drawer)
+        self.assertEqual(baseline.read_text(encoding="utf-8"), "{not json")
 
     def test_recall_reads_the_store_for_a_repo_in_a_closed_folder(self):
         # The drawer is named by the repo's path, so a closed parent
