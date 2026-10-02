@@ -4818,7 +4818,8 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
             proof_bytes = calendar_request(url + "/digest", data=digest)
             judge_proof(head, proof_bytes)  # refuse to store what can't replay
         except (OSError, ProofError, ValueError) as e:
-            print(f"warning: calendar {url}: {e}", file=sys.stderr)
+            # What a calendar refused with is its own text (#349).
+            print(f"warning: calendar {url}: {visible(e)}", file=sys.stderr)
             continue
         try:
             append_anchor_record(target, head, n, url, proof_bytes)
