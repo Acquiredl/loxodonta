@@ -170,6 +170,25 @@ class ConcurrentAppendTest(unittest.TestCase):
         self.assertIn("lock", result.stderr.lower())
         self.assertEqual(len(self.entries()), 1, "nothing was written")
 
+    def test_a_folder_at_the_locks_name_is_named_not_waited_on(self):
+        # Walk 5: no stale break removes a folder, so "locked by another
+        # writer, retry" (75) was a wait that never ended.
+        lock = Path(str(self.log) + ".lock")
+        lock.mkdir()
+        old = time.time() - 3600
+        os.utime(lock, (old, old))
+
+        result = run_receipts("log", "--actor", "agent", "--action", "lost",
+                              cwd=self.workdir,
+                              extra_env={"LOXODONTA_LOCK_TIMEOUT": "0.5"})
+
+        self.assertEqual(result.returncode, 73, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("folder", result.stderr)
+        self.assertNotIn("another writer", result.stderr)
+        self.assertTrue(lock.is_dir(), "left as it lies")
+        self.assertEqual(len(self.entries()), 1, "nothing was written")
+
 
 class SiblingChainTest(unittest.TestCase):
     """A damaged tail ends a chain, not the recording (ADR-0004)."""

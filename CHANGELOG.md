@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Fixed
 
 - `supervisor calibrate` refuses a baseline `scan` reads as blind and leaves it as it lies, pointing at `acknowledge --baseline`, where it advised a scan or ended in a traceback; a refused write is 73.
+- `log`, `run` and the hook name a folder or a pipe at a chain's lock name, exit 73, where they said another writer held the lock, exit 75, and no wait ever ended it.
 
 ## [0.12.0] - 2026-10-02
 
