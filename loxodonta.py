@@ -3236,6 +3236,13 @@ def locked_out(log):
         print(f"error: cannot create {lock} — no entry was written. "
               "Check write permissions on the directory.", file=sys.stderr)
         return EX_CANTCREAT
+    # A folder at the lock's name is no writer's lock, and the stale break
+    # cannot remove one: waiting would never end. A pipe or a file this
+    # user may not open is removed by the stale break, so it stays 75.
+    if file_problem(lock) == IS_A_FOLDER:
+        print(f"error: {lock} cannot be a lock: {IS_A_FOLDER} — no entry "
+              "was written; nothing removes it but you", file=sys.stderr)
+        return EX_CANTCREAT
     print(f"error: {log} is locked by another writer — no entry was written. "
           "Retry; if nothing is running, delete the .lock file beside it.",
           file=sys.stderr)

@@ -1145,15 +1145,12 @@ class ExistenceIsAskedThroughOsPathTest(SpoiledScript, unittest.TestCase):
 LISTING_METHODS = {"glob", "rglob", "iterdir"}
 OS_LISTINGS = {"listdir", "scandir", "walk"}
 
-WITNESS = "the harness's transcripts, which are not the store"
-
 # Every function of the supervisor that lists a folder:
 # function -> (how many such calls, and why).
 ALLOWED_LISTINGS = {
-    "listed": (1, "the one listing over the store: a folder it cannot list "
-                  "is named or raised, never read as empty (#431)"),
-    "witness_files": (1, WITNESS),
-    "watch_completeness": (1, WITNESS),
+    "listed": (1, "the one listing over the store and the witness: a "
+                  "folder it cannot list is named or raised, never read "
+                  "as empty (#431, walk 5)"),
 }
 
 
@@ -1176,11 +1173,12 @@ def listings_beyond_the_list(calls):
 
 
 class EveryStoreListingIsNamedTest(SpoiledScript, unittest.TestCase):
-    """The rule of #431 as a check: the supervisor lists a folder of the
-    store only through `listed`, which names a folder it cannot list or
-    raises, and never reads it as empty, on every Python. The harness's
-    transcripts are listed on their own and are on the list. The
-    recorder and the receiver are not walked: the rule is the reader's.
+    """The rule of #431 as a check: the supervisor lists a folder only
+    through `listed`, which names a folder it cannot list or raises, and
+    never reads it as empty, on every Python. The harness's transcripts
+    too since walk 5: a closed one read UNWITNESSED with no reason, more
+    quietly than a deleted one. The recorder and the receiver are not
+    walked: the rule is the reader's.
 
     What the walk does not see: a listing reached through `getattr`, or
     inside a library call that lists a folder itself."""
