@@ -15,7 +15,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `supervisor calibrate` refuses a baseline `scan` reads as blind and leaves it as it lies, pointing at `acknowledge --baseline`, where it advised a scan or ended in a traceback; a refused write is 73.
 - `supervisor calibrate` refuses with 75 when the baseline changed while it ran, where it wrote over what a scan or an acknowledgement had just written.
 - `supervisor scan` names a transcript folder or a subagents folder it cannot list, where its sessions read UNWITNESSED, or lost their subagents' calls, with no reason given.
-- `log`, `run` and the hook name a folder or a pipe at a chain's lock name, exit 73, where they said another writer held the lock, exit 75, and no wait ever ended it.
+- `log`, `run` and the hook name a folder at a chain's lock name, exit 73, where they said another writer held the lock, exit 75, and no wait ever ended it.
 
 ## [0.12.0] - 2026-10-02
 

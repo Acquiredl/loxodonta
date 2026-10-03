@@ -1503,6 +1503,8 @@ class SubagentWitnessTest(unittest.TestCase):
         result = self.scan()
 
         watch = json.loads(result.stdout)["completeness"]
+        self.assertEqual(result.returncode, 0,
+                         "a note, as for a deleted witness, never the exit")
         self.assertEqual(self.states(result)["sess-shut"]["state"],
                          "UNWITNESSED")
         self.assertIn("cannot be listed", watch["note"])
@@ -1519,8 +1521,10 @@ class SubagentWitnessTest(unittest.TestCase):
             event_times=[ago(5980), ago(5970), ago(5960)], tool="Read")
         self.closed(sidechain.parent)
 
-        judged = self.states(self.scan())["sess-hid"]
+        result = self.scan()
 
+        judged = self.states(result)["sess-hid"]
+        self.assertEqual(result.returncode, 0, "a note, never the exit")
         self.assertEqual(judged["tools"], 2, "the parent is still judged")
         self.assertIn("cannot be listed", judged["note"])
         self.assertIn(sidechain.parent.as_posix(), judged["note"])
@@ -1790,6 +1794,23 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(row["deficit"], 0)
         self.assertIn("store", report["completeness"]["note"])
         self.assertIn("no chains", report["note"])
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_a_closed_witness_folder_leaves_the_elsewhere_note_standing(self):
+        # #457 review: the two notes are joined, neither hides the other.
+        write_transcript(self.witness, self.root / "alpha", "sess-live",
+                         event_times=[ago(600), ago(400), ago(120)])
+        shut = write_transcript(self.witness, self.root / "beta", "sess-x",
+                                event_times=[ago(600)]).parent
+        os.chmod(shut, 0)
+        self.addCleanup(os.chmod, shut, 0o755)
+
+        result = self.scan(env=self.store_holding("sess-live"))
+
+        note = json.loads(result.stdout)["completeness"]["note"]
+        self.assertIn("cannot be listed", note)
+        self.assertIn("keep their receipts in the store", note)
 
     def test_a_session_that_never_recorded_anywhere_still_alarms(self):
         # The other half, and the one the guard must not swallow: no

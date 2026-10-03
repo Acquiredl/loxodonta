@@ -189,6 +189,22 @@ class ConcurrentAppendTest(unittest.TestCase):
         self.assertTrue(lock.is_dir(), "left as it lies")
         self.assertEqual(len(self.entries()), 1, "nothing was written")
 
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a file this user may not open")
+    def test_a_lock_file_this_user_may_not_open_is_still_a_wait(self):
+        # Another user's lock, say: the stale break removes it, so it is
+        # a wait like any held lock, never the folder's 73 (#457 review).
+        lock = Path(str(self.log) + ".lock")
+        lock.write_text("held\n", encoding="utf-8")
+        os.chmod(lock, 0)
+
+        result = run_receipts("log", "--actor", "agent", "--action", "lost",
+                              cwd=self.workdir,
+                              extra_env={"LOXODONTA_LOCK_TIMEOUT": "0.5"})
+
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertIn("another writer", result.stderr)
+
 
 class SiblingChainTest(unittest.TestCase):
     """A damaged tail ends a chain, not the recording (ADR-0004)."""

@@ -3523,12 +3523,15 @@ def watch_completeness(root, witness, families, everywhere=False,
         watch["calibration"] = {"epochs": calibration,
                                 "words": "; ".join(said)}
 
-    if elsewhere and "note" not in watch:
-        watch["note"] = (f"{elsewhere} witnessed session(s) under this "
-                         "--root keep their receipts in the store "
-                         "(ADR-0011), not here, so they are named and not "
-                         "judged. The store is the default universe: run "
-                         "`scan` with no --root to watch them.")
+    if elsewhere:
+        # Joined, not replaced: a closed witness folder's note can stand
+        # beside it.
+        watch["note"] = "; ".join(filter(None, (
+            watch.get("note"),
+            f"{elsewhere} witnessed session(s) under this --root keep "
+            "their receipts in the store (ADR-0011), not here, so they "
+            "are named and not judged. The store is the default "
+            "universe: run `scan` with no --root to watch them.")))
 
     # One counted block for everything older than the memory (ADR-0029
     # ruling 4). It is stated whether or not anyone asked, because the
