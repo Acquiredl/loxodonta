@@ -2887,7 +2887,7 @@ def owes_receipt(name, matchers):
     return False
 
 
-def witness_files(transcript):
+def witness_files(transcript, closed):
     """Every file a session's tool calls are written to (#211): the
     parent transcript, plus one per subagent under
     `<session>/subagents/`. The harness fires PostToolUse for a
@@ -2895,14 +2895,10 @@ def witness_files(transcript):
     in the parent's chain, and a witness that read only the parent
     missed the reads and searches a delegating parent hands out, and
     called the session surplus for work it did honestly (the numbers:
-    docs/TOUR-SUPERVISOR.md)."""
-    files = [transcript]
-    try:
-        files.extend(sorted((transcript.with_suffix("") / "subagents")
-                            .glob("*.jsonl")))
-    except OSError:
-        pass  # no sidechain here, or unreadable: the parent still counts
-    return files
+    docs/TOUR-SUPERVISOR.md). A subagents folder it cannot list goes on
+    `closed`: the parent still counts, and the row names the folder."""
+    return [transcript] + listed(transcript.with_suffix("") / "subagents",
+                                 "*.jsonl", closed)
 
 
 # How a failed call is read (ADR-0034). The harness fires its failed-call
@@ -2974,7 +2970,8 @@ def read_witness(transcript, calibration):
     PowerShell calls read as `may_owe` because no `Exit code N` line
     opened them (#379); both are counted for the canary in
     watch_completeness(), and neither moves
-    the reading."""
+    the reading. `closed` holds each subagents folder it could not list
+    (`witness_files`)."""
     names = {}
     owed = []
     may_owe = {}
@@ -2982,7 +2979,8 @@ def read_witness(transcript, calibration):
     latest = None
     first = None
     worded = unworded = 0
-    for path in witness_files(transcript):
+    closed = []
+    for path in witness_files(transcript, closed):
         # A transcript is in the writer's reach, so a pipe at its name is
         # refused rather than waited on (#386).
         with io.TextIOWrapper(open_regular(path), encoding="utf-8",
@@ -3054,7 +3052,7 @@ def read_witness(transcript, calibration):
     owed.sort(key=lambda call: call[0] or "")
     return {"owed": owed, "may_owe": may_owe, "witnessed": witnessed,
             "latest": latest, "first": first,
-            "worded": worded, "unworded": unworded}
+            "worded": worded, "unworded": unworded, "closed": closed}
 
 
 def reconcile(owed, may_owe, receipts, witnessed):
@@ -3139,13 +3137,15 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     is handed back unjudged (ADR-0029): the tool count stands as what
     the witness saw, the state says the coverage behind that number is
     unknown, and no deficit and no may_owe count are named for it.
-    Returns a dict: state, tools, deficit, may_owe, and the worded and
-    unworded counts the canary in watch_completeness() reads."""
+    Returns a dict: state, tools, deficit, may_owe, the worded and
+    unworded counts the canary in watch_completeness() reads, and the
+    subagents folders it could not list (`closed`)."""
     seen = read_witness(transcript, calibration)
     tools = len(seen["owed"])
     if before_memory(calibration, seen["first"]):
         return {"state": "BEFORE-MEMORY", "tools": tools, "deficit": 0,
-                "may_owe": 0, "worded": 0, "unworded": 0}
+                "may_owe": 0, "worded": 0, "unworded": 0,
+                "closed": seen["closed"]}
     latest = seen["latest"]
     # The idle clock reads the newest timestamped record, not file
     # mtime: the harness touches ended transcripts with timestamp-less
@@ -3172,7 +3172,8 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
                               deficit_age, silent),
             "tools": tools, "deficit": deficit,
             "may_owe": sum(len(calls) for calls in seen["may_owe"].values()),
-            "worded": seen["worded"], "unworded": seen["unworded"]}
+            "worded": seen["worded"], "unworded": seen["unworded"],
+            "closed": seen["closed"]}
 
 
 def keep_tails(sessions):
@@ -3236,6 +3237,21 @@ def store_session_ids(closed=None):
                                      closed)}
 
 
+def unlisted_words(closed):
+    """Each (folder, why) a listing of the witness could not make, in
+    words."""
+    return "; ".join(f"{Path(folder).as_posix()} ({why})"
+                     for folder, why in closed)
+
+
+def sidechains_unlisted(closed):
+    """A session row's note for a subagents folder it could not list:
+    the parent is judged, and the calls that folder holds are not
+    counted."""
+    return (f"{unlisted_words(closed)} cannot be listed — {UNKNOWN}, and "
+            "the subagent calls it holds are not counted here")
+
+
 def watch_completeness(root, witness, families, everywhere=False,
                        calibration=None, sessionend=None,
                        show_before_memory=False, closed=None):
@@ -3292,8 +3308,12 @@ def watch_completeness(root, witness, families, everywhere=False,
                         "judged by one are judged on that word, not on "
                         "anything this supervisor watched")
     transcripts = {}
+    # A folder of the witness it cannot list is named, never read as
+    # empty: closed, it would hide more quietly than a deleted witness.
+    unlisted = []
     if os.path.isdir(witness):
-        transcripts = {t.stem: t for t in sorted(witness.glob("*/*.jsonl"))}
+        transcripts = {t.stem: t
+                       for t in listed(witness, "*/*.jsonl", unlisted)}
     else:
         watch["note"] = (f"witness absent — no transcript layout at "
                          f"{witness.as_posix()}; completeness cannot be "
@@ -3302,6 +3322,12 @@ def watch_completeness(root, witness, families, everywhere=False,
         watch["note"] = ("no recorder hook is wired into the harness "
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
+    if unlisted:
+        watch["note"] = "; ".join(filter(None, (
+            watch.get("note"),
+            f"{len(unlisted)} folder(s) of the witness cannot be listed: "
+            f"{unlisted_words(unlisted)} — {UNKNOWN}, and the sessions "
+            "whose transcripts they hold read UNWITNESSED")))
     # How long the harness keeps what this watch reads (#260): a fact
     # beside the watch, never a judgment in it, and never the exit.
     retention = transcript_retention(witness)
@@ -3421,6 +3447,8 @@ def watch_completeness(root, witness, families, everywhere=False,
         row = add(repo, session, state, reading["tools"], receipts, spans,
                   judge=judge, transcript=transcript,
                   deficit=reading["deficit"], may_owe=reading["may_owe"])
+        if reading["closed"]:
+            row["note"] = sidechains_unlisted(reading["closed"])
         # The lifecycle facts (ADR-0018), quiet fields on the row.
         tier = lifecycle_tier(group.get("last_grew"), now)
         if tier:
@@ -3468,9 +3496,11 @@ def watch_completeness(root, witness, families, everywhere=False,
         canary.append(reading)
         name = (folder if everywhere
                 else folder[len(ours):].strip("-") or root.name)
-        add(name, stem, reading["state"], reading["tools"], 0,
-            transcript=transcript, deficit=reading["deficit"],
-            may_owe=reading["may_owe"])
+        row = add(name, stem, reading["state"], reading["tools"], 0,
+                  transcript=transcript, deficit=reading["deficit"],
+                  may_owe=reading["may_owe"])
+        if reading["closed"]:
+            row["note"] = sidechains_unlisted(reading["closed"])
 
     # The canary for the one wording the witness leans on (ADR-0034): a
     # harness that stopped opening a failed command with `Exit code N`
@@ -4358,6 +4388,25 @@ def refused(words, code=None):
     return EX_USAGE if code is None else code
 
 
+def keep_memory(path, seen, data, what):
+    """Write `data` as the baseline at `path`, or refuse and return the
+    exit: 75 when the file no longer holds `seen`, the text this verb
+    read (a scan, a calibration or an acknowledgement wrote it since;
+    ADR-0039), 73 when the system refuses the write. `what` is the act
+    that did not happen. None when written."""
+    if not unchanged_since(path, seen):
+        return refused(f"the baseline at {path.as_posix()} changed while "
+                       "this ran (a scan, a calibration or an "
+                       f"acknowledgement wrote it); nothing was {what}: "
+                       "run it again", 75)
+    try:
+        write_whole(path, json.dumps(data, indent=2) + "\n")
+    except OSError as error:
+        return refused(f"{path.name} could not be written: "
+                       f"{error.strerror or error}; nothing was {what}", 73)
+    return None
+
+
 def census_logs(root, store):
     """Every chain the scan's census counts: the store's drawers, or a
     legacy root's three shapes (`find_chains`). The twin of the census
@@ -4463,16 +4512,9 @@ def cmd_acknowledge(args):
         "ts": stamp, "log": log, "change": change,
         "remembered": {"n": known["n"], "head": known["head"]},
         "accepted": accepted}]
-    if not unchanged_since(path, memory["seen"]):
-        return refused(f"the baseline at {path.as_posix()} changed while "
-                       "this ran (a scan or another acknowledgement wrote "
-                       "it); nothing was written: run it again", 75)
-    try:
-        write_whole(path, json.dumps(data, indent=2) + "\n")
-    except OSError as error:
-        return refused(f"{path.name} could not be written: "
-                       f"{error.strerror or error}; nothing was "
-                       "acknowledged", 73)
+    code = keep_memory(path, memory["seen"], data, "acknowledged")
+    if code is not None:
+        return code
     now_remembers = (f"n {accepted['n']} at {accepted['head'][:16]}"
                      if accepted else "nothing for it (gone)")
     print(f"acknowledged: {visible(log)}, {change}; the baseline remembered "
@@ -4611,12 +4653,9 @@ def cmd_calibrate(args):
                   "is what this supervisor saw", file=sys.stderr)
             return 64
         data["calibration"] = kept
-        try:
-            write_whole(path, json.dumps(data, indent=2) + "\n")
-        except OSError as error:
-            return refused(f"{path.name} could not be written: "
-                           f"{error.strerror or error}; nothing was "
-                           "forgotten", 73)
+        code = keep_memory(path, memory["seen"], data, "forgotten")
+        if code is not None:
+            return code
         print(f"forgotten: your statement about {args.forget} is gone; "
               "sessions it covered fall back to whatever epoch now "
               "precedes them, or to BEFORE-MEMORY")
@@ -4636,11 +4675,9 @@ def cmd_calibrate(args):
     restated = len(kept) != len(calibration)
     data["calibration"] = sorted(kept + [seeded],
                                  key=lambda epoch: epoch.get("since") or "")
-    try:
-        write_whole(path, json.dumps(data, indent=2) + "\n")
-    except OSError as error:
-        return refused(f"{path.name} could not be written: "
-                       f"{error.strerror or error}; nothing was seeded", 73)
+    code = keep_memory(path, memory["seen"], data, "seeded")
+    if code is not None:
+        return code
     print(f"{'restated' if restated else 'seeded'}: from {args.since}, "
           f"coverage was {' '.join(args.matchers)} — your word, not this "
           "supervisor's observation, and marked as such wherever it judges")

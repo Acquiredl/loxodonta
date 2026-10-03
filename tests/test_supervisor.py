@@ -1484,6 +1484,47 @@ class SubagentWitnessTest(unittest.TestCase):
                          "a subagent's calls owe receipts too")
         self.assertEqual(judged["state"], "ENDED-CLEAN")
 
+    def closed(self, folder):
+        os.chmod(folder, 0)
+        self.addCleanup(os.chmod, folder, 0o755)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_a_closed_folder_in_the_witness_is_named_not_read_as_empty(self):
+        # Walk 5: Path.glob read a closed transcript folder as empty, so
+        # its sessions read UNWITNESSED with no reason, where a deleted
+        # witness is named.
+        make_chain(self.root / "alpha" / "receipts", "sess-shut", entries=1)
+        transcript = write_transcript(
+            self.witness, self.root / "alpha", "sess-shut",
+            event_times=[ago(6000), ago(5990), ago(5980)])
+        self.closed(transcript.parent)
+
+        result = self.scan()
+
+        watch = json.loads(result.stdout)["completeness"]
+        self.assertEqual(self.states(result)["sess-shut"]["state"],
+                         "UNWITNESSED")
+        self.assertIn("cannot be listed", watch["note"])
+        self.assertIn(transcript.parent.as_posix(), watch["note"])
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_a_closed_subagents_folder_is_named_and_the_parent_judged(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-hid", entries=5)
+        write_transcript(self.witness, self.root / "alpha", "sess-hid",
+                         event_times=[ago(6000), ago(5990)], tool="Agent")
+        sidechain = write_subagent_transcript(
+            self.witness, self.root / "alpha", "sess-hid", "aaa",
+            event_times=[ago(5980), ago(5970), ago(5960)], tool="Read")
+        self.closed(sidechain.parent)
+
+        judged = self.states(self.scan())["sess-hid"]
+
+        self.assertEqual(judged["tools"], 2, "the parent is still judged")
+        self.assertIn("cannot be listed", judged["note"])
+        self.assertIn(sidechain.parent.as_posix(), judged["note"])
+
     def test_several_subagents_are_all_read(self):
         make_chain(self.root / "alpha" / "receipts", "sess-fanout", entries=7)
         write_transcript(self.witness, self.root / "alpha", "sess-fanout",
