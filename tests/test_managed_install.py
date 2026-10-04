@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -464,6 +465,35 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         self.assertIn("--publish", report["published"]["note"])
         self.assertNotEqual(report["recorder"]["state"], "unwired")
         self.assertEqual(Path(report["recorder"]["path"]), LOXODONTA)
+
+    def test_a_managed_uninstall_is_dated_when_it_happened(self):
+        # The supervisor dates a change of coverage by the mtime of what
+        # was wired (ADR-0016). The managed file is gone after its
+        # uninstall, and the operator's file was last written when the
+        # hook moved out of it: dated by that, every session between the
+        # move and the uninstall would be judged as owed nothing.
+        self.install()
+        self.install("--managed")
+        long_ago = time.time() - 5 * 86400
+        os.utime(self.operator_file, (long_ago, long_ago))
+        self.scan()
+        done = self.run_tool("uninstall-hook", "--managed")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+        report = json.loads(self.scan().stdout)
+
+        last = report["completeness"]["calibration"]["epochs"][-1]
+        self.assertEqual(last["matchers"], [])
+        self.assertGreater(last["since"], ago(3600))
+
+    def test_a_folder_where_the_managed_file_belongs_is_named(self):
+        # #405's rule for the operator's file, held for the second home.
+        self.managed_file.mkdir(parents=True)
+
+        report = json.loads(self.scan().stdout)
+
+        self.assertIn(self.managed_file.as_posix(), report["settings_note"])
+        self.assertIn("it is a folder", report["settings_note"])
 
     def test_no_other_file_in_the_managed_folder_is_read(self):
         # managed-settings.json is an administrator's, and a sibling in

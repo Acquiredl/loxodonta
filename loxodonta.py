@@ -5666,16 +5666,17 @@ def refuse_to_touch(path, why):
     return EX_NOINPUT
 
 
-def replace_file(path, data, mode_of=None):
+def replace_file(path, data, mode_of=None, mode=None):
     """Write `data` to `path` whole or not at all (#293): into a
     temporary file in the same folder, flushed to disk, then moved over
     the original with os.replace, which is atomic within one filesystem
     and a same-folder file is always on the original's. A crash or a
     full disk mid-write leaves the old file, never half a new one. The
-    new file keeps the permission bits of `mode_of` (default `path`)
-    when that exists. A `path` that is a symbolic link (a dotfile
-    manager's) is written through: the temporary file and the replace
-    land beside the file it names, and the link stays a link."""
+    new file takes the permission bits `mode` when one is given, else
+    keeps those of `mode_of` (default `path`) when that exists. A `path`
+    that is a symbolic link (a dotfile manager's) is written through:
+    the temporary file and the replace land beside the file it names,
+    and the link stays a link."""
     path = os.path.realpath(path)
     folder = os.path.dirname(path)
     os.makedirs(folder, exist_ok=True)
@@ -5687,7 +5688,8 @@ def replace_file(path, data, mode_of=None):
             f.flush()
             os.fsync(f.fileno())
         try:
-            os.chmod(temp, os.stat(mode_of or path).st_mode & 0o7777)
+            os.chmod(temp, mode if mode is not None
+                     else os.stat(mode_of or path).st_mode & 0o7777)
         except OSError:
             # A new file keeps mkstemp's owner-only bits, deliberately:
             # the SessionEnd command can carry a publish URL, and the
@@ -6034,10 +6036,11 @@ def block_is_ours(block, names=RECORDER_NAMES):
                for h in block.get("hooks", []))
 
 
-def write_hooks_file(path, settings):
+def write_hooks_file(path, settings, mode=None):
     """The settings as the installer has always written them (two-space
     JSON, LF endings, a final newline), replaced whole (#293)."""
-    replace_file(path, (json.dumps(settings, indent=2) + "\n").encode("utf-8"))
+    replace_file(path, (json.dumps(settings, indent=2) + "\n").encode("utf-8"),
+                 mode=mode)
 
 
 def codex_hooks_path():
@@ -6150,6 +6153,118 @@ def install_codex_hooks(publish=None, profile="local",
     return 0
 
 
+# --- The managed install (ADR-0040) -------------------------------------------
+# The operator's settings file is in the writer's reach, and so is the
+# command line: a run started with `disableAllHooks` in a `--settings`
+# file runs no hook wired there, and writes no receipt (#259). The
+# harness also reads managed settings, from a folder an administrator
+# writes, which its documentation ranks above the command line, and
+# merges in every file of a `managed-settings.d` folder beside them.
+# `install-hook --managed` writes one file of the recorder's own there
+# and opens no other. The hook then has one home, which is why a plain
+# install refuses while that file holds the entries, and why every
+# reader of what is wired reads both.
+
+
+def harness_managed_folder():
+    """The harness's managed settings folder, as its documentation names
+    it for each platform. On Windows the literal, never %ProgramFiles%:
+    an environment variable is in the writer's reach, and a 32-bit
+    Python is handed another folder under that name."""
+    return {"win32": "C:\\Program Files\\ClaudeCode",
+            "darwin": "/Library/Application Support/ClaudeCode",
+            }.get(sys.platform, "/etc/claude-code")
+
+
+def managed_hooks_path():
+    """The recorder's own file among the harness's managed settings
+    (ADR-0040 ruling 1): the one file there a managed install writes,
+    and the only one any reader here opens. LOXODONTA_MANAGED_DIR names
+    a folder to stand for the harness's, which is how the suite reaches
+    one it may write. It moves where these tools read and write, never
+    where the harness reads, and `install-hook --managed` says so
+    whenever it is set."""
+    folder = (os.environ.get("LOXODONTA_MANAGED_DIR")
+              or harness_managed_folder())
+    return os.path.join(folder, "managed-settings.d", "loxodonta.json")
+
+
+def managed_dir_said(managed):
+    """The warning a managed install or uninstall ends on when
+    LOXODONTA_MANAGED_DIR is set: a hook wired in a folder the harness
+    does not read records nothing, and nothing else here would say so."""
+    if os.environ.get("LOXODONTA_MANAGED_DIR"):
+        print("warning: LOXODONTA_MANAGED_DIR is set, so the managed file "
+              f"is {managed}. The harness reads its managed settings from "
+              f"{harness_managed_folder()} whatever this variable says: "
+              "unless it names that folder, no session runs a hook from "
+              "this file.", file=sys.stderr)
+
+
+def read_hooks(path):
+    """The settings in a hooks file, or None: no file there, nothing
+    that reads as one, or JSON of a shape the installer cannot walk.
+    For a file that is read to learn what is wired and is not about to
+    be merged into; `load_settings` is the reader that refuses."""
+    try:
+        with io.TextIOWrapper(open_regular(path), encoding="utf-8") as f:
+            settings = json.load(f)
+    except (OSError, ValueError, RecursionError):
+        return None
+    return None if settings_shape_problem(settings) else settings
+
+
+def our_hooks(settings):
+    """The installer's entries in `settings` and nothing else, as new
+    settings holding `hooks` alone (ADR-0040 ruling 5): each wired
+    event's blocks cut down to the entries the installer wrote, a
+    block's own keys (its matcher) kept, and an event or a block with
+    none of them left out. `settings` may be None, which holds none."""
+    hooks = {}
+    for event in HOOK_EVENTS:
+        blocks = []
+        for block in (settings or {}).get("hooks", {}).get(event, []):
+            entries = [dict(hook) for hook in block.get("hooks", [])
+                       if owned_script(hook.get("command"),
+                                       RECORDER_NAMES + DIGEST_NAMES)]
+            if entries:
+                blocks.append({**block, "hooks": entries})
+        if blocks:
+            hooks[event] = blocks
+    return {"hooks": hooks}
+
+
+def write_managed_hooks(path, settings):
+    """Write the managed file whole, making the folders above it that
+    are absent, and return None; or return the OSError that refused it,
+    with nothing left behind: a folder made on the way is taken down
+    again, so a refused install has written nothing anywhere (ADR-0040
+    ruling 2). Whether this account may write there is found by trying,
+    and nothing here asks for rights it was not started with. The file,
+    and each folder made, is left readable by every account: the harness
+    that must read it runs as the operator, not as whoever installed,
+    and mkstemp's owner-only bits would close it to every other
+    account."""
+    made, folder = [], os.path.dirname(os.path.abspath(path))
+    # A drive that is not there is its own parent, and is never made.
+    while not os.path.lexists(folder) and os.path.dirname(folder) != folder:
+        made.append(folder)
+        folder = os.path.dirname(folder)
+    try:
+        for folder in reversed(made):
+            os.mkdir(folder)
+            os.chmod(folder, 0o755)
+        write_hooks_file(path, settings, mode=0o644)
+    except OSError as error:
+        for folder in made:
+            try:
+                os.rmdir(folder)
+            except OSError:
+                pass
+        return error
+    return None
+
+
 # --- The coverage marker ------------------------------------------------------
 # ADR-0030. The recorder is the only program that knows the moment
 # coverage begins, because it is the one that wires it. Without this the
@@ -6174,7 +6289,7 @@ def coverage_path():
 
 
 def record_coverage(harness, matchers, profile, remote=None,
-                    authority=None, failures=None):
+                    authority=None, failures=None, level=None):
     """Append what this install just wired, unless it wired what the last
     one did (the `heal()` rule, so re-running never grows the file,
     ADR-0030 ruling 1). Scoped by harness: `--codex` wires `.*` into
@@ -6183,17 +6298,22 @@ def record_coverage(harness, matchers, profile, remote=None,
     profile (ADR-0031 ruling 1), so its change is as visible as a
     matcher's; `remote`, where publishing goes (at `full` the one URL,
     under `custom` the chain's URL, else the head's), which `serve`
-    follows only at `full` (#246); `authority` (ADR-0032); and
+    follows only at `full` (#246); `authority` (ADR-0032);
     `failures`, the matchers the failed-call event was wired on (#239),
     so the witness owes a failed command a receipt only from an install
-    that wired it (an epoch without it wired none). The marker never
-    travels (the export and the package leave it out), so unlike the
-    publish memo it may hold a URL. Every failure is a silent skip: a
-    bookkeeping file is no reason to refuse an install. A folder, a pipe
-    or a device at the marker's name is skipped too, never waited on,
-    but not silently, since it is something put there (#405): returned
-    in words for the installer to name beside the hook it wired.
-    Returns (whether an entry was appended, those words or None)."""
+    that wired it (an epoch without it wired none); and `level`, which
+    home the hook was wired in (ADR-0040 ruling 6): "managed" from a
+    managed install, and absent for the operator's own settings file,
+    as in every entry written before there were two homes, so moving
+    the hook appends an entry whether or not a matcher changed. The
+    marker never travels (the export and the package leave it out), so
+    unlike the publish memo it may hold a URL. Every failure is a silent
+    skip: a bookkeeping file is no reason to refuse an install. A
+    folder, a pipe or a device at the marker's name is skipped too,
+    never waited on, but not silently, since it is something put there
+    (#405): returned in words for the installer to name beside the hook
+    it wired. Returns (whether an entry was appended, those words or
+    None)."""
     entry = {"since": now_ts(), "matchers": list(matchers)}
     if failures:
         entry["failures"] = list(failures)
@@ -6202,6 +6322,8 @@ def record_coverage(harness, matchers, profile, remote=None,
         entry["remote"] = remote
     if authority:
         entry["authority"] = authority
+    if level:
+        entry["level"] = level
     marker = coverage_path()
     try:
         os.makedirs(store_home(), exist_ok=True)
@@ -6224,7 +6346,8 @@ def record_coverage(harness, matchers, profile, remote=None,
                 and last.get("failures") == entry.get("failures") \
                 and last.get("profile") == profile \
                 and last.get("remote") == entry.get("remote") \
-                and last.get("authority") == entry.get("authority"):
+                and last.get("authority") == entry.get("authority") \
+                and last.get("level") == entry.get("level"):
             return False, None
         body = json.dumps({"purpose": COVERAGE_PURPOSE,
                            "epochs": epochs + [entry]}, indent=2)
@@ -6251,50 +6374,26 @@ def coverage_said(marked, unmarked):
               "written, and the hook is wired without it", file=sys.stderr)
 
 
-def cmd_install_hook(args):
-    """Merge the hooks into the user-level Claude Code settings,
-    idempotently and without clobbering anything already there. Each
-    hook is checked separately, so an older install gains what it is
-    missing on re-run. The commands carry no shell expansion — both
-    tools read CLAUDE_PROJECT_DIR themselves — and the digest is
-    fail-open: a short timeout, and a chainless repo renders nothing.
-    Restart open sessions afterwards: hooks load at start. With
-    --codex, the Codex half runs instead (install_codex_hooks)."""
-    if args.codex:
-        if args.anchor_at_session_end and args.profile == "custom":
-            # Codex caps a SessionEnd hook at three seconds, too short
-            # for a calendar round trip with any margin (ADR-0024). The
-            # raw flag asked for it by name and is refused; `--profile
-            # timestamped` asked for the tier, which on Codex is the
-            # profile written down and the supervisor anchoring on its
-            # cadence, so it goes through with the anchor left unwired.
-            print("error: --anchor-at-session-end is not wired for Codex: "
-                  "its SessionEnd hook is capped at three seconds, too "
-                  "short to reach a calendar with margin. Use the "
-                  "supervisor's --anchor-every instead.", file=sys.stderr)
-            return EX_USAGE
-        # All three quick steps are wired: #183 measured one POST
-        # inside the same three seconds for the head, and #251 measured
-        # the stamp's (docs/HOOK.md, under Codex CLI). The hook gives
-        # the three half the cap between them, one window and not one
-        # each (#262), the stamp taking what the publishes leave. The
-        # chain resumes from its cursor, so a short clock costs
-        # batches, never entries.
-        return install_codex_hooks(args.publish_head, args.profile,
-                                   args.publish_chain, args.authority)
+def operator_settings_path():
+    """The operator's own Claude Code settings file, at user level: the
+    home of a plain install."""
+    return os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+
+
+def wire_hooks(settings, args):
+    """Merge the Claude Code hooks into `settings`, idempotently and
+    without clobbering anything already there, in whichever home those
+    settings are read from (ADR-0040). Each hook is checked separately,
+    so an older install gains what it is missing on re-run. The
+    commands carry no shell expansion — both tools read
+    CLAUDE_PROJECT_DIR themselves — and the digest is fail-open: a
+    short timeout, and a chainless repo renders nothing. Returns (each
+    thing wired, in words; how many commands were healed; the matchers
+    the recorder is wired on for a completed call; and for a failed
+    one)."""
     supervisor = supervisor_path()
     record = recorder_command()
     digest = digest_command()
-    path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
-
-    settings, refused = load_settings(path)
-    if refused:
-        return refused
-    if args.publish_chain:
-        # Said before anything is written (ADR-0031): what leaves, and
-        # that action lines are command lines.
-        print(chain_notice(args.publish_chain, args.profile))
-
     hooks = settings.setdefault("hooks", {})
     installed = []
     heal, ours = heal_hooks, block_is_ours  # shared with the Codex half
@@ -6396,14 +6495,78 @@ def cmd_install_hook(args):
               "wired without the session-start digest; put supervisor.py "
               "next to loxodonta.py and re-run to add it")
 
+    return (installed, healed,
+            [block.get("matcher", "*") for block in post if ours(block)],
+            [block.get("matcher", "*") for block in failed if ours(block)])
+
+
+def installed_said(path, installed, healed, backup=""):
+    """The installer's word on a hooks file it has just written."""
+    print(f"installed in {path}{backup}")
+    for line in installed:
+        print(f"  {line}")
+    if healed:
+        print(f"  healed {healed} hook command(s) whose script had "
+              "moved — now pointing at this install")
+
+
+def cmd_install_hook(args):
+    """Wire the hooks into the user-level Claude Code settings
+    (wire_hooks). Restart open sessions afterwards: hooks load at start.
+    With --codex, the Codex half runs instead (install_codex_hooks);
+    with --managed, the managed half (install_managed_hooks). While the
+    managed file holds the entries a plain install refuses, since the
+    hook has one home (ADR-0040 ruling 3): 73, as `init` gives for a log
+    that already exists (ADR-0037)."""
+    if args.codex:
+        if args.anchor_at_session_end and args.profile == "custom":
+            # Codex caps a SessionEnd hook at three seconds, too short
+            # for a calendar round trip with any margin (ADR-0024). The
+            # raw flag asked for it by name and is refused; `--profile
+            # timestamped` asked for the tier, which on Codex is the
+            # profile written down and the supervisor anchoring on its
+            # cadence, so it goes through with the anchor left unwired.
+            print("error: --anchor-at-session-end is not wired for Codex: "
+                  "its SessionEnd hook is capped at three seconds, too "
+                  "short to reach a calendar with margin. Use the "
+                  "supervisor's --anchor-every instead.", file=sys.stderr)
+            return EX_USAGE
+        # All three quick steps are wired: #183 measured one POST
+        # inside the same three seconds for the head, and #251 measured
+        # the stamp's (docs/HOOK.md, under Codex CLI). The hook gives
+        # the three half the cap between them, one window and not one
+        # each (#262), the stamp taking what the publishes leave. The
+        # chain resumes from its cursor, so a short clock costs
+        # batches, never entries.
+        return install_codex_hooks(args.publish_head, args.profile,
+                                   args.publish_chain, args.authority)
+    if args.managed:
+        return install_managed_hooks(args)
+    path = operator_settings_path()
+    managed = managed_hooks_path()
+    if our_hooks(read_hooks(managed))["hooks"]:
+        print(f"refusing: the hook is wired in {managed}, a managed "
+              "install, and it has one home (ADR-0040). To change its "
+              "profile or its flags, run `install-hook --managed` again "
+              "from an account that may write that folder. To wire it in "
+              f"{path} instead, run `uninstall-hook --managed` first. "
+              "Nothing was written.", file=sys.stderr)
+        return EX_CANTCREAT
+
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
+    if args.publish_chain:
+        # Said before anything is written (ADR-0031): what leaves, and
+        # that action lines are command lines.
+        print(chain_notice(args.publish_chain, args.profile))
+    installed, healed, wired, failures = wire_hooks(settings, args)
+
     # ADR-0030: as on the Codex half, before the early return.
-    wired = [block.get("matcher", "*") for block in post if ours(block)]
     marked, unmarked = record_coverage(
         "claude-code", wired, args.profile,
         remote=args.publish_chain or args.publish_head,
-        authority=args.authority,
-        failures=[block.get("matcher", "*") for block in failed
-                  if ours(block)])
+        authority=args.authority, failures=failures)
     tier = profile_notice(args.profile, wired)
     if not installed and not healed:
         print(f"already installed in {path}")
@@ -6416,16 +6579,106 @@ def cmd_install_hook(args):
     if backup is None:
         return EX_NOINPUT
     write_hooks_file(path, settings)
-    print(f"installed in {path}{backup}")
-    for line in installed:
-        print(f"  {line}")
-    if healed:
-        print(f"  healed {healed} hook command(s) whose script had "
-              "moved — now pointing at this install")
+    installed_said(path, installed, healed, backup)
     coverage_said(marked, unmarked)
     print("every NEW Claude Code session on this machine now leaves a chain")
     print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
     print("drawer per project. Restart open sessions.")
+    if tier:
+        print(tier)
+    return 0
+
+
+def install_managed_hooks(args):
+    """The managed half of install-hook (ADR-0040): the same entries, in
+    the recorder's own file among the harness's managed settings, and
+    then out of the operator's file, so the hook has one home. The
+    entries start from what is already wired, in the managed file or
+    else in the operator's, so a matcher the operator narrowed moves
+    with them as a plain re-run would have left it.
+
+    Everything is read before anything is written, and the managed file
+    is written first: a refused write leaves the hook where it was, and
+    a failure after it leaves two homes, never none (ruling 3). The
+    coverage marker follows the managed file, so a refused install
+    records nothing."""
+    path = operator_settings_path()
+    managed = managed_hooks_path()
+    settings, refused = load_settings(path)
+    if refused:
+        return refused
+    if args.publish_chain:
+        print(chain_notice(args.publish_chain, args.profile))
+    existing = read_hooks(managed)
+    target = our_hooks(existing)
+    if not target["hooks"]:
+        target = our_hooks(settings)
+    installed, healed, wired, failures = wire_hooks(target, args)
+
+    changed = target != existing
+    if changed:
+        refusal = write_managed_hooks(managed, target)
+        if refusal:
+            print(f"cannot write {managed}: "
+                  f"{refusal.strerror or refusal}. Nothing was written, "
+                  "there or anywhere else, and the hook is wired where it "
+                  "was. A managed install writes the harness's managed "
+                  "settings folder and never raises its own rights: run "
+                  "it again from an account that may write that folder "
+                  "(an administrator's shell, or sudo).", file=sys.stderr)
+            return EX_CANTCREAT
+        # Every entry the file now holds, not only what this run wired:
+        # entries that moved here from the operator's file were wired
+        # by an earlier run, and this is the one place that lists them.
+        held = []
+        for event in HOOK_EVENTS:
+            held += ([line for line in installed
+                      if line.startswith(event + ":")]
+                     or [f"{event}: {hook['command']}"
+                         for block in target["hooks"].get(event, [])
+                         for hook in block["hooks"]])
+        installed_said(managed, held, healed)
+        if args.publish_head or args.publish_chain:
+            print(f"note: every account on this machine can read {managed}, "
+                  "and the URL on its SessionEnd command with it. A URL is "
+                  "where a remote's credential rides (ADR-0025).")
+    marked, unmarked = record_coverage(
+        "claude-code", wired, args.profile,
+        remote=args.publish_chain or args.publish_head,
+        authority=args.authority, failures=failures, level="managed")
+
+    removed = remove_our_hooks(settings.get("hooks", {}), HOOK_EVENTS,
+                               RECORDER_NAMES + DIGEST_NAMES)
+    if not changed:
+        print(f"already installed in {managed}"
+              + ("" if removed else ": nothing changed"))
+    if removed:
+        why, backup = None, ""
+        try:
+            backup = backup_settings(path)
+            if backup is not None:
+                write_hooks_file(path, settings)
+        except OSError as error:
+            why = error.strerror or str(error)
+        if why or backup is None:
+            print(f"the hook is wired in {managed}, and its entries could "
+                  f"not be taken out of {path}" + (f": {why}" if why else "")
+                  + ". It is wired in both until they are: run "
+                  "`install-hook --managed` again once that file can be "
+                  "written.", file=sys.stderr)
+            return EX_NOINPUT if backup is None else EX_CANTCREAT
+        print(f"  removed from {path}: "
+              f"{', '.join(sorted(set(removed)))}{backup}")
+    coverage_said(marked, unmarked)
+    if removed or existing is None:
+        print("the hook has one home now. By the harness's documentation, a")
+        print("run cannot switch it off from the command line or from a")
+        print("settings file the operator owns; what a managed install claims")
+        print("and what it does not is in docs/HOOK.md. Restart open sessions.")
+    elif changed:
+        print("Restart open sessions: hooks load at start.")
+    managed_dir_said(managed)
+    tier = profile_notice(args.profile, wired)
     if tier:
         print(tier)
     return 0
@@ -6453,32 +6706,74 @@ def remove_our_hooks(hooks, events, names):
     return removed
 
 
+def uninstall_managed_hooks():
+    """The managed half of uninstall-hook (ADR-0040 ruling 4): delete
+    the recorder's one file and nothing else in its folder. Nothing is
+    put back in the operator's file, and no coverage marker is written
+    (ADR-0030 ruling 2). A delete the system refuses names the file and
+    exits 73, the number a refused managed install gives: the same
+    missing right, met from the other side."""
+    managed = managed_hooks_path()
+    path = operator_settings_path()
+    if not os.path.lexists(managed):
+        print(f"nothing installed: no managed hook file at {managed}")
+        managed_dir_said(managed)
+        return 0
+    try:
+        os.unlink(managed)
+    except OSError as error:
+        print(f"cannot delete {managed}: {error.strerror or error}. "
+              "Nothing was changed, and a hook wired there still is. Run "
+              "`uninstall-hook --managed` again from an account that may "
+              "write that folder (an administrator's shell, or sudo).",
+              file=sys.stderr)
+        return EX_CANTCREAT
+    print(f"removed {managed}")
+    if our_hooks(read_hooks(path))["hooks"]:
+        print(f"the hook is still wired in {path}: `uninstall-hook` "
+              "removes it there.")
+    else:
+        print(f"nothing was put back in {path}. `install-hook` wires the "
+              "hook there again.")
+    managed_dir_said(managed)
+    return 0
+
+
 def cmd_uninstall_hook(args):
     """Remove exactly our hooks — recorder (either era's name) and
     digest — from the user-level settings, leaving everything else
     untouched. The symmetric half of install-hook; --codex mirrors
-    the Codex half."""
-    path = (codex_hooks_path() if args.codex
-            else os.path.join(os.path.expanduser("~"), ".claude",
-                              "settings.json"))
+    the Codex half, and --managed the managed one. A plain uninstall
+    never touches the managed file: while that holds the entries, it
+    says where they are and what removes them."""
+    if args.managed:
+        return uninstall_managed_hooks()
+    path = codex_hooks_path() if args.codex else operator_settings_path()
+    managed = managed_hooks_path()
+    elsewhere = (None if args.codex
+                 or not our_hooks(read_hooks(managed))["hooks"] else
+                 f"the hook is wired in {managed}, a managed install, "
+                 "which this did not touch: `uninstall-hook --managed` "
+                 "removes it, run from an account that may write that "
+                 "folder.")
     settings, refused = load_settings(path)
     if refused:
         return refused
-    if not settings:
-        print(f"nothing installed: no hooks file at {path}")
-        return 0
-
     removed = remove_our_hooks(settings.get("hooks", {}), HOOK_EVENTS,
                                RECORDER_NAMES + DIGEST_NAMES)
-    if not removed:
+    if not settings:
+        print(f"nothing installed: no hooks file at {path}")
+    elif not removed:
         print(f"nothing of ours found in {path}")
-        return 0
-
-    backup = backup_settings(path)
-    if backup is None:
-        return EX_NOINPUT
-    write_hooks_file(path, settings)
-    print(f"removed from {path}: {', '.join(sorted(set(removed)))}{backup}")
+    else:
+        backup = backup_settings(path)
+        if backup is None:
+            return EX_NOINPUT
+        write_hooks_file(path, settings)
+        print(f"removed from {path}: "
+              f"{', '.join(sorted(set(removed)))}{backup}")
+    if elsewhere:
+        print(elsewhere)
     return 0
 
 
@@ -6625,6 +6920,16 @@ def main(argv=None):
         help="wire Codex CLI instead: PostToolUse, SessionEnd, and the "
              "SessionStart digest into $CODEX_HOME/hooks.json (ADR-0020)")
     install_parser.add_argument(
+        "--managed", action="store_true",
+        help="wire the same hooks in a file of the recorder's own among "
+             "the harness's managed settings, managed-settings.d/"
+             "loxodonta.json, which a run cannot switch off from its "
+             "command line, and take them out of the user settings, so "
+             "the hook has one home (ADR-0040). Run it from an account "
+             "that may write that folder (an administrator's shell, or "
+             "sudo): without the right it writes nothing and exits 73, "
+             "and it never raises its own rights. Claude Code only")
+    install_parser.add_argument(
         "--profile", choices=PROFILES, default=None,
         help="what leaves the machine, in one word (ADR-0031): local "
              "(nothing; the default), timestamped (a 32-byte digest of "
@@ -6683,6 +6988,11 @@ def main(argv=None):
     uninstall_parser.add_argument(
         "--codex", action="store_true",
         help="remove the Codex hooks instead")
+    uninstall_parser.add_argument(
+        "--managed", action="store_true",
+        help="delete the file `install-hook --managed` wrote, and nothing "
+             "else in that folder; nothing is put back in the user "
+             "settings (ADR-0040). Needs the same right the install did")
     uninstall_parser.set_defaults(func=cmd_uninstall_hook)
 
     if argv is None:
@@ -6711,6 +7021,14 @@ def main(argv=None):
                 args.publish_chain, args.authority, args.remote)
         except ValueError as e:
             install_parser.error(str(e))
+    for verb, verb_parser in (("install-hook", install_parser),
+                              ("uninstall-hook", uninstall_parser)):
+        if args.command == verb and args.managed and args.codex:
+            # Codex has the same tier and waits for its vertical
+            # (ADR-0040 ruling 8).
+            verb_parser.error("--managed is Claude Code's alone and does "
+                              "not go with --codex: Codex has no managed "
+                              "install here yet (ADR-0040)")
     return args.func(args)
 
 
