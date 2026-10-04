@@ -1484,6 +1484,51 @@ class SubagentWitnessTest(unittest.TestCase):
                          "a subagent's calls owe receipts too")
         self.assertEqual(judged["state"], "ENDED-CLEAN")
 
+    def closed(self, folder):
+        os.chmod(folder, 0)
+        self.addCleanup(os.chmod, folder, 0o755)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_a_closed_folder_in_the_witness_is_named_not_read_as_empty(self):
+        # Walk 5: Path.glob read a closed transcript folder as empty, so
+        # its sessions read UNWITNESSED with no reason, where a deleted
+        # witness is named.
+        make_chain(self.root / "alpha" / "receipts", "sess-shut", entries=1)
+        transcript = write_transcript(
+            self.witness, self.root / "alpha", "sess-shut",
+            event_times=[ago(6000), ago(5990), ago(5980)])
+        self.closed(transcript.parent)
+
+        result = self.scan()
+
+        watch = json.loads(result.stdout)["completeness"]
+        self.assertEqual(result.returncode, 0,
+                         "a note, as for a deleted witness, never the exit")
+        self.assertEqual(self.states(result)["sess-shut"]["state"],
+                         "UNWITNESSED")
+        self.assertIn("cannot be listed", watch["note"])
+        self.assertIn(transcript.parent.as_posix(), watch["note"])
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_a_closed_subagents_folder_is_named_and_the_parent_judged(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-hid", entries=5)
+        write_transcript(self.witness, self.root / "alpha", "sess-hid",
+                         event_times=[ago(6000), ago(5990)], tool="Agent")
+        sidechain = write_subagent_transcript(
+            self.witness, self.root / "alpha", "sess-hid", "aaa",
+            event_times=[ago(5980), ago(5970), ago(5960)], tool="Read")
+        self.closed(sidechain.parent)
+
+        result = self.scan()
+
+        judged = self.states(result)["sess-hid"]
+        self.assertEqual(result.returncode, 0, "a note, never the exit")
+        self.assertEqual(judged["tools"], 2, "the parent is still judged")
+        self.assertIn("cannot be listed", judged["note"])
+        self.assertIn(sidechain.parent.as_posix(), judged["note"])
+
     def test_several_subagents_are_all_read(self):
         make_chain(self.root / "alpha" / "receipts", "sess-fanout", entries=7)
         write_transcript(self.witness, self.root / "alpha", "sess-fanout",
@@ -1749,6 +1794,23 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(row["deficit"], 0)
         self.assertIn("store", report["completeness"]["note"])
         self.assertIn("no chains", report["note"])
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_a_closed_witness_folder_leaves_the_elsewhere_note_standing(self):
+        # #457 review: the two notes are joined, neither hides the other.
+        write_transcript(self.witness, self.root / "alpha", "sess-live",
+                         event_times=[ago(600), ago(400), ago(120)])
+        shut = write_transcript(self.witness, self.root / "beta", "sess-x",
+                                event_times=[ago(600)]).parent
+        os.chmod(shut, 0)
+        self.addCleanup(os.chmod, shut, 0o755)
+
+        result = self.scan(env=self.store_holding("sess-live"))
+
+        note = json.loads(result.stdout)["completeness"]["note"]
+        self.assertIn("cannot be listed", note)
+        self.assertIn("keep their receipts in the store", note)
 
     def test_a_session_that_never_recorded_anywhere_still_alarms(self):
         # The other half, and the one the guard must not swallow: no

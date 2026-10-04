@@ -903,6 +903,58 @@ class BlindBaselineTest(LegacyRoot):
         self.assertIn("acknowledge --baseline", said)
         self.assertEqual(self.baseline.read_bytes(), before)
 
+    # --- calibrate, the memory's other writer --------------------------------
+
+    def calibrate(self, expect):
+        result = self.supervisor("calibrate", "--since", "2020-01-01",
+                                 "--matchers", "Bash",
+                                 "--root", str(self.root))
+        self.assertEqual(result.returncode, expect,
+                         result.stdout + result.stderr)
+        return result.stderr
+
+    def test_calibrate_leaves_a_blind_baseline_as_it_lies(self):
+        # Walk 5: calibrate kept a reader of its own, so `[]` ended it in
+        # a traceback and a row of the wrong shape was written back over
+        # the evidence.
+        self.look(0)
+        whole = json.loads(self.baseline.read_text(encoding="utf-8"))
+        wrong_row = json.loads(json.dumps(whole))
+        wrong_row["chains"][LOG]["n"] = True
+        for name, text in (("a list", "[]"), ("not JSON", "{not json"),
+                           ("a row of the wrong shape",
+                            json.dumps(wrong_row))):
+            with self.subTest(baseline=name):
+                self.baseline.write_text(text, encoding="utf-8")
+                before = self.baseline.read_bytes()
+
+                said = self.calibrate(64)
+
+                self.assertIn("acknowledge --baseline", said)
+                self.assertEqual(self.baseline.read_bytes(), before)
+
+    def test_calibrate_beside_a_day_book_points_at_acknowledge(self):
+        # The old advice, scan once, cannot work: the scan stays blind.
+        self.look(0)
+        self.baseline.unlink()
+
+        said = self.calibrate(64)
+
+        self.assertIn("acknowledge --baseline", said)
+        self.assertNotIn("supervisor scan", said)
+        self.assertFalse(os.path.lexists(self.baseline))
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not write in")
+    def test_calibrate_answers_73_when_the_baseline_cannot_be_written(self):
+        self.look(0)
+        os.chmod(self.root, 0o555)
+        self.addCleanup(os.chmod, self.root, 0o755)
+
+        said = self.calibrate(73)
+
+        self.assertIn("could not be written", said)
+
 
 class RewritingHandler(BaseHTTPRequestHandler):
     """A remote that, while the scan waits on it, has another writer
