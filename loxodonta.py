@@ -6182,23 +6182,78 @@ def managed_hooks_path():
     and the only one any reader here opens. LOXODONTA_MANAGED_DIR names
     a folder to stand for the harness's, which is how the suite reaches
     one it may write. It moves where these tools read and write, never
-    where the harness reads, and `install-hook --managed` says so
-    whenever it is set."""
+    where the harness reads, and every installer verb that reads it
+    warns when it is set."""
     folder = (os.environ.get("LOXODONTA_MANAGED_DIR")
               or harness_managed_folder())
     return os.path.join(folder, "managed-settings.d", "loxodonta.json")
 
 
-def managed_dir_said(managed):
-    """The warning a managed install or uninstall ends on when
-    LOXODONTA_MANAGED_DIR is set: a hook wired in a folder the harness
-    does not read records nothing, and nothing else here would say so."""
+def managed_dir_said():
+    """The warning every installer verb that reads LOXODONTA_MANAGED_DIR
+    opens on when it is set, a plain install and a refusal included: a
+    hook wired in a folder the harness does not read records nothing,
+    a plain install reads that folder to decide whether to refuse, and
+    nothing else here would say which folder was read."""
     if os.environ.get("LOXODONTA_MANAGED_DIR"):
         print("warning: LOXODONTA_MANAGED_DIR is set, so the managed file "
-              f"is {managed}. The harness reads its managed settings from "
-              f"{harness_managed_folder()} whatever this variable says: "
-              "unless it names that folder, no session runs a hook from "
-              "this file.", file=sys.stderr)
+              f"is {managed_hooks_path()}. The harness reads its managed "
+              f"settings from {harness_managed_folder()} whatever this "
+              "variable says: unless it names that folder, no session "
+              "runs a hook from this file.", file=sys.stderr)
+
+
+def managed_way_out(managed, error):
+    """What to do about a write or a delete of the managed file that the
+    system refused, in a sentence, or "" when the reason given says it
+    all. An administrator's shell mends a missing right and nothing
+    else, so what stands at the path is asked first: a folder where the
+    file belongs, a file where a folder belongs, or on Windows a file
+    marked read-only, none of which more rights would move."""
+    place = os.path.abspath(managed)
+    if os.path.isdir(place) and not os.path.islink(place):
+        return ("There is a folder where that file belongs: see what it "
+                "holds, and move it away by hand.")
+    above = os.path.dirname(place)
+    while not os.path.lexists(above) and os.path.dirname(above) != above:
+        above = os.path.dirname(above)
+    if os.path.lexists(above) and not os.path.isdir(above):
+        return (f"{above} is a file, and a folder belongs there: move it "
+                "away by hand.")
+    # Only Windows refuses to replace or delete a read-only file; on
+    # POSIX that is the folder's to allow, and a missing right there.
+    if sys.platform == "win32" and os.path.isfile(place) \
+            and not os.stat(place).st_mode & stat.S_IWRITE:
+        return ("That file is marked read-only: clear the mark, then run "
+                "this again.")
+    if isinstance(error, PermissionError):
+        return ("Neither managed verb raises its own rights: run this "
+                "again from an account that may write that folder (an "
+                "administrator's shell, or sudo).")
+    return ""
+
+
+def owned_by_another(path):
+    """Whether the file at `path`, or the nearest folder above it that
+    exists, belongs to another account than the one this runs as: a
+    `sudo` that keeps HOME, as macOS's does, runs the installer as root
+    in the operator's home. A file root rewrote there would be root's,
+    and with mkstemp's owner-only bits closed to the operator's own
+    harness; and a root process writing in a folder the writer owns
+    follows whatever the writer planted in it (ADR-0002). So the managed
+    verbs write nothing under a home that is another's (ADR-0040 ruling
+    3: everything else is left as it lies). POSIX only: Windows has no
+    uid to ask, and an elevated shell there is the same account."""
+    if not hasattr(os, "geteuid"):
+        return False
+    folder = os.path.dirname(os.path.abspath(path))
+    while not os.path.lexists(folder) and os.path.dirname(folder) != folder:
+        folder = os.path.dirname(folder)
+    try:
+        return any(os.lstat(place).st_uid != os.geteuid()
+                   for place in (path, folder) if os.path.lexists(place))
+    except OSError:
+        return True
 
 
 def read_hooks(path):
@@ -6601,7 +6656,9 @@ def install_managed_hooks(args):
     is written first: a refused write leaves the hook where it was, and
     a failure after it leaves two homes, never none (ruling 3). The
     coverage marker follows the managed file, so a refused install
-    records nothing."""
+    records nothing. Run as another account than the one that owns the
+    home, it writes the managed file and nothing under that home, and
+    says the hook has two homes (owned_by_another)."""
     path = operator_settings_path()
     managed = managed_hooks_path()
     settings, refused = load_settings(path)
@@ -6622,10 +6679,8 @@ def install_managed_hooks(args):
             print(f"cannot write {managed}: "
                   f"{refusal.strerror or refusal}. Nothing was written, "
                   "there or anywhere else, and the hook is wired where it "
-                  "was. A managed install writes the harness's managed "
-                  "settings folder and never raises its own rights: run "
-                  "it again from an account that may write that folder "
-                  "(an administrator's shell, or sudo).", file=sys.stderr)
+                  f"was. {managed_way_out(managed, refusal)}".rstrip(),
+                  file=sys.stderr)
             return EX_CANTCREAT
         # Every entry the file now holds, not only what this run wired:
         # entries that moved here from the operator's file were wired
@@ -6642,13 +6697,20 @@ def install_managed_hooks(args):
             print(f"note: every account on this machine can read {managed}, "
                   "and the URL on its SessionEnd command with it. A URL is "
                   "where a remote's credential rides (ADR-0025).")
-    marked, unmarked = record_coverage(
+    # Run as another account than the home's owner, nothing under that
+    # home is written: no marker, no backup, no rewrite (owned_by_another).
+    # The managed file is written all the same, and the two homes said.
+    apart = owned_by_another(path)
+    unmarkable = apart or owned_by_another(coverage_path())
+    marked, unmarked = (False, None) if unmarkable else record_coverage(
         "claude-code", wired, args.profile,
         remote=args.publish_chain or args.publish_head,
         authority=args.authority, failures=failures, level="managed")
 
-    removed = remove_our_hooks(settings.get("hooks", {}), HOOK_EVENTS,
-                               RECORDER_NAMES + DIGEST_NAMES)
+    both = apart and bool(our_hooks(settings)["hooks"])
+    removed = [] if apart else remove_our_hooks(
+        settings.get("hooks", {}), HOOK_EVENTS,
+        RECORDER_NAMES + DIGEST_NAMES)
     if not changed:
         print(f"already installed in {managed}"
               + ("" if removed else ": nothing changed"))
@@ -6669,20 +6731,34 @@ def install_managed_hooks(args):
             return EX_NOINPUT if backup is None else EX_CANTCREAT
         print(f"  removed from {path}: "
               f"{', '.join(sorted(set(removed)))}{backup}")
-    elif changed:
-        # Named because it is this account's file: under sudo, or an
-        # administrator account of its own, not the operator's, whose
-        # entries a plain `uninstall-hook` of their own then removes.
+    elif changed and not apart:
+        # Named because it is this account's file: where sudo resets
+        # HOME, or under an administrator account of its own, that is
+        # not the operator's, whose entries a plain `uninstall-hook` of
+        # their own then removes.
         print(f"  nothing of the installer's was wired in {path}")
     coverage_said(marked, unmarked)
-    if removed or existing is None:
+    if apart:
+        print("note: this ran as another account than the one that owns "
+              f"the home of {path}. Nothing under that home was touched: "
+              "no backup, no rewrite of that file, and no coverage marker "
+              "was written.")
+    elif unmarkable:
+        print(f"note: the store at {store_home()} belongs to another "
+              "account than the one this ran as: no coverage marker was "
+              "written there.")
+    if both:
+        print(f"the hook is wired in {managed} and still in {path}: it has "
+              "two homes until `uninstall-hook`, run as the account that "
+              "owns that file, takes it out of there. Restart open "
+              "sessions.")
+    elif removed or existing is None:
         print("the hook has one home now. By the harness's documentation, a")
         print("run cannot switch it off from the command line or from a")
         print("settings file the operator owns; what a managed install claims")
         print("and what it does not is in docs/HOOK.md. Restart open sessions.")
     elif changed:
         print("Restart open sessions: hooks load at start.")
-    managed_dir_said(managed)
     tier = profile_notice(args.profile, wired)
     if tier:
         print(tier)
@@ -6722,15 +6798,13 @@ def uninstall_managed_hooks():
     path = operator_settings_path()
     if not os.path.lexists(managed):
         print(f"nothing installed: no managed hook file at {managed}")
-        managed_dir_said(managed)
         return 0
     try:
         os.unlink(managed)
     except OSError as error:
         print(f"cannot delete {managed}: {error.strerror or error}. "
-              "Nothing was changed, and a hook wired there still is. Run "
-              "`uninstall-hook --managed` again from an account that may "
-              "write that folder (an administrator's shell, or sudo).",
+              "Nothing was changed, and a hook wired there still is. "
+              f"{managed_way_out(managed, error)}".rstrip(),
               file=sys.stderr)
         return EX_CANTCREAT
     print(f"removed {managed}")
@@ -6740,7 +6814,6 @@ def uninstall_managed_hooks():
     else:
         print(f"nothing was put back in {path}. `install-hook` wires the "
               "hook there again.")
-    managed_dir_said(managed)
     return 0
 
 
@@ -6754,13 +6827,12 @@ def cmd_uninstall_hook(args):
     if args.managed:
         return uninstall_managed_hooks()
     path = codex_hooks_path() if args.codex else operator_settings_path()
-    managed = managed_hooks_path()
-    elsewhere = (None if args.codex
-                 or not our_hooks(read_hooks(managed))["hooks"] else
-                 f"the hook is wired in {managed}, a managed install, "
-                 "which this did not touch: `uninstall-hook --managed` "
-                 "removes it, run from an account that may write that "
-                 "folder.")
+    elsewhere = None
+    if not args.codex and our_hooks(read_hooks(managed_hooks_path()))["hooks"]:
+        elsewhere = (f"the hook is wired in {managed_hooks_path()}, a "
+                     "managed install, which this did not touch: "
+                     "`uninstall-hook --managed` removes it, run from an "
+                     "account that may write that folder.")
     settings, refused = load_settings(path)
     if refused:
         return refused
@@ -6928,9 +7000,10 @@ def main(argv=None):
         "--managed", action="store_true",
         help="wire the same hooks in a file of the recorder's own among "
              "the harness's managed settings, managed-settings.d/"
-             "loxodonta.json, which a run cannot switch off from its "
-             "command line, and take them out of the user settings, so "
-             "the hook has one home (ADR-0040). Run it from an account "
+             "loxodonta.json, which by the harness's documentation a run "
+             "cannot switch off from its command line, and take them out "
+             "of the user settings, so the hook has one home (ADR-0040; "
+             "documented, not yet measured). Run it from an account "
              "that may write that folder (an administrator's shell, or "
              "sudo): without the right it writes nothing and exits 73, "
              "and it never raises its own rights. Claude Code only")
@@ -7034,6 +7107,9 @@ def main(argv=None):
             verb_parser.error("--managed is Claude Code's alone and does "
                               "not go with --codex: Codex has no managed "
                               "install here yet (ADR-0040)")
+        if args.command == verb and not args.codex:
+            # Before the verb says anything, so a refusal carries it too.
+            managed_dir_said()
     return args.func(args)
 
 

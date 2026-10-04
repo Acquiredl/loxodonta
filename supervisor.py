@@ -2280,8 +2280,8 @@ def managed_hooks_path():
     and the only one any reader here opens. LOXODONTA_MANAGED_DIR names
     a folder to stand for the harness's, which is how the suite reaches
     one it may write. It moves where these tools read and write, never
-    where the harness reads, and `install-hook --managed` says so
-    whenever it is set."""
+    where the harness reads, and every installer verb that reads it
+    warns when it is set."""
     folder = (os.environ.get("LOXODONTA_MANAGED_DIR")
               or harness_managed_folder())
     return os.path.join(folder, "managed-settings.d", "loxodonta.json")
@@ -2295,10 +2295,19 @@ def wired_files(witness):
     return (witness.parent / "settings.json", Path(managed_hooks_path()))
 
 
+def managed_first(witness):
+    """The two homes in the order a reader that takes the first match
+    reads them. The writer can add an entry to the operator's file and
+    cannot edit the managed one, so the managed file's entry is never
+    shadowed by one beside it (ADR-0040)."""
+    return tuple(reversed(wired_files(witness)))
+
+
 def wired_rules(witness, event):
-    """Every block wired under one hook event, in either home."""
+    """Every block wired under one hook event, in either home, the
+    managed file's first (managed_first)."""
     rules = []
-    for settings_file in wired_files(witness):
+    for settings_file in managed_first(witness):
         try:
             found = read_settings(settings_file)["hooks"][event]
         except (KeyError, TypeError):
@@ -2438,9 +2447,11 @@ def sessionend_commands(witness):
     """The recorder's SessionEnd command lines wired beside the witness
     layout, read from the harness settings: the one place the session-end
     choices live (ADR-0024 ruling 1). Either era's name (ADR-0010), and
-    either home (wired_files): the keepers follow a command wired in the
-    managed file as they follow one in the operator's."""
-    return [command for settings_file in wired_files(witness)
+    either home: the keepers follow a command wired in the managed file
+    as they follow one in the operator's. The managed file's come first
+    (managed_first), for `sessionend_chain_remote`, which takes the
+    first remote named."""
+    return [command for settings_file in managed_first(witness)
             for command in sessionend_commands_in(settings_file)]
 
 
@@ -2831,7 +2842,8 @@ def recorder_path(witness):
     the wired command line — the only place that truth lives. Either
     era's name (ADR-0010), and only a command the installer would claim
     (#303); `~` is expanded, as the shell running the hook expands it.
-    The first one found, the operator's file before the managed one."""
+    The first one found, the managed file's before the operator's
+    (managed_first)."""
     for rule in wired_rules(witness, "PostToolUse"):
         if not isinstance(rule, dict):
             continue
