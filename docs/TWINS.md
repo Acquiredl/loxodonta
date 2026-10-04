@@ -164,6 +164,14 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 The recorder writes down the coverage it wired under this name, and the supervisor's scan reads it there (ADR-0030).
 
+### The managed file
+
+Names: `harness_managed_folder`, `managed_hooks_path`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+`install-hook --managed` writes the hook entries to this one file among the harness's managed settings, and the supervisor reads what is wired from the same file, so both name one path (ADR-0040).
+
 ### A chain batch's content type
 
 Names: `CHAIN_TYPE`.
