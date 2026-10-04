@@ -10,6 +10,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-03
+
 ### Fixed
 
 - `supervisor calibrate` refuses a baseline `scan` reads as blind and leaves it as it lies, pointing at `acknowledge --baseline`, where it advised a scan or ended in a traceback; a refused write is 73.
@@ -347,7 +349,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.12.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.12.1...dev
+[0.12.1]: https://github.com/Acquiredl/loxodonta/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Acquiredl/loxodonta/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Acquiredl/loxodonta/compare/v0.10.3...v0.11.0
 [0.10.3]: https://github.com/Acquiredl/loxodonta/compare/v0.10.2...v0.10.3
