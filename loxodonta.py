@@ -6669,6 +6669,11 @@ def install_managed_hooks(args):
             return EX_NOINPUT if backup is None else EX_CANTCREAT
         print(f"  removed from {path}: "
               f"{', '.join(sorted(set(removed)))}{backup}")
+    elif changed:
+        # Named because it is this account's file: under sudo, or an
+        # administrator account of its own, not the operator's, whose
+        # entries a plain `uninstall-hook` of their own then removes.
+        print(f"  nothing of the installer's was wired in {path}")
     coverage_said(marked, unmarked)
     if removed or existing is None:
         print("the hook has one home now. By the harness's documentation, a")

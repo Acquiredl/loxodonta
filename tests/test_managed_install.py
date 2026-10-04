@@ -142,6 +142,22 @@ class ManagedInstallTest(ManagedBase):
         self.assertEqual(os.listdir(self.managed_file.parent),
                          ["loxodonta.json"])
 
+    @unittest.skipIf(sys.platform == "win32", "permission bits are POSIX")
+    def test_every_account_can_read_what_it_wrote(self):
+        # The harness that reads the file runs as the operator, not as
+        # whoever installed: under an installer's tight umask the file
+        # would otherwise be the installer's alone, and no other
+        # account's session would run the hook.
+        previous = os.umask(0o077)
+        self.addCleanup(os.umask, previous)
+
+        self.install("--managed")
+
+        modes = {path: os.stat(path).st_mode & 0o777
+                 for path in (self.managed, self.managed_file.parent,
+                              self.managed_file)}
+        self.assertEqual(list(modes.values()), [0o755, 0o755, 0o644], modes)
+
     def test_it_writes_the_entries_a_plain_install_writes(self):
         for flags in ((), ("--profile", "timestamped"),
                       ("--profile", "full", "--remote", REMOTE,
