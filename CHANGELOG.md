@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `install-hook --managed` wires the hook in a file of the recorder's own among the harness's managed settings, which rank above a run's command line, and takes it out of your settings file; `uninstall-hook --managed` deletes that file (#259).
+
 ## [0.12.1] - 2026-10-03
 
 ### Fixed
