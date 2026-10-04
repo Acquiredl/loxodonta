@@ -10,8 +10,10 @@ file (one receipt and not two, a run that sets `disableAllHooks`,
 `--bare`) are the author's to run and are not here.
 """
 
+import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,8 +25,9 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_managed_install`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import (ago, isolated_env, prime_memory,  # noqa: E402
-                             run_scan, write_transcript)
+from test_supervisor import (ago, chain_head, isolated_env,  # noqa: E402
+                             make_chain, prime_memory, run_scan,
+                             write_transcript)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -289,13 +292,111 @@ class ManagedInstallTest(ManagedBase):
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
-    def test_the_override_is_said_out_loud(self):
+    def test_the_override_is_said_out_loud_by_every_verb_that_reads_it(self):
         # The seam moves where the installer writes, never where the
-        # harness reads, so an install through it says which folder the
-        # harness does read.
-        done = self.install("--managed")
+        # harness reads, so each verb that reads it says which folder
+        # the harness does read: when it goes through and when it
+        # refuses, since a refusal is where a wrong folder is found.
+        refused = self.without_the_right()
+        (self.work / "folder" / "managed-settings.d" / "loxodonta.json"
+         / "kept").mkdir(parents=True)
+        folder = {**self.env,
+                  "LOXODONTA_MANAGED_DIR": str(self.work / "folder")}
+        for verb, flags, env, code in (
+                ("install-hook", ("--managed",), refused, 73),
+                ("install-hook", ("--managed",), self.env, 0),
+                ("install-hook", (), self.env, 73),
+                ("uninstall-hook", (), self.env, 0),
+                ("uninstall-hook", ("--managed",), folder, 73),
+                ("uninstall-hook", ("--managed",), self.env, 0),
+                ("uninstall-hook", ("--managed",), self.env, 0),
+                ("install-hook", (), self.env, 0)):
+            with self.subTest(verb=verb, flags=flags, code=code):
+                done = self.run_tool(verb, *flags, env=env)
 
-        self.assertIn("LOXODONTA_MANAGED_DIR", done.stderr)
+                self.assertEqual(done.returncode, code,
+                                 done.stdout + done.stderr)
+                self.assertIn("LOXODONTA_MANAGED_DIR", done.stderr)
+                self.assertIn(
+                    os.path.join(env["LOXODONTA_MANAGED_DIR"],
+                                 "managed-settings.d", "loxodonta.json"),
+                    done.stderr)
+
+    def test_codex_reads_no_managed_folder_and_says_nothing_of_one(self):
+        for verb in ("install-hook", "uninstall-hook"):
+            with self.subTest(verb=verb):
+                done = self.run_tool(verb, "--codex")
+
+                self.assertEqual(done.returncode, 0,
+                                 done.stdout + done.stderr)
+                self.assertNotIn("LOXODONTA_MANAGED_DIR", done.stderr)
+
+    def test_the_help_says_whose_word_the_claim_is(self):
+        # ADR-0040 lists it as documented, not measured.
+        done = self.run_tool("install-hook", "--help")
+
+        said = " ".join(done.stdout.split())
+        self.assertIn("by the harness's documentation", said)
+        self.assertNotIn("which a run cannot switch off", said)
+
+    def test_a_refused_write_says_what_stands_in_the_way(self):
+        # An administrator's shell mends a missing right and nothing
+        # else: for a file where a folder belongs, or a folder where the
+        # file belongs, the refusal names that and does not send the
+        # reader for rights that would not help.
+        blocked = self.without_the_right()
+        done = self.run_tool("install-hook", "--managed", env=blocked)
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertIn(str(self.work / "blocker"), done.stderr)
+        self.assertIn("is a file", done.stderr)
+        self.assertNotIn("sudo", done.stderr)
+
+        (self.managed_file / "kept").mkdir(parents=True)
+        before = self.everything()
+        done = self.run_tool("install-hook", "--managed")
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertIn(str(self.managed_file), done.stderr)
+        self.assertIn("a folder", done.stderr)
+        self.assertNotIn("sudo", done.stderr)
+        self.assertEqual(self.everything(), before)
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "a read-only file refuses a replace on Windows")
+    def test_a_read_only_managed_file_is_named_as_that(self):
+        self.install("--managed")
+        os.chmod(self.managed_file, stat.S_IREAD)
+        self.addCleanup(os.chmod, self.managed_file, stat.S_IWRITE)
+        for verb, flags in (("install-hook", ("--managed", "--profile",
+                                              "timestamped")),
+                            ("uninstall-hook", ("--managed",))):
+            with self.subTest(verb=verb):
+                done = self.run_tool(verb, *flags)
+
+                self.assertEqual(done.returncode, 73,
+                                 done.stdout + done.stderr)
+                self.assertIn(str(self.managed_file), done.stderr)
+                self.assertIn("read-only", done.stderr)
+                self.assertNotIn("sudo", done.stderr)
+
+    def test_a_plain_install_goes_ahead_over_a_managed_file_it_cannot_read(self):
+        # Not JSON, or JSON of another shape: nothing says the hook is
+        # wired there, and refusing would leave it wired nowhere, over
+        # a file the operator may have no right to mend.
+        for what, content in (("not JSON", "{not json"),
+                              ("another shape", '{"hooks": "none"}')):
+            with self.subTest(content=what):
+                self.managed_file.parent.mkdir(parents=True, exist_ok=True)
+                self.managed_file.write_text(content, encoding="utf-8")
+
+                done = self.run_tool("install-hook")
+
+                self.assertEqual(done.returncode, 0,
+                                 done.stdout + done.stderr)
+                self.assertEqual(len(self.ours_in(self.operator_file)), 4)
+                self.assertEqual(
+                    self.managed_file.read_text(encoding="utf-8"), content,
+                    "a plain install never writes the managed file")
+                self.run_tool("uninstall-hook")
 
     def hold_two_homes(self):
         self.install()
@@ -394,6 +495,8 @@ class ManagedUninstallTest(ManagedBase):
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertNotIn("Traceback", done.stderr)
         self.assertIn(str(self.managed_file), done.stderr)
+        self.assertIn("a folder", done.stderr)
+        self.assertNotIn("sudo", done.stderr)
         self.assertEqual(self.everything(), before)
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
@@ -409,7 +512,44 @@ class ManagedUninstallTest(ManagedBase):
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertNotIn("Traceback", done.stderr)
         self.assertIn(str(self.managed_file), done.stderr)
+        self.assertIn("sudo", done.stderr)
         self.assertEqual(self.everything(), before)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "a folder's write bit is POSIX")
+    def test_without_the_right_to_write_the_folder_it_says_whose_right(self):
+        self.install("--managed")
+        os.chmod(self.managed_file.parent, 0o555)
+        self.addCleanup(os.chmod, self.managed_file.parent, 0o755)
+        before = self.everything()
+
+        done = self.run_tool("install-hook", "--managed", "--profile",
+                             "timestamped")
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertIn(str(self.managed_file), done.stderr)
+        self.assertIn("sudo", done.stderr)
+        self.assertEqual(self.everything(), before)
+
+    def test_it_says_when_the_operators_file_still_holds_the_entries(self):
+        # Two homes, as a failure between the steps or a run as another
+        # account leaves them: the managed uninstall removes its own
+        # file, touches nothing of the operator's, and says the hook is
+        # still wired there.
+        self.install("--managed")
+        managed = self.managed_file.read_bytes()
+        self.run_tool("uninstall-hook", "--managed")
+        self.install()
+        self.managed_file.write_bytes(managed)
+        operators = self.operator_file.read_bytes()
+
+        done = self.run_tool("uninstall-hook", "--managed")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse(self.managed_file.exists())
+        self.assertEqual(self.operator_file.read_bytes(), operators)
+        self.assertIn(f"still wired in {self.operator_file}", done.stdout)
+        self.assertIn("`uninstall-hook`", done.stdout)
 
     def test_a_plain_uninstall_says_where_the_hook_is_and_what_removes_it(self):
         self.install("--managed")
@@ -436,6 +576,114 @@ class ManagedUninstallTest(ManagedBase):
         self.assertEqual(managed["level"], "managed")
         self.assertNotIn("level", plain)
         self.assertEqual(len(self.ours_in(self.operator_file)), 4)
+
+
+class AnotherAccountTest(ManagedBase):
+    """Run as another account than the one that owns the home (a `sudo`
+    that keeps HOME, as macOS's does), a managed install writes the
+    managed file and touches nothing under that home: a file root
+    rewrote there would be root's, closed to the operator's harness, and
+    a root process writing in a folder the writer owns follows whatever
+    the writer planted in it (ADR-0002).
+
+    Through `sudo -n`, against this test's temporary folders only, and
+    skipped wherever sudo asks for a password."""
+
+    HANDED = ("HOME", "USERPROFILE", "LOXODONTA_HOME", "CODEX_HOME",
+              "LOXODONTA_MANAGED_DIR", "PYTHONIOENCODING")
+
+    def setUp(self):
+        super().setUp()
+        if not hasattr(os, "geteuid") or os.geteuid() == 0:
+            self.skipTest("needs an account that is not root, and sudo")
+        # sudo strips what a hosted Python needs to find its library.
+        library = os.environ.get("LD_LIBRARY_PATH")
+        self.root_python = (["sudo", "-n", "env"]
+                            + ([f"LD_LIBRARY_PATH={library}"]
+                               if library else []))
+        try:
+            probe = subprocess.run(
+                self.root_python + [sys.executable, "-c",
+                                    "import os; print(os.geteuid())"],
+                capture_output=True, encoding="utf-8", timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("no sudo here")
+        if probe.returncode != 0 or probe.stdout.strip() != "0":
+            self.skipTest("sudo asks for a password here")
+        # What root made is handed back before the folder is removed.
+        self.addCleanup(subprocess.run, [
+            "sudo", "-n", "chown", "-R", f"{os.geteuid()}:{os.getegid()}",
+            str(self.work)], capture_output=True, timeout=60)
+
+    def as_root(self, *args):
+        return subprocess.run(
+            self.root_python + [f"{name}={self.env[name]}"
+                                for name in self.HANDED]
+            + [sys.executable, str(LOXODONTA), *args],
+            capture_output=True, encoding="utf-8", timeout=120,
+            env=self.env)
+
+    def under_the_home(self):
+        """Every file and folder of the home and the store, with its
+        owner, files with their bytes."""
+        found = {}
+        for top in (self.home, self.store):
+            for path in [top] + sorted(top.rglob("*")):
+                if os.path.lexists(path):
+                    found[str(path.relative_to(self.work))] = (
+                        os.lstat(path).st_uid,
+                        path.read_bytes() if path.is_file() else None)
+        return found
+
+    def test_as_another_account_it_touches_nothing_under_the_home(self):
+        self.install()
+        before = self.under_the_home()
+
+        done = self.as_root("install-hook", "--managed")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.under_the_home(), before,
+                         "no rewrite, no backup, no coverage marker, and "
+                         "every file still the operator's")
+        self.assertEqual(len(self.ours_in(self.managed_file)), 4)
+        self.assertEqual(os.stat(self.managed_file).st_uid, 0)
+        self.assertIn("two homes", done.stdout)
+        self.assertIn(str(self.operator_file), done.stdout)
+        self.assertIn("`uninstall-hook`", done.stdout)
+
+        # What finishes it, run as the operator.
+        finished = self.run_tool("uninstall-hook")
+        self.assertEqual(finished.returncode, 0,
+                         finished.stdout + finished.stderr)
+        self.assertEqual(self.ours_in(self.operator_file), [])
+        self.assertEqual(os.lstat(self.operator_file).st_uid, os.geteuid())
+
+    def test_as_another_account_a_first_install_makes_no_store(self):
+        before = self.under_the_home()
+
+        done = self.as_root("install-hook", "--managed", "--profile",
+                            "timestamped")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.under_the_home(), before)
+        self.assertFalse(os.path.lexists(self.store),
+                         "a store root made would refuse the operator's "
+                         "hook its drawer")
+        self.assertEqual(len(self.ours_in(self.managed_file)), 4)
+        self.assertIn("coverage marker", done.stdout)
+        self.assertNotIn("two homes", done.stdout)
+
+    def test_as_another_account_the_uninstall_touches_nothing_either(self):
+        self.install()
+        self.as_root("install-hook", "--managed")
+        before = self.under_the_home()
+
+        done = self.as_root("uninstall-hook", "--managed")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse(self.managed_file.exists())
+        self.assertEqual(self.under_the_home(), before)
+        self.assertIn(f"still wired in {self.operator_file}", done.stdout)
 
 
 class SupervisorReadsBothHomesTest(ManagedBase):
@@ -481,6 +729,46 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         self.assertIn("--publish", report["published"]["note"])
         self.assertNotEqual(report["recorder"]["state"], "unwired")
         self.assertEqual(Path(report["recorder"]["path"]), LOXODONTA)
+
+    def an_entry_of_the_writers_own(self):
+        """A recorder entry added to the operator's file after a managed
+        install, which the writer can do and the installer did not:
+        another recorder, another remote."""
+        elsewhere = "python /elsewhere/loxodonta.py hook"
+        self.operator_file.write_text(json.dumps({"hooks": {
+            "PostToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": elsewhere}]}],
+            "SessionEnd": [{"hooks": [
+                {"type": "command", "command": elsewhere
+                 + ' --publish-chain "http://127.0.0.1:9/elsewhere"'}]}],
+        }}), encoding="utf-8")
+
+    def test_the_managed_recorder_is_the_one_the_notice_names(self):
+        # ADR-0040: the managed file is the home the writer cannot edit,
+        # so an entry in the operator's file never shadows it.
+        self.install("--managed")
+        self.an_entry_of_the_writers_own()
+
+        report = json.loads(self.scan().stdout)
+
+        self.assertEqual(Path(report["recorder"]["path"]), LOXODONTA)
+
+    def test_the_managed_remote_is_the_one_a_sent_chain_is_held_to(self):
+        self.install("--managed", "--profile", "custom", "--publish-chain",
+                     REMOTE)
+        self.an_entry_of_the_writers_own()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-sent")
+        Path(str(log) + ".published.jsonl").write_text(json.dumps({
+            "kind": "chain", "first": 0, "last": 2, "head": chain_head(log),
+            "ts": ago(60), "event": "session-end",
+            "remote_id": hashlib.sha256(REMOTE.encode()).hexdigest()[:16],
+        }) + "\n", encoding="utf-8")
+
+        report = json.loads(self.scan().stdout)
+
+        self.assertTrue(report["published"]["wired"])
+        self.assertIsNone(report["published"]["note"],
+                          "the batch the managed remote took counts")
 
     def test_a_managed_uninstall_is_dated_when_it_happened(self):
         # The supervisor dates a change of coverage by the mtime of what
