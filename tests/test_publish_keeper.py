@@ -1184,7 +1184,8 @@ class ProfileKeeperTest(unittest.TestCase):
         clock override), so one install can be older than another."""
         knobs = {"HOME": str(self.home), "USERPROFILE": str(self.home),
                  "LOXODONTA_HOME": str(self.store),
-                 "CODEX_HOME": str(self.home / ".codex")}
+                 "CODEX_HOME": str(self.home / ".codex"),
+                 "LOXODONTA_MANAGED_DIR": str(self.home / "managed")}
         if age:
             knobs["SOURCE_DATE_EPOCH"] = str(int(time.time()) - age)
         subprocess.run(
@@ -1576,7 +1577,8 @@ class ProfileKeeperTest(unittest.TestCase):
             capture_output=True, check=True,
             env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
-                           CODEX_HOME=str(self.home / ".codex")))
+                           CODEX_HOME=str(self.home / ".codex"),
+                           LOXODONTA_MANAGED_DIR=str(self.home / "managed")))
         log = self.aged_chain("sess-unwired", age=7 * 3600)
 
         self.serve()

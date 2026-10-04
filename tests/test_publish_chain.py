@@ -1001,7 +1001,8 @@ class InstallPublishChainTest(unittest.TestCase):
         # would otherwise get this test's hooks in its real hooks.json.
         self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
                     "LOXODONTA_HOME": str(self.store),
-                    "CODEX_HOME": str(self.home / ".codex")}
+                    "CODEX_HOME": str(self.home / ".codex"),
+                    "LOXODONTA_MANAGED_DIR": str(self.home / "managed")}
 
     def install(self, *args):
         return subprocess.run(
@@ -1423,7 +1424,8 @@ class InstallProfileFullTest(unittest.TestCase):
         # would otherwise get this test's hooks in its real hooks.json.
         self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
                     "LOXODONTA_HOME": str(self.store),
-                    "CODEX_HOME": str(self.home / ".codex")}
+                    "CODEX_HOME": str(self.home / ".codex"),
+                    "LOXODONTA_MANAGED_DIR": str(self.home / "managed")}
 
     def install(self, *args):
         return subprocess.run(
@@ -1638,7 +1640,8 @@ class SessionEndUnderFullTest(PublishBase):
             env={**clean_env(), "HOME": str(self.home),
                  "USERPROFILE": str(self.home),
                  "LOXODONTA_HOME": str(self.store),
-                 "CODEX_HOME": str(self.home / ".codex")})
+                 "CODEX_HOME": str(self.home / ".codex"),
+                 "LOXODONTA_MANAGED_DIR": str(self.home / "managed")})
 
     def wired_session_end(self):
         """The argv the installer wrote, read back out of the settings
@@ -1738,7 +1741,8 @@ class FullProfileKeeperTest(unittest.TestCase):
             capture_output=True, check=True,
             env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
-                           CODEX_HOME=str(self.home / ".codex")))
+                           CODEX_HOME=str(self.home / ".codex"),
+                           LOXODONTA_MANAGED_DIR=str(self.home / "managed")))
 
     def aged_chain(self, session, age):
         """A chain through the public CLI whose entries are `age` seconds
@@ -1837,7 +1841,8 @@ class FullProfileKeeperTest(unittest.TestCase):
             capture_output=True, check=True,
             env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
-                           CODEX_HOME=str(self.home / ".codex")))
+                           CODEX_HOME=str(self.home / ".codex"),
+                           LOXODONTA_MANAGED_DIR=str(self.home / "managed")))
 
     def serve_refused(self, *extra):
         """`serve` as a command that is refused before it binds a port."""
@@ -1996,7 +2001,8 @@ class DrillUnderFullTest(unittest.TestCase):
             capture_output=True, check=True,
             env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
-                           CODEX_HOME=str(self.home / ".codex")))
+                           CODEX_HOME=str(self.home / ".codex"),
+                           LOXODONTA_MANAGED_DIR=str(self.home / "managed")))
         make_store_chain(self.root / "alpha" / "receipts", "sess-drill",
                          entries=3)
 

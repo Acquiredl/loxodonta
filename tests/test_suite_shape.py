@@ -70,6 +70,9 @@ RECORDER = REPO_ROOT / "loxodonta.py"
 # Written out here rather than read from the guard, so a home dropped
 # from the guard's list fails these tests instead of passing with it.
 EVERY_HOME = {"LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME"}
+# The managed settings folder (#259), refused beside the homes for every
+# verb that reads the recorder's file in it. A `hook` does not.
+MANAGED = "LOXODONTA_MANAGED_DIR"
 
 
 class EveryModuleRunsAlone(unittest.TestCase):
@@ -116,7 +119,8 @@ class HomeGuardTest(unittest.TestCase):
         # A project inherited from a harness is refused with the homes.
         inherited = ({"CLAUDE_PROJECT_DIR"}
                      if os.environ.get("CLAUDE_PROJECT_DIR") else set())
-        self.assertEqual(named_homes(said), EVERY_HOME | inherited, said)
+        self.assertEqual(named_homes(said),
+                         EVERY_HOME | {MANAGED} | inherited, said)
         # It names the line that started it, so the offender is found
         # without a search.
         where = re.search(r"tests/test_suite_shape\.py:(\d+) in (\w+)", said)
@@ -131,7 +135,7 @@ class HomeGuardTest(unittest.TestCase):
             isolated = {**isolated_env(Path(home).resolve()),
                         "PYTHONIOENCODING": "utf-8"}
 
-            for name in sorted(EVERY_HOME):
+            for name in sorted(EVERY_HOME | {MANAGED}):
                 with self.subTest(home=name):
                     # The machine's own, or where it has none, a folder
                     # that is no temporary one: an unset store or Codex
@@ -143,7 +147,7 @@ class HomeGuardTest(unittest.TestCase):
                                        env=leaky)
                     self.assertEqual(named_homes(refused.exception), {name})
 
-            # All four of the test's own, and the same start goes ahead.
+            # Every one the test's own, and the same start goes ahead.
             done = subprocess.run(self.command, capture_output=True,
                                   encoding="utf-8", env=isolated)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -172,8 +176,10 @@ class WriterHomeGuardTest(unittest.TestCase):
                              if verb == "hook"
                              and os.environ.get("CLAUDE_PROJECT_DIR")
                              else set())
-                self.assertEqual(named_homes(said), EVERY_HOME | inherited,
-                                 said)
+                # And only the two installers read the managed folder.
+                managed = set() if verb == "hook" else {MANAGED}
+                self.assertEqual(named_homes(said),
+                                 EVERY_HOME | managed | inherited, said)
                 self.assertIn("tests/test_suite_shape.py:", said)
 
     def test_adopt_is_refused_with_the_inherited_home(self):
@@ -211,6 +217,26 @@ class WriterHomeGuardTest(unittest.TestCase):
                                capture_output=True, env=machine)
         self.assertEqual(named_homes(refused.exception),
                          {"HOME", "LOXODONTA_HOME", "CODEX_HOME"})
+
+    def test_an_unset_managed_folder_is_refused_where_it_is_read(self):
+        # #259: the harness's managed settings folder is under no home,
+        # so unset it is the machine's own, whatever HOME says. The two
+        # installers read it; a hook never does.
+        with tempfile.TemporaryDirectory() as home:
+            isolated = {**isolated_env(Path(home).resolve()),
+                        "PYTHONIOENCODING": "utf-8"}
+            unset = {k: v for k, v in isolated.items() if k != MANAGED}
+            for verb in ("install-hook", "uninstall-hook"):
+                with self.subTest(verb=verb):
+                    with self.assertRaises(AssertionError) as refused:
+                        subprocess.run(self.command(verb),
+                                       capture_output=True, env=unset)
+                    self.assertEqual(named_homes(refused.exception),
+                                     {MANAGED})
+
+            done = subprocess.run(self.command("hook"), capture_output=True,
+                                  encoding="utf-8", env=unset)
+        self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_a_hook_with_a_project_the_test_did_not_choose_is_refused(self):
         # The project names the drawer a hook writes into: the inherited

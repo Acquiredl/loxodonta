@@ -558,7 +558,8 @@ class InstallPublishHeadTest(unittest.TestCase):
         # would otherwise get this test's hooks in its real hooks.json.
         self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home),
                     "LOXODONTA_HOME": str(self.store),
-                    "CODEX_HOME": str(self.home / ".codex")}
+                    "CODEX_HOME": str(self.home / ".codex"),
+                    "LOXODONTA_MANAGED_DIR": str(self.home / "managed")}
 
     def install(self, *args):
         return run_receipts("install-hook", *args, cwd=self.root,
