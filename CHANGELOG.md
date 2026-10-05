@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- `install-hook --managed` says in its help and its closing words that the harness documents the claim and ADR-0040 measured it, where they said documented and not yet measured (#259).
+
 ## [0.13.0] - 2026-10-04
 
 ### Added

@@ -332,12 +332,14 @@ class ManagedInstallTest(ManagedBase):
                 self.assertNotIn("LOXODONTA_MANAGED_DIR", done.stderr)
 
     def test_the_help_says_whose_word_the_claim_is(self):
-        # ADR-0040 lists it as documented, not measured.
+        # The harness documents it and ADR-0040 measured it: the help
+        # names both, and never states the claim with no source.
         done = self.run_tool("install-hook", "--help")
 
         said = " ".join(done.stdout.split())
-        self.assertIn("by the harness's documentation", said)
-        self.assertNotIn("which a run cannot switch off", said)
+        self.assertIn("documented by the harness", said)
+        self.assertIn("measured in ADR-0040", said)
+        self.assertNotIn("not yet measured", said)
 
     def test_a_refused_write_says_what_stands_in_the_way(self):
         # An administrator's shell mends a missing right and nothing

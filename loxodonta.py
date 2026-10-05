@@ -6753,10 +6753,11 @@ def install_managed_hooks(args):
               "owns that file, takes it out of there. Restart open "
               "sessions.")
     elif removed or existing is None:
-        print("the hook has one home now. By the harness's documentation, a")
-        print("run cannot switch it off from the command line or from a")
-        print("settings file the operator owns; what a managed install claims")
-        print("and what it does not is in docs/HOOK.md. Restart open sessions.")
+        print("the hook has one home now. A run cannot switch it off from the")
+        print("command line or from a settings file the operator owns: the")
+        print("harness documents it and ADR-0040 measured it. What a managed")
+        print("install claims and what it does not is in docs/HOOK.md. Restart")
+        print("open sessions.")
     elif changed:
         print("Restart open sessions: hooks load at start.")
     tier = profile_notice(args.profile, wired)
@@ -7000,10 +7001,10 @@ def main(argv=None):
         "--managed", action="store_true",
         help="wire the same hooks in a file of the recorder's own among "
              "the harness's managed settings, managed-settings.d/"
-             "loxodonta.json, which by the harness's documentation a run "
-             "cannot switch off from its command line, and take them out "
-             "of the user settings, so the hook has one home (ADR-0040; "
-             "documented, not yet measured). Run it from an account "
+             "loxodonta.json, which a run cannot switch off from its "
+             "command line (documented by the harness, and measured in "
+             "ADR-0040), and take them out of the user settings, so the "
+             "hook has one home. Run it from an account "
              "that may write that folder (an administrator's shell, or "
              "sudo): without the right it writes nothing and exits 73, "
              "and it never raises its own rights. Claude Code only")

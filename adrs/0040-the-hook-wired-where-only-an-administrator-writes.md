@@ -1,6 +1,6 @@
 # ADR-0040: A managed install wires the hook where only an administrator writes, and the hook then has one home
 
-**Status:** proposed 2026-10-04. Ruled by the author on #259 and restated in the author's words; the live cases under *Not yet measured* are still to run, and the words are the author's to change.
+**Status:** accepted 2026-10-05. Ruled by the author on #259 and restated in the author's words on 2026-10-04; the live cases were run on 2026-10-05 and are under *Measured*.
 **Deciders:** Acquiredl
 
 ## Context
@@ -30,7 +30,8 @@ cheapest move against completeness there is today.
 
 Read in Claude Code's documentation on 2026-10-04 (the pages *Hooks
 reference*, *Deploy managed settings*, *Settings*, *CLI reference* and
-*Run Claude Code programmatically*). Documented, not yet measured here:
+*Run Claude Code programmatically*). This is what the documentation
+says; what was then run is under *Measured*:
 
 - **Managed settings rank above the command line.** No user, project,
   local or `--settings` value overrides a managed one.
@@ -144,17 +145,31 @@ It does not claim:
   organization delivers settings from a server or through device
   management, the file is skipped without a warning. `/status` shows it,
   and the witness is still what reports a silent session.
-- **`--bare`.** Not stated in the documentation and not measured.
+- **`--bare` in a later version.** A managed hook was measured to run
+  under it; the documentation does not say it does.
 
-### Not yet measured
+### Measured
 
-The documentation above was read, not run. Before this ADR is accepted,
-on a machine with a managed install:
+On 2026-10-05, on a managed install the author made from an
+administrator shell: Claude Code 2.1.287, loxodonta 0.13.0, Windows,
+profile `timestamped`. Everything after the install ran from an ordinary
+shell. The runs are on #259.
 
-1. One ordinary tool call writes one receipt, not two.
-2. Run B from #259 writes its drawer and its receipts.
-3. If an API key is at hand: the same call under `--bare`, with the
-   result written here whichever way it falls.
+| What was run | What it showed |
+|---|---|
+| The install | The managed file holds `hooks` and nothing else; the installer's four entries left the operator's settings file and its other hooks stayed; the coverage marker gained an entry with `level: "managed"`; `/status` lists the managed settings among its sources |
+| One headless session, one tool call | One receipt for the call, not two, with the session-end commitment and the anchor |
+| The same session with `disableAllHooks` set through `--settings` (run B of #259) | The drawer and its receipts are written, and the chain verifies |
+| The same, in a project carrying a hook of its own that writes a marker file | Without the flag the marker and the receipt are both written. With it the marker is not and the receipt is: the flag switches an ordinary hook off, and the managed one outlasts it |
+| A headless session under `--bare`, with an API key | The drawer, the receipt, the commitment and the anchor are written. That the run was a bare one is read from its transcript, a thirtieth the size of an ordinary run's, with no skill listing, no MCP tools and no instruction files |
+| `install-hook --managed` again, and a plain `install-hook`, neither elevated | "already installed ... nothing changed", exit 0; and a refusal that names the managed file, exit 73. The three files are byte for byte as before |
+| The ordinary shell opening the managed file for writing | Refused by the operating system |
+
+Not measured: macOS and Linux by hand (the suite runs the installer as
+root there against temp folders, #462); `--safe-mode`, which the
+documentation says keeps hooks configured by policy; whether `--bare`
+skips an ordinary hook on this version; and a machine with a
+higher-ranked managed source.
 
 ## Consequences
 
@@ -182,10 +197,12 @@ on a machine with a managed install:
 
 **What we'll have to revisit if:**
 
-- `--bare` turns out to skip a managed hook, or becomes the default for
-  `claude -p`: headless runs would then write no receipts wherever the
-  hook is wired, and the finding in #259 that the headless case is
-  covered would no longer hold.
+- A later version of the harness stops running a managed hook under
+  `--bare`. The documentation says `--bare` will become the default for
+  `claude -p`, so headless runs would then write no receipts, and the
+  finding in #259 that the headless case is covered would no longer
+  hold. The measurement above is the thing to repeat when that default
+  changes.
 - The harness changes the folder, the merge order or the ranking of
   managed sources.
 - #460 rules that the recorder moves too.
