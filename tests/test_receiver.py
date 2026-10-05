@@ -395,6 +395,32 @@ class ContentTest(ReceiverFixture):
                 self.assertEqual(status, 400)
         self.assertEqual(self.stored(), ["token"])
 
+    def test_a_deeply_nested_body_is_refused_not_a_crash(self):
+        # RED-TEAM (area C, C8): the sender holding the URL is the
+        # adversary. A deeply nested but valid JSON body, well under the
+        # 8 MiB body cap, makes json.loads raise RecursionError in
+        # head_line (and receipt_of for a batch), which neither catches
+        # (both catch ValueError/UnicodeDecodeError only). keep_batch
+        # catches ValueError but not RecursionError. So the handler
+        # crashes with a traceback and the connection is dropped, instead
+        # of the 400 a malformed body gets everywhere else here
+        # (test_a_batch_that_is_not_receipts_is_refused_whole). RECEIVER.md
+        # and #300 say a malformed body is refused. Same RecursionError
+        # omission as #463 and the serve/mcp readers; catch it beside
+        # ValueError. The receiver survives for the next sender (threaded),
+        # which is tested last.
+        deep = ("[" * 6000 + "]" * 6000).encode("utf-8")
+        status, _ = post(self.proc.url, deep, "application/json")
+        self.assertEqual(status, 400)
+        status, _ = self.send_chain(deep)
+        self.assertEqual(status, 400)
+        # Nothing of either landed, and a valid head still works after.
+        self.assertEqual(self.stored(), ["token"])
+        ok, _ = post(self.proc.url,
+                     json.dumps({"n": 1, "head": "ab"}).encode("utf-8"),
+                     "application/json")
+        self.assertEqual(ok, 200)
+
     def test_any_other_content_type_is_415(self):
         status, _ = post(self.proc.url, self.lines, "text/plain",
                          {"X-Loxodonta-Chain": CHAIN})
