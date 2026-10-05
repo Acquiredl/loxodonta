@@ -235,3 +235,20 @@ with 66 rather than act on part of the store, and `serve`'s views over
 the store answer 503 by name. Every listing of the store by the
 supervisor goes through one helper that names or raises such a folder,
 on every Python.
+
+## Addendum, 2026-10-05: the named residual also retires a standing alarm
+
+*Drafted for the author to confirm.* The decision names one residual:
+deleting both the baseline and the day book reads as a new install. A
+red-team pass measured what follows from it. A live session the scan
+had reported as `ALARM-SILENT`, exit 6, is unjudged after the two files
+are deleted: the scan stamps its first observation now, the session's
+calls fall before memory (ADR-0029 ruling 3), and it reads clean on
+that look and on every later one. Deleting the baseline alone is still
+exit 5.
+
+No code changes. Both files are in the writer's reach, and a third
+file that remembered them would be too. The answer is the one this
+ADR already gives for the heads: what must outlast the writer is kept
+off the machine. Nothing the supervisor remembers about sessions is
+kept there today, and `docs/CLAIMS.md` says so among its limits.

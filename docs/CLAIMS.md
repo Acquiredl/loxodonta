@@ -17,7 +17,7 @@ This page is for someone who wants to rely on a loxodonta record, or build a too
 
 ## What the witness adds
 
-It is not a promise. A Claude Code session that ran tool calls owing a receipt and wrote fewer is reported by the supervisor. That catches faults: a hook that stopped firing, a wedged lock, a silent fork. It does not hold against a writer shaping both records, because the second record it counts against is on the same machine. (GLOSSARY, *Second record*; GROUNDING section 3.)
+It is not a promise. A Claude Code session that ran tool calls owing a receipt and wrote fewer is reported by the supervisor. That catches faults: a hook that stopped firing, a wedged lock, a silent fork. It does not hold against a writer who can edit or delete the transcript: the second record it counts against is on the same machine, and a session whose transcript is garbled, emptied or gone reads as quiet or is not seen at all (#473). (GLOSSARY, *Second record*; GROUNDING section 3.)
 
 It becomes a promise the day a second record exists that the agent cannot reach.
 
@@ -39,6 +39,19 @@ A vantage point is a place with a clear view that the watched party cannot get t
 3. The proof: start a session with `{"disableAllHooks": true}` passed through `--settings`, run one tool call, and see that its drawer and its receipt are written.
 
 **Condition 2 has no check on this page.** An elevated shell, or `sudo` that asks for no password, breaks it. The supervisor runs as the same account as the agent, so it is the one placed to say when that account can rewrite the managed file (#469).
+
+## Running less than the vantage setup
+
+The full setup is what the two promises are made for, and it is the one to run when the record has to hold against the agent that writes it. Every condition can be left out. Each one left out opens something, and this is what.
+
+| Left out | What it opens |
+|---|---|
+| 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives |
+| 2, an agent without administrator rights | The managed file is as easy to rewrite as any other, and condition 1 is worth nothing |
+| 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration shows once the anchor matures, and a wiped store is gone |
+| 4, somebody reading it | Nothing is detected until someone looks |
+
+The full setup does not make the record complete. Whether anything is missing is the witness's question, and its limit is above.
 
 ## What each profile adds
 
@@ -72,6 +85,11 @@ Stated here once, so that none of them is a discovery.
 - On a machine whose organization delivers settings from a server or through device management, the managed file may be skipped without a warning (ADR-0040).
 - That a managed hook runs under `--bare` is measured on one version of the harness and not stated in its documentation, so a later version may differ (#259).
 
+**Limits of what the supervisor remembers:**
+
+- The baseline, the day book and the coverage marker are files on the agent's machine. A baseline deleted alone is an alarm. The baseline and the day book deleted together read as a new install, and a session the scan had already reported as silent is then never judged again (ADR-0039, ADR-0029).
+- What holds against the writer is what is kept off the machine: the anchor, the published head and the published chain. Nothing the supervisor remembers about sessions is kept there today, so a machine that keeps its only memory beside the agent is at risk of losing it to the agent.
+
 **Limits of what a receipt holds:**
 
 - An action line holds the first 160 characters of what ran, with runs of whitespace collapsed to one space. What came after is not in the record, and today nothing in the receipt says how much was dropped (#470 adds the count).
@@ -99,7 +117,7 @@ Any way of getting past the record lands in one of three places.
 
 ## Shown, not only said
 
-Today [FIRE-DRILL.md](FIRE-DRILL.md) rehearses four alarms on sandbox copies: an edit, a deletion, a reorder and a regeneration. Condition 1 was measured by hand on 2026-10-05 (#259). A list of each promise with the drill that shows it firing, and each limit above with the run that shows it holding as described, is not written yet.
+Today [FIRE-DRILL.md](FIRE-DRILL.md) rehearses four alarms on sandbox copies: an edit, a deletion, a reorder and a regeneration. Condition 1 was measured by hand on 2026-10-05 (#259). The same day a red-team pass attacked 29 stated guarantees in temp folders, each attempt run and not reasoned: the two promises held against all of them, and what it did find is in the limits above (#473, #474). A list of each promise with the drill that shows it firing, and each limit above with the run that shows it holding as described, is not written yet.
 
 ## Standing of this page
 

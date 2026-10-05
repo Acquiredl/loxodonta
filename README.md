@@ -92,7 +92,7 @@ python supervisor.py digest    # this project's recent history, the text a new s
 python supervisor.py serve     # the dashboard, bound to 127.0.0.1 only
 ```
 
-The supervisor reads the store on the same machine the agent works on, so what it says is a reason to look, never proof. [docs/TOPOLOGY.md](docs/TOPOLOGY.md) draws where each file runs and what a verdict is worth there.
+The supervisor reads the store on the same machine the agent works on, so what it says is a reason to look, never proof. [docs/TOPOLOGY.md](docs/TOPOLOGY.md) draws where each file runs and what a verdict is worth there. [docs/CLAIMS.md](docs/CLAIMS.md) says what the record promises, the setup to run when it has to hold against the agent, and what each part left out opens.
 
 ## What it catches, and what it does not
 
