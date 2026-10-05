@@ -14,6 +14,7 @@ Every page in this folder, sorted by what you came for: running loxodonta, check
 
 ## Reference
 
+- [CLAIMS.md](CLAIMS.md): what a loxodonta record promises, the setup those promises depend on, and where they stop.
 - [SPEC.md](SPEC.md): the receipt format, precise enough that an independent implementation in any language produces the same hashes.
 - [PACKAGE.md](PACKAGE.md): how a session's receipts are shipped to someone else as a sealed zip that one file verifies.
 - [ANCHORING.md](ANCHORING.md): how a chain's latest hash is committed to Bitcoin through OpenTimestamps, and what that does and does not prove.
