@@ -201,6 +201,13 @@ TWINS = (
     Twin("Written-down coverage", ("COVERAGE_NAME",), ORIGINAL, SUPERVISOR,
          "The recorder writes down the coverage it wired under this name, "
          "and the supervisor's scan reads it there (ADR-0030)."),
+    Twin("The managed file",
+         ("harness_managed_folder", "managed_hooks_path"),
+         ORIGINAL, SUPERVISOR,
+         "`install-hook --managed` writes the hook entries to this one "
+         "file among the harness's managed settings, and the supervisor "
+         "reads what is wired from the same file, so both name one path "
+         "(ADR-0040)."),
     Twin("A chain batch's content type", ("CHAIN_TYPE",), ORIGINAL, RECEIVER,
          "The recorder sends a batch of the chain under this content type, "
          "and the receiver takes a batch only under it (ADR-0031)."),

@@ -15,7 +15,9 @@ only channel; there is no email address.
   keeps (`docs/RECEIVER.md`).
 - The adapters under `adapters/`.
 - The hook wiring: `install-hook` and the settings files it writes
-  (`~/.claude/settings.json`, `~/.codex/hooks.json`).
+  (`~/.claude/settings.json`, `~/.codex/hooks.json`, and with `--managed`
+  its own file in the harness's managed settings folder,
+  `managed-settings.d/loxodonta.json`).
 
 ## What the tool claims, so a report can say what broke
 

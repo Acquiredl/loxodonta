@@ -3465,17 +3465,21 @@ def keeper_env(**knobs):
 def isolated_env(home, **knobs):
     """`keeper_env` with every home the tools read pointed inside `home`:
     the store, the user's settings and Codex's hooks, so a scan reads
-    neither this machine's own wiring nor its coverage marker. Pair it
-    with a `--witness` under a temporary folder. The knobs land last, so
-    a test that keeps its store or its project somewhere of its own
-    names it here (`LOXODONTA_HOME=...`, `CLAUDE_PROJECT_DIR=...`). Every
-    start of scan, serve, calibrate, drill, export or package (#242), and
-    of adopt, hook, install-hook or uninstall-hook (#274), goes through
-    this or sets all four homes itself; the home guard
-    (tests/home_guard.py) refuses one that does neither."""
+    neither this machine's own wiring nor its coverage marker, and the
+    folder that stands in for the harness's managed settings folder
+    (#259), which nothing creates until a test asks for a managed
+    install. Pair it with a `--witness` under a temporary folder. The
+    knobs land last, so a test that keeps its store or its project
+    somewhere of its own names it here (`LOXODONTA_HOME=...`,
+    `CLAUDE_PROJECT_DIR=...`). Every start of scan, serve, calibrate,
+    drill, export or package (#242), and of adopt, hook, install-hook or
+    uninstall-hook (#274), goes through this or sets all four homes
+    itself, and the managed folder where the verb reads it; the home
+    guard (tests/home_guard.py) refuses one that does neither."""
     env = keeper_env(LOXODONTA_HOME=str(Path(home) / ".loxodonta"),
                      HOME=str(home), USERPROFILE=str(home),
-                     CODEX_HOME=str(Path(home) / ".codex"))
+                     CODEX_HOME=str(Path(home) / ".codex"),
+                     LOXODONTA_MANAGED_DIR=str(Path(home) / "managed"))
     env.pop("CLAUDE_PROJECT_DIR", None)
     env.update(knobs)
     return env

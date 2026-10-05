@@ -79,7 +79,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.12.1"
+TOOL_VERSION = "0.13.0"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -1162,8 +1162,9 @@ def codex_hooks_file():
 
 def recorder_wired(harness, witness):
     """Whether `harness`'s recorder is still on a SessionEnd command:
-    Claude Code's in the settings beside the witness layout, Codex's in
-    its hooks file, the two files `install-hook` writes. A harness with
+    Claude Code's in the settings beside the witness layout or in its
+    managed file (wired_files), Codex's in its hooks file, the files
+    `install-hook` writes. A harness with
     no settings file this reader knows is read as not wired, so a
     marker epoch nothing can confirm steers nothing."""
     if harness == "claude-code":
@@ -2251,6 +2252,70 @@ def read_settings(settings_file):
     return settings if isinstance(settings, dict) else None
 
 
+# --- The two homes of the hook (ADR-0040) -------------------------------------
+# `install-hook --managed` wires the recorder in a file of its own among
+# the harness's managed settings and takes it out of the operator's
+# file. A reader that knew the operator's file alone would then find no
+# hook: nothing owed, no SessionEnd wired, no recorder to drift, and a
+# silent session would read as one nobody asked to record. So whatever
+# reads what is wired reads both homes, by the same rule (ruling 7).
+# What is the operator's own to set (the retention setting) is read
+# where it was.
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def harness_managed_folder():
+    """The harness's managed settings folder, as its documentation names
+    it for each platform. On Windows the literal, never %ProgramFiles%:
+    an environment variable is in the writer's reach, and a 32-bit
+    Python is handed another folder under that name."""
+    return {"win32": "C:\\Program Files\\ClaudeCode",
+            "darwin": "/Library/Application Support/ClaudeCode",
+            }.get(sys.platform, "/etc/claude-code")
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def managed_hooks_path():
+    """The recorder's own file among the harness's managed settings
+    (ADR-0040 ruling 1): the one file there a managed install writes,
+    and the only one any reader here opens. LOXODONTA_MANAGED_DIR names
+    a folder to stand for the harness's, which is how the suite reaches
+    one it may write. It moves where these tools read and write, never
+    where the harness reads, and every installer verb that reads it
+    warns when it is set."""
+    folder = (os.environ.get("LOXODONTA_MANAGED_DIR")
+              or harness_managed_folder())
+    return os.path.join(folder, "managed-settings.d", "loxodonta.json")
+
+
+def wired_files(witness):
+    """The two files a Claude Code hook entry of the recorder's can be
+    wired in: the operator's settings beside the witness layout, then
+    the recorder's managed file. No other file of the managed folder is
+    opened."""
+    return (witness.parent / "settings.json", Path(managed_hooks_path()))
+
+
+def managed_first(witness):
+    """The two homes in the order a reader that takes the first match
+    reads them. The writer can add an entry to the operator's file and
+    cannot edit the managed one, so the managed file's entry is never
+    shadowed by one beside it (ADR-0040)."""
+    return tuple(reversed(wired_files(witness)))
+
+
+def wired_rules(witness, event):
+    """Every block wired under one hook event, in either home, the
+    managed file's first (managed_first)."""
+    rules = []
+    for settings_file in managed_first(witness):
+        try:
+            found = read_settings(settings_file)["hooks"][event]
+        except (KeyError, TypeError):
+            continue
+        rules += found if isinstance(found, list) else []
+    return rules
+
+
 # --- Which hook entries are the recorder's ------------------------------------
 # The settings file is shared with the user's own hooks, so a reader must
 # know which entries the installer wrote before it reads anything off
@@ -2346,36 +2411,48 @@ def beside_a_recorder(script):
 def hook_matchers(witness, event="PostToolUse"):
     """Which tools owe a receipt: the matchers wired to receipts under
     one hook event, read from the harness settings beside the witness
-    layout. `PostToolUse` is the completed call, and `PostToolUseFailure`
-    the call that ran and failed, wired beside it since #239. No wired
-    hook means nothing owes a receipt — a session can never be behind a
+    layout and from the recorder's managed file (wired_files).
+    `PostToolUse` is the completed call, and `PostToolUseFailure` the
+    call that ran and failed, wired beside it since #239. No wired hook
+    means nothing owes a receipt — a session can never be behind a
     recorder that was never asked to record."""
-    settings = read_settings(witness.parent / "settings.json")
-    try:
-        rules = settings["hooks"][event]
-    except (KeyError, TypeError):
-        return []
-    matchers = []
-    for rule in rules if isinstance(rules, list) else []:
-        if not isinstance(rule, dict):
-            continue
-        commands = rule.get("hooks")
-        wired = isinstance(commands, list) and any(
-            isinstance(hook, dict)
-            # Either era's name (ADR-0010): an install that predates the
-            # rename still owes receipts, and is still watched.
-            and owned_script(hook.get("command"), RECORDER_NAMES)
-            for hook in commands)
-        if wired:
-            matchers.append(str(rule.get("matcher", "*")))
-    return matchers
+    homes = []
+    for settings_file in wired_files(witness):
+        try:
+            rules = read_settings(settings_file)["hooks"][event]
+        except (KeyError, TypeError):
+            rules = []
+        matchers = []
+        for rule in rules if isinstance(rules, list) else []:
+            if not isinstance(rule, dict):
+                continue
+            commands = rule.get("hooks")
+            wired = isinstance(commands, list) and any(
+                isinstance(hook, dict)
+                # Either era's name (ADR-0010): an install that predates
+                # the rename still owes receipts, and is still watched.
+                and owned_script(hook.get("command"), RECORDER_NAMES)
+                for hook in commands)
+            if wired:
+                matchers.append(str(rule.get("matcher", "*")))
+        homes.append(matchers)
+    # A matcher wired in both homes, between the two steps of a managed
+    # install, is one coverage and not a change of it: moving the hook
+    # must not read here as the matchers changing (ADR-0016).
+    mine, managed = homes
+    return mine + [matcher for matcher in managed if matcher not in mine]
 
 
 def sessionend_commands(witness):
     """The recorder's SessionEnd command lines wired beside the witness
     layout, read from the harness settings: the one place the session-end
-    choices live (ADR-0024 ruling 1). Either era's name (ADR-0010)."""
-    return sessionend_commands_in(witness.parent / "settings.json")
+    choices live (ADR-0024 ruling 1). Either era's name (ADR-0010), and
+    either home: the keepers follow a command wired in the managed file
+    as they follow one in the operator's. The managed file's come first
+    (managed_first), for `sessionend_chain_remote`, which takes the
+    first remote named."""
+    return [command for settings_file in managed_first(witness)
+            for command in sessionend_commands_in(settings_file)]
 
 
 def sessionend_commands_in(settings_file):
@@ -2597,9 +2674,16 @@ def calibrate(remembered, witness, now):
     history the old rules recorded honestly. The first observation
     claims nothing earlier (BEFORE-MEMORY, ADR-0029); a change is dated
     by the settings file's mtime, clamped between the last observation
-    and now, since the harness does not log its own config changes. The
-    failed-call event is observed the same way (#239). Lives in the
-    baseline: writer-reachable, trusted for nothing beyond calibration."""
+    and now, since the harness does not log its own config changes. With
+    two homes (ADR-0040) it is the newer mtime of the two, and where
+    there is no managed file its folder stands in for it:
+    `uninstall-hook --managed` deletes the file, and the folder's mtime
+    is then the only thing dating that. Without it the end of coverage
+    would be dated by the operator's file, last written when the hook
+    moved out of it, and every session since would be judged as owed
+    nothing. The failed-call event is observed the same way (#239).
+    Lives in the baseline: writer-reachable, trusted for nothing beyond
+    calibration."""
     current = hook_matchers(witness)
     failures = hook_matchers(witness, "PostToolUseFailure")
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2609,12 +2693,17 @@ def calibrate(remembered, witness, now):
         return remembered
     if not remembered:
         return [coverage_epoch(stamp, current, failures)]
-    try:
-        changed = datetime.fromtimestamp(
-            (witness.parent / "settings.json").stat().st_mtime,
-            timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except OSError:
-        changed = stamp
+    mine, managed = wired_files(witness)
+    written = []
+    for places in ((mine,), (managed, managed.parent)):
+        for place in places:
+            try:
+                written.append(place.stat().st_mtime)
+            except OSError:
+                continue
+            break
+    changed = (datetime.fromtimestamp(max(written), timezone.utc)
+               .strftime("%Y-%m-%dT%H:%M:%SZ") if written else stamp)
     floor = remembered[-1]["since"] or ""
     return remembered + [coverage_epoch(min(max(changed, floor), stamp),
                                         current, failures)]
@@ -2752,13 +2841,10 @@ def recorder_path(witness):
     """The file the harness actually runs for PostToolUse, read out of
     the wired command line — the only place that truth lives. Either
     era's name (ADR-0010), and only a command the installer would claim
-    (#303); `~` is expanded, as the shell running the hook expands it."""
-    settings = read_settings(witness.parent / "settings.json")
-    try:
-        rules = settings["hooks"]["PostToolUse"]
-    except (KeyError, TypeError):
-        return None
-    for rule in rules if isinstance(rules, list) else []:
+    (#303); `~` is expanded, as the shell running the hook expands it.
+    The first one found, the managed file's before the operator's
+    (managed_first)."""
+    for rule in wired_rules(witness, "PostToolUse"):
         if not isinstance(rule, dict):
             continue
         for hook in rule.get("hooks") or []:
@@ -4080,8 +4166,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     shelf = not_a_file(daybook)
     marker = Path(store_home()) / COVERAGE_NAME
     unmarked = not_a_file(marker)
-    settings = witness.parent / "settings.json"
-    unset = not_a_file(settings)
+    # Either home of the hook (ADR-0040): a folder or a pipe at the
+    # managed file's name hides a hook as one at the operator's does.
+    unset = "; ".join(
+        f"{settings.as_posix()} cannot be read as harness settings: {why} "
+        "— read as none, as if no hook were wired"
+        for settings in wired_files(witness)
+        for why in [not_a_file(settings)] if why)
     report_note = None
     if unlisted:
         pass  # an empty census beside a closed folder is no empty store
@@ -4122,10 +4213,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                            f"coverage marker: {unmarked} — read as none, as "
                            "if install-hook had written nothing"}
            if unmarked else {}),
-        **({"settings_note": f"{settings.as_posix()} cannot be read as "
-                             f"harness settings: {unset} — read as none, "
-                             "as if no hook were wired"}
-           if unset else {}),
+        **({"settings_note": unset} if unset else {}),
         **({"closed": unlisted, "closed_note": closed_words(unlisted)}
            if unlisted else {}),
         "baseline": baseline,

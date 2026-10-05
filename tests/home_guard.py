@@ -29,6 +29,13 @@ home. A `hook` is refused a CLAUDE_PROJECT_DIR the test did not choose
 as well, since that names the drawer it writes into; the other recorder
 verbs never read it.
 
+Since #259 it covers the managed settings folder too (ADR-0040): the
+six reading verbs read the recorder's own file there to learn what is
+wired, `install-hook` reads it and with `--managed` writes it, and
+`uninstall-hook --managed` deletes it. That folder is under no home, so
+nothing keeps an unset LOXODONTA_MANAGED_DIR inside the test: a start of
+one of those eight verbs names it, in the temp root, or is refused.
+
 The recall verbs (`digest`, `show`, `search`, `timeline`, `mcp`) read
 the home and write nothing to it, so their tests are isolated but not
 guarded. A process started another way (`os.system`, `os.spawn*`; this
@@ -38,7 +45,8 @@ tests/test_supervisor.py arms it, and every suite that starts one of
 those verbs imports from there (directly, or through test_anchor or
 test_recall), so the guard is on whether the suite runs under discovery
 or one module at a time. `isolated_env` there is the way to give a start
-its homes; a start that sets all four by hand passes too. Every importer
+its homes; a start that sets all four by hand, and the managed folder
+where the verb reads it, passes too. Every importer
 names this module `home_guard`, so there is one of it and the hook goes
 in once. Not a test module: discovery collects `test_*.py` only.
 """
@@ -67,6 +75,10 @@ SUPERVISOR_VERB = re.compile(r'(?:^|[\s"/\\])supervisor\.py"?\s+"?([a-z-]+)')
 SUPERVISOR_WRITERS = {"adopt", "acknowledge"}
 RECORDER_WRITERS = {"hook", "install-hook", "uninstall-hook"}
 RECORDER_VERB = re.compile(r'(?:^|[\s"/\\])loxodonta\.py"?\s+"?([a-z-]+)')
+# The folder that stands in for the harness's managed settings folder
+# (#259), and the verbs that read or write the recorder's file in it.
+MANAGED = "LOXODONTA_MANAGED_DIR"
+MANAGED_VERBS = HOME_READERS | {"install-hook", "uninstall-hook"}
 
 
 def inside_the_temp_root(value, cwd):
@@ -83,11 +95,12 @@ def inside_the_temp_root(value, cwd):
         return False
 
 
-def strays(env, cwd, project_too=True):
+def strays(env, cwd, project_too=True, managed_too=True):
     """The names in `env` that could still reach this machine's home: a
     home unset, outside the temp root, or no different from the one this
-    process was started with; and, when `project_too`, a
-    CLAUDE_PROJECT_DIR the test did not choose.
+    process was started with; when `project_too`, a CLAUDE_PROJECT_DIR
+    the test did not choose; and, when `managed_too`, a managed settings
+    folder judged as a home is, with no exception for an unset one.
 
     Unset LOXODONTA_HOME and CODEX_HOME are the exception, when HOME and
     USERPROFILE both pass: the tools then fall back to `~/.loxodonta` and
@@ -109,6 +122,8 @@ def strays(env, cwd, project_too=True):
         found = [name for name in found
                  if name not in ("LOXODONTA_HOME", "CODEX_HOME")
                  or env.get(name)]
+    if managed_too and stray(MANAGED):
+        found.append(MANAGED)
     if (project_too and env.get("CLAUDE_PROJECT_DIR")
             and stray("CLAUDE_PROJECT_DIR")):
         found.append("CLAUDE_PROJECT_DIR")
@@ -148,7 +163,8 @@ def refuse_this_machines_home(event, args):
     names = strays(os.environ if env is None else env,
                    os.getcwd() if cwd is None else os.fsdecode(cwd),
                    project_too=tool == "supervisor.py"
-                   or verb.group(1) == "hook")
+                   or verb.group(1) == "hook",
+                   managed_too=verb.group(1) in MANAGED_VERBS)
     if names:
         raise AssertionError(
             "%s %s started with this machine's %s (#242, the "
@@ -172,6 +188,7 @@ def arm():
     if not _armed:
         _started_with.update(
             (name, os.environ[name])
-            for name in HOMES + ("CLAUDE_PROJECT_DIR",) if name in os.environ)
+            for name in HOMES + (MANAGED, "CLAUDE_PROJECT_DIR")
+            if name in os.environ)
         sys.addaudithook(refuse_this_machines_home)
         _armed = True
