@@ -894,8 +894,7 @@ def read_views(path):
     is."""
     try:
         views = json.loads(read_whole(path))["views"]
-    except (OSError, ValueError, KeyError, TypeError,
-            json.JSONDecodeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return []
     if not isinstance(views, list):
         return []
@@ -6131,7 +6130,7 @@ def cmd_mcp(args):
             continue
         try:
             message = json.loads(line.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             reply = mcp_error(None, -32700, "Parse error")
         else:
             reply = mcp_dispatch(message, args.repo)
@@ -8228,7 +8227,7 @@ class Face(BaseHTTPRequestHandler):
             return None
         try:
             return json.loads(self.rfile.read(length).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             return None
 
     def reply_views(self, views):

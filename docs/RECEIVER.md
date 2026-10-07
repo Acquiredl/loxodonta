@@ -50,6 +50,7 @@ What it keeps, in the data directory:
 - `token`: the secret half of the URL, readable by this user alone where the filesystem has the notion.
 - `heads.jsonl`: one line per published head, in the order received.
 - `receipts-<session>.jsonl`, and `receipts-<session>-002.jsonl` for a sibling chain (GLOSSARY *sibling chain*): one file per chain, named by the sender under the rule in section 4, holding chain bytes from genesis on.
+- `events-<YYYY-MM-DD>.jsonl`: one line per request of the harness's events (section 4, *The second door*), one file per UTC day of arrival, with every identity attribute removed.
 
 ## 3. The URL is the credential
 
@@ -63,7 +64,7 @@ The URL sits on the writer's machine, in the wired hook command, where the agent
 
 The sender side of this contract is the recorder. Any other sender, and any other receiver, speaks it exactly.
 
-**One door.** `POST` at `/<token>`. Every other verb at that path is `405` with `Allow: POST`; every other path is `404`, whatever the verb. There is no verb and no path that returns, lists or deletes what the receiver holds.
+**Two doors.** `POST` at `/<token>` takes a published head or a batch of a published chain; `POST` at `/<token>/v1/logs` takes the harness's events (*The second door*, below). Every other verb at either path is `405` with `Allow: POST`; every other path is `404`, whatever the verb. There is no verb and no path that returns, lists or deletes what the receiver holds.
 
 **Two content types, two destinations.**
 
@@ -79,7 +80,7 @@ The sender side of this contract is the recorder. Any other sender, and any othe
 | `X-Loxodonta-Range` | the `n` of the batch's first and last entry, `first-last` | no |
 | `X-Loxodonta-Head` | the chain head after the batch's last entry | no |
 
-The receiver reads the chain header and nothing else; the other three ride along for an operator reading traffic at a proxy, and for any receiver built to this contract that wants them. This one stores chain bytes and nothing besides.
+The receiver reads the chain header and nothing else; the other three ride along for an operator reading traffic at a proxy, and for any receiver built to this contract that wants them. This one stores the chain bytes of a batch and nothing besides.
 
 **The chain header must be a receipt file name.** `receipts-`, then a session id of letters, digits, hyphens and underscores (the sibling suffix is made of the same), then `.jsonl`, at most 200 characters between the two. Anything else is refused with `400` and nothing is written: a separator (`/` or `\`), a parent reference (`..`), a dot inside the id, another extension, `.JSONL`, an empty header, a missing one. Nothing in a header ever becomes a path.
 
@@ -95,20 +96,22 @@ The receiver reads the chain header and nothing else; the other three ride along
 
 **The answer.** `200` with a small JSON body, `{"appended": 3, "dropped": 0}` for a chain batch and `{"appended": 1}` for a head, sent only after the bytes are on disk, flushed and fsynced. Any `2xx` means on disk; the recorder advances its memo on a `2xx` and on nothing else.
 
+**The second door.** `POST` at `/<token>/v1/logs` with `Content-Type: application/json` is the harness's events (GLOSSARY *Harness events*; ADR-0041 rulings 2 and 3): `/v1/logs` is the path an OpenTelemetry exporter appends to the base address it is given, so the receiver's URL is the whole of what the sending machine holds. The body is one JSON object, or `400`; the receiver reads nothing else of it, and `Content-Length`, the body cap, the deadline and the idle timeout are as at the first door. Before the line is kept, every attribute whose key begins `user.` or `organization.`, matched exactly and case included, is removed from every `attributes` list and from the `values` of every `kvlistValue` at every level of the object, whoever the sender is, and the rest is kept whole. Each request becomes one line in `events-<YYYY-MM-DD>.jsonl`, named by the UTC day of arrival: a JSON object, compact and key-sorted, holding `received` (the arrival time, UTC, the receiver's clock), `from` (the client address) and `logs` (the posted object after the identity rule). The append lock, the fsync before the answer and the caps are the chain files'. The answer is `200` with the body `{}`, once the line is on disk. A body is taken as it is, at either door: a `Content-Encoding` other than `identity` is `415`.
+
 | Status | When |
 |---|---|
-| `200` | appended (or every line was an exact duplicate: `appended` is `0`) |
-| `400` | the chain header is not a receipt file name or is missing; a line is not an entry; the body ended early; `Content-Length` is not a length |
-| `404` | not the token's path |
-| `405` | a verb other than `POST` at the token's path (`Allow: POST`) |
+| `200` | appended (or every line was an exact duplicate: `appended` is `0`); at the second door, the line is on disk |
+| `400` | the chain header is not a receipt file name or is missing; a line is not an entry; the body ended early; `Content-Length` is not a length; at the second door, the body is not one JSON object; at either door, a body nested past what the reader takes, or a number JSON cannot carry (`NaN`, `Infinity`) |
+| `404` | not the token's path, nor its events path |
+| `405` | a verb other than `POST` at either door (`Allow: POST`) |
 | `411` | no `Content-Length` |
 | `413` | `Content-Length` past the cap |
-| `415` | a content type that is neither of the two |
+| `415` | a content type that is neither of the two, or at the second door not `application/json`; a `Content-Encoding` other than `identity` |
 | `500` | the disk refused the write; nothing of the batch is acknowledged, and the sender's memo does not advance |
 | `501` | a verb the stdlib server does not know at all |
 | `507` | the lines would take a file past `--file-cap` or the data directory past `--total-cap`; nothing is written |
 
-A refusal carries one line of plain text saying why. The receiver's own log, on its stdout, is one line per request with the time, the client address, the verb and the status; the request path is on no line, because the path is the credential.
+A refusal carries one line of plain text saying why. The receiver's own log, on its stdout, is one line per request with the time, the client address, the verb and the status; the request path is on no line, because the path is the credential. For events that landed, the line says how many identity attributes were dropped.
 
 **The sender's side.** The recorder speaks this contract from `publish --chain --log LOG URL` and from a wired session end (`install-hook --profile full --remote URL`, or `--profile custom --publish-chain URL` for the chain alone, docs/HOOK.md); `supervisor scan|serve --publish-every AGE --publish-chain URL` sends by running that same command, so there is one sender and not three.
 
@@ -156,12 +159,13 @@ The walk judges the receiver's file the way it judges any chain, so what it says
 
 ## 7. What it refuses
 
-- Any verb but `POST` at the token's path: `405`.
-- Any path but the token's: `404`, so a leaked or guessed path learns nothing, and the retired path after `--new-token` learns nothing either.
-- Any content type but the two: `415`.
+- Any verb but `POST` at the token's path or its events path: `405`.
+- Any path but the token's and its events path, `/v1/metrics` under the token included: `404`, so a leaked or guessed path learns nothing, and the retired path after `--new-token` learns nothing either.
+- Any content type but the two at the token's path, or but `application/json` at the events path, and any `Content-Encoding` but `identity`: `415`.
 - A chain header that is not a receipt file name: `400`, nothing written, nothing from the header touching the disk.
 - A body with no declared length, or declared past the cap: `411`, `413`, before a byte is read.
 - A batch with a line that is not shaped like an entry: `400`, nothing written.
+- An events body that is not one JSON object (a list, a scalar, bytes that are not UTF-8), and at either door a body nested past what the reader takes: `400`, nothing written.
 - A request that has not arrived whole, headers and body, sixty seconds after its connection opened, or a sender that goes quiet for thirty seconds, mid-body or before a TLS handshake it never starts: dropped silently, with no line on the receiver's log, so a stalling stranger cannot fill it. A slow sender holds only its own connection while it lasts; every other sender is served beside it.
 - Lines that would take a file past its cap, or the data directory past the total cap: `507`, nothing written, nothing already kept touched.
 - Every request for what it holds: there is no such request. The files are read on the box, by the operator, with the recorder.

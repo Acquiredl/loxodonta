@@ -619,6 +619,44 @@ class DashboardTest(ServerFixture):
         self.assertEqual(self.views(), [{"name": "fine",
                                          "repo": "alpha"}])
 
+    def test_a_deeply_nested_views_file_does_not_crash_the_reader(self):
+        # RED-TEAM (area C, C2): the views file is writer-reachable, like
+        # the baseline and the day book. A deeply nested but valid JSON
+        # document makes json.loads raise RecursionError, which read_views
+        # does not catch (it catches ValueError/JSONDecodeError only),
+        # unlike its sibling readers (daybook, project.json, baseline all
+        # catch RecursionError). So `/api/views` ends in a RecursionError
+        # traceback and the connection is dropped — a reader in the
+        # writer's reach ended in a traceback, which ADR-0037 and #331 say
+        # must never happen. A damaged views file must read as empty, as
+        # the hand-edited one above does, not take the request down. This
+        # is not #463 (which names the settings file and the coverage
+        # marker, read by install-hook and scan), nor #452 (a folder that
+        # cannot be listed): a different file and a different reader.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        depth = 6000
+        (self.root / ".supervisor-views.json").write_text(
+            '{"views":' + "[" * depth + "]" * depth + "}", encoding="utf-8")
+        self.serve()
+        # self.get has a 30 s timeout, so a hang would fail here too.
+        self.assertEqual(self.views(), [])
+
+    def test_a_deeply_nested_views_post_is_400_not_a_crash(self):
+        # The same reader's other half (#474): the page's one write path
+        # takes a body up to 16 KiB, and six thousand brackets fit in
+        # twelve. Not a JSON object is 400, as "[]" is; the depth must
+        # be too, not a dropped connection.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        request = urllib.request.Request(
+            self.url + "/api/views",
+            data=("[" * 6000 + "]" * 6000).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as refused:
+            OPENER.open(request, timeout=30)
+        self.assertEqual(refused.exception.code, 400)
+        self.assertEqual(self.views(), [])
+
     def test_the_views_row_sits_above_the_tabs_and_below_nothing_else(self):
         page = self.page()
         self.assertIn('id="view-list"', page)

@@ -12,12 +12,18 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Added
 
+- `receiver serve` takes a harness's events at `POST /<token>/v1/logs`, drops every `user.*` and `organization.*` attribute at every level, and keeps each request as one line in `events-<day>.jsonl` by UTC day of arrival, under the same caps (#479).
 - `install-hook --managed --profile full` also pins the harness's events to the `--remote` URL in a second file of its own, says what leaves through them and warns of another source; any other profile, or uninstall, removes it (#480).
 - The hook writes `second-record-cut: reason=...` once per chain when its environment has the pinned events off or sent elsewhere, so a session whose second record was cut says so (#480).
 
 ### Changed
 
 - `install-hook --managed` says in its help and its closing words that the harness documents the claim and ADR-0040 measured it, where they said documented and not yet measured (#259).
+- The receiver refuses a head whose JSON carries `NaN` or `Infinity` with `400`, where it kept a line most readers cannot parse (#479).
+
+### Fixed
+
+- A JSON body nested past the reader's limit is `400` at both receiver doors, no saved views at the dashboard, and `-32700` from the MCP server, where each ended in a traceback (#474).
 
 ## [0.13.0] - 2026-10-04
 

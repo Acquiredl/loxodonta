@@ -19,13 +19,20 @@ the evidence with it, as of the last send.
   python receiver.py --version                   # tool, format, and commit
 
 What it keeps, in its data directory: `token`, the secret half of the
-URL; `heads.jsonl`, one line per published head; and one
+URL; `heads.jsonl`, one line per published head; one
 `receipts-<session>.jsonl` per chain, named by the sender and holding
 chain bytes from genesis on, so `loxodonta verify --log` judges it as
-it is, up to a cap on each file and one on them all. The operator on
-this box reads those files with the recorder;
+it is; and `events-<day>.jsonl`, one line per request of a harness's
+own events, up to a cap on each file and one on them all. The operator
+on this box reads those files with the recorder;
 nothing here serves them back over the wire. The wire contract, header
 names included, is docs/RECEIVER.md. Stdlib only, like everything here.
+
+The second door, `POST /<token>/v1/logs`, takes a harness's events about
+its tool calls as one JSON object, drops every `user.*` and
+`organization.*` attribute at every level, and keeps each request as one
+line in the file of its UTC day of arrival, understanding nothing else
+about it (ADR-0041 rulings 2 and 3).
 """
 
 import argparse
@@ -68,6 +75,28 @@ HEAD_TYPE = "application/json"
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 CHAIN_TYPE = "application/x-ndjson"
 CHAIN_HEADER = "X-Loxodonta-Chain"
+
+# The second door (ADR-0041 rulings 2 and 3): a harness's own events
+# about its tool calls, posted at the token's path plus the logs suffix
+# of the OpenTelemetry protocol, which an exporter given the receiver's
+# URL as its base address appends itself. The body is one JSON object,
+# kept one request per line in a file per UTC day of arrival. Nothing
+# here reads the object: which lines are tool calls, and what a harness
+# calls them, is the supervisor's business, so the receiver knows no
+# vendor (ADR-0031 ruling 5).
+EVENTS_SUFFIX = "/v1/logs"
+EVENTS_TYPE = "application/json"
+EVENTS_PREFIX = "events-"
+
+# The identity namespaces of the OpenTelemetry conventions, dropped
+# before a line is kept from every list the standard keeps attributes
+# in, at every level: an `attributes` list, and the `values` of a
+# `kvlistValue`, its nested-attributes shape. Matched exactly, case
+# included, whoever the sender is: the operator's email and ids serve
+# nothing the session id does not, and belong on no file of the
+# receiver's (ADR-0041 ruling 3).
+IDENTITY_KEYS = ("user.", "organization.")
+NESTED_ATTRIBUTES = "kvlistValue"
 
 # The only file names a header can reach: the recorder's own chain
 # names, `receipts-<session>.jsonl` and the sibling
@@ -217,14 +246,77 @@ def head_line(body):
     """The one line a published head becomes: the JSON object that was
     posted, compact and key-sorted so the heads file reads one head per
     line whatever whitespace the sender used. None when the body is not
-    one JSON object."""
+    one JSON object, is nested past what the reader or the writer takes,
+    or carries a number JSON cannot (#474). The writer sits under the
+    same guard as the reader: it gives up at a depth the reader still
+    takes, and that depth must be a refusal too, never a traceback.
+    `allow_nan=False`, because Python's reader takes NaN and Infinity
+    and a line holding one is a line most readers refuse."""
     try:
         head = json.loads(body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+        if not isinstance(head, dict):
+            return None
+        return json.dumps(head, sort_keys=True, separators=(",", ":"),
+                          allow_nan=False).encode("utf-8")
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
-    if not isinstance(head, dict):
-        return None
-    return json.dumps(head, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def identity_attribute(attribute):
+    """True for an attribute whose key begins with an identity
+    namespace. Anything that is not an attribute, or whose key is not
+    text, is not one, and stays."""
+    return (isinstance(attribute, dict)
+            and isinstance(attribute.get("key"), str)
+            and attribute["key"].startswith(IDENTITY_KEYS))
+
+
+def drop_identity(logs):
+    """Remove each identity attribute from every `attributes` list, and
+    from the `values` of every nested attribute list, at any depth of
+    the posted object, in place, and return how many went. Walked with
+    a list of what is left to visit, not by recursion: the object passed
+    the JSON reader's depth limit, and the walk must not be what runs
+    out of stack a few frames further down. Nothing else in the object
+    is touched, list order included."""
+    dropped = 0
+    pending = [logs]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            for holder, name in ((node, "attributes"),
+                                 (node.get(NESTED_ATTRIBUTES), "values")):
+                if isinstance(holder, dict) and isinstance(holder.get(name), list):
+                    kept = [a for a in holder[name] if not identity_attribute(a)]
+                    dropped += len(holder[name]) - len(kept)
+                    holder[name] = kept
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
+    return dropped
+
+
+def events_line(body, sender, received):
+    """The one line a received request becomes: the client address, the
+    posted object after the identity rule, and the arrival time, compact
+    and key-sorted, with how many attributes were dropped. (None, 0)
+    when the body is not one JSON object, which is all the receiver asks
+    of it, is nested past what the reader or the writer takes, or
+    carries a number JSON cannot (#474). The kept line wraps the object
+    one level deeper than it was read, so the writer gives up at a depth
+    the reader still takes: the writer sits under the same guard, and
+    that depth is a refusal too, never a traceback. `allow_nan=False`,
+    as for a head."""
+    try:
+        logs = json.loads(body.decode("utf-8"))
+        if not isinstance(logs, dict):
+            return None, 0
+        dropped = drop_identity(logs)
+        line = {"from": sender, "logs": logs, "received": received}
+        return (json.dumps(line, sort_keys=True, separators=(",", ":"),
+                           allow_nan=False).encode("utf-8"), dropped)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return None, 0
 
 
 def receipt_of(line):
@@ -234,7 +326,7 @@ def receipt_of(line):
     else about a line, since judging is `loxodonta verify`'s job."""
     try:
         entry = json.loads(line.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
     if not isinstance(entry, dict):
         return None
@@ -385,9 +477,11 @@ class Arrival(io.RawIOBase):
 
 
 class Door(BaseHTTPRequestHandler):
-    """The one door: POST at the token's path. Everything else is turned
-    away with a status and one short line, and the request path is
-    never written anywhere, because the path is the credential."""
+    """Two doors: POST at the token's path, for a head or a chain batch,
+    and POST at the events path under it, for a harness's events.
+    Everything else is turned away with a status and one short line, and
+    the request path is never written anywhere, because the path is the
+    credential."""
 
     # A sender that goes quiet this long, mid-body or before a TLS
     # handshake it never starts, is dropped, not waited on, even with
@@ -410,17 +504,28 @@ class Door(BaseHTTPRequestHandler):
             arrival.limit_wait()
             self.connection.do_handshake()
 
-    def at_the_token(self):
-        # A token is ASCII, so a path that is not is never the token's;
-        # asked first, because compare_digest refuses non-ASCII text.
+    def door(self):
+        """Which door the path is at: "token" for the token's own,
+        "events" for the events path under it, None for anything else.
+        A token is ASCII, so a path that is not is at neither; asked
+        first, because compare_digest refuses non-ASCII text. Each
+        comparison is of the whole path, so the token is never judged a
+        character at a time."""
         path = urlsplit(self.path).path
-        return path.isascii() and hmac.compare_digest(path, "/" + self.server.token)
+        if not path.isascii():
+            return None
+        token = "/" + self.server.token
+        if hmac.compare_digest(path, token):
+            return "token"
+        if hmac.compare_digest(path, token + EVENTS_SUFFIX):
+            return "events"
+        return None
 
     def refuse_method(self):
-        """Every verb but POST: 405 at the token's path, so an operator
-        with the right URL learns it is the verb that is wrong, and 404
+        """Every verb but POST: 405 at either door, so an operator with
+        the right URL learns it is the verb that is wrong, and 404
         anywhere else. There is no verb that reads, lists or deletes."""
-        if self.at_the_token():
+        if self.door():
             self.answer(405, "the receiver takes POST only", allow="POST")
         else:
             self.answer(404, "not the receiver's path")
@@ -451,14 +556,29 @@ class Door(BaseHTTPRequestHandler):
     def content_type(self):
         return (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
 
+    def content_encoding(self):
+        return (self.headers.get("Content-Encoding") or "identity").strip().lower()
+
     def do_POST(self):
-        if not self.at_the_token():
+        door = self.door()
+        if door is None:
             self.answer(404, "not the receiver's path")
             return
         kind = self.content_type()
-        if kind not in (HEAD_TYPE, CHAIN_TYPE):
+        if door == "events":
+            if kind != EVENTS_TYPE:
+                self.answer(415, f"events are {EVENTS_TYPE}")
+                return
+        elif kind not in (HEAD_TYPE, CHAIN_TYPE):
             self.answer(415, f"a head is {HEAD_TYPE}, a chain batch is "
                              f"{CHAIN_TYPE}")
+            return
+        # A body is taken as it is, at either door: nothing here
+        # decompresses, so an encoded body would be kept as garbage or
+        # refused as one. Judged before the body is read, like the type.
+        if self.content_encoding() != "identity":
+            self.answer(415, "the body must be sent as it is, with no "
+                             "Content-Encoding")
             return
         # The chain's name is judged before the body is read: a batch
         # for a file this receiver would not write is not worth reading.
@@ -476,15 +596,39 @@ class Door(BaseHTTPRequestHandler):
         if len(body) != length:
             self.answer(400, "the body ended before its declared length")
             return
-        if kind == HEAD_TYPE:
+        if door == "events":
+            self.keep_events(body)
+        elif kind == HEAD_TYPE:
             self.keep_head(body)
         else:
             self.keep_batch(body, name)
 
+    def keep_events(self, body):
+        """The second door's keep: one line per received request, in the
+        file of the UTC day it arrived, under the same lock and caps as
+        a chain. The day and the line's `received` come from one reading
+        of the clock, so the file a line sits in and the time it carries
+        never disagree. The log line says how many identity attributes
+        went and nothing of the path."""
+        now = datetime.now(timezone.utc)
+        line, dropped = events_line(body, self.client_address[0],
+                                    now.isoformat())
+        if line is None:
+            self.answer(400, "events are one JSON object, within what JSON carries")
+            return
+        path = os.path.join(self.server.data,
+                            EVENTS_PREFIX + now.strftime("%Y-%m-%d") + ".jsonl")
+        with self.server.appending:
+            refused = self.append(path, [line])
+        if refused:
+            self.answer(*refused)
+        else:
+            self.ok({}, said=f"events: {dropped} identity attribute(s) dropped")
+
     def keep_head(self, body):
         line = head_line(body)
         if line is None:
-            self.answer(400, "a head is one JSON object")
+            self.answer(400, "a head is one JSON object, within what JSON carries")
             return
         path = os.path.join(self.server.data, HEADS_FILE)
         with self.server.appending:
@@ -537,11 +681,13 @@ class Door(BaseHTTPRequestHandler):
             return 500, f"could not write: {e.strerror or e}"
         return None
 
-    def ok(self, counts):
-        """The 200: what landed, as JSON, and said to be JSON."""
-        self.answer(200, json.dumps(counts), kind="application/json")
+    def ok(self, counts, said=None):
+        """The 200: what landed, as JSON, and said to be JSON. `said` is
+        the log line's words when the body is not them."""
+        self.answer(200, json.dumps(counts), kind="application/json", said=said)
 
-    def answer(self, status, text, allow=None, kind="text/plain; charset=utf-8"):
+    def answer(self, status, text, allow=None, kind="text/plain; charset=utf-8",
+               said=None):
         body = (text + "\n").encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", kind)
@@ -553,7 +699,7 @@ class Door(BaseHTTPRequestHandler):
             self.wfile.write(body)
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         print(f"{stamp} {self.client_address[0]} {self.command} {status} "
-              f"{text}", flush=True)
+              f"{said or text}", flush=True)
 
     def log_request(self, *_):
         pass  # `answer` prints the line, without the path
@@ -719,8 +865,9 @@ def main(argv):
                              "the checkout's commit, then exit")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    serve = sub.add_parser("serve", help="listen for published chains "
-                                         "and heads, and keep them")
+    serve = sub.add_parser("serve", help="listen for published chains, "
+                                         "heads and a harness's events, "
+                                         "and keep them")
     serve.add_argument("--data", metavar="DIR",
                        help="where the token and the files live "
                             "(default: ~/.loxodonta/receiver)")
