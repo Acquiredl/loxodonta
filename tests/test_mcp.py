@@ -235,6 +235,28 @@ class HandshakeTest(McpBase):
         for line in out.splitlines():
             json.loads(line)
 
+    def test_a_deeply_nested_line_is_a_parse_error_not_a_crash(self):
+        # RED-TEAM (area C, C2/C6): the agent speaking MCP is the adversary
+        # (ADR-0002), and a deeply nested but syntactically valid JSON line
+        # — reachable through tool-call arguments — makes json.loads raise
+        # RecursionError, which cmd_mcp does not catch (it catches
+        # ValueError/UnicodeDecodeError only). So the whole
+        # recall server crashes with a traceback and exits non-zero,
+        # denying recall, where a malformed line must get -32700 Parse
+        # error and the server must stay up for the next request, exactly
+        # as "this is not json" does above. Same omission as #463
+        # (settings/coverage) and the serve views reader, in a third
+        # reader: catch RecursionError beside ValueError.
+        c = self.client()
+        c.initialize()
+        bad = c.raw("[" * 6000 + "]" * 6000)
+        self.assertEqual(bad["error"]["code"], -32700)
+        self.assertIsNone(bad["id"])
+        # The server is still answering after the bad line.
+        self.assertEqual(c.request("ping")["result"], {})
+        code, out, err = c.close()
+        self.assertEqual(code, 0, err)
+
 
 class ToolListTest(McpBase):
     def test_five_recall_tools_and_no_writer(self):
