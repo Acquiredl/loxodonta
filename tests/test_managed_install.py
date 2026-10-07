@@ -849,9 +849,9 @@ class TelemetryPinTest(ManagedBase):
         text, else as the installer writes JSON (two spaces, a final
         newline), so a pin put back as it stood is byte for byte."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content if isinstance(content, str)
-                        else json.dumps(content, indent=2) + "\n",
-                        encoding="utf-8", newline="\n")
+        text = (content if isinstance(content, str)
+                else json.dumps(content, indent=2) + "\n")
+        path.write_bytes(text.encode("utf-8"))
 
     def test_full_writes_the_pin_with_the_four_keys_and_nothing_else(self):
         done = self.full()
