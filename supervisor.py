@@ -3737,13 +3737,18 @@ def attribute_value(box):
     """One OTLP attribute value out of its box ({"stringValue": "x"},
     {"intValue": 3}, ...): the one field the box holds. A counter the
     exporter writes as a string of digits reads as the number. None for
-    a box of another shape."""
+    a box of another shape, and for digits int() refuses: isdigit()
+    passes a superscript two and a string past the interpreter's digit
+    limit, and whoever holds the URL can post either (#481)."""
     if not isinstance(box, dict) or len(box) != 1:
         return None
     (kind, value), = box.items()
     if kind == "intValue" and isinstance(value, str) \
             and value.lstrip("-").isdigit():
-        return int(value)
+        try:
+            return int(value)
+        except ValueError:
+            return None
     return value
 
 
@@ -3793,7 +3798,8 @@ def read_events(root, closed=None):
     per-session counter whose missing numbers are the second record's
     gap. Beside the sessions: the newest `received` per sending address
     (ruling 5's "last heard"), the days the files are named for, and
-    the lines that were not one JSON object, skipped and counted, never
+    the lines that were not one JSON object holding a `logs` object,
+    skipped and counted, never
     fatal: the files are out of the writer's reach, but a reader that
     ends on one line is still wrong."""
     sessions = {}
@@ -3812,7 +3818,8 @@ def read_events(root, closed=None):
                 arrival = json.loads(line)
             except (ValueError, RecursionError):
                 arrival = None
-            if not isinstance(arrival, dict):
+            if not isinstance(arrival, dict) \
+                    or not isinstance(arrival.get("logs"), dict):
                 unparsed += 1
                 continue
             received = arrival.get("received")

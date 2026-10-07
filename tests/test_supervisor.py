@@ -5423,6 +5423,62 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
+    def test_an_object_not_in_the_line_shape_is_counted_too(self):
+        chain_copy(self.data, FIXTURE_SESSION)
+        with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
+                  encoding="utf-8") as events:
+            events.write('{"received":"2026-10-07T02:22:00Z","from":"x",'
+                         '"logs":null}\n{"logs":[1]}\n{}\n')
+
+        report = self.report()
+
+        self.assertEqual(report["completeness"]["second_record"]["unparsed"],
+                         3)
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_an_int_value_int_cannot_read_ends_nothing(self):
+        # str.isdigit() passes a superscript two and a string past the
+        # interpreter's 4300-digit limit; int() refuses both. Whoever
+        # holds the URL can post either.
+        chain_copy(self.data, FIXTURE_SESSION)
+        with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
+                  encoding="utf-8") as events:
+            for value in ("²", "9" * 5000):
+                record = {"attributes": [
+                    {"key": "session.id",
+                     "value": {"stringValue": FIXTURE_SESSION}},
+                    {"key": "event.sequence",
+                     "value": {"intValue": value}}]}
+                events.write(json.dumps({
+                    "received": "2026-10-07T02:22:00Z", "from": "x",
+                    "logs": {"resourceLogs": [{"scopeLogs": [
+                        {"logRecords": [record]}]}]}}) + "\n")
+
+        report = self.report()
+
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_an_event_received_just_now_keeps_its_session_pending(self):
+        # The copy arrived an hour ago; the events' own `received`, the
+        # receiver's clock, says the session is still sending.
+        chain_copy(self.data, FIXTURE_SESSION)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        path = self.data / f"events-{FIXTURE_DAY}.jsonl"
+        lines = [dict(json.loads(line), received=now)
+                 for line in path.read_text(encoding="utf-8").splitlines()]
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines),
+                        encoding="utf-8")
+
+        pending = self.report(settle=None)
+        judged = self.report(settle="0")
+
+        self.assertEqual(self.rows(pending)[FIXTURE_SESSION]["state"],
+                         "PENDING")
+        self.assertEqual(self.rows(judged)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
     def test_the_memory_lives_in_the_folder_and_the_store_is_untouched(self):
         chain_copy(self.data, FIXTURE_SESSION)
 
