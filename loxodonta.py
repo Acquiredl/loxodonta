@@ -3924,6 +3924,7 @@ def upgrade_pending_proofs(folder, remaining, deadline):
 
 SESSION_END_PUBLISH = 3.0   # seconds for the one POST; the anchor gets the rest
 CODEX_ACTOR = "codex"       # the actor the Codex installer writes
+CLAUDE_CODE_ACTOR = "claude-code"   # the hook's default, which that installer leaves
 # Codex caps the whole SessionEnd hook at three seconds; asking for more
 # is asking to be killed mid-seal, so the installer wires this as the
 # block's timeout. The quick steps (the head, the chain, the stamp, in
@@ -5214,6 +5215,77 @@ def commit_transcript_due(log, transcript_path):
         append_locked(log, "receipts", action, [])
 
 
+# The hook's note that the second record is cut (ADR-0041 ruling 8),
+# the third bookkeeping kind, with its grammar pinned in SPEC §2.2: one
+# space between fields, no trailing content.
+CUT_NOTE = "second-record-cut: reason="
+
+
+def second_record_cut(env, pin):
+    """Why the environment `env` cuts the second record the pin
+    promises, or None when it does not: the first of the telemetry
+    off, the exporter not naming the pinned one, and the effective
+    logs endpoint elsewhere than the pinned URL, which is the
+    per-signal variable when set (the pinned URL plus /v1/logs, as the
+    harness appends it) and else the base one. A trailing slash is no
+    difference, and a key the pin does not hold is not compared."""
+    switch = "CLAUDE_CODE_ENABLE_TELEMETRY"
+    if switch in pin and env.get(switch) != pin[switch]:
+        return "telemetry-off"
+    named = [name.strip()
+             for name in env.get("OTEL_LOGS_EXPORTER", "").split(",")]
+    if "OTEL_LOGS_EXPORTER" in pin and pin["OTEL_LOGS_EXPORTER"] not in named:
+        return "exporter-off"
+    if PIN_ENDPOINT in pin:
+        pinned = pin[PIN_ENDPOINT].rstrip("/")
+        if env.get(LOGS_ENDPOINT):
+            sent_to, pinned = env[LOGS_ENDPOINT], pinned + "/v1/logs"
+        else:
+            sent_to = env.get(PIN_ENDPOINT, "")
+        if sent_to.rstrip("/") != pinned:
+            return "endpoint-elsewhere"
+    return None
+
+
+def holds_cut_note(lines):
+    """Whether a chain already says its second record was cut: parsed,
+    never searched as text, so a command line quoting the note cannot
+    stand in for one."""
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(entry, dict) and entry.get("actor") == "receipts" \
+                and str(entry.get("action", "")).startswith(CUT_NOTE):
+            return True
+    return False
+
+
+def note_second_record_cut(log):
+    """Append the note that this session's second record is cut, once
+    per chain (ADR-0041 ruling 8): when the installer's pin is there
+    and reads as one, and the hook's own environment, which is the
+    harness's, disagrees with it. Called with the chain lock held,
+    after a completed-call or failed-call receipt; a SessionEnd run
+    writes none. A chain holding the note gets no second one: it says
+    the record was cut, not how often. Every failure path is a silent
+    skip, as the commitment's is: a hook that failed a session over
+    bookkeeping would teach the operator to turn the hook off."""
+    pin = pinned_env(read_json_object(managed_telemetry_path()))
+    if not pin:
+        return
+    reason = second_record_cut(os.environ, pin)
+    if reason is None:
+        return
+    try:
+        lines = read_log(log)
+    except OSError:
+        return
+    if not holds_cut_note(lines):
+        append_locked(log, "receipts", CUT_NOTE + reason, [])
+
+
 def one_line(text, limit=160):
     """Whitespace collapsed to single spaces, truncated with an ellipsis:
     action is one line (SPEC §2), and receipts are not transcripts. The
@@ -5574,15 +5646,20 @@ def cmd_hook(args):
         log, file_paths, base=base if problem else named)
     if files is None:
         return code
-    # One lock for the receipt and any due transcript commitment: a
-    # racing sibling process between the two could steal the cadence
-    # boundary, and a commitment that sometimes silently misses its
-    # window is the kind of flake an operator learns to shrug at.
+    # One lock for the receipt, any due transcript commitment and the
+    # second-record note: a racing sibling process between them could
+    # steal the cadence boundary, and a commitment that sometimes
+    # silently misses its window is the kind of flake an operator
+    # learns to shrug at.
     try:
         with ChainLock(log):
             code = append_locked(log, args.actor, action, files)
             if code == 0:
                 commit_transcript_due(log, payload.get("transcript_path"))
+                if args.actor == CLAUDE_CODE_ACTOR:
+                    # The pin is Claude Code's: another harness reads no
+                    # managed settings and has no second record to cut.
+                    note_second_record_cut(log)
             return code
     except LockTimeout:
         return locked_out(log)
@@ -6160,10 +6237,13 @@ def install_codex_hooks(publish=None, profile="local",
 # harness also reads managed settings, from a folder an administrator
 # writes, which its documentation ranks above the command line, and
 # merges in every file of a `managed-settings.d` folder beside them.
-# `install-hook --managed` writes one file of the recorder's own there
-# and opens no other. The hook then has one home, which is why a plain
-# install refuses while that file holds the entries, and why every
-# reader of what is wired reads both.
+# `install-hook --managed` writes the hook entries to one file of the
+# recorder's own there, and at `full` the telemetry pin to a second
+# (ADR-0041), and writes no other: the others it reads once, for an
+# `env` that already sends the events elsewhere, and never merges into
+# (ADR-0040, addendum of 2026-10-06). The hook then has one
+# home, which is why a plain install refuses while that file holds the
+# entries, and why every reader of what is wired reads both.
 
 
 def harness_managed_folder():
@@ -6177,13 +6257,14 @@ def harness_managed_folder():
 
 
 def managed_hooks_path():
-    """The recorder's own file among the harness's managed settings
-    (ADR-0040 ruling 1): the one file there a managed install writes,
-    and the only one any reader here opens. LOXODONTA_MANAGED_DIR names
-    a folder to stand for the harness's, which is how the suite reaches
-    one it may write. It moves where these tools read and write, never
-    where the harness reads, and every installer verb that reads it
-    warns when it is set."""
+    """The recorder's own hooks file among the harness's managed
+    settings (ADR-0040 ruling 1): the file a managed install writes the
+    hook entries to, and the one file there the supervisor reads; the
+    telemetry pin sits beside it (ADR-0041). LOXODONTA_MANAGED_DIR
+    names a folder to stand for the harness's, which is how the suite
+    reaches one it may write. It moves where these tools read and
+    write, never where the harness reads, and every installer verb that
+    reads it warns when it is set."""
     folder = (os.environ.get("LOXODONTA_MANAGED_DIR")
               or harness_managed_folder())
     return os.path.join(folder, "managed-settings.d", "loxodonta.json")
@@ -6256,17 +6337,46 @@ def owned_by_another(path):
         return True
 
 
+def bytes_at(path):
+    """(the bytes of the file at `path`, None), or (None, the OSError
+    that refused it): nothing there, a folder, a pipe or a device at
+    the name, which `open_regular` refuses rather than waits on (#386),
+    or no right to read it."""
+    try:
+        with open_regular(path) as f:
+            return f.read(), None
+    except OSError as error:
+        return None, error
+
+
+def json_object(data):
+    """The JSON object `data` holds, or None: not UTF-8, not JSON,
+    nested past the reader, or JSON that is not an object. None in,
+    None out."""
+    if data is None:
+        return None
+    try:
+        settings = json.loads(data.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
+def read_json_object(path):
+    """The JSON object in the file at `path`, or None, by the two
+    above."""
+    return json_object(bytes_at(path)[0])
+
+
 def read_hooks(path):
     """The settings in a hooks file, or None: no file there, nothing
     that reads as one, or JSON of a shape the installer cannot walk.
     For a file that is read to learn what is wired and is not about to
     be merged into; `load_settings` is the reader that refuses."""
-    try:
-        with io.TextIOWrapper(open_regular(path), encoding="utf-8") as f:
-            settings = json.load(f)
-    except (OSError, ValueError, RecursionError):
+    settings = read_json_object(path)
+    if settings is None or settings_shape_problem(settings):
         return None
-    return None if settings_shape_problem(settings) else settings
+    return settings
 
 
 def our_hooks(settings):
@@ -6289,14 +6399,15 @@ def our_hooks(settings):
     return {"hooks": hooks}
 
 
-def write_managed_hooks(path, settings):
-    """Write the managed file whole, making the folders above it that
-    are absent, and return None; or return the OSError that refused it,
-    with nothing left behind: a folder made on the way is taken down
-    again, so a refused install has written nothing anywhere (ADR-0040
-    ruling 2). Whether this account may write there is found by trying,
-    and nothing here asks for rights it was not started with. The file,
-    and each folder made, is left readable by every account: the harness
+def write_managed_file(path, settings):
+    """Write a managed file of the recorder's own (the hooks file, the
+    telemetry pin) whole, making the folders above it that are absent,
+    and return None; or return the OSError that refused it, with
+    nothing left behind: a folder made on the way is taken down again,
+    so a refused install has written nothing anywhere (ADR-0040 ruling
+    2). Whether this account may write there is found by trying, and
+    nothing here asks for rights it was not started with. The file, and
+    each folder made, is left readable by every account: the harness
     that must read it runs as the operator, not as whoever installed,
     and mkstemp's owner-only bits would close it to every other
     account."""
@@ -6318,6 +6429,204 @@ def write_managed_hooks(path, settings):
                 pass
         return error
     return None
+
+
+# --- The telemetry pin (ADR-0041 rulings 7 and 8) ------------------------------
+# The harness emits one event per tool call that ran, a second record
+# out of the writer's reach once it has left the machine, and reads
+# where to send them from the same managed settings. At `full` the
+# installer pins them to the receiver in a second file of its own
+# beside the hooks file, which keeps holding hooks alone (ADR-0040
+# ruling 5). The pin holds against the settings files and the command
+# line and not against the environment a run is launched with, so the
+# hook, which runs in that environment, writes down a cut second record
+# in the chain (note_second_record_cut).
+
+TELEMETRY_PIN_NAME = "loxodonta-telemetry.json"
+# The switches the pin sets beside the receiver's URL. Never
+# OTEL_LOG_USER_PROMPTS or OTEL_LOG_TOOL_DETAILS, which would put
+# prompts, replies, commands, paths and parameters on the events, and
+# never a metrics exporter.
+TELEMETRY_SWITCHES = {"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+                      "OTEL_LOGS_EXPORTER": "otlp",
+                      "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json"}
+PIN_ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
+# The per-signal address, which the harness takes as written, over the
+# base one, to which it appends /v1/logs.
+LOGS_ENDPOINT = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+# A key in another managed file's `env` that sends the events
+# elsewhere, or stops them: the installer names the file and the key.
+TELEMETRY_KEYS = ("CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_LOGS_EXPORTER",
+                  PIN_ENDPOINT, LOGS_ENDPOINT)
+
+
+def managed_telemetry_path():
+    """The pin, beside the hooks file, and moved with it by
+    LOXODONTA_MANAGED_DIR."""
+    return os.path.join(os.path.dirname(managed_hooks_path()),
+                        TELEMETRY_PIN_NAME)
+
+
+def telemetry_pin(url):
+    """The pin for the receiver at `url`, as given to --remote: `env`
+    and nothing else."""
+    return {"env": {**TELEMETRY_SWITCHES, PIN_ENDPOINT: url}}
+
+
+def pinned_env(settings):
+    """The pin's `env` when `settings` is the installer's pin, else
+    None: `env` and nothing else at the top, holding the installer's
+    keys or a subset of them, each a string. Decided by content, as
+    `our_hooks` decides the hooks file's entries, so a file at the
+    pin's name that is somebody else's is left alone and named.
+    `settings` may be None, which is no pin."""
+    if not isinstance(settings, dict) or list(settings) != ["env"]:
+        return None
+    env = settings["env"]
+    if not isinstance(env, dict) \
+            or set(env) - set(TELEMETRY_SWITCHES) - {PIN_ENDPOINT} \
+            or not all(isinstance(value, str) for value in env.values()):
+        return None
+    return env
+
+
+def events_notice(url):
+    """What leaves through the harness's events once they are pinned
+    (ADR-0041 ruling 3), said before the pin is written, as
+    chain_notice says what leaves through the chain. Measured on Claude
+    Code 2.1.287: prompts and replies arrive redacted, and tool inputs
+    only under a flag the pin never sets."""
+    return ("the harness's events will leave this machine as they happen, "
+            f"to {url}: for each tool call its name, timing, success or "
+            "failure and the sizes of its input and output; for each model "
+            "request the model, tokens and cost; the harness version, "
+            "operating system and terminal type; the hooks it ran and the "
+            "plugins it loaded, by name; the session id. Never a command, "
+            "a path, a prompt or a reply. The account's identity rides on "
+            "every event and is dropped at the receiver's door.")
+
+
+def other_telemetry_sources(ours):
+    """(found, unread): each (file, key) where another managed file,
+    managed-settings.json or a drop-in, holds an `env` with one of the
+    harness's telemetry switches (ADR-0041 ruling 7), read and never
+    written, the one narrowing of ADR-0040's rule that the installer
+    opens no other file there (its addendum of 2026-10-06); and each
+    file or folder that stands there and could not be read, so a look
+    that saw nothing is told apart from one that could not look. `ours`
+    are the recorder's own files, which are no other source. A file
+    that holds no object says nothing."""
+    dropins = os.path.dirname(ours[0])
+    found, unread = [], []
+    try:
+        names = sorted(os.listdir(dropins))
+    except OSError:
+        names = []
+        if os.path.lexists(dropins):
+            unread.append(dropins)
+    files = [os.path.join(os.path.dirname(dropins), "managed-settings.json")]
+    files += [os.path.join(dropins, name) for name in names
+              if name.endswith(".json")]
+    skip = {os.path.normcase(path) for path in ours}
+    for path in files:
+        if os.path.normcase(path) in skip:
+            continue
+        data, refused = bytes_at(path)
+        if refused is not None:
+            if os.path.lexists(path):
+                unread.append(path)
+            continue
+        env = (json_object(data) or {}).get("env")
+        if isinstance(env, dict):
+            found += [(path, key) for key in TELEMETRY_KEYS if key in env]
+    return found, unread
+
+
+def pin_in_the_way(path, found, unread):
+    """Why a `full` install cannot put its pin at `path`, printed, and
+    73 to exit with; or None. Asked before anything is said or
+    written, so a refused install never says what will leave: a JSON
+    object there that is not the installer's pin is somebody else's
+    file at the pin's name, and whatever the reader refuses (a folder,
+    a pipe, a device, no right to read) is named with its way out, in
+    the manner of the hooks file's folder case. A readable file that is
+    not JSON is nobody's pin and is written over, as the hooks file is,
+    and put back as it stood if the install is refused after it."""
+    if found is not None and pinned_env(found) is None:
+        why = ("a file that is not the installer's pin stands there. "
+               "Nothing was written, there or anywhere else, and the hook "
+               "is wired where it was. See what it holds, and move it "
+               "away by hand.")
+    elif unread is not None:
+        why = (f"{unread.strerror or unread}. Nothing was written, there "
+               "or anywhere else, and the hook is wired where it was. "
+               f"{managed_way_out(path, unread)}").rstrip()
+    else:
+        return None
+    print(f"cannot write {path}: {why}", file=sys.stderr)
+    return EX_CANTCREAT
+
+
+def settle_telemetry_pin(path, wanted, found, standing):
+    """Bring the pin at `path` to `wanted`, the pin's content at `full`
+    and None at any other profile (ADR-0041 ruling 7), say what was
+    done, and return (what changed, "written", "removed" or None; the
+    exit code, or None). `found` is what the file holds and `standing`
+    whether anything is at its name, both read before the installer
+    writes anything. When none is wanted, whatever stands there that is
+    not the installer's pin is left alone and named. When one is, what
+    stood in the way was refused before anything was said
+    (pin_in_the_way), so what is here is nothing, the installer's own
+    pin, or a readable file that is not JSON, written over as the hooks
+    file is. A write or a delete the system refuses names the file and
+    the way out, and exits 73, as the hooks file's does."""
+    if standing and not wanted and pinned_env(found) is None:
+        print(f"warning: {path} is not the installer's pin and was left "
+              "alone: nothing of the installer's stands there",
+              file=sys.stderr)
+        return None, None
+    if wanted:
+        if found == wanted:
+            return None, None
+        refusal = write_managed_file(path, wanted)
+        if refusal:
+            print(f"cannot write {path}: {refusal.strerror or refusal}. "
+                  "Nothing was written, there or anywhere else, and the "
+                  "hook is wired where it was. "
+                  f"{managed_way_out(path, refusal)}".rstrip(),
+                  file=sys.stderr)
+            return None, EX_CANTCREAT
+        print(f"pinned the harness's events to {wanted['env'][PIN_ENDPOINT]} "
+              f"in {path}")
+        return "written", None
+    if not standing:
+        return None, None
+    try:
+        os.unlink(path)
+    except OSError as error:
+        print(f"cannot delete {path}: {error.strerror or error}. Nothing "
+              "was changed, and the harness's events stay pinned there. "
+              f"{managed_way_out(path, error)}".rstrip(), file=sys.stderr)
+        return None, EX_CANTCREAT
+    print(f"removed {path}: the harness's events are no longer pinned to "
+          "the receiver")
+    return "removed", None
+
+
+def put_pin_back(path, data):
+    """Undo settle_telemetry_pin after a refused hooks write, so a
+    refused install has written nothing anywhere (ADR-0040 ruling 2):
+    the very bytes that stood there, never a re-serialisation (a file
+    that was not JSON goes back as it was), or no file when nothing
+    did. Quiet on failure: the refusal being reported is the one that
+    matters."""
+    try:
+        if data is None:
+            os.unlink(path)
+        else:
+            replace_file(path, data, mode=0o644)
+    except OSError:
+        pass
 
 
 # --- The coverage marker ------------------------------------------------------
@@ -6652,30 +6961,69 @@ def install_managed_hooks(args):
     else in the operator's, so a matcher the operator narrowed moves
     with them as a plain re-run would have left it.
 
-    Everything is read before anything is written, and the managed file
-    is written first: a refused write leaves the hook where it was, and
-    a failure after it leaves two homes, never none (ruling 3). The
-    coverage marker follows the managed file, so a refused install
-    records nothing. Run as another account than the one that owns the
-    home, it writes the managed file and nothing under that home, and
-    says the hook has two homes (owned_by_another)."""
+    Everything is read before anything is written, and the managed
+    files are written first, the telemetry pin and then the hooks file
+    (ADR-0041 ruling 7): a refused write leaves the hook where it was
+    and the pin as it stood, byte for byte, and a failure after them
+    leaves two homes, never none (ruling 3). At `full`, a file at the
+    pin's name that is not the installer's pin refuses the install
+    before anything is said or written (pin_in_the_way); at any other
+    profile it is left alone and named. The coverage marker follows
+    the managed file, so a refused install records nothing. Run as
+    another account than the one that owns the home, it writes the
+    managed files and nothing under that home, and says the hook has
+    two homes (owned_by_another)."""
     path = operator_settings_path()
     managed = managed_hooks_path()
+    pin_path = managed_telemetry_path()
     settings, refused = load_settings(path)
     if refused:
         return refused
+    # The pin goes with the tier whose chain goes to the receiver
+    # (ADR-0041 ruling 7). What stands at its name is read before
+    # anything is said: a refused install says nothing about what
+    # will leave, and the bytes are what a refusal later puts back.
+    wanted_pin = telemetry_pin(args.remote) if args.profile == "full" else None
+    pin_data, unread = bytes_at(pin_path)
+    pin_standing = os.path.lexists(pin_path)
+    found_pin = json_object(pin_data)
+    if wanted_pin and pin_standing:
+        refused = pin_in_the_way(pin_path, found_pin, unread)
+        if refused:
+            return refused
     if args.publish_chain:
         print(chain_notice(args.publish_chain, args.profile))
+    if wanted_pin:
+        # What leaves through the events, said before anything is
+        # written, as the chain's is (ADR-0041 ruling 3).
+        print(events_notice(args.remote))
+        found, unreadable = other_telemetry_sources((managed, pin_path))
+        for other, key in found:
+            print(f"warning: {other} sets {key} in its env, so the "
+                  "harness's events may already go elsewhere. The harness "
+                  "sends to one place, and this does not say which file it "
+                  "honours; the pin is written all the same (ADR-0041).",
+                  file=sys.stderr)
+        for other in unreadable:
+            print(f"warning: could not read {other}, so whether it sends "
+                  "the harness's events elsewhere is not known.",
+                  file=sys.stderr)
     existing = read_hooks(managed)
     target = our_hooks(existing)
     if not target["hooks"]:
         target = our_hooks(settings)
     installed, healed, wired, failures = wire_hooks(target, args)
 
+    pinned, refused = settle_telemetry_pin(pin_path, wanted_pin, found_pin,
+                                           pin_standing)
+    if refused:
+        return refused
     changed = target != existing
     if changed:
-        refusal = write_managed_hooks(managed, target)
+        refusal = write_managed_file(managed, target)
         if refusal:
+            if pinned:
+                put_pin_back(pin_path, pin_data)
             print(f"cannot write {managed}: "
                   f"{refusal.strerror or refusal}. Nothing was written, "
                   "there or anywhere else, and the hook is wired where it "
@@ -6713,7 +7061,7 @@ def install_managed_hooks(args):
         RECORDER_NAMES + DIGEST_NAMES)
     if not changed:
         print(f"already installed in {managed}"
-              + ("" if removed else ": nothing changed"))
+              + ("" if removed or pinned else ": nothing changed"))
     if removed:
         why, backup = None, ""
         try:
@@ -6758,8 +7106,8 @@ def install_managed_hooks(args):
         print("harness documents it and ADR-0040 measured it. What a managed")
         print("install claims and what it does not is in docs/HOOK.md. Restart")
         print("open sessions.")
-    elif changed:
-        print("Restart open sessions: hooks load at start.")
+    elif changed or pinned:
+        print("Restart open sessions: managed settings load at start.")
     tier = profile_notice(args.profile, wired)
     if tier:
         print(tier)
@@ -6790,25 +7138,39 @@ def remove_our_hooks(hooks, events, names):
 
 def uninstall_managed_hooks():
     """The managed half of uninstall-hook (ADR-0040 ruling 4): delete
-    the recorder's one file and nothing else in its folder. Nothing is
-    put back in the operator's file, and no coverage marker is written
-    (ADR-0030 ruling 2). A delete the system refuses names the file and
-    exits 73, the number a refused managed install gives: the same
-    missing right, met from the other side."""
+    the recorder's own files, the telemetry pin and then the hooks
+    file, and nothing else in their folder. The pin goes first
+    (ADR-0041 ruling 7): a refusal between the two leaves the hook
+    writing receipts and the events unpinned, never receipts stopped
+    and events still flowing. Nothing is put back in the operator's
+    file, and no coverage marker is written (ADR-0030 ruling 2). A
+    delete the system refuses names the file and exits 73, the number
+    a refused managed install gives: the same missing right, met from
+    the other side."""
     managed = managed_hooks_path()
+    pin_path = managed_telemetry_path()
     path = operator_settings_path()
-    if not os.path.lexists(managed):
+    if not os.path.lexists(managed) and not os.path.lexists(pin_path):
         print(f"nothing installed: no managed hook file at {managed}")
         return 0
-    try:
-        os.unlink(managed)
-    except OSError as error:
-        print(f"cannot delete {managed}: {error.strerror or error}. "
-              "Nothing was changed, and a hook wired there still is. "
-              f"{managed_way_out(managed, error)}".rstrip(),
-              file=sys.stderr)
-        return EX_CANTCREAT
-    print(f"removed {managed}")
+    pinned, refused = settle_telemetry_pin(
+        pin_path, None, read_json_object(pin_path), os.path.lexists(pin_path))
+    if refused:
+        return refused
+    if not os.path.lexists(managed):
+        print(f"no managed hook file at {managed}")
+    else:
+        try:
+            os.unlink(managed)
+        except OSError as error:
+            print(f"cannot delete {managed}: {error.strerror or error}. "
+                  + ("The pin was removed and nothing else was changed"
+                     if pinned else "Nothing was changed")
+                  + ", and a hook wired there still is. "
+                  f"{managed_way_out(managed, error)}".rstrip(),
+                  file=sys.stderr)
+            return EX_CANTCREAT
+        print(f"removed {managed}")
     if our_hooks(read_hooks(path))["hooks"]:
         print(f"the hook is still wired in {path}: `uninstall-hook` "
               "removes it there.")
@@ -6953,7 +7315,7 @@ def main(argv=None):
                              help="directory for per-session receipt logs "
                                   "(default: $CLAUDE_PROJECT_DIR/receipts, "
                                   "else the working directory)")
-    hook_parser.add_argument("--actor", default="claude-code",
+    hook_parser.add_argument("--actor", default=CLAUDE_CODE_ACTOR,
                              help="actor recorded for hook entries")
     hook_parser.add_argument("--anchor", action="store_true",
                              help="at SessionEnd, anchor the chain head "
@@ -7004,7 +7366,11 @@ def main(argv=None):
              "loxodonta.json, which a run cannot switch off from its "
              "command line (documented by the harness, and measured in "
              "ADR-0040), and take them out of the user settings, so the "
-             "hook has one home. Run it from an account "
+             "hook has one home. At --profile full it also pins the "
+             "harness's events to the --remote URL in a second file of "
+             "its own there, managed-settings.d/loxodonta-telemetry.json, "
+             "and says what leaves through them (ADR-0041); at any other "
+             "profile it removes that pin. Run it from an account "
              "that may write that folder (an administrator's shell, or "
              "sudo): without the right it writes nothing and exits 73, "
              "and it never raises its own rights. Claude Code only")

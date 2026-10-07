@@ -453,8 +453,10 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         self.project.mkdir()
         # The adapter runs in-process and spawns the recorder, which
         # reads its homes from this process's environment: all of them
-        # the test's own for the test's length (#274).
-        homes = ("LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME")
+        # the test's own for the test's length (#274), the managed
+        # folder the hook reads the telemetry pin from included (#480).
+        homes = ("LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME",
+                 "LOXODONTA_MANAGED_DIR")
         previous = {k: os.environ.get(k)
                     for k in homes + ("CLAUDE_PROJECT_DIR",)}
         own = clean_env(self.root / "home", LOXODONTA_HOME=str(self.store))
