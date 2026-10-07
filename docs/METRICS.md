@@ -62,7 +62,7 @@ Each is the scan's own string, unchanged, and every one of them is on every scra
 | Metric | Label | Values |
 |---|---|---|
 | `loxodonta_chains` | `verdict` | `VALID`, `BROKEN`, `ANCHOR-MISMATCH`, `ANCHOR-INVALID`, `ANCHOR-PENDING`, `ANCHOR-UNANSWERED`, `TRANSCRIPT-DIVERGED`, `UNSUPPORTED-VERSION`, `NO-VERDICT` |
-| `loxodonta_completeness_sessions` | `state` | `OK`, `LAGGING`, `SURPLUS`, `QUIET`, `ALARM-SILENT`, `ALARM-DEFICIT`, `IDLE-CLEAN`, `IDLE-DEFICIT`, `ENDED-CLEAN`, `ENDED-DEFICIT`, `ENDED-SURPLUS`, `UNWITNESSED`, `UNWATCHED`, `ELSEWHERE`, `BEFORE-MEMORY` |
+| `loxodonta_completeness_sessions` | `state` | `OK`, `LAGGING`, `SURPLUS`, `QUIET`, `ALARM-SILENT`, `ALARM-DEFICIT`, `IDLE-CLEAN`, `IDLE-DEFICIT`, `ENDED-CLEAN`, `ENDED-DEFICIT`, `ENDED-SURPLUS`, `UNWITNESSED`, `UNWATCHED`, `ELSEWHERE`, `BEFORE-MEMORY`, `PENDING`, `SECOND-RECORD-ABSENT`, `SECOND-RECORD-GAP` |
 | `loxodonta_lifecycle_sessions` | `state` | `awake`, `waning`, `dormant` |
 | `loxodonta_consumption_sessions` | `state` | `RUNNING-HOT`, `ENDED-HOT` |
 | `loxodonta_last_attempt_failed` | `step` | `anchor`, `publish-head`, `publish-chain`, `stamp` |

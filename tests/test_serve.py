@@ -28,8 +28,10 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_serve`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import (assert_replaced_whole, hold, home_outside,
-                             read_line_within, unreadable_depth,
+from test_supervisor import (FIXTURE_SESSION, assert_replaced_whole,
+                             chain_copy, hold, home_outside,
+                             read_line_within, receiver_folder,
+                             unreadable_depth,
                              isolated_env)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1619,3 +1621,79 @@ class ScanBatchingTest(ServerFixture):
         make_chain(self.root / "beta" / "receipts", "sess-bbbb")
         _, _, second = self.get("/api/status")
         self.assertEqual(first, second)
+
+
+class ReceiverServeTest(ServerFixture):
+    """`serve --receiver DIR` (ADR-0041 ruling 4): the face over a
+    receiver's data directory, its status endpoint carrying the same
+    reading `scan --receiver` prints, the page carrying the last-heard
+    table, and the memory in the folder's own subfolder."""
+
+    def setUp(self):
+        super().setUp()
+        self.data = receiver_folder(self.root)
+        chain_copy(self.data, FIXTURE_SESSION)
+        self.env["SUPERVISOR_SETTLE_SECONDS"] = "0"
+
+    def serve_receiver(self, *extra_args):
+        """Start `serve --receiver` on an ephemeral port, as `serve`
+        starts the legacy face; None when it announced no URL, for a
+        test of a refusal."""
+        self.proc = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "serve", "--receiver",
+             str(self.data), "--port", "0", *extra_args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        self.addCleanup(self._stop)
+        line = read_line_within(self.proc.stdout)
+        match = re.search(r"http://127\.0\.0\.1:\d+", line)
+        if match is None:
+            return None
+        self.url = match.group()
+        return self.url
+
+    def test_the_status_endpoint_carries_the_receivers_reading(self):
+        self.assertIsNotNone(self.serve_receiver())
+
+        status, ctype, body = self.get("/api/status")
+
+        self.assertEqual(status, 200)
+        served = json.loads(body)
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["session"], row["state"]),
+                         (FIXTURE_SESSION, "ENDED-SURPLUS"))
+        self.assertEqual(served["completeness"]["last_heard"]["addresses"],
+                         [{"from": "127.0.0.1",
+                           "received": "2026-10-07T02:21:37.488585+00:00"}])
+        cli = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "scan", "--receiver",
+             str(self.data), "--json"],
+            capture_output=True, encoding="utf-8", timeout=180,
+            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        printed = json.loads(cli.stdout)
+        # Two ticks, two clocks: the freshness stamp is the one field
+        # allowed to differ between them.
+        served.pop("scanned"), printed.pop("scanned")
+        self.assertEqual(served, printed)
+
+    def test_the_page_carries_the_last_heard_table_and_the_memory_sits_in_the_folder(self):
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, page = self.get("/")
+        self.get("/api/status")
+
+        self.assertIn("last-heard", page)
+        self.assertIn("sending address", page)
+        self.assertIn("second_record_cut", page)
+        shelf = self.data / "supervisor"
+        self.assertTrue(os.path.isfile(shelf / "daybook.json"))
+        self.assertTrue(os.path.isfile(shelf / "baseline.json"))
+        self.assertFalse(os.path.exists(self.root / ".supervisor-daybook.json"))
+
+    def test_receiver_with_root_is_a_usage_error(self):
+        self.assertIsNone(self.serve_receiver("--root", str(self.root)))
+
+        _, err = self.proc.communicate(timeout=30)
+
+        self.assertEqual(self.proc.returncode, 64, err)
+        self.assertIn("--receiver reads a receiver's data directory", err)

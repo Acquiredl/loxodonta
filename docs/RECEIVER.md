@@ -4,7 +4,7 @@
 
 ## 1. What the receiver is
 
-The repo's third single file. The recorder sends a chain's entries off the machine that wrote them (GLOSSARY *Published chain*) and its head (GLOSSARY *Published head*); the receiver is the machine they go to, run by the operator somewhere the writer cannot reach: an old laptop, a small VPS, a second box on the same shelf. It mints one URL when it starts, appends whatever arrives at that URL to its own disk, and refuses everything else. There is no route that returns, lists or deletes anything. That is what makes the URL pass the head-record test (GLOSSARY *Head record*, restated in section 8): a credential that can add and cannot take away.
+The repo's third single file. The recorder sends a chain's entries off the machine that wrote them (GLOSSARY *Published chain*) and its head (GLOSSARY *Published head*); the receiver is the machine they go to, run by the operator somewhere the writer cannot reach: an old laptop, a small VPS, a second box on the same shelf. It mints one URL when it starts, appends whatever arrives at that URL to its own disk, and refuses everything else. There is no route that returns, lists or deletes anything. That is what makes the URL pass the head-record test (GLOSSARY *Head record*, restated in section 9): a credential that can add and cannot take away.
 
 What it holds is the operator's copy of what the writer said, at an address of the operator's choosing. The entries survive a wipe of the writer's machine as of the last send, and a regenerated chain lands beside the entries it replaced rather than over them, where the recorder's own `verify` shows the collision (section 6). The receiver is bound by the other two files' constraints: stdlib only, readable in one sitting, Python 3.9 and up, tested on Windows, macOS and Linux (ADR-0005's *single file per tool*).
 
@@ -157,7 +157,29 @@ A sibling chain (`receipts-<session>-002.jsonl`) verifies on its own, as sibling
 
 The walk judges the receiver's file the way it judges any chain, so what it says about the writer holds here too: the copy is of what the writer said. A harness that lied at write time is copied faithfully (ADR-0002). Every field but the hashes is testimony (GLOSSARY *Testimony*).
 
-## 7. What it refuses
+## 7. Reading the folder with the supervisor
+
+The reading that counts runs here, on the box (ADR-0041 ruling 4). `supervisor scan --receiver DIR`, `serve --receiver DIR` and `acknowledge --receiver DIR` read the data directory as the universe: the chain copies directly in it are the chains, judged by the same walk as a chain in the store and remembered by the same baseline, so a collision there reads `BROKEN`, which is what the copy exists to show; `token` and `heads.jsonl` are not chains. The memory, `baseline.json` and `daybook.json` (and the dashboard's `views.json`), lives in a `supervisor` subfolder of the directory, which the caps do not count and the receiver never writes. `--receiver` with `--root` is a usage error, 64; a `DIR` that is not a folder is 66. No keeper runs over the folder: nothing is anchored, sent or appended from the far end. The on-machine supervisor, its reading, its states and its memory change nothing.
+
+```
+python supervisor.py scan --receiver ~/.loxodonta/receiver
+python supervisor.py serve --receiver ~/.loxodonta/receiver
+```
+
+The events files are the second record (GLOSSARY *Second record*; section 4, *The second door*). The supervisor's events reader, the twin of its transcript reader in shape, reads every `events-*.jsonl` and takes a log record as a tool call when its `event.name` is `tool_result`: the tool is `tool_name`, the time `event.timestamp`, the session `session.id`, the place in the session's counter `event.sequence`. Every `tool_result` owes a receipt: the receiver has no coverage marker, and the vantage setup wires every tool; the report says so once. A `tool_decision` owes nothing, since a refused call has no result after it. A line the reader cannot parse is skipped and counted, never fatal. Receipts are counted by tool from the chain copy as the store census counts them, the recorder's own bookkeeping entries excluded, and the two are reconciled tool by tool (ADR-0034) by the same code that reconciles the transcript on the agent's machine.
+
+A session is judged once it has settled: nothing of it has arrived for the settle window, no event by `received` and no chain growth by the chain file's own modification time. Receipts reach the receiver at session end, and a killed session's chain only when the keeper on the agent's machine sends it on its cadence, so the window is `SUPERVISOR_SETTLE_SECONDS`, 7 hours by default (the keeper's six plus one; 1 hour is tight, 24 hours is generous). Until then the session is listed as `PENDING` with its counts and never alarmed. Settled, it reads as one of:
+
+- `ENDED-DEFICIT`: events arrived and receipts fell short, tool by tool.
+- `SECOND-RECORD-ABSENT`: receipts arrived and no events did. Named, never clean, and its exit is the deficit's. A run launched with the telemetry cut reads this way, and the chain's own `second-record-cut:` note (docs/HOOK.md) is quoted on the row when the copy carries one.
+- `SECOND-RECORD-GAP`: integers are missing between the session's lowest and highest `event.sequence`, and the row names them. A deficit beside a gap reads as the deficit, with the gap still named.
+- `ENDED-CLEAN` or `ENDED-SURPLUS` otherwise. A surplus is expected while #476 stands (the hook on 2.1.287 writes two receipts for a failed call and one for a refused call, which the events count as one and none) and is no alarm.
+
+None of these is live, so none raises the exit: an ended deficit is evidence here as it is on the agent's machine. A session whose chain copy's newest entry predates the day of the oldest events file the receiver holds is from before the second record's memory: counted in one block and not listed, as `BEFORE-MEMORY` sessions are (ADR-0029); `scan --before-memory` lists them.
+
+Last heard: the report carries, per sending address (`from`), the newest `received`, and per session its newest arrival; the dashboard shows the per-address table. A machine that sends nothing at all is not seen by the receiver, and that table is where its silence shows. No heartbeat (ADR-0041 ruling 5).
+
+## 8. What it refuses
 
 - Any verb but `POST` at the token's path or its events path: `405`.
 - Any path but the token's and its events path, `/v1/metrics` under the token included: `404`, so a leaked or guessed path learns nothing, and the retired path after `--new-token` learns nothing either.
@@ -170,7 +192,7 @@ The walk judges the receiver's file the way it judges any chain, so what it says
 - Lines that would take a file past its cap, or the data directory past the total cap: `507`, nothing written, nothing already kept touched.
 - Every request for what it holds: there is no such request. The files are read on the box, by the operator, with the recorder.
 
-## 8. The head-record test, restated
+## 9. The head-record test, restated
 
 A remote is a head record when it is off the machine and the credentials present on the machine cannot delete or overwrite what they wrote there (GLOSSARY *Head record*, ADR-0025). Same login is not the test; deletability is. The receiver's URL passes: it is the only credential the writer's machine holds for the receiver, it can add, and it can do nothing else.
 
