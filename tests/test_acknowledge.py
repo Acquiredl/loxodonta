@@ -30,8 +30,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import FakeCalendar
-from test_supervisor import (BASELINE_NAME, FakeCalendarHandler, ago,
-                             home_outside, isolated_env, write_pending_anchor)
+from test_supervisor import (BASELINE_NAME, FIXTURE_SESSION,
+                             FakeCalendarHandler, ago, chain_copy,
+                             home_outside, isolated_env, receiver_folder,
+                             write_pending_anchor)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOXODONTA = REPO_ROOT / "loxodonta.py"
@@ -1201,6 +1203,91 @@ class StoreReadersTest(StoreFixture):
         witness = json.loads((out / "witness.json").read_text(
             encoding="utf-8"))
         self.assertEqual(witness["scan"]["exit"], 5)
+
+
+class ReceiverAcknowledgeTest(unittest.TestCase):
+    """`acknowledge --receiver DIR` (ADR-0041 ruling 4): the same act
+    over the memory in the receiver folder's own subfolder, and over no
+    other memory."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name).resolve()
+        self.home = base / "home"
+        self.data = receiver_folder(base)
+        self.log = chain_copy(self.data, FIXTURE_SESSION)
+        self.env = {**isolated_env(self.home), "PYTHONIOENCODING": "utf-8",
+                    "SUPERVISOR_SETTLE_SECONDS": "0"}
+        self.relpath = f"receipts-{FIXTURE_SESSION}.jsonl"
+
+    def run_supervisor(self, *args):
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), *args], capture_output=True,
+            encoding="utf-8", timeout=BOUND, env=self.env)
+        self.assertNotIn("Traceback", result.stderr)
+        return result
+
+    def look(self, expect):
+        result = self.run_supervisor("scan", "--receiver", str(self.data),
+                                     "--json")
+        self.assertEqual(result.returncode, expect,
+                         result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def test_a_copy_cut_short_alarms_until_acknowledged_in_the_folder(self):
+        self.look(0)
+        lines = self.log.read_bytes().splitlines(keepends=True)
+        self.log.write_bytes(b"".join(lines[:-1]))
+
+        first = self.look(5)
+        second = self.look(5)
+
+        for report in (first, second):
+            (event,) = report["baseline"]["events"]
+            self.assertEqual((event["log"], event["change"]),
+                             (self.relpath, "regressed"))
+        accepted = self.run_supervisor("acknowledge", "--receiver",
+                                       str(self.data), self.relpath,
+                                       event["found"]["head"])
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+
+        clean = self.look(0)
+
+        (record,) = clean["baseline"]["acknowledged"]
+        self.assertEqual((record["log"], record["change"]),
+                         (self.relpath, "regressed"))
+        memory = json.loads((self.data / "supervisor" / "baseline.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(len(memory["acknowledged"]), 1)
+        # The store's own memory was never made, let alone moved.
+        self.assertFalse(os.path.exists(self.home / ".loxodonta"))
+
+    def test_the_baseline_itself_is_acknowledged_in_the_folder(self):
+        self.look(0)
+        shelf = self.data / "supervisor"
+        (shelf / "baseline.json").write_text("{not json", encoding="utf-8")
+        self.look(5)
+
+        accepted = self.run_supervisor("acknowledge", "--receiver",
+                                       str(self.data), "--baseline")
+
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+        self.assertIn("1 chain(s)", accepted.stdout)
+        memory = json.loads((shelf / "baseline.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(list(memory["chains"]), [self.relpath])
+        self.look(0)
+
+    def test_receiver_with_root_is_a_usage_error(self):
+        result = self.run_supervisor("acknowledge", "--receiver",
+                                     str(self.data), "--root",
+                                     str(self.data), self.relpath, "gone")
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("--receiver reads a receiver's data directory",
+                      result.stderr)
 
 
 if __name__ == "__main__":
