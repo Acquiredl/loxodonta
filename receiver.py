@@ -88,11 +88,15 @@ EVENTS_SUFFIX = "/v1/logs"
 EVENTS_TYPE = "application/json"
 EVENTS_PREFIX = "events-"
 
-# The identity namespaces of the OpenTelemetry conventions, dropped from
-# every `attributes` list at every level before a line is kept, whoever
-# the sender is: the operator's email and ids serve nothing the session
-# id does not, and belong on no file of the receiver's (ADR-0041 ruling 3).
+# The identity namespaces of the OpenTelemetry conventions, dropped
+# before a line is kept from every list the standard keeps attributes
+# in, at every level: an `attributes` list, and the `values` of a
+# `kvlistValue`, its nested-attributes shape. Matched exactly, case
+# included, whoever the sender is: the operator's email and ids serve
+# nothing the session id does not, and belong on no file of the
+# receiver's (ADR-0041 ruling 3).
 IDENTITY_KEYS = ("user.", "organization.")
+NESTED_ATTRIBUTES = "kvlistValue"
 
 # The only file names a header can reach: the recorder's own chain
 # names, `receipts-<session>.jsonl` and the sibling
@@ -242,14 +246,20 @@ def head_line(body):
     """The one line a published head becomes: the JSON object that was
     posted, compact and key-sorted so the heads file reads one head per
     line whatever whitespace the sender used. None when the body is not
-    one JSON object, or is nested past what the reader takes (#474)."""
+    one JSON object, is nested past what the reader or the writer takes,
+    or carries a number JSON cannot (#474). The writer sits under the
+    same guard as the reader: it gives up at a depth the reader still
+    takes, and that depth must be a refusal too, never a traceback.
+    `allow_nan=False`, because Python's reader takes NaN and Infinity
+    and a line holding one is a line most readers refuse."""
     try:
         head = json.loads(body.decode("utf-8"))
+        if not isinstance(head, dict):
+            return None
+        return json.dumps(head, sort_keys=True, separators=(",", ":"),
+                          allow_nan=False).encode("utf-8")
     except (ValueError, UnicodeDecodeError, RecursionError):
         return None
-    if not isinstance(head, dict):
-        return None
-    return json.dumps(head, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def identity_attribute(attribute):
@@ -262,22 +272,24 @@ def identity_attribute(attribute):
 
 
 def drop_identity(logs):
-    """Remove each identity attribute from every `attributes` list at
-    any depth of the posted object, in place, and return how many went.
-    Walked with a list of what is left to visit, not by recursion: the
-    object passed the JSON reader's depth limit, and the walk must not
-    be what runs out of stack a few frames further down. Nothing else
-    in the object is touched, list order included."""
+    """Remove each identity attribute from every `attributes` list, and
+    from the `values` of every nested attribute list, at any depth of
+    the posted object, in place, and return how many went. Walked with
+    a list of what is left to visit, not by recursion: the object passed
+    the JSON reader's depth limit, and the walk must not be what runs
+    out of stack a few frames further down. Nothing else in the object
+    is touched, list order included."""
     dropped = 0
     pending = [logs]
     while pending:
         node = pending.pop()
         if isinstance(node, dict):
-            attributes = node.get("attributes")
-            if isinstance(attributes, list):
-                kept = [a for a in attributes if not identity_attribute(a)]
-                dropped += len(attributes) - len(kept)
-                node["attributes"] = kept
+            for holder, name in ((node, "attributes"),
+                                 (node.get(NESTED_ATTRIBUTES), "values")):
+                if isinstance(holder, dict) and isinstance(holder.get(name), list):
+                    kept = [a for a in holder[name] if not identity_attribute(a)]
+                    dropped += len(holder[name]) - len(kept)
+                    holder[name] = kept
             pending.extend(node.values())
         elif isinstance(node, list):
             pending.extend(node)
@@ -289,17 +301,22 @@ def events_line(body, sender, received):
     posted object after the identity rule, and the arrival time, compact
     and key-sorted, with how many attributes were dropped. (None, 0)
     when the body is not one JSON object, which is all the receiver asks
-    of it, or is nested past what the reader takes (#474)."""
+    of it, is nested past what the reader or the writer takes, or
+    carries a number JSON cannot (#474). The kept line wraps the object
+    one level deeper than it was read, so the writer gives up at a depth
+    the reader still takes: the writer sits under the same guard, and
+    that depth is a refusal too, never a traceback. `allow_nan=False`,
+    as for a head."""
     try:
         logs = json.loads(body.decode("utf-8"))
+        if not isinstance(logs, dict):
+            return None, 0
+        dropped = drop_identity(logs)
+        line = {"from": sender, "logs": logs, "received": received}
+        return (json.dumps(line, sort_keys=True, separators=(",", ":"),
+                           allow_nan=False).encode("utf-8"), dropped)
     except (ValueError, UnicodeDecodeError, RecursionError):
         return None, 0
-    if not isinstance(logs, dict):
-        return None, 0
-    dropped = drop_identity(logs)
-    line = {"from": sender, "logs": logs, "received": received}
-    return (json.dumps(line, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-            dropped)
 
 
 def receipt_of(line):
@@ -597,7 +614,7 @@ class Door(BaseHTTPRequestHandler):
         line, dropped = events_line(body, self.client_address[0],
                                     now.isoformat())
         if line is None:
-            self.answer(400, "events are one JSON object")
+            self.answer(400, "events are one JSON object, within what JSON carries")
             return
         path = os.path.join(self.server.data,
                             EVENTS_PREFIX + now.strftime("%Y-%m-%d") + ".jsonl")
@@ -611,7 +628,7 @@ class Door(BaseHTTPRequestHandler):
     def keep_head(self, body):
         line = head_line(body)
         if line is None:
-            self.answer(400, "a head is one JSON object")
+            self.answer(400, "a head is one JSON object, within what JSON carries")
             return
         path = os.path.join(self.server.data, HEADS_FILE)
         with self.server.appending:

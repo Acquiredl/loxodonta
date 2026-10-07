@@ -448,18 +448,25 @@ def fixture_bodies():
             for line in FIXTURE.read_text("utf-8").splitlines()]
 
 
+def is_identity(entry):
+    return (isinstance(entry, dict) and isinstance(entry.get("key"), str)
+            and entry["key"].startswith(IDENTITY))
+
+
 def without_identity(node):
     """The expected shape of a kept object: every attribute whose key
     begins `user.` or `organization.` gone from every `attributes` list
-    at any depth, and nothing else changed, list order included."""
+    and from the `values` of every `kvlistValue` at any depth, and
+    nothing else changed, list order included."""
     if isinstance(node, dict):
         kept = {}
         for key, value in node.items():
             if key == "attributes" and isinstance(value, list):
-                value = [a for a in value
-                         if not (isinstance(a, dict)
-                                 and isinstance(a.get("key"), str)
-                                 and a["key"].startswith(IDENTITY))]
+                value = [a for a in value if not is_identity(a)]
+            elif (key == "kvlistValue" and isinstance(value, dict)
+                  and isinstance(value.get("values"), list)):
+                value = {**value, "values": [a for a in value["values"]
+                                             if not is_identity(a)]}
             kept[key] = without_identity(value)
         return kept
     if isinstance(node, list):
@@ -547,6 +554,11 @@ class EventsDoorTest(ReceiverFixture):
                                              separators=(",", ":")).encode())
 
     def test_identity_goes_from_every_level_and_nothing_else_moves(self):
+        # The two list shapes the standard keeps attributes in: an
+        # `attributes` list, and the `values` of a `kvlistValue`, which
+        # an `arrayValue` may hold in turn (the fixture's own
+        # `managed_settings.sources` is the sibling `arrayValue`). The
+        # match is exact, case included: `User.email` stays.
         body = {
             "attributes": [attribute("user.id", "top"),
                            attribute("kept.top", "1")],
@@ -560,8 +572,14 @@ class EventsDoorTest(ReceiverFixture):
                             attribute("user.account_uuid", "a"),
                             attribute("event.name", "tool_result"),
                             {"key": "deep", "value": {"kvlistValue": {
-                                "attributes": [attribute("user.account_id", "d"),
-                                               attribute("kept.deep", "2")]}}},
+                                "values": [attribute("user.account_id", "d"),
+                                           attribute("kept.deep", "2")]}}},
+                            {"key": "list", "value": {"arrayValue": {
+                                "values": [{"stringValue": "file"},
+                                           {"kvlistValue": {"values": [
+                                               attribute("organization.id", "listed"),
+                                               attribute("kept.listed", "3")]}}]}}},
+                            attribute("User.email", "kept, the case differs"),
                             attribute("user", "no dot, so kept"),
                             attribute("users.x", "kept"),
                             attribute("organizations", "kept"),
@@ -573,14 +591,18 @@ class EventsDoorTest(ReceiverFixture):
                     }]}]}]}
         status, answer = self.send(json.dumps(body, indent=2).encode("utf-8"))
         self.assertEqual(status, 200, answer)
-        [(_, line)] = self.lines()
+        [(raw, line)] = self.lines()
         self.assertEqual(line["logs"], without_identity(body))
+        for gone in (b'"user.', b'"organization.'):
+            self.assertNotIn(gone, raw)
+        for kept in (b'"kept.deep"', b'"kept.listed"', b'"User.email"'):
+            self.assertIn(kept, raw)
         record = log_records(line["logs"])[0]
         self.assertEqual([a["key"] for a in record["attributes"]
                           if isinstance(a, dict)],
-                         ["event.name", "deep", "user", "users.x",
-                          "organizations", 7])
-        self.assertIn("events: 5 identity attribute(s) dropped",
+                         ["event.name", "deep", "list", "User.email", "user",
+                          "users.x", "organizations", 7])
+        self.assertIn("events: 6 identity attribute(s) dropped",
                       self.logged(self.proc, 200))
 
     def test_a_body_without_identity_is_kept_whole(self):
@@ -641,6 +663,19 @@ class EventsDoorTest(ReceiverFixture):
         status, _ = post(self.proc.url, deep, "application/json")
         self.assertEqual(status, 400)
 
+    def test_a_number_json_cannot_carry_is_400_at_either_door(self):
+        # Python's reader takes NaN, Infinity and a float past its range;
+        # JSON has none of them, and a line holding one is a line most
+        # line-oriented readers refuse. So the body is refused instead.
+        for body in (b'{"a": NaN}', b'{"a": Infinity}', b'{"a": -Infinity}',
+                     b'{"a": 1e400}', b'{"a": [{"attributes": [], "b": NaN}]}'):
+            with self.subTest(body=body):
+                status, _ = self.send(body)
+                self.assertEqual(status, 400)
+                status, _ = post(self.proc.url, body, "application/json")
+                self.assertEqual(status, 400)
+        self.assertEqual(self.stored(), ["token"])
+
     def test_what_the_door_refuses_by_verb_path_type_and_encoding(self):
         for verb in ("GET", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"):
             with self.subTest(verb=verb):
@@ -683,6 +718,80 @@ class EventsDoorTest(ReceiverFixture):
             (opening + "Content-Length: 1000000000000\r\n\r\n").encode())
         self.assertTrue(answered.startswith(b"HTTP/1.0 413 "), answered)
         self.assertEqual(self.stored(), ["token"])
+
+
+class DepthTest(ReceiverFixture):
+    """At either door a body nested past what the reader takes is 400,
+    and so is one nested past what the writer takes (#474; the review
+    of #482): the kept line wraps what was posted one level deeper, so
+    the writer gives up one level before the reader does, and that one
+    depth was a dropped connection with a traceback on the receiver's
+    own output, which a holder of the URL could fill by a depth sweep.
+    The depth is found here, not assumed: it moves with the interpreter."""
+
+    def setUp(self):
+        super().setUp()
+        self.proc = self.start()
+        self.said = []
+        for stream in (self.proc.stdout, self.proc.stderr):
+            threading.Thread(target=self.drain, args=(stream,),
+                             daemon=True).start()
+
+    def drain(self, stream):
+        # Everything the receiver prints, so a sweep of a few hundred
+        # requests never fills a pipe nobody reads, and a traceback shows.
+        try:
+            for line in stream:
+                self.said.append(line)
+        except (ValueError, OSError):
+            pass  # the fixture closed the stream at cleanup
+
+    @staticmethod
+    def nested(depth):
+        return b'{"a":' + b"[" * depth + b"]" * depth + b"}"
+
+    def status_of(self, url, depth):
+        try:
+            return post(url, self.nested(depth), "application/json")[0]
+        except (urllib.error.URLError, http.client.HTTPException,
+                ConnectionError):
+            return "dropped"
+
+    def first_refused(self, url, seen):
+        """The shallowest depth the door refuses: a coarse step up, then
+        every depth of the last step. Every status goes into `seen`."""
+        coarse = None
+        for depth in range(100, 40001, 100):
+            seen[depth] = self.status_of(url, depth)
+            if seen[depth] == 400:
+                coarse = depth
+                break
+        self.assertIsNotNone(coarse, "no depth up to 40000 was refused")
+        for depth in range(coarse - 99, coarse):
+            seen[depth] = self.status_of(url, depth)
+            if seen[depth] == 400:
+                break
+        return min(depth for depth, status in seen.items() if status == 400)
+
+    def test_every_depth_is_answered_200_or_400_at_either_door(self):
+        for name, url in (("events", self.proc.url + "/v1/logs"),
+                          ("head", self.proc.url)):
+            with self.subTest(door=name):
+                seen = {}
+                first = self.first_refused(url, seen)
+                self.assertGreater(first, 100)
+                # The few depths below the first refusal land, the few
+                # past it are refused, and each the same way every time.
+                for depth in range(first - 6, first + 4):
+                    for _ in range(3):
+                        seen[depth] = self.status_of(url, depth)
+                        self.assertEqual(seen[depth],
+                                         200 if depth < first else 400, depth)
+                self.assertEqual(sorted(set(seen.values())), [200, 400])
+        said = "".join(self.said)
+        self.assertEqual(said.count("Traceback"), 0,
+                         "the receiver printed a traceback")
+        self.assertNotIn(self.proc.url.rsplit("/", 1)[1], said)
 
 
 class VerifyTest(ReceiverFixture):

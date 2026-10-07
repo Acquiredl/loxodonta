@@ -240,7 +240,7 @@ class HandshakeTest(McpBase):
         # (ADR-0002), and a deeply nested but syntactically valid JSON line
         # — reachable through tool-call arguments — makes json.loads raise
         # RecursionError, which cmd_mcp does not catch (it catches
-        # ValueError/UnicodeDecodeError only, line 6132). So the whole
+        # ValueError/UnicodeDecodeError only). So the whole
         # recall server crashes with a traceback and exits non-zero,
         # denying recall, where a malformed line must get -32700 Parse
         # error and the server must stay up for the next request, exactly
