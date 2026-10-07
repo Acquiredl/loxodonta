@@ -56,11 +56,19 @@ only with two producers behind it. Each [second record](GLOSSARY.md#second-recor
 states its reach wherever its count is shown, and a writer-reachable one
 is said to catch faults, not a writer shaping both records.
 
-Verticals are built one at a time. The next is LangGraph, carrying a real
-recurring workload of the author's, because a vertical nobody runs can
-only be declared complete, never watched working: every receipt in the
-author's store so far was written under Claude Code, and what made that
-reader good was field data no documentation held.
+**Toward, ruled 2026-10-06 (ADR-0041):** the second producer is the
+harness itself. Claude Code emits one event per tool call, and the
+receiver takes them at a second door, so a second record exists out of
+the writer's reach, and the reading that counts runs on the receiver's
+machine over both copies. That is the producer `/0` waited for, in place
+of another agent framework.
+
+Verticals are built one at a time. The next after that is LangGraph,
+carrying a real recurring workload of the author's, because a vertical
+nobody runs can only be declared complete, never watched working: every
+receipt in the author's store so far was written under Claude Code, and
+what made that reader good was field data no documentation held. The
+author runs no such workload today, so that vertical waits for one.
 
 ## 4. The road to 1.0
 
@@ -133,9 +141,11 @@ repository. What the dashboard has, it keeps.
 - **A generated control matrix.** A line that says a control is satisfied
   is a conclusion about someone's deployment, and the verdicts here name
   the mechanism and never the conclusion.
-- **Before 1.0:** a receipt written before the call runs, a second record
-  for Claude Code that is out of the writer's reach, capture through a
-  proxy or a gateway.
+- **Before 1.0:** a receipt written before the call runs, and capture
+  through a proxy or a gateway. *(A second record for Claude Code out of
+  the writer's reach was declined here until 2026-10-06, when the
+  harness's own events made it a second door rather than a proxy:
+  ADR-0041.)*
 - **Modular source**, until one of ADR-0035's named triggers fires.
 
 ## 7. What it can and cannot claim
