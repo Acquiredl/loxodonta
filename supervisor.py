@@ -3969,8 +3969,15 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
         newest = family.get("newest_ts")
         if seen is None and oldest and isinstance(newest, str) \
                 and newest[:10] < oldest:
+            # Not WATCH_WORDS' entry: that one offers `calibrate
+            # --since`, which seeds a coverage memory this reading does
+            # not keep.
             row["state"] = "BEFORE-MEMORY"
-            row["words"] = WATCH_WORDS["BEFORE-MEMORY"]
+            row["words"] = (f"this chain copy's newest entry predates "
+                            f"{oldest}, the day of the oldest events file "
+                            "the receiver holds, so its second record was "
+                            "never kept here: counted, not judged, and not "
+                            "called absent (ADR-0041).")
             unjudged.append(row)
             continue
         quiet_for = ((now - heard).total_seconds()
