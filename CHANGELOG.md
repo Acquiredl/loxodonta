@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Added
 
 - `receiver serve` takes a harness's events at `POST /<token>/v1/logs`, drops every `user.*` and `organization.*` attribute at every level, and keeps each request as one line in `events-<day>.jsonl` by UTC day of arrival, under the same caps (#479).
+- `supervisor scan|serve|acknowledge --receiver DIR` read a receiver's data directory as the universe: its chain copies against the harness's events kept there, each session judged once settled, with `SECOND-RECORD-ABSENT`, `SECOND-RECORD-GAP` and a last-heard table (#481).
 
 ### Changed
 
