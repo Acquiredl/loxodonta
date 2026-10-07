@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_supervisor import (FIXTURE_SESSION, assert_replaced_whole,
                              chain_copy, hold, home_outside,
                              read_line_within, receiver_folder,
+                             unreadable_depth,
                              isolated_env)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -635,7 +636,10 @@ class DashboardTest(ServerFixture):
         # marker, read by install-hook and scan), nor #452 (a folder that
         # cannot be listed): a different file and a different reader.
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        depth = 6000
+        # A depth this interpreter cannot read, so the reader meets the
+        # RecursionError on every version, not a list of lists it would
+        # drop as junk (#474).
+        depth = unreadable_depth()
         (self.root / ".supervisor-views.json").write_text(
             '{"views":' + "[" * depth + "]" * depth + "}", encoding="utf-8")
         self.serve()
@@ -645,8 +649,11 @@ class DashboardTest(ServerFixture):
     def test_a_deeply_nested_views_post_is_400_not_a_crash(self):
         # The same reader's other half (#474): the page's one write path
         # takes a body up to 16 KiB, and six thousand brackets fit in
-        # twelve. Not a JSON object is 400, as "[]" is; the depth must
-        # be too, not a dropped connection.
+        # twelve, where a found depth (unreadable_depth) need not. The
+        # depth stays fixed and both readings of it are 400, never a
+        # dropped connection: where the interpreter reads it (3.13 on
+        # Linux and macOS) the body is a list, not an object, as "[]"
+        # is; where it does not (3.9, Windows) it is a parse error.
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         self.serve()
         request = urllib.request.Request(

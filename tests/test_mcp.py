@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_recall import (HOSTILE_ACTION, HOSTILE_ACTOR, HOSTILE_SHOWN,
                          forge_chain, recall_home, run_py, steering)
-from test_supervisor import isolated_env
+from test_supervisor import isolated_env, unreadable_depth
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
@@ -247,9 +247,13 @@ class HandshakeTest(McpBase):
         # as "this is not json" does above. Same omission as #463
         # (settings/coverage) and the serve views reader, in a third
         # reader: catch RecursionError beside ValueError.
+        # The depth is found, not assumed: six thousand levels read on
+        # 3.13 for Linux and macOS, where the line is a list, not a
+        # request, and -32600 is the right answer (#474).
         c = self.client()
         c.initialize()
-        bad = c.raw("[" * 6000 + "]" * 6000)
+        depth = unreadable_depth()
+        bad = c.raw("[" * depth + "]" * depth)
         self.assertEqual(bad["error"]["code"], -32700)
         self.assertIsNone(bad["id"])
         # The server is still answering after the bad line.

@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import clean_env
+from test_supervisor import unreadable_depth
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RECEIVER = REPO_ROOT / "receiver.py"
@@ -411,7 +412,13 @@ class ContentTest(ReceiverFixture):
         # omission as #463 and the serve/mcp readers; catch it beside
         # ValueError. The receiver survives for the next sender (threaded),
         # which is tested last.
-        deep = ("[" * 6000 + "]" * 6000).encode("utf-8")
+        # The depth is found, not assumed (#474): six thousand levels
+        # read on 3.13 for Linux and macOS, where the body is a list,
+        # refused as not a receipt, and the catch goes untested. DepthTest
+        # sweeps the two JSON doors; the chain door (a batch, receipt_of)
+        # is held here.
+        depth = unreadable_depth()
+        deep = ("[" * depth + "]" * depth).encode("utf-8")
         status, _ = post(self.proc.url, deep, "application/json")
         self.assertEqual(status, 400)
         status, _ = self.send_chain(deep)
@@ -649,7 +656,8 @@ class EventsDoorTest(ReceiverFixture):
             self.assertEqual(json.loads(response.read()), {})
 
     def test_a_body_that_is_not_one_json_object_is_400_and_nothing_is_written(self):
-        deep = b"[" * 6000 + b"]" * 6000
+        depth = unreadable_depth()
+        deep = b"[" * depth + b"]" * depth
         for body in (b"[]", b'[{"a": 1}]', b"1", b'"text"', b"null", b"true",
                      b"\xff\xfe{}", b"{", b"", deep):
             with self.subTest(body=body[:12]):
