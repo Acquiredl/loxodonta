@@ -1208,6 +1208,24 @@ def read_line_within(stream, bound=60):
     return said[0] if said else ""
 
 
+def unreadable_depth(step=1000, ceiling=200000):
+    """A nesting depth this interpreter's `json.loads` refuses with
+    RecursionError, found rather than assumed: the depth it reads moves
+    with the version and the platform (six thousand levels read on 3.13
+    for Linux and macOS and not on 3.9 or on Windows, #474). A script a
+    test starts is the same interpreter, so what this process cannot
+    read, the script cannot either; but it sits a few frames shallower
+    than a test runner where the nesting counts against the frames (3.9
+    to 3.11), so a whole step past the first refused depth, not one
+    level, clears its boundary too."""
+    for depth in range(step, ceiling + 1, step):
+        try:
+            json.loads("[" * depth + "]" * depth)
+        except RecursionError:
+            return depth + step
+    raise AssertionError(f"json.loads read {ceiling} levels of nesting")
+
+
 def hold(test, path):
     """A second name for the file at `path` right now: what a reader that
     opened it before the next write is holding, and what a crash
