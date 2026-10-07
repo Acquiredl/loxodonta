@@ -176,10 +176,10 @@ class WriterHomeGuardTest(unittest.TestCase):
                              if verb == "hook"
                              and os.environ.get("CLAUDE_PROJECT_DIR")
                              else set())
-                # And only the two installers read the managed folder.
-                managed = set() if verb == "hook" else {MANAGED}
+                # And all three read the managed folder: the installers
+                # for the hooks file, the hook for the pin (#480).
                 self.assertEqual(named_homes(said),
-                                 EVERY_HOME | managed | inherited, said)
+                                 EVERY_HOME | {MANAGED} | inherited, said)
                 self.assertIn("tests/test_suite_shape.py:", said)
 
     def test_adopt_is_refused_with_the_inherited_home(self):
@@ -221,12 +221,13 @@ class WriterHomeGuardTest(unittest.TestCase):
     def test_an_unset_managed_folder_is_refused_where_it_is_read(self):
         # #259: the harness's managed settings folder is under no home,
         # so unset it is the machine's own, whatever HOME says. The two
-        # installers read it; a hook never does.
+        # installers read it, and since #480 the hook reads the
+        # telemetry pin there (ADR-0041).
         with tempfile.TemporaryDirectory() as home:
             isolated = {**isolated_env(Path(home).resolve()),
                         "PYTHONIOENCODING": "utf-8"}
             unset = {k: v for k, v in isolated.items() if k != MANAGED}
-            for verb in ("install-hook", "uninstall-hook"):
+            for verb in ("install-hook", "uninstall-hook", "hook"):
                 with self.subTest(verb=verb):
                     with self.assertRaises(AssertionError) as refused:
                         subprocess.run(self.command(verb),
@@ -235,7 +236,7 @@ class WriterHomeGuardTest(unittest.TestCase):
                                      {MANAGED})
 
             done = subprocess.run(self.command("hook"), capture_output=True,
-                                  encoding="utf-8", env=unset)
+                                  encoding="utf-8", env=isolated)
         self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_a_hook_with_a_project_the_test_did_not_choose_is_refused(self):
