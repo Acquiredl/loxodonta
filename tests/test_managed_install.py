@@ -968,7 +968,8 @@ class TelemetryPinTest(ManagedBase):
         self.assertIn(f"removed {self.pin_file}", done.stdout)
 
     def test_a_refused_pin_write_writes_nothing_anywhere(self):
-        # A folder where the pin belongs: no right would move it, and
+        # A folder where the pin belongs: no right would move it, the
+        # install is refused before anything is said or written, and
         # the hooks file, written after the pin, is not written at all.
         (self.pin_file / "kept").mkdir(parents=True)
         before = self.everything()
@@ -981,18 +982,19 @@ class TelemetryPinTest(ManagedBase):
         self.assertIn(str(self.pin_file), done.stderr)
         self.assertIn("a folder", done.stderr)
         self.assertNotIn("sudo", done.stderr)
-        self.assertIn("events will leave", done.stdout,
-                      "what leaves is said before the pin is written")
+        self.assertNotIn("will leave", done.stdout,
+                         "a refused install says nothing about what leaves")
         self.assertEqual(self.everything(), before)
 
     def test_a_refused_hooks_write_puts_the_pin_back_as_it_was(self):
         # The pin is written first; a refused hooks write afterwards
-        # puts it back, so a refused install has written nothing.
+        # puts back the very bytes that stood there, a file that was
+        # not JSON included, so a refused install has written nothing.
         old = {"env": {**PIN_ENV,
                        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:9/old"}}
-        for standing in (None, old):
-            with self.subTest(standing=bool(standing)):
-                if standing:
+        for standing in (None, old, "{not json"):
+            with self.subTest(standing=standing):
+                if standing is not None:
                     self.plant(self.pin_file, standing)
                 (self.managed_file / "kept").mkdir(parents=True)
                 before = self.everything()
@@ -1003,12 +1005,30 @@ class TelemetryPinTest(ManagedBase):
                 self.assertEqual(done.returncode, 73,
                                  done.stdout + done.stderr)
                 self.assertIn(str(self.managed_file), done.stderr)
-                self.assertEqual(self.everything(), before)
-                self.assertEqual(self.pin_file.exists(), bool(standing))
-                if standing:
-                    self.assertEqual(self.read(self.pin_file), standing)
+                self.assertIn("Nothing was written", done.stderr)
+                self.assertEqual(self.everything(), before,
+                                 "the pin as it stood, byte for byte, or "
+                                 "no pin")
                 (self.managed_file / "kept").rmdir()
                 self.managed_file.rmdir()
+                if standing is not None:
+                    self.pin_file.unlink()
+
+    def test_what_is_not_json_at_the_pins_name_is_nobodys_pin(self):
+        # Left alone and named when no pin is wanted; written over at
+        # `full`, as the hooks file is over one it cannot read.
+        self.plant(self.pin_file, "{not json")
+
+        done = self.install("--managed", "--profile", "timestamped")
+
+        self.assertIn(str(self.pin_file), done.stderr)
+        self.assertEqual(self.pin_file.read_text(encoding="utf-8"),
+                         "{not json")
+
+        done = self.full()
+
+        self.assertEqual(self.read(self.pin_file), {"env": PIN_ENV})
+        self.assertNotIn(str(self.pin_file), done.stderr)
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
                      "a folder's write bit is POSIX")
@@ -1050,19 +1070,33 @@ class TelemetryPinTest(ManagedBase):
                 self.assertNotIn("sudo", done.stderr)
                 self.assertEqual(self.everything(), before)
 
-    def test_a_file_at_the_pins_name_that_is_not_the_installers_is_left(self):
+    def test_a_file_at_the_pins_name_that_is_not_the_installers(self):
         # Decided by content, as the hooks file's entries are: a file
         # there holding more than the installer's keys is somebody
-        # else's, left alone and named, whichever verb meets it.
+        # else's. A `full` install, which wants the name, is refused
+        # before anything is said or written; every other verb leaves
+        # it alone and names it.
         foreign = ('{"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": '
                    '"http://127.0.0.1:9/theirs", "THEIR_OWN": "1"}}')
         self.plant(self.pin_file, foreign)
+        before = self.everything()
+
+        done = self.run_tool("install-hook", "--managed", "--profile",
+                             "full", "--remote", REMOTE)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertIn(str(self.pin_file), done.stderr)
+        self.assertIn("move it away by hand", done.stderr)
+        self.assertNotIn("sudo", done.stderr)
+        self.assertNotIn("will leave", done.stdout,
+                         "a refused install says nothing about what leaves")
+        self.assertEqual(self.everything(), before)
+
         for verb, flags in (
-                ("install-hook", ("--managed", "--profile", "full",
-                                  "--remote", REMOTE)),
                 ("install-hook", ("--managed", "--profile", "timestamped")),
                 ("uninstall-hook", ("--managed",))):
-            with self.subTest(verb=verb, flags=flags):
+            with self.subTest(verb=verb):
                 done = self.run_tool(verb, *flags)
 
                 self.assertEqual(done.returncode, 0,
@@ -1104,6 +1138,23 @@ class TelemetryPinTest(ManagedBase):
         self.assertEqual(len(named), 2, again.stderr)
         for ours in (self.pin_file, self.managed_file):
             self.assertFalse(any(str(ours) in line for line in named), named)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "a file's read bit is POSIX")
+    def test_a_managed_file_it_cannot_read_is_named_as_unread(self):
+        # A look that saw nothing is told apart from one that could
+        # not look: the file is named, its content never.
+        closed = self.managed_file.parent / "zz-closed.json"
+        self.plant(closed, {"env": {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.test/secret"}})
+        os.chmod(closed, 0)
+        self.addCleanup(os.chmod, closed, 0o644)
+
+        done = self.full()
+
+        self.assertIn(f"could not read {closed}", done.stderr)
+        self.assertNotIn("secret", done.stderr)
+        self.assertEqual(self.read(self.pin_file), {"env": PIN_ENV})
 
     def test_without_a_pin_wanted_no_other_file_is_read_for_one(self):
         self.plant(self.managed / "managed-settings.json", {"env": {
