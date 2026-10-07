@@ -10,6 +10,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `install-hook --managed --profile full` also pins the harness's events to the `--remote` URL in a second file of its own, says what leaves through them and warns of another source; any other profile, or uninstall, removes it (#480).
+- The hook writes `second-record-cut: reason=...` once per chain when its environment has the pinned events off or sent elsewhere, so a session whose second record was cut says so (#480).
+
 ### Changed
 
 - `install-hook --managed` says in its help and its closing words that the harness documents the claim and ADR-0040 measured it, where they said documented and not yet measured (#259).

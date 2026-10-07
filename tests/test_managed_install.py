@@ -845,9 +845,13 @@ class TelemetryPinTest(ManagedBase):
                             REMOTE, *args, env=env)
 
     def plant(self, path, content):
+        """A file in the managed folder: `content` as given when it is
+        text, else as the installer writes JSON (two spaces, a final
+        newline), so a pin put back as it stood is byte for byte."""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content if isinstance(content, str)
-                        else json.dumps(content), encoding="utf-8")
+                        else json.dumps(content, indent=2) + "\n",
+                        encoding="utf-8", newline="\n")
 
     def test_full_writes_the_pin_with_the_four_keys_and_nothing_else(self):
         done = self.full()
@@ -1081,7 +1085,7 @@ class TelemetryPinTest(ManagedBase):
         done = self.full()
 
         warnings = [line for line in done.stderr.splitlines()
-                    if line.startswith("warning:")]
+                    if line.startswith("warning:") and " sets " in line]
         self.assertEqual(len(warnings), 2, done.stderr)
         self.assertIn(str(policy), warnings[0])
         self.assertIn("OTEL_EXPORTER_OTLP_ENDPOINT", warnings[0])
@@ -1096,8 +1100,10 @@ class TelemetryPinTest(ManagedBase):
 
         # The installer's own two files are no other source.
         again = self.full()
-        self.assertNotIn(str(self.pin_file), again.stderr)
-        self.assertNotIn(str(self.managed_file), again.stderr)
+        named = [line for line in again.stderr.splitlines() if " sets " in line]
+        self.assertEqual(len(named), 2, again.stderr)
+        for ours in (self.pin_file, self.managed_file):
+            self.assertFalse(any(str(ours) in line for line in named), named)
 
     def test_without_a_pin_wanted_no_other_file_is_read_for_one(self):
         self.plant(self.managed / "managed-settings.json", {"env": {
@@ -1124,10 +1130,16 @@ class SecondRecordNoteWitnessTest(ManagedBase):
         super().setUp()
         self.witness = self.home / ".claude" / "projects"
         self.witness.mkdir()
-        self.root = self.work / "repos"
-        self.project = self.root / "beta"
+        self.project = self.work / "repos" / "beta"
         self.project.mkdir(parents=True)
-        prime_memory(self.root, matcher="*", failures="*")
+        # A store-mode scan keeps its memory beside the store's receipts
+        # folder: a calibration older than the fixtures, as prime_memory
+        # gives a --root scan.
+        self.store.mkdir()
+        (self.store / "baseline.json").write_text(json.dumps({
+            "chains": {}, "calibration": [{
+                "since": ago(864000), "matchers": ["*"], "failures": ["*"]}],
+        }), encoding="utf-8")
         for name in TELEMETRY_VARIABLES:
             self.env.pop(name, None)
 

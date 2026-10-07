@@ -2275,13 +2275,14 @@ def harness_managed_folder():
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def managed_hooks_path():
-    """The recorder's own file among the harness's managed settings
-    (ADR-0040 ruling 1): the one file there a managed install writes,
-    and the only one any reader here opens. LOXODONTA_MANAGED_DIR names
-    a folder to stand for the harness's, which is how the suite reaches
-    one it may write. It moves where these tools read and write, never
-    where the harness reads, and every installer verb that reads it
-    warns when it is set."""
+    """The recorder's own hooks file among the harness's managed
+    settings (ADR-0040 ruling 1): the file a managed install writes the
+    hook entries to, and the one file there the supervisor reads; the
+    telemetry pin sits beside it (ADR-0041). LOXODONTA_MANAGED_DIR
+    names a folder to stand for the harness's, which is how the suite
+    reaches one it may write. It moves where these tools read and
+    write, never where the harness reads, and every installer verb that
+    reads it warns when it is set."""
     folder = (os.environ.get("LOXODONTA_MANAGED_DIR")
               or harness_managed_folder())
     return os.path.join(folder, "managed-settings.d", "loxodonta.json")
