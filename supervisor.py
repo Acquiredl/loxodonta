@@ -8834,9 +8834,11 @@ def cmd_serve(args):
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
-    print(keeper_words(anchor_every, anchor_source, publish_every,
-                       publish_head, publish_chain, publish_source,
-                       authority),
+    print("keeper: none over a receiver's folder; nothing is anchored, "
+          "sent or appended from the far end (ADR-0041)" if receiver
+          else keeper_words(anchor_every, anchor_source, publish_every,
+                            publish_head, publish_chain, publish_source,
+                            authority),
           flush=True)
     # With a cadence in force, the keepers get a clock of their own
     # (#271): a daemon thread asking for a scan on the tick, so what
