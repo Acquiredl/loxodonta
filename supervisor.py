@@ -3799,9 +3799,8 @@ def read_events(root, closed=None):
     gap. Beside the sessions: the newest `received` per sending address
     (ruling 5's "last heard"), the days the files are named for, and
     the lines that were not one JSON object holding a `logs` object,
-    skipped and counted, never
-    fatal: the files are out of the writer's reach, but a reader that
-    ends on one line is still wrong."""
+    skipped and counted, never fatal: the files are out of the writer's
+    reach, but a reader that ends on one line is still wrong."""
     sessions = {}
     addresses = {}
     files = events_files(root, closed)
@@ -3927,8 +3926,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             "words": (f"the harness's events as the receiver kept them, "
                       f"identity removed: {len(days)} file(s)"
                       + (f" from {oldest} to {max(days)}" if days else "")
-                      + (f"; {events['unparsed']} line(s) not one JSON "
-                         "object skipped and counted"
+                      + (f"; {events['unparsed']} line(s) not in the "
+                         "line shape skipped and counted"
                          if events["unparsed"] else "")
                       + ". The harness's word, like the transcript; what "
                       "differs is that nothing on the agent's machine "

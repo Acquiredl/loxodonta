@@ -5440,7 +5440,9 @@ class ReceiverReadingTest(unittest.TestCase):
     def test_an_int_value_int_cannot_read_ends_nothing(self):
         # str.isdigit() passes a superscript two and a string past the
         # interpreter's 4300-digit limit; int() refuses both. Whoever
-        # holds the URL can post either.
+        # holds the URL can post either. An interpreter without the
+        # limit reads the long one as a number, a gap: so the state is
+        # only asked to be judged.
         chain_copy(self.data, FIXTURE_SESSION)
         with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
                   encoding="utf-8") as events:
@@ -5457,8 +5459,8 @@ class ReceiverReadingTest(unittest.TestCase):
 
         report = self.report()
 
-        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
-                         "ENDED-SURPLUS")
+        self.assertIn(self.rows(report)[FIXTURE_SESSION]["state"],
+                      ("ENDED-SURPLUS", "SECOND-RECORD-GAP"))
 
     def test_an_event_received_just_now_keeps_its_session_pending(self):
         # The copy arrived an hour ago; the events' own `received`, the
