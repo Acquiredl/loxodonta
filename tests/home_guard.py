@@ -32,9 +32,10 @@ verbs never read it.
 Since #259 it covers the managed settings folder too (ADR-0040): the
 six reading verbs read the recorder's own file there to learn what is
 wired, `install-hook` reads it and with `--managed` writes it, and
-`uninstall-hook --managed` deletes it. That folder is under no home, so
+`uninstall-hook --managed` deletes it; since #480 the `hook` reads the
+telemetry pin there (ADR-0041). That folder is under no home, so
 nothing keeps an unset LOXODONTA_MANAGED_DIR inside the test: a start of
-one of those eight verbs names it, in the temp root, or is refused.
+one of those nine verbs names it, in the temp root, or is refused.
 
 The recall verbs (`digest`, `show`, `search`, `timeline`, `mcp`) read
 the home and write nothing to it, so their tests are isolated but not
@@ -78,7 +79,7 @@ RECORDER_VERB = re.compile(r'(?:^|[\s"/\\])loxodonta\.py"?\s+"?([a-z-]+)')
 # The folder that stands in for the harness's managed settings folder
 # (#259), and the verbs that read or write the recorder's file in it.
 MANAGED = "LOXODONTA_MANAGED_DIR"
-MANAGED_VERBS = HOME_READERS | {"install-hook", "uninstall-hook"}
+MANAGED_VERBS = HOME_READERS | RECORDER_WRITERS
 
 
 def inside_the_temp_root(value, cwd):

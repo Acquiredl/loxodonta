@@ -2,7 +2,7 @@
 
 This document specifies three parts, and each has its own version:
 
-- **The chain format:** `0.1`, sections 1 to 8, amended through 0.1.4.
+- **The chain format:** `0.1`, sections 1 to 8, amended through 0.1.5.
 - **The sidecars:** every row names its kind (ADR-0038), section 9.
 - **The package format:** `loxodonta-package/1`, section 10.
 
@@ -14,6 +14,7 @@ A revision of this document is not a format version: each part changes only unde
 - **0.1.2** (2026-08-31, ADR-0017) names the bookkeeping-entry class and pins the transcript-commitment grammar (§2.2) — additive vocabulary over ordinary entries.
 - **0.1.3** (2026-09-23, ADR-0036, ADR-0037) freezes the hash chain across format versions (§4), so a verifier walks the hashes before it refuses a version (§2.1), and gives exit 1 to `BROKEN` alone (§6): verifier behavior, and a promise about later versions.
 - **0.1.4** (2026-09-24, #332, #336) changes words only: §5 says the head commits to canonical form, not to the file's bytes, and §8 splits into what the design cannot claim (§8.1) and the format's non-goals (§8.2), stating whole-chain regeneration as closed only for what a commitment held off the machine covers.
+- **0.1.5** (2026-10-06, ADR-0041) pins the grammar of a third bookkeeping kind, the second-record note (§2.2): additive vocabulary over ordinary entries, as 0.1.2 was.
 
 This document defines the receipt log format precisely enough that an independent implementation, in any language, produces byte-identical hashes. That reproducibility is the whole game: a hash chain is only as trustworthy as the serialization rules underneath it.
 
@@ -55,7 +56,7 @@ Genesis is fully determined except for its timestamp:
 
 ### 2.2 Bookkeeping entries and the transcript commitment *(amended v0.1.2, ADR-0017)*
 
-An entry whose `actor` is `"receipts"` is a **bookkeeping entry**: the recorder speaking in its own voice rather than on behalf of a tool call. Genesis is the original bookkeeping entry; the transcript commitment is the second kind. Readers that count or render *work* — the completeness witness, the recall digest — exclude bookkeeping entries; no tool event owes them.
+An entry whose `actor` is `"receipts"` is a **bookkeeping entry**: the recorder speaking in its own voice rather than on behalf of a tool call. Genesis is the original bookkeeping entry; the transcript commitment is the second kind, and the second-record note the third *(amended v0.1.5, ADR-0041)*. Readers that count or render *work* — the completeness witness, the recall digest — exclude bookkeeping entries; no tool event owes them.
 
 A **transcript commitment** records the hash of the harness transcript's byte-prefix at the moment of writing. Its action line is machine-parsed and its grammar is pinned, one space between fields, no trailing content:
 
@@ -66,6 +67,16 @@ transcript-commitment: bytes=<decimal byte count> sha256=<64 lowercase hex>
 - The hash covers the transcript's **first `bytes` bytes, from byte zero**, so each commitment re-covers everything before it; across one chain the byte counts never decrease (a growing file never shrinks — a verifier may judge this from the chain alone).
 - `files` is `[]`. The commitment is an ordinary entry in every other respect: chained, hashed, no new schema fields — a v0.1 verifier that predates this amendment walks it without noticing.
 - The honest claim, stated once here: the commitment is **writer-authored**. It extends tamper-evidence to the transcript *by reference, forward from each commitment* — a prefix rewritten before it was first committed is committed as-is. Detection latency, not protection.
+
+A **second-record note** *(amended v0.1.5, ADR-0041)* records that the session's second record, the harness's own events, was cut in the environment the hook ran in: the telemetry off, the exporter off, or the events pointed elsewhere than the receiver a managed install pinned them to. Its action line is machine-parsed and its grammar is pinned, one space between fields, no trailing content:
+
+```
+second-record-cut: reason=<telemetry-off|exporter-off|endpoint-elsewhere>
+```
+
+- The reason is the first that applies, in that order. **At most one note per chain**: a chain holding one is given no second, whatever later calls find, so the note says the record was cut and never how often. A sibling chain is a chain of its own.
+- `files` is `[]`. The note is an ordinary entry in every other respect, like the commitment: chained, hashed, no new schema fields, so a verifier that predates this amendment walks it without noticing.
+- The honest claim: the note is written by the hook from the environment the harness gave it, which whoever launches the harness can set, and never from anything the receiver saw. A session whose events never arrived is named at the receiver whether or not its chain carries a note; the note is the chain's own word that they were not going to.
 
 ## 3. File references
 

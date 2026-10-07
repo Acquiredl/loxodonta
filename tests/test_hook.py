@@ -1004,6 +1004,181 @@ class TranscriptCommitmentTest(unittest.TestCase):
         self.assertEqual(chain.read_bytes(), before)
 
 
+# The pin as `install-hook --managed --profile full` writes it, for a
+# receiver at PINNED (ADR-0041 ruling 7).
+PINNED = "http://127.0.0.1:9/abc"
+PIN = {"env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+               "OTEL_LOGS_EXPORTER": "otlp",
+               "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+               "OTEL_EXPORTER_OTLP_ENDPOINT": PINNED}}
+# What the hook compares with the pin, scrubbed from the environment a
+# test hands it so the shell this runs in says nothing.
+TELEMETRY_VARIABLES = ("CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_LOGS_EXPORTER",
+                       "OTEL_EXPORTER_OTLP_PROTOCOL",
+                       "OTEL_EXPORTER_OTLP_ENDPOINT",
+                       "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+# An environment the pin is in force in: the harness's events reach
+# the receiver, and the hook has nothing to note.
+IN_FORCE = {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_LOGS_EXPORTER": "otlp",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": PINNED}
+NOTE = "second-record-cut: reason="
+
+
+class SecondRecordCutTest(unittest.TestCase):
+    """ADR-0041 ruling 8: the hook runs in the harness's environment,
+    and when the installer's pin is there and that environment has the
+    events off or pointed elsewhere, the hook writes one bookkeeping
+    entry per chain saying the second record was cut. Driven through
+    the public CLI with a planted pin under LOXODONTA_MANAGED_DIR and a
+    controlled environment, like every hook behavior."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name).resolve()
+        self.transcript = self.workdir / "transcript.jsonl"
+        self.managed = self.workdir / "managed"
+        self.pin = (self.managed / "managed-settings.d"
+                    / "loxodonta-telemetry.json")
+        self.plant(PIN)
+        # run_hook copies this process's environment: a telemetry
+        # variable set in the shell this runs in would be the harness's
+        # word here, so none of them is.
+        previous = {name: os.environ.pop(name)
+                    for name in TELEMETRY_VARIABLES if name in os.environ}
+        self.addCleanup(os.environ.update, previous)
+
+    def plant(self, content):
+        self.pin.parent.mkdir(parents=True, exist_ok=True)
+        self.pin.write_text(content if isinstance(content, str)
+                            else json.dumps(content), encoding="utf-8")
+
+    def hook(self, env, body=None, *args, session="sess-1234abcd"):
+        if body is None:
+            body = payload(session=session, tool="Bash",
+                           tool_input={"command": "step"})
+        result = run_hook(body, self.workdir, *args, timeout=120,
+                          extra_env={"LOXODONTA_MANAGED_DIR": str(self.managed),
+                                     **env})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        return result
+
+    def entries(self, session="sess-1234abcd"):
+        log = self.workdir / f"receipts-{session}.jsonl"
+        return [json.loads(line)
+                for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def notes(self, session="sess-1234abcd"):
+        return [e for e in self.entries(session)
+                if e["action"].startswith(NOTE)]
+
+    def test_a_cut_environment_leaves_one_note_after_the_first_receipt(self):
+        for _ in range(3):
+            self.hook({})
+
+        entries = self.entries()
+        self.assertEqual([e["action"] for e in entries],
+                         ["genesis", "Bash: step",
+                          "second-record-cut: reason=telemetry-off",
+                          "Bash: step", "Bash: step"])
+        note = entries[2]
+        self.assertEqual(note["actor"], "receipts")
+        self.assertEqual(note["files"], [])
+        verify = run_receipts("verify", "--log",
+                              "receipts-sess-1234abcd.jsonl",
+                              cwd=self.workdir)
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+
+    def test_the_reason_is_the_first_that_applies(self):
+        cases = (
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}, "telemetry-off"),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}, "exporter-off"),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+              "OTEL_LOGS_EXPORTER": "console"}, "exporter-off"),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+              "OTEL_LOGS_EXPORTER": "otlp"}, "endpoint-elsewhere"),
+            ({**IN_FORCE, "OTEL_EXPORTER_OTLP_ENDPOINT":
+              "http://127.0.0.1:9/other"}, "endpoint-elsewhere"),
+            ({**IN_FORCE, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":
+              "http://127.0.0.1:9/other/v1/logs"}, "endpoint-elsewhere"),
+            # The pin in force, four spellings: no note.
+            (IN_FORCE, None),
+            ({**IN_FORCE, "OTEL_EXPORTER_OTLP_ENDPOINT": PINNED + "/"}, None),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_LOGS_EXPORTER": "otlp",
+              "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": PINNED + "/v1/logs"}, None),
+            ({**IN_FORCE, "OTEL_LOGS_EXPORTER": "otlp,console"}, None),
+        )
+        for i, (env, reason) in enumerate(cases):
+            session = f"sess-{i:04d}aaaa"
+            with self.subTest(env=env, reason=reason):
+                self.hook(env, session=session)
+
+                notes = [e["action"] for e in self.notes(session)]
+                self.assertEqual(notes, [NOTE + reason] if reason else [])
+
+    def test_without_the_installers_pin_there_is_no_note(self):
+        for i, content in enumerate((
+                None,                                   # no file
+                "{not json",
+                '{"hooks": {}}',                        # not a pin
+                '{"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "%s", '
+                '"THEIR_OWN": "1"}}' % PINNED)):        # somebody else's
+            session = f"sess-{i:04d}bbbb"
+            with self.subTest(content=content):
+                if content is None:
+                    self.pin.unlink()
+                else:
+                    self.plant(content)
+
+                self.hook({}, session=session)
+
+                self.assertEqual(self.notes(session), [])
+
+    def test_a_session_end_run_writes_no_note(self):
+        # The seal is written; the note is a completed-call or
+        # failed-call matter, and the tail keeper's payload, whose
+        # environment is the supervisor's, never gets one.
+        self.transcript.write_bytes(b"page one\n")
+        self.hook(IN_FORCE)
+        for reason in ("prompt_input_exit", "tail-keeper"):
+            with self.subTest(reason=reason):
+                body = {"session_id": "sess-1234abcd",
+                        "hook_event_name": "SessionEnd", "reason": reason,
+                        "transcript_path": str(self.transcript)}
+
+                self.hook({}, body)
+
+                self.assertEqual(self.notes(), [])
+        actions = [e["action"] for e in self.entries()]
+        self.assertEqual(len(actions), 3, actions)
+        self.assertTrue(actions[-1].startswith("transcript-commitment:"))
+
+    def test_a_failed_call_run_leaves_the_note_too(self):
+        body = payload(tool="Bash", tool_input={"command": "step"})
+        body["hook_event_name"] = "PostToolUseFailure"
+
+        self.hook({}, body)
+
+        self.assertEqual([e["action"] for e in self.notes()],
+                         [NOTE + "telemetry-off"])
+
+    def test_another_harness_gets_no_note(self):
+        # The pin is Claude Code's: Codex reads no managed settings and
+        # has no second record to cut (docs/CLAIMS.md), so its receipts
+        # carry no note about it.
+        self.hook({}, None, "--actor", "codex")
+
+        self.assertEqual(self.notes(), [])
+
+    def test_the_note_stays_once_the_record_is_cut_and_back(self):
+        self.hook({})
+        self.hook(IN_FORCE)
+        self.hook({})
+
+        self.assertEqual(len(self.notes()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 
