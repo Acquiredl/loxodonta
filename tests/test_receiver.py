@@ -200,8 +200,9 @@ class UrlTest(ReceiverFixture):
 
 
 class RefusalTest(ReceiverFixture):
-    """One door, POST at the token's path; everything else is turned
-    away, and nothing that arrived is ever handed back."""
+    """The token's door, POST at the token's path; everything else is
+    turned away, and nothing that arrived is ever handed back. The
+    events door under it is EventsDoorTest's."""
 
     def setUp(self):
         super().setUp()

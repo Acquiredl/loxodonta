@@ -10,9 +10,17 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `receiver serve` takes a harness's events at `POST /<token>/v1/logs`, drops every `user.*` and `organization.*` attribute at every level, and keeps each request as one line in `events-<day>.jsonl` by UTC day of arrival, under the same caps (#479).
+
 ### Changed
 
 - `install-hook --managed` says in its help and its closing words that the harness documents the claim and ADR-0040 measured it, where they said documented and not yet measured (#259).
+
+### Fixed
+
+- A JSON body nested past the reader's limit is `400` at both receiver doors, no saved views at the dashboard, and `-32700` from the MCP server, where each ended in a traceback (#474).
 
 ## [0.13.0] - 2026-10-04
 
