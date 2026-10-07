@@ -641,6 +641,22 @@ class DashboardTest(ServerFixture):
         # self.get has a 30 s timeout, so a hang would fail here too.
         self.assertEqual(self.views(), [])
 
+    def test_a_deeply_nested_views_post_is_400_not_a_crash(self):
+        # The same reader's other half (#474): the page's one write path
+        # takes a body up to 16 KiB, and six thousand brackets fit in
+        # twelve. Not a JSON object is 400, as "[]" is; the depth must
+        # be too, not a dropped connection.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        self.serve()
+        request = urllib.request.Request(
+            self.url + "/api/views",
+            data=("[" * 6000 + "]" * 6000).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as refused:
+            OPENER.open(request, timeout=30)
+        self.assertEqual(refused.exception.code, 400)
+        self.assertEqual(self.views(), [])
+
     def test_the_views_row_sits_above_the_tabs_and_below_nothing_else(self):
         page = self.page()
         self.assertIn('id="view-list"', page)
