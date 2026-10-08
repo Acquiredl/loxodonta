@@ -26,6 +26,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 # This folder on sys.path, so the sibling import below also resolves
@@ -33,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_anchor import clean_env
+from test_supervisor import unreadable_depth
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RECEIVER = REPO_ROOT / "receiver.py"
@@ -199,8 +201,9 @@ class UrlTest(ReceiverFixture):
 
 
 class RefusalTest(ReceiverFixture):
-    """One door, POST at the token's path; everything else is turned
-    away, and nothing that arrived is ever handed back."""
+    """The token's door, POST at the token's path; everything else is
+    turned away, and nothing that arrived is ever handed back. The
+    events door under it is EventsDoorTest's."""
 
     def setUp(self):
         super().setUp()
@@ -395,6 +398,38 @@ class ContentTest(ReceiverFixture):
                 self.assertEqual(status, 400)
         self.assertEqual(self.stored(), ["token"])
 
+    def test_a_deeply_nested_body_is_refused_not_a_crash(self):
+        # RED-TEAM (area C, C8): the sender holding the URL is the
+        # adversary. A deeply nested but valid JSON body, well under the
+        # 8 MiB body cap, makes json.loads raise RecursionError in
+        # head_line (and receipt_of for a batch), which neither catches
+        # (both catch ValueError/UnicodeDecodeError only). keep_batch
+        # catches ValueError but not RecursionError. So the handler
+        # crashes with a traceback and the connection is dropped, instead
+        # of the 400 a malformed body gets everywhere else here
+        # (test_a_batch_that_is_not_receipts_is_refused_whole). RECEIVER.md
+        # and #300 say a malformed body is refused. Same RecursionError
+        # omission as #463 and the serve/mcp readers; catch it beside
+        # ValueError. The receiver survives for the next sender (threaded),
+        # which is tested last.
+        # The depth is found, not assumed (#474): six thousand levels
+        # read on 3.13 for Linux and macOS, where the body is a list,
+        # refused as not a receipt, and the catch goes untested. DepthTest
+        # sweeps the two JSON doors; the chain door (a batch, receipt_of)
+        # is held here.
+        depth = unreadable_depth()
+        deep = ("[" * depth + "]" * depth).encode("utf-8")
+        status, _ = post(self.proc.url, deep, "application/json")
+        self.assertEqual(status, 400)
+        status, _ = self.send_chain(deep)
+        self.assertEqual(status, 400)
+        # Nothing of either landed, and a valid head still works after.
+        self.assertEqual(self.stored(), ["token"])
+        ok, _ = post(self.proc.url,
+                     json.dumps({"n": 1, "head": "ab"}).encode("utf-8"),
+                     "application/json")
+        self.assertEqual(ok, 200)
+
     def test_any_other_content_type_is_415(self):
         status, _ = post(self.proc.url, self.lines, "text/plain",
                          {"X-Loxodonta-Chain": CHAIN})
@@ -402,6 +437,369 @@ class ContentTest(ReceiverFixture):
         status, _ = post(self.proc.url, b"{}", "")
         self.assertEqual(status, 415)
         self.assertEqual(self.stored(), ["token"])
+
+
+EVENTS = "application/json"
+EVENTS_FILE = re.compile(r"events-\d{4}-\d{2}-\d{2}\.jsonl")
+IDENTITY = ("user.", "organization.")
+# One real session's events, scrubbed: seven requests as the harness
+# posted them, 51 log records, with the five identity values replaced by
+# obvious fakes. The fakes are there so a test can show they are dropped.
+FIXTURE = REPO_ROOT / "tests" / "fixtures" / "harness_events.jsonl"
+
+
+def fixture_bodies():
+    """The `logs` object of each line of the capture: the bodies a
+    sender posts, in the order they were sent."""
+    return [json.loads(line)["logs"]
+            for line in FIXTURE.read_text("utf-8").splitlines()]
+
+
+def is_identity(entry):
+    return (isinstance(entry, dict) and isinstance(entry.get("key"), str)
+            and entry["key"].startswith(IDENTITY))
+
+
+def without_identity(node):
+    """The expected shape of a kept object: every attribute whose key
+    begins `user.` or `organization.` gone from every `attributes` list
+    and from the `values` of every `kvlistValue` at any depth, and
+    nothing else changed, list order included."""
+    if isinstance(node, dict):
+        kept = {}
+        for key, value in node.items():
+            if key == "attributes" and isinstance(value, list):
+                value = [a for a in value if not is_identity(a)]
+            elif (key == "kvlistValue" and isinstance(value, dict)
+                  and isinstance(value.get("values"), list)):
+                value = {**value, "values": [a for a in value["values"]
+                                             if not is_identity(a)]}
+            kept[key] = without_identity(value)
+        return kept
+    if isinstance(node, list):
+        return [without_identity(item) for item in node]
+    return node
+
+
+def log_records(logs):
+    """Every log record in a posted object, in order."""
+    return [record
+            for resource in logs.get("resourceLogs", [])
+            for scope in resource.get("scopeLogs", [])
+            for record in scope.get("logRecords", [])]
+
+
+def attribute(key, value):
+    return {"key": key, "value": {"stringValue": value}}
+
+
+class EventsDoorTest(ReceiverFixture):
+    """The second door (ADR-0041 rulings 2 and 3, #479): POST at
+    /<token>/v1/logs takes a harness's events as one JSON object, drops
+    the identity attributes, and keeps each request as one line in the
+    file of its UTC day of arrival, under the first door's lock, fsync
+    and caps. The receiver understands nothing else about the body."""
+
+    def setUp(self):
+        super().setUp()
+        self.proc = self.start()
+        self.token = self.proc.url.rsplit("/", 1)[1]
+        self.base = self.proc.url[:-len(self.token)]  # http://127.0.0.1:P/
+        self.door = self.proc.url + "/v1/logs"
+
+    def send(self, body, content_type=EVENTS, headers=None):
+        return post(self.door, body, content_type, headers)
+
+    def event_files(self):
+        return [name for name in self.stored() if name.startswith("events-")]
+
+    def lines(self):
+        """Every kept line across the day files, raw and parsed, in
+        order."""
+        kept = []
+        for name in self.event_files():
+            for raw in (self.data / name).read_bytes().split(b"\n"):
+                if raw:
+                    kept.append((raw, json.loads(raw)))
+        return kept
+
+    def test_the_capture_lands_one_line_a_request_with_identity_dropped(self):
+        bodies = fixture_bodies()
+        self.assertEqual(sum(len(log_records(b)) for b in bodies), 51)
+        before = datetime.now(timezone.utc)
+        for body in bodies:
+            status, answer = self.send(json.dumps(body).encode("utf-8"))
+            self.assertEqual(status, 200, answer)
+            self.assertEqual(json.loads(answer), {})
+            said = self.logged(self.proc, 200)
+            dropped = 5 * len(log_records(body))
+            self.assertIn(f"events: {dropped} identity attribute(s) dropped",
+                          said)
+            self.assertNotIn(self.token, said)
+            self.assertNotIn("/v1/logs", said)
+        after = datetime.now(timezone.utc)
+
+        # None of the fakes, and no identity key at all, on disk.
+        on_disk = b"".join((self.data / name).read_bytes()
+                           for name in self.event_files())
+        for fake in (b"operator@example.invalid", b'"user.', b'"organization.'):
+            self.assertNotIn(fake, on_disk)
+
+        lines = self.lines()
+        self.assertEqual(len(lines), 7)
+        for (raw, line), body in zip(lines, bodies):
+            self.assertEqual(sorted(line), ["from", "logs", "received"])
+            self.assertEqual(line["from"], "127.0.0.1")
+            self.assertEqual(line["logs"], without_identity(body))
+            self.assertEqual(len(log_records(line["logs"])),
+                             len(log_records(body)))
+            received = datetime.fromisoformat(line["received"])
+            self.assertIsNotNone(received.tzinfo)
+            self.assertTrue(before <= received <= after, line["received"])
+            # Compact and key-sorted, whatever whitespace the sender used.
+            self.assertEqual(raw, json.dumps(line, sort_keys=True,
+                                             separators=(",", ":")).encode())
+
+    def test_identity_goes_from_every_level_and_nothing_else_moves(self):
+        # The two list shapes the standard keeps attributes in: an
+        # `attributes` list, and the `values` of a `kvlistValue`, which
+        # an `arrayValue` may hold in turn (the fixture's own
+        # `managed_settings.sources` is the sibling `arrayValue`). The
+        # match is exact, case included: `User.email` stays.
+        body = {
+            "attributes": [attribute("user.id", "top"),
+                           attribute("kept.top", "1")],
+            "resourceLogs": [{
+                "resource": {"attributes": [attribute("organization.id", "r"),
+                                            attribute("service.name", "x")]},
+                "scopeLogs": [{
+                    "scope": {"attributes": [attribute("user.email", "s")]},
+                    "logRecords": [{
+                        "attributes": [
+                            attribute("user.account_uuid", "a"),
+                            attribute("event.name", "tool_result"),
+                            {"key": "deep", "value": {"kvlistValue": {
+                                "values": [attribute("user.account_id", "d"),
+                                           attribute("kept.deep", "2")]}}},
+                            {"key": "list", "value": {"arrayValue": {
+                                "values": [{"stringValue": "file"},
+                                           {"kvlistValue": {"values": [
+                                               attribute("organization.id", "listed"),
+                                               attribute("kept.listed", "3")]}}]}}},
+                            attribute("User.email", "kept, the case differs"),
+                            attribute("user", "no dot, so kept"),
+                            attribute("users.x", "kept"),
+                            attribute("organizations", "kept"),
+                            {"key": 7, "value": {}},
+                            "not an attribute at all",
+                        ],
+                        "body": {"stringValue": "a tool ran"},
+                        "timeUnixNano": "1791339677262000000",
+                    }]}]}]}
+        status, answer = self.send(json.dumps(body, indent=2).encode("utf-8"))
+        self.assertEqual(status, 200, answer)
+        [(raw, line)] = self.lines()
+        self.assertEqual(line["logs"], without_identity(body))
+        for gone in (b'"user.', b'"organization.'):
+            self.assertNotIn(gone, raw)
+        for kept in (b'"kept.deep"', b'"kept.listed"', b'"User.email"'):
+            self.assertIn(kept, raw)
+        record = log_records(line["logs"])[0]
+        self.assertEqual([a["key"] for a in record["attributes"]
+                          if isinstance(a, dict)],
+                         ["event.name", "deep", "list", "User.email", "user",
+                          "users.x", "organizations", 7])
+        self.assertIn("events: 6 identity attribute(s) dropped",
+                      self.logged(self.proc, 200))
+
+    def test_a_body_without_identity_is_kept_whole(self):
+        body = {"resourceLogs": [], "other": {"attributes": [
+            {"key": "a.b", "value": {"intValue": 1}}]},
+            "z": [1, "two", None, 3.5, True, {"attributes": "not a list"}]}
+        status, _ = self.send(json.dumps(body).encode("utf-8"))
+        self.assertEqual(status, 200)
+        [(_, line)] = self.lines()
+        self.assertEqual(line["logs"], body)
+        self.assertIn("events: 0 identity attribute(s) dropped",
+                      self.logged(self.proc, 200))
+
+    def test_each_request_is_one_line_in_the_file_of_its_arrival_day(self):
+        # The receiver's clock cannot be moved from here, so the day is
+        # read from the line: the file a line sits in is named by its own
+        # `received`, and that is today, UTC, on this machine.
+        days = {datetime.now(timezone.utc).strftime("%Y-%m-%d")}
+        for n in (1, 2, 3):
+            status, _ = self.send(json.dumps({"n": n}).encode("utf-8"))
+            self.assertEqual(status, 200)
+        days.add(datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        files = self.event_files()
+        self.assertEqual(self.stored(), sorted(files + ["token"]))
+        self.assertTrue(set(files) <= {f"events-{day}.jsonl" for day in days},
+                        files)
+        for name in files:
+            self.assertTrue(EVENTS_FILE.fullmatch(name), name)
+            for raw in (self.data / name).read_bytes().split(b"\n"):
+                if raw:
+                    day = json.loads(raw)["received"][:10]
+                    self.assertEqual(name, f"events-{day}.jsonl")
+        self.assertEqual([line["logs"] for _, line in self.lines()],
+                         [{"n": 1}, {"n": 2}, {"n": 3}])
+
+    def test_the_answer_is_an_empty_json_object_said_to_be_json(self):
+        request = urllib.request.Request(
+            self.door, data=b"{}", method="POST",
+            headers={"Content-Type": EVENTS})
+        with OPENER.open(request, timeout=30) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get("Content-Type"),
+                             "application/json")
+            self.assertEqual(json.loads(response.read()), {})
+
+    def test_a_body_that_is_not_one_json_object_is_400_and_nothing_is_written(self):
+        depth = unreadable_depth()
+        deep = b"[" * depth + b"]" * depth
+        for body in (b"[]", b'[{"a": 1}]', b"1", b'"text"', b"null", b"true",
+                     b"\xff\xfe{}", b"{", b"", deep):
+            with self.subTest(body=body[:12]):
+                status, answer = self.send(body)
+                self.assertEqual(status, 400, answer)
+                self.assertNotIn(b"Traceback", answer)
+        self.assertEqual(self.stored(), ["token"])
+        # Still answering, and the first door is unmoved by it.
+        status, _ = self.send(b"{}")
+        self.assertEqual(status, 200)
+        status, _ = post(self.proc.url, deep, "application/json")
+        self.assertEqual(status, 400)
+
+    def test_a_number_json_cannot_carry_is_400_at_either_door(self):
+        # Python's reader takes NaN, Infinity and a float past its range;
+        # JSON has none of them, and a line holding one is a line most
+        # line-oriented readers refuse. So the body is refused instead.
+        for body in (b'{"a": NaN}', b'{"a": Infinity}', b'{"a": -Infinity}',
+                     b'{"a": 1e400}', b'{"a": [{"attributes": [], "b": NaN}]}'):
+            with self.subTest(body=body):
+                status, _ = self.send(body)
+                self.assertEqual(status, 400)
+                status, _ = post(self.proc.url, body, "application/json")
+                self.assertEqual(status, 400)
+        self.assertEqual(self.stored(), ["token"])
+
+    def test_what_the_door_refuses_by_verb_path_type_and_encoding(self):
+        for verb in ("GET", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"):
+            with self.subTest(verb=verb):
+                status, headers, _ = request(verb, self.door)
+                self.assertEqual(status, 405)
+                self.assertEqual(headers.get("Allow"), "POST")
+        for path in (self.token + "/v1/metrics", self.token + "/v1/traces",
+                     self.token + "/v1/logs/", self.token + "/v1",
+                     self.token + "/V1/LOGS", self.token[:-1] + "/v1/logs",
+                     self.token.upper() + "/v1/logs", "v1/logs"):
+            with self.subTest(path=path):
+                status, _ = post(self.base + path, b"{}", EVENTS)
+                self.assertEqual(status, 404)
+                status, _, _ = request("GET", self.base + path)
+                self.assertEqual(status, 404)
+        for kind in ("text/plain", "application/x-ndjson",
+                     "application/x-protobuf"):
+            with self.subTest(kind=kind):
+                status, _ = self.send(b"{}", kind)
+                self.assertEqual(status, 415)
+        # A body must arrive as it is, at either door.
+        for encoding in ("gzip", "deflate", "br"):
+            with self.subTest(encoding=encoding):
+                status, _ = self.send(b"{}", headers={"Content-Encoding": encoding})
+                self.assertEqual(status, 415)
+                status, _ = post(self.proc.url, b"{}", "application/json",
+                                 {"Content-Encoding": encoding})
+                self.assertEqual(status, 415)
+        self.assertEqual(self.stored(), ["token"])
+        status, _ = self.send(b"{}", headers={"Content-Encoding": "identity"})
+        self.assertEqual(status, 200)
+
+    def test_no_length_is_411_and_past_the_cap_is_413_before_a_byte_is_read(self):
+        opening = (f"POST /{self.token}/v1/logs HTTP/1.0\r\nHost: receiver\r\n"
+                   f"Content-Type: {EVENTS}\r\n")
+        answered = raw_request(self.proc.url, (opening + "\r\n").encode())
+        self.assertTrue(answered.startswith(b"HTTP/1.0 411 "), answered)
+        answered = raw_request(
+            self.proc.url,
+            (opening + "Content-Length: 1000000000000\r\n\r\n").encode())
+        self.assertTrue(answered.startswith(b"HTTP/1.0 413 "), answered)
+        self.assertEqual(self.stored(), ["token"])
+
+
+class DepthTest(ReceiverFixture):
+    """At either door a body nested past what the reader takes is 400,
+    and so is one nested past what the writer takes (#474; the review
+    of #482): the kept line wraps what was posted one level deeper, so
+    the writer gives up one level before the reader does, and that one
+    depth was a dropped connection with a traceback on the receiver's
+    own output, which a holder of the URL could fill by a depth sweep.
+    The depth is found here, not assumed: it moves with the interpreter."""
+
+    def setUp(self):
+        super().setUp()
+        self.proc = self.start()
+        self.said = []
+        for stream in (self.proc.stdout, self.proc.stderr):
+            threading.Thread(target=self.drain, args=(stream,),
+                             daemon=True).start()
+
+    def drain(self, stream):
+        # Everything the receiver prints, so a sweep of a few hundred
+        # requests never fills a pipe nobody reads, and a traceback shows.
+        try:
+            for line in stream:
+                self.said.append(line)
+        except (ValueError, OSError):
+            pass  # the fixture closed the stream at cleanup
+
+    @staticmethod
+    def nested(depth):
+        return b'{"a":' + b"[" * depth + b"]" * depth + b"}"
+
+    def status_of(self, url, depth):
+        try:
+            return post(url, self.nested(depth), "application/json")[0]
+        except (urllib.error.URLError, http.client.HTTPException,
+                ConnectionError):
+            return "dropped"
+
+    def first_refused(self, url, seen):
+        """The shallowest depth the door refuses: a coarse step up, then
+        every depth of the last step. Every status goes into `seen`."""
+        coarse = None
+        for depth in range(100, 40001, 100):
+            seen[depth] = self.status_of(url, depth)
+            if seen[depth] == 400:
+                coarse = depth
+                break
+        self.assertIsNotNone(coarse, "no depth up to 40000 was refused")
+        for depth in range(coarse - 99, coarse):
+            seen[depth] = self.status_of(url, depth)
+            if seen[depth] == 400:
+                break
+        return min(depth for depth, status in seen.items() if status == 400)
+
+    def test_every_depth_is_answered_200_or_400_at_either_door(self):
+        for name, url in (("events", self.proc.url + "/v1/logs"),
+                          ("head", self.proc.url)):
+            with self.subTest(door=name):
+                seen = {}
+                first = self.first_refused(url, seen)
+                self.assertGreater(first, 100)
+                # The few depths below the first refusal land, the few
+                # past it are refused, and each the same way every time.
+                for depth in range(first - 6, first + 4):
+                    for _ in range(3):
+                        seen[depth] = self.status_of(url, depth)
+                        self.assertEqual(seen[depth],
+                                         200 if depth < first else 400, depth)
+                self.assertEqual(sorted(set(seen.values())), [200, 400])
+        said = "".join(self.said)
+        self.assertEqual(said.count("Traceback"), 0,
+                         "the receiver printed a traceback")
+        self.assertNotIn(self.proc.url.rsplit("/", 1)[1], said)
 
 
 class VerifyTest(ReceiverFixture):
@@ -636,6 +1034,38 @@ class CapTest(ReceiverFixture):
         self.assertEqual(
             {name: (self.data / name).read_bytes() for name in self.stored()},
             before)
+
+    def test_an_events_line_past_a_cap_is_507_and_nothing_is_touched(self):
+        # The second door's lines live under the same caps as the chain
+        # files (ADR-0041 ruling 2): the file cap on the day file, and
+        # the total cap counted over chain files and events files alike.
+        proc = self.start("--file-cap", "1", "--total-cap", "2")
+        door = proc.url + "/v1/logs"
+        body = json.dumps({"pad": "x" * (600 * 1024)}).encode()  # about 0.59 MiB
+        status, _ = post(door, body, "application/json")
+        self.assertEqual(status, 200)
+        self.logged(proc, 200)
+        kept = {name: (self.data / name).read_bytes() for name in self.stored()}
+
+        status, answer = post(door, body, "application/json")
+        self.assertEqual(status, 507, answer)
+        self.assertIn(b"file cap", answer)
+        self.assertIn("file cap", self.logged(proc, 507))
+        self.assertEqual(
+            {name: (self.data / name).read_bytes() for name in self.stored()},
+            kept)
+
+        for name in ("receipts-a.jsonl", "receipts-b.jsonl"):  # 1.85 MiB in all
+            status, _ = self.send(proc, filler(0, 600), name)
+            self.assertEqual(status, 200)
+        kept = {name: (self.data / name).read_bytes() for name in self.stored()}
+        small = json.dumps({"pad": "x" * (200 * 1024)}).encode()
+        status, answer = post(door, small, "application/json")
+        self.assertEqual(status, 507, answer)
+        self.assertIn(b"total cap", answer)
+        self.assertEqual(
+            {name: (self.data / name).read_bytes() for name in self.stored()},
+            kept)
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
                      "needs a folder this user may not look into")

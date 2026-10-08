@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1206,6 +1207,24 @@ def read_line_within(stream, bound=60):
     reader.start()
     reader.join(bound)
     return said[0] if said else ""
+
+
+def unreadable_depth(step=1000, ceiling=200000):
+    """A nesting depth this interpreter's `json.loads` refuses with
+    RecursionError, found rather than assumed: the depth it reads moves
+    with the version and the platform (six thousand levels read on 3.13
+    for Linux and macOS and not on 3.9 or on Windows, #474). A script a
+    test starts is the same interpreter, so what this process cannot
+    read, the script cannot either; but it sits a few frames shallower
+    than a test runner where the nesting counts against the frames (3.9
+    to 3.11), so a whole step past the first refused depth, not one
+    level, clears its boundary too."""
+    for depth in range(step, ceiling + 1, step):
+        try:
+            json.loads("[" * depth + "]" * depth)
+        except RecursionError:
+            return depth + step
+    raise AssertionError(f"json.loads read {ceiling} levels of nesting")
 
 
 def hold(test, path):
@@ -5113,3 +5132,403 @@ class ClosedFolderTest(unittest.TestCase):
 
         self.assertEqual(report["exit"], 0)
         self.assertIn("witness absent", report["completeness"]["note"])
+
+
+# --- The reading over a receiver's folder (ADR-0041 rulings 4 and 5) ---------
+# One scrubbed capture of a real session's events (Claude Code 2.1.287,
+# 2026-10-06, #479): seven received requests in the receiver's line
+# shape, 51 log records in sequence 0 to 50, two tool_result (one Bash
+# that ran, one that failed), three tool_decision (two accepts, one
+# reject). The hook wrote four receipts for those three calls (#476).
+FIXTURE_EVENTS = Path(__file__).resolve().parent / "fixtures" / \
+    "harness_events.jsonl"
+FIXTURE_SESSION = "3253bacd-3ba1-4907-a5dd-c7e1a5d9f403"
+FIXTURE_DAY = "2026-10-07"   # the day the fixture's requests arrived
+FIXTURE_RECEIPTS = ("Bash: git status", "Bash: false", "Bash: false",
+                    "Bash: rm -rf /tmp/x")
+
+
+def receiver_folder(base, events=True, day=FIXTURE_DAY, drop=()):
+    """A receiver's data directory as `receiver serve` leaves it: the
+    token, the heads file, and, unless `events` is off, the fixture's
+    requests laid down as the day's events file."""
+    data = Path(base) / "receiver"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "token").write_text("not-a-real-token\n", encoding="utf-8")
+    (data / "heads.jsonl").write_text(
+        '{"event":"session-end","head":"ab","n":4,"session":"x","ts":"t"}\n',
+        encoding="utf-8")
+    if events:
+        lay_events(data, day, drop)
+    return data
+
+
+def lay_events(data, day=FIXTURE_DAY, drop=()):
+    """The fixture's seven requests as `events-<day>.jsonl` in the
+    folder, minus the log records whose `event.sequence` is in `drop`:
+    a sequence cut out is the second record's gap."""
+    kept = []
+    for line in FIXTURE_EVENTS.read_text(encoding="utf-8").splitlines():
+        arrival = json.loads(line)
+        for resource in arrival["logs"]["resourceLogs"]:
+            for scope in resource["scopeLogs"]:
+                scope["logRecords"] = [
+                    record for record in scope["logRecords"]
+                    if not any(pair["key"] == "event.sequence"
+                               and pair["value"].get("intValue") in drop
+                               for pair in record["attributes"])]
+        kept.append(json.dumps(arrival, sort_keys=True,
+                               separators=(",", ":")))
+    path = data / f"events-{day}.jsonl"
+    path.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+    return path
+
+
+def chain_copy(data, session, actions=FIXTURE_RECEIPTS, epoch=None,
+               notes=(), settled=True):
+    """A chain copy in the receiver's folder: written by the recorder
+    into a store of its own, through `init` and `log`, then copied flat
+    into the folder as the receiver keeps it (a copy is a chain, the
+    same bytes). `epoch` pins its timestamps (SOURCE_DATE_EPOCH);
+    `notes` are bookkeeping entries in the recorder's voice, laid down
+    after the receipts; `settled` dates the copy an hour back, so the
+    settle clock reads it as arrived long ago."""
+    store = Path(data).parent / "store"
+    store.mkdir(exist_ok=True)
+    log = store / f"receipts-{session}.jsonl"
+    if log.exists():
+        log.unlink()
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    if epoch is not None:
+        env["SOURCE_DATE_EPOCH"] = str(epoch)
+    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log",
+                    str(log)], capture_output=True, check=True, timeout=60,
+                   env=env)
+    for actor, action in ([("claude-code", a) for a in actions]
+                          + [("receipts", n) for n in notes]):
+        subprocess.run([sys.executable, str(LOXODONTA), "log", "--log",
+                        str(log), "--actor", actor, "--action", action],
+                       capture_output=True, check=True, timeout=60, env=env)
+    copy = Path(data) / log.name
+    shutil.copyfile(log, copy)
+    if settled:
+        back = time.time() - 3600
+        os.utime(copy, (back, back))
+    return copy
+
+
+class ReceiverReadingTest(unittest.TestCase):
+    """`scan --receiver DIR` (ADR-0041 rulings 4 and 5): a receiver's
+    data directory read as the universe, its chain copies as what was
+    paid and the harness's events there as what was owed, each session
+    judged once settled, with the memory in the folder's own subfolder
+    and the agent's machine read for nothing."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name).resolve()
+        self.home = self.base / "home"
+        self.env = {**isolated_env(self.home), "PYTHONIOENCODING": "utf-8"}
+        self.data = receiver_folder(self.base)
+
+    def scan(self, *extra, settle="0", data=None):
+        """One `scan --receiver`, settled at once unless `settle` says
+        otherwise (None leaves the default window in force)."""
+        env = dict(self.env)
+        if settle is not None:
+            env["SUPERVISOR_SETTLE_SECONDS"] = settle
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "scan", "--receiver",
+             str(data or self.data), "--json", *extra],
+            capture_output=True, encoding="utf-8", timeout=180, env=env)
+        self.assertNotIn("Traceback", result.stderr, result.stderr)
+        return result
+
+    def report(self, *extra, expect=0, **how):
+        result = self.scan(*extra, **how)
+        self.assertEqual(result.returncode, expect,
+                         result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def rows(self, report):
+        return {row["session"]: row
+                for row in report["completeness"]["sessions"]}
+
+    def test_the_untouched_fixture_session_reads_surplus_with_its_counts(self):
+        # Four receipts for three calls (#476) against two tool_result
+        # events: a surplus, expected while #476 stands, and no alarm.
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report()
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "ENDED-SURPLUS")
+        self.assertEqual((row["tools"], row["receipts"], row["deficit"]),
+                         (2, 4, 0))
+        self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 4}})
+        self.assertEqual(row["repo"], "receiver")
+        watch = report["completeness"]
+        self.assertEqual(watch["witness"], self.data.as_posix())
+        self.assertEqual(watch["reach"], "out of reach")
+        # The coverage it assumes, said once.
+        self.assertEqual(json.dumps(report).count(
+            "read as owing a receipt"), 1)
+        self.assertIn("every tool", watch["coverage"]["words"])
+        # One chain in the census: the token and the heads file are not
+        # chains, and the memory's own folder holds none.
+        chains = chains_by_session(report)
+        self.assertEqual(list(chains), [("receiver", FIXTURE_SESSION)])
+        self.assertEqual(chains[("receiver", FIXTURE_SESSION)][0]["verdict"],
+                         "VALID")
+
+    def test_a_copy_with_the_two_extra_receipts_taken_out_reads_clean(self):
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:2])
+
+        row = self.rows(self.report())[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "ENDED-CLEAN")
+        self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 2}})
+
+    def test_a_receipt_short_in_the_copy_is_a_deficit_naming_its_tool(self):
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+
+        report = self.report()
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["deficit"], 1)
+        self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 1}})
+        # An ended deficit is evidence here as on the agent's machine:
+        # nothing at the receiver is live, so nothing raises the exit.
+        self.assertEqual(report["exit"], 0)
+
+    def test_events_with_no_copy_at_all_are_a_deficit_tool_by_tool(self):
+        # The chain never reached the receiver: every reported call is
+        # unpaid, by name.
+        row = self.rows(self.report())[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual((row["tools"], row["receipts"], row["deficit"]),
+                         (2, 0, 2))
+        self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 0}})
+
+    def test_receipts_with_no_events_are_second_record_absent_never_clean(self):
+        # The fixture's events name one session; this copy is another's,
+        # and carries the hook's note that its second record was cut.
+        chain_copy(self.data, "cut-session-1111", notes=(
+            "second-record-cut: reason=telemetry-off",))
+        deficit = self.report()  # exit as a deficit: the same number
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report()
+
+        row = self.rows(report)["cut-session-1111"]
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertEqual((row["tools"], row["receipts"]), (0, 4))
+        self.assertNotIn("deficit", row)
+        self.assertIn("never", row["words"])
+        self.assertEqual(row["second_record_cut"],
+                         "second-record-cut: reason=telemetry-off")
+        self.assertEqual(report["exit"], deficit["exit"])
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_a_sequence_cut_out_of_the_events_is_a_gap_naming_the_numbers(self):
+        lay_events(self.data, drop=(29, 30))
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        row = self.rows(self.report())[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "SECOND-RECORD-GAP")
+        self.assertEqual(row["gap"], {"count": 2, "numbers": [29, 30]})
+        self.assertIn("29, 30", json.dumps(row["gap"]["numbers"]))
+
+    def test_a_deficit_wins_over_a_gap_and_the_gap_stays_on_the_row(self):
+        lay_events(self.data, drop=(29,))
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+
+        row = self.rows(self.report())[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["gap"], {"count": 1, "numbers": [29]})
+
+    def test_a_session_inside_the_settle_window_is_pending_until_the_knob(self):
+        # The copy arrived just now: inside the seven-hour window it is
+        # listed with its counts and judged not at all; the knob settles
+        # it on the next look.
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1],
+                   settled=False)
+
+        pending = self.report(settle=None)
+        judged = self.report(settle="0")
+
+        row = self.rows(pending)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "PENDING")
+        self.assertEqual((row["tools"], row["receipts"]), (2, 1))
+        self.assertNotIn("deficit", row)
+        self.assertEqual(pending["exit"], 0)
+        self.assertEqual(self.rows(judged)[FIXTURE_SESSION]["state"],
+                         "ENDED-DEFICIT")
+
+    def test_a_copy_predating_the_oldest_events_file_is_counted_not_listed(self):
+        # A chain from before the second record began (its entries dated
+        # 2026-10-01, the oldest events file named for 2026-10-07): the
+        # keeper's first send of every chain in the store, not a session
+        # whose events were cut.
+        old = int(datetime.datetime(2026, 10, 1,
+                                    tzinfo=datetime.timezone.utc).timestamp())
+        chain_copy(self.data, "old-session-0000", epoch=old)
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report()
+        listed = self.report("--before-memory")
+
+        self.assertNotIn("old-session-0000", self.rows(report))
+        block = report["completeness"]["before_memory"]
+        self.assertEqual((block["count"], block["since"]), (1, FIXTURE_DAY))
+        self.assertNotIn("sessions", block)
+        self.assertEqual([row["session"] for row in
+                          listed["completeness"]["before_memory"]["sessions"]],
+                         ["old-session-0000"])
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_last_heard_is_in_the_report_per_address_and_per_session(self):
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report()
+
+        heard = report["completeness"]["last_heard"]
+        self.assertEqual(heard["addresses"], [
+            {"from": "127.0.0.1",
+             "received": "2026-10-07T02:21:37.488585+00:00"}])
+        self.assertIn("no heartbeat", heard["words"])
+        row = self.rows(report)[FIXTURE_SESSION]
+        # The copy arrived an hour ago, after every event: the session's
+        # newest arrival is the copy's own time.
+        self.assertRegex(row["last_heard"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertGreater(row["last_heard"], "2026-10-07T02:21:37Z")
+
+    def test_a_line_the_reader_cannot_parse_is_skipped_and_counted(self):
+        chain_copy(self.data, FIXTURE_SESSION)
+        with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
+                  encoding="utf-8") as events:
+            events.write("not json at all\n[1, 2, 3]\n")
+
+        report = self.report()
+
+        self.assertEqual(report["completeness"]["second_record"]["unparsed"],
+                         2)
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_an_object_not_in_the_line_shape_is_counted_too(self):
+        chain_copy(self.data, FIXTURE_SESSION)
+        with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
+                  encoding="utf-8") as events:
+            events.write('{"received":"2026-10-07T02:22:00Z","from":"x",'
+                         '"logs":null}\n{"logs":[1]}\n{}\n')
+
+        report = self.report()
+
+        self.assertEqual(report["completeness"]["second_record"]["unparsed"],
+                         3)
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_an_int_value_int_cannot_read_ends_nothing(self):
+        # str.isdigit() passes a superscript two and a string past the
+        # interpreter's 4300-digit limit; int() refuses both. Whoever
+        # holds the URL can post either. An interpreter without the
+        # limit reads the long one as a number, a gap: so the state is
+        # only asked to be judged.
+        chain_copy(self.data, FIXTURE_SESSION)
+        with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
+                  encoding="utf-8") as events:
+            for value in ("²", "9" * 5000):
+                record = {"attributes": [
+                    {"key": "session.id",
+                     "value": {"stringValue": FIXTURE_SESSION}},
+                    {"key": "event.sequence",
+                     "value": {"intValue": value}}]}
+                events.write(json.dumps({
+                    "received": "2026-10-07T02:22:00Z", "from": "x",
+                    "logs": {"resourceLogs": [{"scopeLogs": [
+                        {"logRecords": [record]}]}]}}) + "\n")
+
+        report = self.report()
+
+        self.assertIn(self.rows(report)[FIXTURE_SESSION]["state"],
+                      ("ENDED-SURPLUS", "SECOND-RECORD-GAP"))
+
+    def test_an_event_received_just_now_keeps_its_session_pending(self):
+        # The copy arrived an hour ago; the events' own `received`, the
+        # receiver's clock, says the session is still sending.
+        chain_copy(self.data, FIXTURE_SESSION)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        path = self.data / f"events-{FIXTURE_DAY}.jsonl"
+        lines = [dict(json.loads(line), received=now)
+                 for line in path.read_text(encoding="utf-8").splitlines()]
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines),
+                        encoding="utf-8")
+
+        pending = self.report(settle=None)
+        judged = self.report(settle="0")
+
+        self.assertEqual(self.rows(pending)[FIXTURE_SESSION]["state"],
+                         "PENDING")
+        self.assertEqual(self.rows(judged)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_the_memory_lives_in_the_folder_and_the_store_is_untouched(self):
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report()
+
+        shelf = self.data / "supervisor"
+        self.assertEqual(report["baseline"]["file"],
+                         (shelf / "baseline.json").as_posix())
+        self.assertEqual(sorted(os.listdir(shelf)),
+                         ["baseline.json", "daybook.json"])
+        remembered = json.loads((shelf / "baseline.json")
+                                .read_text(encoding="utf-8"))
+        self.assertEqual(list(remembered["chains"]),
+                         [f"receipts-{FIXTURE_SESSION}.jsonl"])
+        self.assertFalse(os.path.exists(self.home / ".loxodonta"))
+
+    def test_a_collision_in_a_copy_reads_broken_and_is_remembered(self):
+        # Two histories at one name, as the receiver's append rule keeps
+        # them (docs/RECEIVER.md section 6): the copy exists to show it.
+        first = chain_copy(self.data, FIXTURE_SESSION, epoch=1700000000)
+        lines = first.read_bytes()
+        second = chain_copy(self.data, FIXTURE_SESSION, epoch=1700000001)
+        second.write_bytes(lines + second.read_bytes())
+
+        report = self.report(expect=1)
+
+        (chain,) = chains_by_session(report)[("receiver", FIXTURE_SESSION)]
+        self.assertEqual(chain["verdict"], "BROKEN")
+        remembered = json.loads((self.data / "supervisor" / "baseline.json")
+                                .read_text(encoding="utf-8"))
+        self.assertEqual(
+            remembered["chains"][f"receipts-{FIXTURE_SESSION}.jsonl"]["verdict"],
+            "BROKEN")
+
+    def test_receiver_with_root_is_a_usage_error_and_a_missing_one_66(self):
+        with_root = self.scan("--root", str(self.base))
+        self.assertEqual(with_root.returncode, 64, with_root.stderr)
+        self.assertIn("--receiver reads a receiver's data directory",
+                      with_root.stderr)
+
+        missing = self.scan(data=self.base / "nowhere")
+        self.assertEqual(missing.returncode, 66, missing.stderr)
+        self.assertIn("not a folder", missing.stderr)
+        self.assertFalse(os.path.exists(self.base / "nowhere"))
+
+    def test_another_verb_does_not_take_the_flag(self):
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "calibrate", "--receiver",
+             str(self.data), "--since", "2026-01-01", "--matchers", "*"],
+            capture_output=True, encoding="utf-8", timeout=60, env=self.env)
+        self.assertEqual(result.returncode, 64, result.stderr)

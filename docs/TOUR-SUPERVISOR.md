@@ -132,6 +132,16 @@ the wedged lock, the silent fork — and shortens the window between loss
 and discovery. A writer shaping both the transcript and the chain is
 beyond this alarm, and the code says so out loud.
 
+Since ADR-0041 the same witness also reads a second record out of the
+writer's reach. `read_events` is the transcript reader's twin in
+shape: from the harness's own `tool_result` events, as a receiver kept
+them, it returns per session the dict `read_witness` returns, so
+`reconcile` and `classify` judge both records by one rule, and
+`watch_receiver` runs that reading over a receiver's folder (`scan
+--receiver`, docs/RECEIVER.md section 7) with three words of its own:
+PENDING inside the settle window, SECOND-RECORD-ABSENT for receipts
+with no events, SECOND-RECORD-GAP for a counter with holes.
+
 Two field findings calibrate the count (2026-08-29): the witness counts
 only tools the *wired matchers* cover (`hook_matchers` reads the
 harness settings — an all-tools witness over an `Edit|Write|Bash` hook
@@ -218,7 +228,9 @@ fewer than the calls it made) / SURPLUS (an investigate flag, never a
 verdict) / ENDED-CLEAN / ENDED-DEFICIT (missing forever, unless a
 failed call fired nothing; kept as evidence, not a siren) /
 ENDED-SURPLUS (a surplus does not become clean by the session ending)
-/ UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY.
+/ UNWITNESSED / UNWATCHED / ELSEWHERE / BEFORE-MEMORY, and over a
+receiver's folder PENDING / SECOND-RECORD-ABSENT / SECOND-RECORD-GAP
+(ADR-0041).
 Deficit is sticky — lost receipts never arrive later — and since
 pairing went tool by tool it also wins: a session short in one tool and
 over in another reads as the deficit, never the surplus (ADR-0034).

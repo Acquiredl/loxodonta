@@ -4,7 +4,7 @@
 
 ## 1. What the receiver is
 
-The repo's third single file. The recorder sends a chain's entries off the machine that wrote them (GLOSSARY *Published chain*) and its head (GLOSSARY *Published head*); the receiver is the machine they go to, run by the operator somewhere the writer cannot reach: an old laptop, a small VPS, a second box on the same shelf. It mints one URL when it starts, appends whatever arrives at that URL to its own disk, and refuses everything else. There is no route that returns, lists or deletes anything. That is what makes the URL pass the head-record test (GLOSSARY *Head record*, restated in section 8): a credential that can add and cannot take away.
+The repo's third single file. The recorder sends a chain's entries off the machine that wrote them (GLOSSARY *Published chain*) and its head (GLOSSARY *Published head*); the receiver is the machine they go to, run by the operator somewhere the writer cannot reach: an old laptop, a small VPS, a second box on the same shelf. It mints one URL when it starts, appends whatever arrives at that URL to its own disk, and refuses everything else. There is no route that returns, lists or deletes anything. That is what makes the URL pass the head-record test (GLOSSARY *Head record*, restated in section 9): a credential that can add and cannot take away.
 
 What it holds is the operator's copy of what the writer said, at an address of the operator's choosing. The entries survive a wipe of the writer's machine as of the last send, and a regenerated chain lands beside the entries it replaced rather than over them, where the recorder's own `verify` shows the collision (section 6). The receiver is bound by the other two files' constraints: stdlib only, readable in one sitting, Python 3.9 and up, tested on Windows, macOS and Linux (ADR-0005's *single file per tool*).
 
@@ -50,6 +50,7 @@ What it keeps, in the data directory:
 - `token`: the secret half of the URL, readable by this user alone where the filesystem has the notion.
 - `heads.jsonl`: one line per published head, in the order received.
 - `receipts-<session>.jsonl`, and `receipts-<session>-002.jsonl` for a sibling chain (GLOSSARY *sibling chain*): one file per chain, named by the sender under the rule in section 4, holding chain bytes from genesis on.
+- `events-<YYYY-MM-DD>.jsonl`: one line per request of the harness's events (section 4, *The second door*), one file per UTC day of arrival, with every identity attribute removed.
 
 ## 3. The URL is the credential
 
@@ -63,7 +64,7 @@ The URL sits on the writer's machine, in the wired hook command, where the agent
 
 The sender side of this contract is the recorder. Any other sender, and any other receiver, speaks it exactly.
 
-**One door.** `POST` at `/<token>`. Every other verb at that path is `405` with `Allow: POST`; every other path is `404`, whatever the verb. There is no verb and no path that returns, lists or deletes what the receiver holds.
+**Two doors.** `POST` at `/<token>` takes a published head or a batch of a published chain; `POST` at `/<token>/v1/logs` takes the harness's events (*The second door*, below). Every other verb at either path is `405` with `Allow: POST`; every other path is `404`, whatever the verb. There is no verb and no path that returns, lists or deletes what the receiver holds.
 
 **Two content types, two destinations.**
 
@@ -79,7 +80,7 @@ The sender side of this contract is the recorder. Any other sender, and any othe
 | `X-Loxodonta-Range` | the `n` of the batch's first and last entry, `first-last` | no |
 | `X-Loxodonta-Head` | the chain head after the batch's last entry | no |
 
-The receiver reads the chain header and nothing else; the other three ride along for an operator reading traffic at a proxy, and for any receiver built to this contract that wants them. This one stores chain bytes and nothing besides.
+The receiver reads the chain header and nothing else; the other three ride along for an operator reading traffic at a proxy, and for any receiver built to this contract that wants them. This one stores the chain bytes of a batch and nothing besides.
 
 **The chain header must be a receipt file name.** `receipts-`, then a session id of letters, digits, hyphens and underscores (the sibling suffix is made of the same), then `.jsonl`, at most 200 characters between the two. Anything else is refused with `400` and nothing is written: a separator (`/` or `\`), a parent reference (`..`), a dot inside the id, another extension, `.JSONL`, an empty header, a missing one. Nothing in a header ever becomes a path.
 
@@ -95,20 +96,22 @@ The receiver reads the chain header and nothing else; the other three ride along
 
 **The answer.** `200` with a small JSON body, `{"appended": 3, "dropped": 0}` for a chain batch and `{"appended": 1}` for a head, sent only after the bytes are on disk, flushed and fsynced. Any `2xx` means on disk; the recorder advances its memo on a `2xx` and on nothing else.
 
+**The second door.** `POST` at `/<token>/v1/logs` with `Content-Type: application/json` is the harness's events (GLOSSARY *Harness events*; ADR-0041 rulings 2 and 3): `/v1/logs` is the path an OpenTelemetry exporter appends to the base address it is given, so the receiver's URL is the whole of what the sending machine holds. The body is one JSON object, or `400`; the receiver reads nothing else of it, and `Content-Length`, the body cap, the deadline and the idle timeout are as at the first door. Before the line is kept, every attribute whose key begins `user.` or `organization.`, matched exactly and case included, is removed from every `attributes` list and from the `values` of every `kvlistValue` at every level of the object, whoever the sender is, and the rest is kept whole. Each request becomes one line in `events-<YYYY-MM-DD>.jsonl`, named by the UTC day of arrival: a JSON object, compact and key-sorted, holding `received` (the arrival time, UTC, the receiver's clock), `from` (the client address) and `logs` (the posted object after the identity rule). The append lock, the fsync before the answer and the caps are the chain files'. The answer is `200` with the body `{}`, once the line is on disk. A body is taken as it is, at either door: a `Content-Encoding` other than `identity` is `415`.
+
 | Status | When |
 |---|---|
-| `200` | appended (or every line was an exact duplicate: `appended` is `0`) |
-| `400` | the chain header is not a receipt file name or is missing; a line is not an entry; the body ended early; `Content-Length` is not a length |
-| `404` | not the token's path |
-| `405` | a verb other than `POST` at the token's path (`Allow: POST`) |
+| `200` | appended (or every line was an exact duplicate: `appended` is `0`); at the second door, the line is on disk |
+| `400` | the chain header is not a receipt file name or is missing; a line is not an entry; the body ended early; `Content-Length` is not a length; at the second door, the body is not one JSON object; at either door, a body nested past what the reader takes, or a number JSON cannot carry (`NaN`, `Infinity`) |
+| `404` | not the token's path, nor its events path |
+| `405` | a verb other than `POST` at either door (`Allow: POST`) |
 | `411` | no `Content-Length` |
 | `413` | `Content-Length` past the cap |
-| `415` | a content type that is neither of the two |
+| `415` | a content type that is neither of the two, or at the second door not `application/json`; a `Content-Encoding` other than `identity` |
 | `500` | the disk refused the write; nothing of the batch is acknowledged, and the sender's memo does not advance |
 | `501` | a verb the stdlib server does not know at all |
 | `507` | the lines would take a file past `--file-cap` or the data directory past `--total-cap`; nothing is written |
 
-A refusal carries one line of plain text saying why. The receiver's own log, on its stdout, is one line per request with the time, the client address, the verb and the status; the request path is on no line, because the path is the credential.
+A refusal carries one line of plain text saying why. The receiver's own log, on its stdout, is one line per request with the time, the client address, the verb and the status; the request path is on no line, because the path is the credential. For events that landed, the line says how many identity attributes were dropped.
 
 **The sender's side.** The recorder speaks this contract from `publish --chain --log LOG URL` and from a wired session end (`install-hook --profile full --remote URL`, or `--profile custom --publish-chain URL` for the chain alone, docs/HOOK.md); `supervisor scan|serve --publish-every AGE --publish-chain URL` sends by running that same command, so there is one sender and not three.
 
@@ -154,19 +157,42 @@ A sibling chain (`receipts-<session>-002.jsonl`) verifies on its own, as sibling
 
 The walk judges the receiver's file the way it judges any chain, so what it says about the writer holds here too: the copy is of what the writer said. A harness that lied at write time is copied faithfully (ADR-0002). Every field but the hashes is testimony (GLOSSARY *Testimony*).
 
-## 7. What it refuses
+## 7. Reading the folder with the supervisor
 
-- Any verb but `POST` at the token's path: `405`.
-- Any path but the token's: `404`, so a leaked or guessed path learns nothing, and the retired path after `--new-token` learns nothing either.
-- Any content type but the two: `415`.
+The reading that counts runs here, on the box (ADR-0041 ruling 4). `supervisor scan --receiver DIR`, `serve --receiver DIR` and `acknowledge --receiver DIR` read the data directory as the universe: the chain copies directly in it are the chains, judged by the same walk as a chain in the store and remembered by the same baseline, so a collision there reads `BROKEN`, which is what the copy exists to show; `token` and `heads.jsonl` are not chains. The memory, `baseline.json` and `daybook.json` (and the dashboard's `views.json`), lives in a `supervisor` subfolder of the directory, which the caps do not count and the receiver never writes. `--receiver` with `--root` is a usage error, 64; a `DIR` that is not a folder is 66. No keeper runs over the folder: nothing is anchored, sent or appended from the far end. The on-machine supervisor, its reading, its states and its memory change nothing.
+
+```
+python supervisor.py scan --receiver ~/.loxodonta/receiver
+python supervisor.py serve --receiver ~/.loxodonta/receiver
+```
+
+The events files are the second record (GLOSSARY *Second record*; section 4, *The second door*). The supervisor's events reader, the twin of its transcript reader in shape, reads every `events-*.jsonl` and takes a log record as a tool call when its `event.name` is `tool_result`: the tool is `tool_name`, the time `event.timestamp`, the session `session.id`, the place in the session's counter `event.sequence`. Every `tool_result` owes a receipt: the receiver has no coverage marker, and the vantage setup wires every tool; the report says so once. A `tool_decision` owes nothing, since a refused call has no result after it. A line the reader cannot parse is skipped and counted, never fatal. Receipts are counted by tool from the chain copy as the store census counts them, the recorder's own bookkeeping entries excluded, and the two are reconciled tool by tool (ADR-0034) by the same code that reconciles the transcript on the agent's machine.
+
+A session is judged once it has settled: nothing of it has arrived for the settle window, no event by `received` and no chain growth by the chain file's own modification time. Receipts reach the receiver at session end, and a killed session's chain only when the keeper on the agent's machine sends it on its cadence, so the window is `SUPERVISOR_SETTLE_SECONDS`, 7 hours by default (the keeper's six plus one; 1 hour is tight, 24 hours is generous). Until then the session is listed as `PENDING` with its counts and never alarmed. Settled, it reads as one of:
+
+- `ENDED-DEFICIT`: events arrived and receipts fell short, tool by tool.
+- `SECOND-RECORD-ABSENT`: receipts arrived and no events did. Named, never clean, and its exit is the deficit's. A run launched with the telemetry cut reads this way, and the chain's own `second-record-cut:` note (docs/HOOK.md) is quoted on the row when the copy carries one.
+- `SECOND-RECORD-GAP`: integers are missing between the session's lowest and highest `event.sequence`, and the row names them. A deficit beside a gap reads as the deficit, with the gap still named.
+- `ENDED-CLEAN` or `ENDED-SURPLUS` otherwise. A surplus is expected while #476 stands (the hook on 2.1.287 writes two receipts for a failed call and one for a refused call, which the events count as one and none) and is no alarm.
+
+None of these is live, so none raises the exit: an ended deficit is evidence here as it is on the agent's machine. A session whose chain copy's newest entry predates the day of the oldest events file the receiver holds is from before the second record's memory: counted in one block and not listed, as `BEFORE-MEMORY` sessions are (ADR-0029); `scan --before-memory` lists them.
+
+Last heard: the report carries, per sending address (`from`), the newest `received`, and per session its newest arrival; the dashboard shows the per-address table. A machine that sends nothing at all is not seen by the receiver, and that table is where its silence shows. No heartbeat (ADR-0041 ruling 5).
+
+## 8. What it refuses
+
+- Any verb but `POST` at the token's path or its events path: `405`.
+- Any path but the token's and its events path, `/v1/metrics` under the token included: `404`, so a leaked or guessed path learns nothing, and the retired path after `--new-token` learns nothing either.
+- Any content type but the two at the token's path, or but `application/json` at the events path, and any `Content-Encoding` but `identity`: `415`.
 - A chain header that is not a receipt file name: `400`, nothing written, nothing from the header touching the disk.
 - A body with no declared length, or declared past the cap: `411`, `413`, before a byte is read.
 - A batch with a line that is not shaped like an entry: `400`, nothing written.
+- An events body that is not one JSON object (a list, a scalar, bytes that are not UTF-8), and at either door a body nested past what the reader takes: `400`, nothing written.
 - A request that has not arrived whole, headers and body, sixty seconds after its connection opened, or a sender that goes quiet for thirty seconds, mid-body or before a TLS handshake it never starts: dropped silently, with no line on the receiver's log, so a stalling stranger cannot fill it. A slow sender holds only its own connection while it lasts; every other sender is served beside it.
 - Lines that would take a file past its cap, or the data directory past the total cap: `507`, nothing written, nothing already kept touched.
 - Every request for what it holds: there is no such request. The files are read on the box, by the operator, with the recorder.
 
-## 8. The head-record test, restated
+## 9. The head-record test, restated
 
 A remote is a head record when it is off the machine and the credentials present on the machine cannot delete or overwrite what they wrote there (GLOSSARY *Head record*, ADR-0025). Same login is not the test; deletability is. The receiver's URL passes: it is the only credential the writer's machine holds for the receiver, it can add, and it can do nothing else.
 

@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_recall import (HOSTILE_ACTION, HOSTILE_ACTOR, HOSTILE_SHOWN,
                          forge_chain, recall_home, run_py, steering)
-from test_supervisor import isolated_env
+from test_supervisor import isolated_env, unreadable_depth
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO_ROOT / "supervisor.py"
@@ -234,6 +234,32 @@ class HandshakeTest(McpBase):
         # Nothing but MCP messages ever reached stdout.
         for line in out.splitlines():
             json.loads(line)
+
+    def test_a_deeply_nested_line_is_a_parse_error_not_a_crash(self):
+        # RED-TEAM (area C, C2/C6): the agent speaking MCP is the adversary
+        # (ADR-0002), and a deeply nested but syntactically valid JSON line
+        # — reachable through tool-call arguments — makes json.loads raise
+        # RecursionError, which cmd_mcp does not catch (it catches
+        # ValueError/UnicodeDecodeError only). So the whole
+        # recall server crashes with a traceback and exits non-zero,
+        # denying recall, where a malformed line must get -32700 Parse
+        # error and the server must stay up for the next request, exactly
+        # as "this is not json" does above. Same omission as #463
+        # (settings/coverage) and the serve views reader, in a third
+        # reader: catch RecursionError beside ValueError.
+        # The depth is found, not assumed: six thousand levels read on
+        # 3.13 for Linux and macOS, where the line is a list, not a
+        # request, and -32600 is the right answer (#474).
+        c = self.client()
+        c.initialize()
+        depth = unreadable_depth()
+        bad = c.raw("[" * depth + "]" * depth)
+        self.assertEqual(bad["error"]["code"], -32700)
+        self.assertIsNone(bad["id"])
+        # The server is still answering after the bad line.
+        self.assertEqual(c.request("ping")["result"], {})
+        code, out, err = c.close()
+        self.assertEqual(code, 0, err)
 
 
 class ToolListTest(McpBase):

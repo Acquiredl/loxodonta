@@ -8,3 +8,7 @@ docs/demo/*.jsonl -text
 # would hash differently, or no longer be what its row says it is. `**`,
 # since a package vector is a folder and its manifest is sealed as bytes.
 tests/vectors/** -text
+
+# The harness-events capture is bytes a sender posts and a reader lays
+# down as a receiver file: its line endings stay as captured.
+tests/fixtures/harness_events.jsonl -text

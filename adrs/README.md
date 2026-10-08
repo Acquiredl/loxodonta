@@ -43,4 +43,5 @@ Each ADR records a decision that is hard to reverse and why it was made; filenam
 | 0037 | [Exit 1 means BROKEN and nothing else](0037-exit-1-means-broken-and-nothing-else.md) | accepted |
 | 0038 | [Every sidecar row names its kind](0038-every-sidecar-row-names-its-kind.md) | accepted |
 | 0039 | [The baseline keeps what it remembered until the chain holds it again or the operator accepts the change](0039-the-baseline-keeps-what-it-remembered-until-acknowledged.md) | proposed |
-| 0040 | [A managed install wires the hook where only an administrator writes](0040-the-hook-wired-where-only-an-administrator-writes.md) | proposed |
+| 0040 | [A managed install wires the hook where only an administrator writes](0040-the-hook-wired-where-only-an-administrator-writes.md) | accepted |
+| 0041 | [The harness's events are a second record out of reach, judged where they land](0041-the-harness-events-are-a-second-record-out-of-reach.md) | proposed |

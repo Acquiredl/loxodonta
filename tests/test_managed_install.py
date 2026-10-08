@@ -52,6 +52,9 @@ class ManagedBase(unittest.TestCase):
         self.operator_file = self.home / ".claude" / "settings.json"
         self.managed_file = (self.managed / "managed-settings.d"
                              / "loxodonta.json")
+        # The telemetry pin, beside the hooks file (ADR-0041 ruling 7).
+        self.pin_file = (self.managed / "managed-settings.d"
+                         / "loxodonta-telemetry.json")
 
     def run_tool(self, *args, env=None):
         return subprocess.run(
@@ -332,12 +335,14 @@ class ManagedInstallTest(ManagedBase):
                 self.assertNotIn("LOXODONTA_MANAGED_DIR", done.stderr)
 
     def test_the_help_says_whose_word_the_claim_is(self):
-        # ADR-0040 lists it as documented, not measured.
+        # The harness documents it and ADR-0040 measured it: the help
+        # names both, and never states the claim with no source.
         done = self.run_tool("install-hook", "--help")
 
         said = " ".join(done.stdout.split())
-        self.assertIn("by the harness's documentation", said)
-        self.assertNotIn("which a run cannot switch off", said)
+        self.assertIn("documented by the harness", said)
+        self.assertIn("measured in ADR-0040", said)
+        self.assertNotIn("not yet measured", said)
 
     def test_a_refused_write_says_what_stands_in_the_way(self):
         # An administrator's shell mends a missing right and nothing
@@ -813,6 +818,432 @@ class SupervisorReadsBothHomesTest(ManagedBase):
 
         self.assertFalse(report["published"]["wired"])
         self.assertEqual(report["recorder"]["state"], "unwired")
+
+
+# The pin as the installer writes it for REMOTE: the four switches and
+# nothing else (ADR-0041 ruling 7).
+PIN_ENV = {"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+           "OTEL_LOGS_EXPORTER": "otlp",
+           "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+           "OTEL_EXPORTER_OTLP_ENDPOINT": REMOTE}
+# What a hook run reads for the harness's telemetry: scrubbed from the
+# environment a test hands it, so the shell this runs in says nothing.
+TELEMETRY_VARIABLES = ("CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_LOGS_EXPORTER",
+                       "OTEL_EXPORTER_OTLP_PROTOCOL",
+                       "OTEL_EXPORTER_OTLP_ENDPOINT",
+                       "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+
+
+class TelemetryPinTest(ManagedBase):
+    """ADR-0041 ruling 7: at `full`, a managed install also pins the
+    harness's events to the receiver, in a second managed file of the
+    recorder's own beside the hooks file, which keeps holding hooks
+    alone. Written, removed and refused as the hooks file is."""
+
+    def full(self, *args, env=None):
+        return self.install("--managed", "--profile", "full", "--remote",
+                            REMOTE, *args, env=env)
+
+    def plant(self, path, content):
+        """A file in the managed folder: `content` as given when it is
+        text, else as the installer writes JSON (two spaces, a final
+        newline), so a pin put back as it stood is byte for byte."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = (content if isinstance(content, str)
+                else json.dumps(content, indent=2) + "\n")
+        path.write_bytes(text.encode("utf-8"))
+
+    def test_full_writes_the_pin_with_the_four_keys_and_nothing_else(self):
+        done = self.full()
+
+        self.assertEqual(self.read(self.pin_file), {"env": PIN_ENV})
+        self.assertEqual(list(self.read(self.managed_file)), ["hooks"],
+                         "the hooks file keeps holding hooks only")
+        self.assertEqual(sorted(os.listdir(self.managed_file.parent)),
+                         ["loxodonta-telemetry.json", "loxodonta.json"])
+        self.assertIn(str(self.pin_file), done.stdout)
+        text = self.pin_file.read_text(encoding="utf-8")
+        for never in ("OTEL_LOG_USER_PROMPTS", "OTEL_LOG_TOOL_DETAILS",
+                      "METRICS"):
+            self.assertNotIn(never, text)
+
+    def test_it_says_what_leaves_through_the_events(self):
+        done = self.full()
+
+        said = " ".join(done.stdout.split()).lower()
+        self.assertLess(said.index("events will leave"),
+                        said.index(str(self.pin_file).lower()),
+                        "said before the pin is written")
+        for words in ("tool call", "model", "session id", "never a command",
+                      "prompt", "identity"):
+            self.assertIn(words, said)
+
+    @unittest.skipIf(sys.platform == "win32", "permission bits are POSIX")
+    def test_every_account_can_read_the_pin(self):
+        previous = os.umask(0o077)
+        self.addCleanup(os.umask, previous)
+
+        self.full()
+
+        self.assertEqual(os.stat(self.pin_file).st_mode & 0o777, 0o644)
+
+    def test_at_another_profile_no_pin_is_written(self):
+        for flags in ((), ("--profile", "timestamped"),
+                      ("--profile", "custom", "--publish-chain", REMOTE)):
+            with self.subTest(flags=flags):
+                done = self.install("--managed", *flags)
+
+                self.assertFalse(self.pin_file.exists())
+                self.assertNotIn(str(self.pin_file), done.stdout)
+                self.assertEqual(os.listdir(self.managed_file.parent),
+                                 ["loxodonta.json"])
+
+    def test_a_run_at_another_profile_removes_the_installers_pin(self):
+        self.full()
+
+        done = self.install("--managed", "--profile", "timestamped")
+
+        self.assertFalse(self.pin_file.exists())
+        self.assertIn(f"removed {self.pin_file}", done.stdout)
+        self.assertTrue(self.managed_file.exists())
+        self.assertEqual(os.listdir(self.managed_file.parent),
+                         ["loxodonta.json"])
+
+    def test_a_full_rerun_that_changes_nothing_says_so(self):
+        self.full()
+        before = self.everything()
+
+        done = self.full()
+
+        self.assertEqual(self.everything(), before)
+        self.assertIn("already installed", done.stdout)
+        self.assertIn("nothing changed", done.stdout)
+
+    def test_a_pin_gone_missing_is_written_again(self):
+        self.full()
+        self.pin_file.unlink()
+
+        done = self.full()
+
+        self.assertEqual(self.read(self.pin_file), {"env": PIN_ENV})
+        self.assertNotIn("nothing changed", done.stdout)
+        self.assertIn(str(self.pin_file), done.stdout)
+
+    def test_the_url_is_written_as_given_and_a_new_one_rewrites_the_pin(self):
+        other = "http://127.0.0.1:9/other/"
+        self.full()
+
+        self.install("--managed", "--profile", "full", "--remote", other)
+
+        self.assertEqual(self.read(self.pin_file),
+                         {"env": {**PIN_ENV,
+                                  "OTEL_EXPORTER_OTLP_ENDPOINT": other}})
+
+    def test_uninstall_removes_the_pin_with_the_hooks_file(self):
+        self.full()
+        self.plant(self.managed / "managed-settings.json",
+                   {"cleanupPeriodDays": 90})
+        self.plant(self.managed_file.parent / "another-tool.json",
+                   {"hooks": {}})
+        expected = self.everything()
+        for ours in (self.managed_file, self.pin_file):
+            del expected[str(ours.relative_to(self.work))]
+
+        done = self.run_tool("uninstall-hook", "--managed")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(str(self.pin_file), done.stdout)
+        self.assertIn(str(self.managed_file), done.stdout)
+        self.assertEqual(self.everything(), expected,
+                         "both files are gone; nothing else moved")
+
+    def test_uninstall_with_only_the_pin_standing_removes_it(self):
+        self.full()
+        self.managed_file.unlink()
+
+        done = self.run_tool("uninstall-hook", "--managed")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse(self.pin_file.exists())
+        self.assertIn(f"removed {self.pin_file}", done.stdout)
+
+    def test_a_refused_pin_write_writes_nothing_anywhere(self):
+        # A folder where the pin belongs: no right would move it, the
+        # install is refused before anything is said or written, and
+        # the hooks file, written after the pin, is not written at all.
+        (self.pin_file / "kept").mkdir(parents=True)
+        before = self.everything()
+
+        done = self.run_tool("install-hook", "--managed", "--profile",
+                             "full", "--remote", REMOTE)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertIn(str(self.pin_file), done.stderr)
+        self.assertIn("a folder", done.stderr)
+        self.assertNotIn("sudo", done.stderr)
+        self.assertNotIn("will leave", done.stdout,
+                         "a refused install says nothing about what leaves")
+        self.assertEqual(self.everything(), before)
+
+    def test_a_refused_hooks_write_puts_the_pin_back_as_it_was(self):
+        # The pin is written first; a refused hooks write afterwards
+        # puts back the very bytes that stood there, a file that was
+        # not JSON included, so a refused install has written nothing.
+        old = {"env": {**PIN_ENV,
+                       "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:9/old"}}
+        for standing in (None, old, "{not json"):
+            with self.subTest(standing=standing):
+                if standing is not None:
+                    self.plant(self.pin_file, standing)
+                (self.managed_file / "kept").mkdir(parents=True)
+                before = self.everything()
+
+                done = self.run_tool("install-hook", "--managed",
+                                     "--profile", "full", "--remote", REMOTE)
+
+                self.assertEqual(done.returncode, 73,
+                                 done.stdout + done.stderr)
+                self.assertIn(str(self.managed_file), done.stderr)
+                self.assertIn("Nothing was written", done.stderr)
+                self.assertEqual(self.everything(), before,
+                                 "the pin as it stood, byte for byte, or "
+                                 "no pin")
+                (self.managed_file / "kept").rmdir()
+                self.managed_file.rmdir()
+                if standing is not None:
+                    self.pin_file.unlink()
+
+    def test_what_is_not_json_at_the_pins_name_is_nobodys_pin(self):
+        # Left alone and named when no pin is wanted; written over at
+        # `full`, as the hooks file is over one it cannot read.
+        self.plant(self.pin_file, "{not json")
+
+        done = self.install("--managed", "--profile", "timestamped")
+
+        self.assertIn(str(self.pin_file), done.stderr)
+        self.assertEqual(self.pin_file.read_text(encoding="utf-8"),
+                         "{not json")
+
+        done = self.full()
+
+        self.assertEqual(self.read(self.pin_file), {"env": PIN_ENV})
+        self.assertNotIn(str(self.pin_file), done.stderr)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "a folder's write bit is POSIX")
+    def test_a_refused_pin_delete_is_named_posix(self):
+        self.full()
+        os.chmod(self.managed_file.parent, 0o555)
+        self.addCleanup(os.chmod, self.managed_file.parent, 0o755)
+        before = self.everything()
+        for verb, flags in (("install-hook", ("--managed", "--profile",
+                                              "timestamped")),
+                            ("uninstall-hook", ("--managed",))):
+            with self.subTest(verb=verb):
+                done = self.run_tool(verb, *flags)
+
+                self.assertEqual(done.returncode, 73,
+                                 done.stdout + done.stderr)
+                self.assertNotIn("Traceback", done.stderr)
+                self.assertIn(str(self.pin_file), done.stderr)
+                self.assertIn("sudo", done.stderr)
+                self.assertEqual(self.everything(), before)
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "a read-only file refuses a delete on Windows")
+    def test_a_read_only_pin_is_named_as_that(self):
+        self.full()
+        os.chmod(self.pin_file, stat.S_IREAD)
+        self.addCleanup(os.chmod, self.pin_file, stat.S_IWRITE)
+        before = self.everything()
+        for verb, flags in (("install-hook", ("--managed", "--profile",
+                                              "timestamped")),
+                            ("uninstall-hook", ("--managed",))):
+            with self.subTest(verb=verb):
+                done = self.run_tool(verb, *flags)
+
+                self.assertEqual(done.returncode, 73,
+                                 done.stdout + done.stderr)
+                self.assertIn(str(self.pin_file), done.stderr)
+                self.assertIn("read-only", done.stderr)
+                self.assertNotIn("sudo", done.stderr)
+                self.assertEqual(self.everything(), before)
+
+    def test_a_file_at_the_pins_name_that_is_not_the_installers(self):
+        # Decided by content, as the hooks file's entries are: a file
+        # there holding more than the installer's keys is somebody
+        # else's. A `full` install, which wants the name, is refused
+        # before anything is said or written; every other verb leaves
+        # it alone and names it.
+        foreign = ('{"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": '
+                   '"http://127.0.0.1:9/theirs", "THEIR_OWN": "1"}}')
+        self.plant(self.pin_file, foreign)
+        before = self.everything()
+
+        done = self.run_tool("install-hook", "--managed", "--profile",
+                             "full", "--remote", REMOTE)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertIn(str(self.pin_file), done.stderr)
+        self.assertIn("move it away by hand", done.stderr)
+        self.assertNotIn("sudo", done.stderr)
+        self.assertNotIn("will leave", done.stdout,
+                         "a refused install says nothing about what leaves")
+        self.assertEqual(self.everything(), before)
+
+        for verb, flags in (
+                ("install-hook", ("--managed", "--profile", "timestamped")),
+                ("uninstall-hook", ("--managed",))):
+            with self.subTest(verb=verb):
+                done = self.run_tool(verb, *flags)
+
+                self.assertEqual(done.returncode, 0,
+                                 done.stdout + done.stderr)
+                self.assertIn(str(self.pin_file), done.stderr)
+                self.assertEqual(self.pin_file.read_text(encoding="utf-8"),
+                                 foreign)
+        self.assertFalse(self.managed_file.exists())
+
+    def test_another_managed_source_of_the_events_is_named_not_quoted(self):
+        policy = self.managed / "managed-settings.json"
+        self.plant(policy, {"cleanupPeriodDays": 30, "env": {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.test/secret"}})
+        theirs = self.managed_file.parent / "zz-org.json"
+        self.plant(theirs, {"env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+                                    "THEIR_OWN": "x"}})
+        quiet = self.managed_file.parent / "aa-quiet.json"
+        self.plant(quiet, {"env": {"UNRELATED": "1"}, "hooks": {}})
+
+        done = self.full()
+
+        warnings = [line for line in done.stderr.splitlines()
+                    if line.startswith("warning:") and " sets " in line]
+        self.assertEqual(len(warnings), 2, done.stderr)
+        self.assertIn(str(policy), warnings[0])
+        self.assertIn("OTEL_EXPORTER_OTLP_ENDPOINT", warnings[0])
+        self.assertIn(str(theirs), warnings[1])
+        self.assertIn("CLAUDE_CODE_ENABLE_TELEMETRY", warnings[1])
+        self.assertNotIn("secret", done.stderr)
+        self.assertNotIn(str(quiet), done.stderr)
+        self.assertEqual(self.read(self.pin_file), {"env": PIN_ENV},
+                         "the pin is written all the same")
+        self.assertEqual(self.read(policy)["cleanupPeriodDays"], 30,
+                         "read, never written")
+
+        # The installer's own two files are no other source.
+        again = self.full()
+        named = [line for line in again.stderr.splitlines() if " sets " in line]
+        self.assertEqual(len(named), 2, again.stderr)
+        for ours in (self.pin_file, self.managed_file):
+            self.assertFalse(any(str(ours) in line for line in named), named)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "a file's read bit is POSIX")
+    def test_a_managed_file_it_cannot_read_is_named_as_unread(self):
+        # A look that saw nothing is told apart from one that could
+        # not look: the file is named, its content never.
+        closed = self.managed_file.parent / "zz-closed.json"
+        self.plant(closed, {"env": {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.test/secret"}})
+        os.chmod(closed, 0)
+        self.addCleanup(os.chmod, closed, 0o644)
+
+        done = self.full()
+
+        self.assertIn(f"could not read {closed}", done.stderr)
+        self.assertNotIn("secret", done.stderr)
+        self.assertEqual(self.read(self.pin_file), {"env": PIN_ENV})
+
+    def test_without_a_pin_wanted_no_other_file_is_read_for_one(self):
+        self.plant(self.managed / "managed-settings.json", {"env": {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.test/secret"}})
+
+        done = self.install("--managed", "--profile", "timestamped")
+
+        self.assertNotIn("warning: " + str(self.managed), done.stderr)
+
+    def test_the_help_names_the_pin(self):
+        done = self.run_tool("install-hook", "--help")
+
+        self.assertIn("loxodonta-telemetry.json", " ".join(done.stdout.split()))
+
+
+class SecondRecordNoteWitnessTest(ManagedBase):
+    """The hook's note is a bookkeeping entry (ADR-0041 ruling 8): the
+    witness's receipt count and the digest's rows ignore it, as they
+    ignore genesis and the transcript commitment."""
+
+    SESSION = "sess-cut-1111"
+
+    def setUp(self):
+        super().setUp()
+        self.witness = self.home / ".claude" / "projects"
+        self.witness.mkdir()
+        self.project = self.work / "repos" / "beta"
+        self.project.mkdir(parents=True)
+        # A store-mode scan keeps its memory beside the store's receipts
+        # folder: a calibration older than the fixtures, as prime_memory
+        # gives a --root scan.
+        self.store.mkdir()
+        (self.store / "baseline.json").write_text(json.dumps({
+            "chains": {}, "calibration": [{
+                "since": ago(864000), "matchers": ["*"], "failures": ["*"]}],
+        }), encoding="utf-8")
+        for name in TELEMETRY_VARIABLES:
+            self.env.pop(name, None)
+
+    def hook(self, command):
+        payload = json.dumps({"session_id": self.SESSION,
+                              "hook_event_name": "PostToolUse",
+                              "tool_name": "Bash",
+                              "tool_input": {"command": command},
+                              "tool_response": {}})
+        done = subprocess.run(
+            [sys.executable, str(LOXODONTA), "hook"],
+            input=payload.encode("utf-8"), capture_output=True, timeout=120,
+            env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def chain(self):
+        (drawer,) = [p for p in (self.store / "receipts").iterdir()
+                     if p.is_dir()]
+        return [json.loads(line) for line in
+                (drawer / f"receipts-{self.SESSION}.jsonl").read_text(
+                    encoding="utf-8").splitlines()]
+
+    def test_the_witness_and_the_digest_ignore_the_note(self):
+        self.install("--managed", "--profile", "full", "--remote", REMOTE)
+        self.hook("step 0")
+        self.hook("step 1")
+        actions = [e["action"] for e in self.chain()]
+        self.assertEqual(actions, ["genesis", "Bash: step 0",
+                                   "second-record-cut: reason=telemetry-off",
+                                   "Bash: step 1"])
+        write_transcript(self.witness, self.project, self.SESSION,
+                         event_times=[ago(6000), ago(5990)])
+
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "supervisor.py"), "scan",
+             "--json", "--witness", str(self.witness)],
+            capture_output=True, encoding="utf-8", timeout=120,
+            env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (judged,) = json.loads(result.stdout)["completeness"]["sessions"]
+        self.assertEqual(judged["receipts"], 2)
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+
+        digest = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "supervisor.py"), "digest",
+             "--repo", str(self.project)],
+            capture_output=True, encoding="utf-8", timeout=120,
+            env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
+
+        self.assertEqual(digest.returncode, 0, digest.stdout + digest.stderr)
+        self.assertIn("step 1", digest.stdout)
+        self.assertNotIn("second-record-cut", digest.stdout)
 
 
 if __name__ == "__main__":
