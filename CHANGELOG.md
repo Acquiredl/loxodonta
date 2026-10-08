@@ -10,6 +10,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-07
+
 ### Added
 
 - `receiver serve` takes a harness's events at `POST /<token>/v1/logs`, drops every `user.*` and `organization.*` attribute at every level, and keeps each request as one line in `events-<day>.jsonl` by UTC day of arrival, under the same caps (#479).
@@ -371,7 +373,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.13.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.14.0...dev
+[0.14.0]: https://github.com/Acquiredl/loxodonta/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Acquiredl/loxodonta/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/Acquiredl/loxodonta/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Acquiredl/loxodonta/compare/v0.11.0...v0.12.0
