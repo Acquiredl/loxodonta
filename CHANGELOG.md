@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `cleanroom/verify.py`: a second chain verifier written from SPEC.md and the vectors alone, frozen, and run against every chain vector in the suite (#493).
+
 ## [0.14.0] - 2026-10-07
 
 ### Added
