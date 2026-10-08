@@ -18,7 +18,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DavidAnson/markdownlint-cli2-action@v24
         with:
+          # The three cleanroom/ globs skip the clean-room build's own record, kept as it was written (#493).
           globs: |
             **/*.md
             !node_modules
             !.claude
+            !cleanroom/GAPS.md
+            !cleanroom/RESULTS.md
+            !cleanroom/BRIEF.md
