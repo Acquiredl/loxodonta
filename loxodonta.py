@@ -5298,7 +5298,12 @@ def one_line(text, limit=160):
     cut lands between words when a space sits within the last forty
     characters before the limit (#157), else at the limit itself, and
     never orphans a combining mark or a joiner, so an accented letter or
-    an emoji sequence is dropped whole rather than split."""
+    an emoji sequence is dropped whole rather than split.
+
+    A cut line ends with ` (+N)`, N the characters dropped (#470), so a
+    telling part past a long harmless start is not silent. N counts code
+    points as Python does, in the collapsed line, whatever the cut backed
+    off from included: the kept start plus N is the collapsed length."""
     line = " ".join(str(text).split())
     if len(line) <= limit:
         return line
@@ -5309,7 +5314,7 @@ def one_line(text, limit=160):
     space = line.rfind(" ", max(0, cut - 40), cut)
     if space > 0:
         cut = space
-    return line[:cut] + "…"
+    return f"{line[:cut]}… (+{len(line) - cut})"
 
 
 # Code points that glue to a neighbour: the zero-width joiner of emoji
