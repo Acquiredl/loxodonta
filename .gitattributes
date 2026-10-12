@@ -12,3 +12,7 @@ tests/vectors/** -text
 # The harness-events capture is bytes a sender posts and a reader lays
 # down as a receiver file: its line endings stay as captured.
 tests/fixtures/harness_events.jsonl -text
+
+# The clean-room verifier is frozen and its bytes are pinned in the suite
+# (tests/test_cleanroom.py, #493): checkout must not rewrite them.
+cleanroom/** -text

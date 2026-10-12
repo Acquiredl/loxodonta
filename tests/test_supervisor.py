@@ -123,6 +123,26 @@ def write_chain_row(log, first, last, head, when):
         out.write(json.dumps(row) + "\n")
 
 
+def regenerated_with_rows(log_dir, session, write_new, mismatch_first=True):
+    """A chain regenerated whole after its head was anchored, then
+    carried on: the old head's pending row is a mismatch now, and
+    `write_new(log)` writes the new head's row. The two rows land in the
+    sidecar in the order asked, mismatch first as the session end
+    leaves them (#496)."""
+    log = make_chain(log_dir, session)
+    sidecar = Path(str(log) + ".anchors.jsonl")
+    write_pending_anchor(log, chain_head(log), "2026-10-11T10:00:00Z")
+    mismatch = sidecar.read_text(encoding="utf-8")
+    log.unlink()
+    # One entry fewer, so the new head differs from the anchored one.
+    make_chain(log_dir, session, entries=1)
+    write_new(log)
+    new = sidecar.read_text(encoding="utf-8")
+    sidecar.write_text(mismatch + new if mismatch_first else new + mismatch,
+                       encoding="utf-8")
+    return log
+
+
 def run_scan(root, *extra, env):
     # Pin both ends of the pipe to UTF-8 (PYTHONIOENCODING for the child,
     # encoding= for this parent): `text=True` alone decodes with the locale
@@ -729,6 +749,28 @@ class ScanVerdictTest(unittest.TestCase):
                          "the chain keeps verify's own exit; only the "
                          "scan's fold renames")
 
+    def test_an_anchor_mismatch_outranks_a_shrunk_commitment(self):
+        # #496: TRANSCRIPT-DIVERGED prints after the anchor lines, and
+        # the mismatch sets exit 3, so the mismatch is the word.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_pending_anchor(log, "f" * 64, "2026-10-11T10:00:00Z")
+        for count in (18, 9):
+            subprocess.run(
+                [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+                 "--actor", "receipts", "--action",
+                 f"transcript-commitment: bytes={count} sha256=" + "0" * 64],
+                capture_output=True, check=True, timeout=60)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-aaaa")]
+        self.assertTrue(any(line.startswith("TRANSCRIPT-DIVERGED")
+                            for line in chain["detail"]), chain["detail"])
+        self.assertEqual(chain["verdict"], "ANCHOR-MISMATCH", chain["detail"])
+        self.assertEqual(chain["exit"], 3)
+
     def test_a_superseded_torn_tail_stays_visible_but_stands_down(self):
         # ADR-0004 working as designed: the tear ended a chain, not the
         # recording. Failing the exit code forever over handled history is
@@ -890,6 +932,53 @@ class ScanAnchorTest(unittest.TestCase):
         self.assertEqual(regenerated["verdict"], "ANCHOR-MISMATCH")
         self.assertEqual(regenerated["exit"], 3)
         self.assertFalse(regenerated["anchored"])
+
+    def test_the_word_follows_the_exit_whatever_the_sidecar_order(self):
+        # #496: the session end after a regeneration anchors the new
+        # head, so the old head's mismatch rows are never the sidecar's
+        # last. The word is the gravest line verify printed, not its
+        # last: wait lines and a matured anchor of the new head never
+        # take the word from the mismatch that set exit 3.
+        later = {"pending": lambda log: write_pending_anchor(
+                     log, chain_head(log), "2026-10-11T11:00:00Z"),
+                 "anchored": lambda log: write_completed_anchor(
+                     log, chain_head(log))}
+        for kind, write_new in later.items():
+            for mismatch_first in (True, False):
+                with self.subTest(new_head=kind,
+                                  mismatch_first=mismatch_first):
+                    root = self.root / f"{kind}-{mismatch_first}"
+                    log = regenerated_with_rows(root / "alpha" / "receipts",
+                                                "sess-aaaa", write_new,
+                                                mismatch_first)
+
+                    result = run_scan(root, env=self.env)
+
+                    self.assertEqual(result.returncode, 3,
+                                     result.stdout + result.stderr)
+                    (chain,) = chains_by_session(json.loads(result.stdout))[
+                        ("alpha", "sess-aaaa")]
+                    self.assertTrue(any(line.startswith("ANCHOR-MISMATCH")
+                                        for line in chain["detail"]),
+                                    chain["detail"])
+                    self.assertEqual(chain["verdict"], "ANCHOR-MISMATCH",
+                                     chain["detail"])
+                    self.assertEqual(chain["exit"], 3)
+
+    def test_a_wait_line_on_a_valid_chain_leaves_the_word_valid(self):
+        # #496's other side: a line that moves no exit is never the
+        # word, so a chain whose anchor is in flight still reads VALID.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_pending_anchor(log, chain_head(log), "2026-10-11T11:00:00Z")
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-aaaa")]
+        self.assertTrue(any(line.startswith("ANCHOR-PENDING")
+                            for line in chain["detail"]), chain["detail"])
+        self.assertEqual(chain["verdict"], "VALID")
 
     def test_a_malformed_anchor_row_is_invalid_and_never_a_departure(self):
         # #348: a row whose head is not a string is judged by verify,

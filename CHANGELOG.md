@@ -10,6 +10,21 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-12
+
+### Added
+
+- `cleanroom/verify.py`: a second chain verifier written from SPEC.md and the vectors alone, frozen, and run against every chain vector in the suite (#493).
+
+### Changed
+
+- A hook action line cut at 160 characters ends with the count of characters it dropped, `… (+2846)`, for every tool, so a long harmless start no longer hides how much more ran; a line that fits is unchanged (#470).
+
+### Fixed
+
+- The hook no longer writes `second-record-cut: reason=exporter-off` on every session at `full`: an exporter or endpoint its environment does not hold is no cut, since Claude Code 2.1.294 keeps every `OTEL_*` variable from its hooks (#495).
+- `supervisor scan`, the dashboard and `/metrics` name a chain by the gravest line `verify` printed, not its last, so a regenerated chain whose new head was anchored after reads `ANCHOR-MISMATCH`, never `ANCHOR-PENDING` or `ANCHORED` (#496).
+
 ## [0.14.0] - 2026-10-07
 
 ### Added
@@ -373,7 +388,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.14.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.15.0...dev
+[0.15.0]: https://github.com/Acquiredl/loxodonta/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Acquiredl/loxodonta/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Acquiredl/loxodonta/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/Acquiredl/loxodonta/compare/v0.12.0...v0.12.1

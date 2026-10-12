@@ -9,6 +9,7 @@ public CLI with stdin payloads, never internals.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -192,16 +193,23 @@ class HookTest(unittest.TestCase):
         self.assertIn("pytest -q", entries[1]["action"])
         self.assertIn("git status", entries[2]["action"])
 
+    def cut_action(self, tool, value, key="command"):
+        """Run one call and split its cut action line into the kept
+        start and the count of characters dropped (#470)."""
+        run_hook(payload(tool=tool, tool_input={key: value}),
+                 cwd=self.workdir)
+        action = self.entries()[1]["action"]
+        match = re.fullmatch(re.escape(tool) + r": (.*)… \(\+(\d+)\)",
+                             action, re.DOTALL)
+        self.assertIsNotNone(match, f"not a cut line with a count: {action!r}")
+        return match.group(1), int(match.group(2))
+
     def test_long_action_is_cut_at_a_word_boundary(self):
         # A receipt's action is one line (SPEC §2), cut with an ellipsis.
         # The cut lands between words, never inside one: the todo chain's
         # receipts read "publi…" and "noreply@ant…" before this (#157).
         words = " ".join(f"word{i:03d}" for i in range(40))  # 319 chars
-        run_hook(payload(tool="Bash", tool_input={"command": words}),
-                 cwd=self.workdir)
-        action = self.entries()[1]["action"]
-        self.assertTrue(action.endswith("…"), action)
-        body = action[len("Bash: "):-1]
+        body, _ = self.cut_action("Bash", words)
         self.assertLessEqual(len(body), 160)
         self.assertTrue(body.endswith(tuple(f"word{i:03d}" for i in range(40))),
                         f"cut inside a word: {body[-12:]!r}")
@@ -210,25 +218,65 @@ class HookTest(unittest.TestCase):
         # No word boundary anywhere near the limit (one long URL): the
         # hard cut at the limit stands rather than dropping most of it.
         url = "https://example.com/" + "a" * 300
-        run_hook(payload(tool="WebFetch", tool_input={"url": url}),
-                 cwd=self.workdir)
-        action = self.entries()[1]["action"]
-        body = action[len("WebFetch: "):-1]
+        body, _ = self.cut_action("WebFetch", url, key="url")
         self.assertEqual(len(body), 160)
-        self.assertTrue(action.endswith("…"))
 
     def test_long_action_never_splits_a_combining_sequence(self):
         # A base letter and its combining accent straddling the limit:
         # the cut backs up so the accent is never orphaned at the edge.
         head = "x" * 159
         text = head + "e\u0301 tail words follow here"  # e + combining acute
-        run_hook(payload(tool="Bash", tool_input={"command": text}),
-                 cwd=self.workdir)
-        action = self.entries()[1]["action"]
-        body = action[len("Bash: "):-1]
+        body, _ = self.cut_action("Bash", text)
         self.assertNotEqual(body[-1], "e",
                             "cut between a base letter and its accent")
         self.assertLessEqual(len(body), 160)
+
+    # #470: a cut action line says how many characters it dropped, so a
+    # command whose telling part comes after a long harmless start does
+    # not read as the harmless start alone. The cases are the ruling's.
+
+    def test_a_command_that_fits_is_recorded_unchanged(self):
+        command = "echo " + "a" * 95  # 100 characters
+        run_hook(payload(tool="Bash", tool_input={"command": command}),
+                 cwd=self.workdir)
+        self.assertEqual(self.entries()[1]["action"], f"Bash: {command}")
+
+    def test_a_cut_command_says_how_many_characters_it_dropped(self):
+        kept, dropped = self.cut_action("Bash", "a" * 3000)
+        self.assertEqual((kept, dropped), ("a" * 160, 2840))
+
+    def test_the_count_includes_what_a_cut_between_words_dropped(self):
+        # The space at 150 sits within the last forty characters before
+        # the limit, so the cut lands on it: the space and the ten
+        # characters after it are dropped too, and counted.
+        command = "x" * 150 + " " + "y" * 2849  # 3,000 characters
+        kept, dropped = self.cut_action("Bash", command)
+        self.assertEqual((kept, dropped), ("x" * 150, 2850))
+
+    def test_the_count_is_of_the_collapsed_line(self):
+        # Whitespace collapses before anything is cut, so each run below
+        # is one space in the line, and the count is of 3,000 characters.
+        command = "  " + "a" * 1000 + "\n\t   " + "b" * 1999 + " " * 2000
+        kept, dropped = self.cut_action("Bash", command)
+        self.assertEqual((kept, dropped), ("a" * 160, 2840))
+
+    def test_a_short_command_padded_with_spaces_is_unchanged(self):
+        command = "echo" + " " * 2000 + "hi" + " " * 2000
+        run_hook(payload(tool="Bash", tool_input={"command": command}),
+                 cwd=self.workdir)
+        self.assertEqual(self.entries()[1]["action"], "Bash: echo hi")
+
+    def test_a_read_of_a_long_path_is_cut_by_the_same_rule(self):
+        path = "src/" + "deep/" * 80 + "file.py"  # 411 characters, no spaces
+        kept, dropped = self.cut_action("Read", path, key="file_path")
+        self.assertEqual((kept, dropped), (path[:160], 251))
+
+    def test_the_count_includes_a_combining_mark_dropped_whole(self):
+        # The limit falls between "e" and its accent, so both are
+        # dropped, and counted: kept plus dropped is the whole line.
+        command = "x" * 159 + "e" + chr(0x301) + "y" * 1000
+        kept, dropped = self.cut_action("Bash", command)
+        self.assertEqual((kept, dropped), ("x" * 159, 1002))
 
     def test_two_sessions_get_sibling_chains(self):
         run_hook(payload(session="sess-aaaa"), cwd=self.workdir)
@@ -1093,15 +1141,29 @@ class SecondRecordCutTest(unittest.TestCase):
     def test_the_reason_is_the_first_that_applies(self):
         cases = (
             ({"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}, "telemetry-off"),
-            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}, "exporter-off"),
+            # The switch absent still reads off: the harness hands it to
+            # every hook, so its absence is not the harness's habit.
+            ({}, "telemetry-off"),
             ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
               "OTEL_LOGS_EXPORTER": "console"}, "exporter-off"),
             ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-              "OTEL_LOGS_EXPORTER": "otlp"}, "endpoint-elsewhere"),
+              "OTEL_LOGS_EXPORTER": ""}, "exporter-off"),
             ({**IN_FORCE, "OTEL_EXPORTER_OTLP_ENDPOINT":
               "http://127.0.0.1:9/other"}, "endpoint-elsewhere"),
             ({**IN_FORCE, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":
               "http://127.0.0.1:9/other/v1/logs"}, "endpoint-elsewhere"),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+              "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":
+              "http://127.0.0.1:9/other/v1/logs"}, "endpoint-elsewhere"),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+              "OTEL_EXPORTER_OTLP_ENDPOINT":
+              "http://127.0.0.1:9/other"}, "endpoint-elsewhere"),
+            # A key the hook's environment does not hold is not a cut
+            # (#495): Claude Code 2.1.294 keeps every OTEL_* variable
+            # away from the hooks it runs, pinned or not.
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}, None),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+              "OTEL_LOGS_EXPORTER": "otlp"}, None),
             # The pin in force, four spellings: no note.
             (IN_FORCE, None),
             ({**IN_FORCE, "OTEL_EXPORTER_OTLP_ENDPOINT": PINNED + "/"}, None),

@@ -18,6 +18,7 @@
 - `supervisor.py` — the reader: `scan` / `calibrate` / `acknowledge` / `serve` / `adopt` / `drill` / `digest` / `show` / `search` / `timeline` / `verify` / `mcp` / `export` / `package`.
 - `receiver.py` — the receiver: `serve`, one verb; the URL that can only add, never delete (ADR-0031, `docs/RECEIVER.md`).
 - `verifier.py` — the recipient's verifier: `head` / `verify` / `verify-package`. Generated: `tools/build_verifier.py` copies the fenced verify region of `loxodonta.py`; edit the recorder, never this file (ADR-0035).
+- `cleanroom/` — a second chain verifier written from SPEC.md alone (#493). Frozen: its bytes are pinned by `tests/test_cleanroom.py`; a change is a new clean-room round, never an edit.
 - `adapters/` — per-harness recorder adapters (ADR-0020).
 - `tools/` — repo tooling; `house_check.py` enforces the vocabulary.
 - `tests/` — the suite, through the public CLI: `python -m unittest discover -s tests`.

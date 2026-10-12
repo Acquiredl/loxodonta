@@ -79,7 +79,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.14.0"
+TOOL_VERSION = "0.15.0"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -311,20 +311,40 @@ def verify(log):
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     lines = result.stdout.strip().splitlines()
-    if lines:
-        # Last line is the verdict — true for every combination this
-        # command can produce. Tripwire: if the tick ever gains --files
-        # (.out-of-scope/002's reopening), FILES-DIVERGED prints before
-        # the anchor lines and this parse breaks; fix the parse and the
-        # print ordering in the same PR that adds the flag.
-        verdict = lines[-1].split(":")[0].split(" at ")[0]
-    else:
+    verdict = verdict_word(lines)
+    if verdict == "NO-VERDICT":
         # verify refused without a verdict line (an empty or unopenable
         # log). Its own words on stderr are the evidence; the supervisor
         # invents no verdict of its own.
-        verdict = "NO-VERDICT"
-        lines = result.stderr.strip().splitlines()
+        lines += result.stderr.strip().splitlines()
     return verdict, result.returncode, lines
+
+
+# The words verify sets its exit by, gravest first, in the order its
+# exit ladder takes them (SPEC §6: 1 > 3 > 5 > 2; the refusal, 4, is
+# printed beside HEAD-MISMATCH alone, which outranks it). Every other line
+# (ANCHORED, ANCHOR-PENDING, NO-ANCHORS, a file's state) moves no exit
+# and is never the word, whatever order the sidecar put it in (#496).
+VERDICT_RANKS = (("BROKEN",),
+                 ("HEAD-MISMATCH", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
+                  "STAMP-INVALID"),
+                 ("TRANSCRIPT-DIVERGED",),
+                 ("FILES-DIVERGED",),
+                 ("UNSUPPORTED-VERSION",),
+                 ("VALID",))
+
+
+def verdict_word(lines):
+    """The verdict word among the lines `verify` printed: the one of the
+    gravest rank, the first printed within a rank, so the word follows
+    the exit and never the sidecar's order. NO-VERDICT when no line
+    carries one."""
+    words = [line.split(":")[0].split(" at ")[0] for line in lines]
+    for rank in VERDICT_RANKS:
+        for word in words:
+            if word in rank:
+                return word
+    return "NO-VERDICT"
 
 
 def scan_exit(code):
@@ -8215,9 +8235,7 @@ def run_drill(root, asked):
         if tamper == "regenerate":
             command += ["--expect-head", known_head]
         judged = receipts_cli(*command)
-        spoken = judged.stdout.strip().splitlines()
-        verdict = (spoken[-1].split(":")[0].split(" at ")[0]
-                   if spoken else "NO-VERDICT")
+        verdict = verdict_word(judged.stdout.strip().splitlines())
         drills.append({
             "tamper": tamper,
             "expected": expected,
@@ -8290,9 +8308,9 @@ METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 # The label values every scrape carries, at zero when nothing is in them,
 # so a panel never meets a missing series. Each is the scan's own string.
 # One the scan emits that is not listed here is rendered all the same.
-# ANCHOR-PENDING and ANCHOR-UNANSWERED join the list because the scan
-# reads the verdict off verify's last line: with several anchor records
-# and the bad one not last, a wait line is what lands there.
+# ANCHOR-PENDING and ANCHOR-UNANSWERED stay listed, at zero now, because
+# releases before #496 read the word off verify's last line and served
+# them, and a label value once served is never withdrawn.
 KNOWN_VERDICTS = ("VALID", "BROKEN", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
                   "ANCHOR-PENDING", "ANCHOR-UNANSWERED",
                   "TRANSCRIPT-DIVERGED", "UNSUPPORTED-VERSION", "NO-VERDICT")

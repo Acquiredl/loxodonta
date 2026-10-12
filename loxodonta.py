@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.14.0"
+TOOL_VERSION = "0.15.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -591,9 +591,9 @@ def check_transcript(entries, transcript_path):
     if transcript_path is not None:
         diverged = judge_prefixes(marks, transcript_path) or diverged
     # The TRANSCRIPT-DIVERGED verdict line itself is printed by the
-    # caller's exit ladder, last — the supervisor reads the final line
-    # as the verdict (its own tripwire comment), so detail lines here
-    # must never dangle after the conclusion.
+    # caller's exit ladder, after these detail lines: a script that reads
+    # verify's last line as its verdict must meet the conclusion there,
+    # never a detail line dangling after it.
     return diverged
 
 
@@ -1671,10 +1671,11 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
             + (["STAMP-INVALID"] if stamps_bad else [])
 
     if transcript_diverged:
-        # Printed after the anchor chatter so that when this verdict
-        # governs, it is the last line — the supervisor reads the final
-        # line as the verdict. A graver finding below still prints
-        # later and wins the exit (all reported, gravest sets the code).
+        # Printed after the anchor lines so that when this verdict
+        # governs, it is the last line, where a script reading verify's
+        # last line looks for the verdict. A graver finding still wins
+        # the exit, whether a head mismatch printed after this line or
+        # an anchor finding before it (all reported, gravest sets the code).
         print("TRANSCRIPT-DIVERGED: chain intact, but a committed "
               "transcript prefix no longer holds")
 
@@ -5228,15 +5229,21 @@ def second_record_cut(env, pin):
     logs endpoint elsewhere than the pinned URL, which is the
     per-signal variable when set (the pinned URL plus /v1/logs, as the
     harness appends it) and else the base one. A trailing slash is no
-    difference, and a key the pin does not hold is not compared."""
+    difference, and a key the pin does not hold is not compared.
+
+    An exporter or endpoint the environment does not hold is not a cut
+    either, only a present value that differs (#495): the measured
+    harness keeps every OTEL_* variable away from the hooks it runs, so
+    absence says nothing. The switch it does hand to every hook, so an
+    absent switch still reads off."""
     switch = "CLAUDE_CODE_ENABLE_TELEMETRY"
     if switch in pin and env.get(switch) != pin[switch]:
         return "telemetry-off"
-    named = [name.strip()
-             for name in env.get("OTEL_LOGS_EXPORTER", "").split(",")]
-    if "OTEL_LOGS_EXPORTER" in pin and pin["OTEL_LOGS_EXPORTER"] not in named:
+    exporter = "OTEL_LOGS_EXPORTER"
+    if exporter in pin and exporter in env and pin[exporter] not in [
+            name.strip() for name in env[exporter].split(",")]:
         return "exporter-off"
-    if PIN_ENDPOINT in pin:
+    if PIN_ENDPOINT in pin and (LOGS_ENDPOINT in env or PIN_ENDPOINT in env):
         pinned = pin[PIN_ENDPOINT].rstrip("/")
         if env.get(LOGS_ENDPOINT):
             sent_to, pinned = env[LOGS_ENDPOINT], pinned + "/v1/logs"
@@ -5292,7 +5299,12 @@ def one_line(text, limit=160):
     cut lands between words when a space sits within the last forty
     characters before the limit (#157), else at the limit itself, and
     never orphans a combining mark or a joiner, so an accented letter or
-    an emoji sequence is dropped whole rather than split."""
+    an emoji sequence is dropped whole rather than split.
+
+    A cut line ends with ` (+N)`, N the characters dropped (#470), so a
+    telling part past a long harmless start is not silent. N counts code
+    points as Python does, in the collapsed line, whatever the cut backed
+    off from included: the kept start plus N is the collapsed length."""
     line = " ".join(str(text).split())
     if len(line) <= limit:
         return line
@@ -5303,7 +5315,7 @@ def one_line(text, limit=160):
     space = line.rfind(" ", max(0, cut - 40), cut)
     if space > 0:
         cut = space
-    return line[:cut] + "…"
+    return f"{line[:cut]}… (+{len(line) - cut})"
 
 
 # Code points that glue to a neighbour: the zero-width joiner of emoji

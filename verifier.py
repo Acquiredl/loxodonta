@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.14.0"
+TOOL_VERSION = "0.15.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -598,9 +598,9 @@ def check_transcript(entries, transcript_path):
     if transcript_path is not None:
         diverged = judge_prefixes(marks, transcript_path) or diverged
     # The TRANSCRIPT-DIVERGED verdict line itself is printed by the
-    # caller's exit ladder, last — the supervisor reads the final line
-    # as the verdict (its own tripwire comment), so detail lines here
-    # must never dangle after the conclusion.
+    # caller's exit ladder, after these detail lines: a script that reads
+    # verify's last line as its verdict must meet the conclusion there,
+    # never a detail line dangling after it.
     return diverged
 
 
@@ -1678,10 +1678,11 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
             + (["STAMP-INVALID"] if stamps_bad else [])
 
     if transcript_diverged:
-        # Printed after the anchor chatter so that when this verdict
-        # governs, it is the last line — the supervisor reads the final
-        # line as the verdict. A graver finding below still prints
-        # later and wins the exit (all reported, gravest sets the code).
+        # Printed after the anchor lines so that when this verdict
+        # governs, it is the last line, where a script reading verify's
+        # last line looks for the verdict. A graver finding still wins
+        # the exit, whether a head mismatch printed after this line or
+        # an anchor finding before it (all reported, gravest sets the code).
         print("TRANSCRIPT-DIVERGED: chain intact, but a committed "
               "transcript prefix no longer holds")
 
