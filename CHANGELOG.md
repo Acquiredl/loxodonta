@@ -14,6 +14,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `cleanroom/verify.py`: a second chain verifier written from SPEC.md and the vectors alone, frozen, and run against every chain vector in the suite (#493).
 
+### Fixed
+
+- The hook no longer writes `second-record-cut: reason=exporter-off` on every session at `full`: an exporter or endpoint its environment does not hold is no cut, since the harness keeps every `OTEL_*` variable from its hooks (#495).
+
 ## [0.14.0] - 2026-10-07
 
 ### Added
