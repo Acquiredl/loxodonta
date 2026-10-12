@@ -380,7 +380,8 @@ acknowledges. The posture everywhere is degrade, skip, fall back — keep
 the kitchen running, keep printing.
 
 - **`one_line` — receipts are not transcripts.** The ticket says
-  "grilled the salmon," not the recipe: one line, 160 characters. The
+  "grilled the salmon," not the recipe: one line, 160 characters, and a
+  count of whatever was cut. The
   summary comes from `HOOK_SUMMARY_KEYS`, a preference order over the
   most descriptive scalar a tool call carries (a file path beats a
   command beats a pattern beats a prompt).
