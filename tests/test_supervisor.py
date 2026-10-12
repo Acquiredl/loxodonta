@@ -749,6 +749,28 @@ class ScanVerdictTest(unittest.TestCase):
                          "the chain keeps verify's own exit; only the "
                          "scan's fold renames")
 
+    def test_an_anchor_mismatch_outranks_a_shrunk_commitment(self):
+        # #496: TRANSCRIPT-DIVERGED prints after the anchor lines, and
+        # the mismatch sets exit 3, so the mismatch is the word.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_pending_anchor(log, "f" * 64, "2026-10-11T10:00:00Z")
+        for count in (18, 9):
+            subprocess.run(
+                [sys.executable, str(LOXODONTA), "log", "--log", str(log),
+                 "--actor", "receipts", "--action",
+                 f"transcript-commitment: bytes={count} sha256=" + "0" * 64],
+                capture_output=True, check=True, timeout=60)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-aaaa")]
+        self.assertTrue(any(line.startswith("TRANSCRIPT-DIVERGED")
+                            for line in chain["detail"]), chain["detail"])
+        self.assertEqual(chain["verdict"], "ANCHOR-MISMATCH", chain["detail"])
+        self.assertEqual(chain["exit"], 3)
+
     def test_a_superseded_torn_tail_stays_visible_but_stands_down(self):
         # ADR-0004 working as designed: the tear ended a chain, not the
         # recording. Failing the exit code forever over handled history is
