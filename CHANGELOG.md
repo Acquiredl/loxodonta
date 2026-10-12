@@ -14,6 +14,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `cleanroom/verify.py`: a second chain verifier written from SPEC.md and the vectors alone, frozen, and run against every chain vector in the suite (#493).
 
+### Changed
+
+- A hook action line cut at 160 characters ends with the count of characters it dropped, `… (+2846)`, for every tool, so a long harmless start no longer hides that more ran; a line that fits is unchanged (#470).
+
 ## [0.14.0] - 2026-10-07
 
 ### Added
