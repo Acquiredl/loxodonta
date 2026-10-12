@@ -1093,15 +1093,29 @@ class SecondRecordCutTest(unittest.TestCase):
     def test_the_reason_is_the_first_that_applies(self):
         cases = (
             ({"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}, "telemetry-off"),
-            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}, "exporter-off"),
+            # The switch absent still reads off: the harness hands it to
+            # every hook, so its absence is not the harness's habit.
+            ({}, "telemetry-off"),
             ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
               "OTEL_LOGS_EXPORTER": "console"}, "exporter-off"),
             ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-              "OTEL_LOGS_EXPORTER": "otlp"}, "endpoint-elsewhere"),
+              "OTEL_LOGS_EXPORTER": ""}, "exporter-off"),
             ({**IN_FORCE, "OTEL_EXPORTER_OTLP_ENDPOINT":
               "http://127.0.0.1:9/other"}, "endpoint-elsewhere"),
             ({**IN_FORCE, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":
               "http://127.0.0.1:9/other/v1/logs"}, "endpoint-elsewhere"),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+              "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":
+              "http://127.0.0.1:9/other/v1/logs"}, "endpoint-elsewhere"),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+              "OTEL_EXPORTER_OTLP_ENDPOINT":
+              "http://127.0.0.1:9/other"}, "endpoint-elsewhere"),
+            # A key the hook's environment does not hold is not a cut
+            # (#495): Claude Code 2.1.294 keeps every OTEL_* variable
+            # away from the hooks it runs, pinned or not.
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}, None),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+              "OTEL_LOGS_EXPORTER": "otlp"}, None),
             # The pin in force, four spellings: no note.
             (IN_FORCE, None),
             ({**IN_FORCE, "OTEL_EXPORTER_OTLP_ENDPOINT": PINNED + "/"}, None),
