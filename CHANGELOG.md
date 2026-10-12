@@ -16,6 +16,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
+- The hook no longer writes `second-record-cut: reason=exporter-off` on every session at `full`: an exporter or endpoint its environment does not hold is no cut, since the harness keeps every `OTEL_*` variable from its hooks (#495).
 - `supervisor scan`, the dashboard and `/metrics` name a chain by the gravest line `verify` printed, not its last, so a regenerated chain whose new head was anchored after reads `ANCHOR-MISMATCH`, never `ANCHOR-PENDING` or `ANCHORED` (#496).
 
 ## [0.14.0] - 2026-10-07

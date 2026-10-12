@@ -75,6 +75,7 @@ second-record-cut: reason=<telemetry-off|exporter-off|endpoint-elsewhere>
 ```
 
 - The reason is the first that applies, in that order. **At most one note per chain**: a chain holding one is given no second, whatever later calls find, so the note says the record was cut and never how often. A sibling chain is a chain of its own.
+- A reason is read only from a value the environment holds: an exporter or endpoint variable it does not hold is no difference, while an absent telemetry switch reads `telemetry-off`. Claude Code 2.1.294 hands its hooks the switch and no `OTEL_*` variable, so there a hook writes `telemetry-off` alone. *(Stated 2026-10-12, #495; writer behavior, not a format change.)*
 - `files` is `[]`. The note is an ordinary entry in every other respect, like the commitment: chained, hashed, no new schema fields, so a verifier that predates this amendment walks it without noticing.
 - The honest claim: the note is written by the hook from the environment the harness gave it, which whoever launches the harness can set, and never from anything the receiver saw. A session whose events never arrived is named at the receiver whether or not its chain carries a note; the note is the chain's own word that they were not going to.
 
