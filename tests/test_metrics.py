@@ -30,8 +30,9 @@ from test_anchor import clean_env
 from test_publish import FakeReceiver, FakeReceiverHandler
 from test_serve import OPENER, ServerFixture, log_entry
 from test_supervisor import (ago, chain_head, install_witness_hook,
-                             make_chain, prime_memory, run_scan,
-                             write_attempt_row, write_completed_anchor,
+                             make_chain, prime_memory, regenerated_with_rows,
+                             run_scan, write_attempt_row,
+                             write_completed_anchor, write_pending_anchor,
                              write_transcript)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -228,6 +229,22 @@ class ChainsByVerdictTest(MetricsFixture):
                 if key[0] == "loxodonta_chains")
             + scrape.value("loxodonta_chains_superseded"),
             len(chains), "every chain is in exactly one bucket")
+
+    def test_a_regeneration_a_session_end_followed_counts_as_a_mismatch(self):
+        # #496: the new head's pending row lands after the old head's
+        # mismatch row, and an alert on the label must still see it.
+        regenerated_with_rows(
+            self.root / "alpha" / "receipts", "sess-aaaa",
+            lambda log: write_pending_anchor(log, chain_head(log),
+                                             "2026-10-11T11:00:00Z"))
+        self.serve()
+
+        _, _, scrape = self.scrape()
+
+        self.assertEqual(
+            scrape.value("loxodonta_chains", verdict="ANCHOR-MISMATCH"), 1)
+        self.assertEqual(
+            scrape.value("loxodonta_chains", verdict="ANCHOR-PENDING"), 0)
 
 
 class ScanAndTallyTest(MetricsFixture):
