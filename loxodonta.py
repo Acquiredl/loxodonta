@@ -5228,15 +5228,21 @@ def second_record_cut(env, pin):
     logs endpoint elsewhere than the pinned URL, which is the
     per-signal variable when set (the pinned URL plus /v1/logs, as the
     harness appends it) and else the base one. A trailing slash is no
-    difference, and a key the pin does not hold is not compared."""
+    difference, and a key the pin does not hold is not compared.
+
+    An exporter or endpoint the environment does not hold is not a cut
+    either, only a present value that differs (#495): the measured
+    harness keeps every OTEL_* variable away from the hooks it runs, so
+    absence says nothing. The switch it does hand to every hook, so an
+    absent switch still reads off."""
     switch = "CLAUDE_CODE_ENABLE_TELEMETRY"
     if switch in pin and env.get(switch) != pin[switch]:
         return "telemetry-off"
-    named = [name.strip()
-             for name in env.get("OTEL_LOGS_EXPORTER", "").split(",")]
-    if "OTEL_LOGS_EXPORTER" in pin and pin["OTEL_LOGS_EXPORTER"] not in named:
+    exporter = "OTEL_LOGS_EXPORTER"
+    if exporter in pin and exporter in env and pin[exporter] not in [
+            name.strip() for name in env[exporter].split(",")]:
         return "exporter-off"
-    if PIN_ENDPOINT in pin:
+    if PIN_ENDPOINT in pin and (LOGS_ENDPOINT in env or PIN_ENDPOINT in env):
         pinned = pin[PIN_ENDPOINT].rstrip("/")
         if env.get(LOGS_ENDPOINT):
             sent_to, pinned = env[LOGS_ENDPOINT], pinned + "/v1/logs"

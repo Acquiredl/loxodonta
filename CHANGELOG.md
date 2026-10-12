@@ -16,7 +16,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Changed
 
-- A hook action line cut at 160 characters ends with the count of characters it dropped, `… (+2846)`, for every tool, so a long harmless start no longer hides that more ran; a line that fits is unchanged (#470).
+- A hook action line cut at 160 characters ends with the count of characters it dropped, `… (+2846)`, for every tool, so a long harmless start no longer hides how much more ran; a line that fits is unchanged (#470).
+
+### Fixed
+
+- The hook no longer writes `second-record-cut: reason=exporter-off` on every session at `full`: an exporter or endpoint its environment does not hold is no cut, since the harness keeps every `OTEL_*` variable from its hooks (#495).
 
 ## [0.14.0] - 2026-10-07
 
