@@ -30,7 +30,7 @@ paragraph; this page is the long form.
 
 The first thing settled was the vocabulary, not the code.
 [GLOSSARY.md](GLOSSARY.md) names every term and, more usefully, the words
-the project refuses: this is not a blockchain, nothing in it is immutable,
+the project refuses: this is not a blockchain, nothing here is immutable,
 and it is not an audit log. Each refusal has a reason written beside it,
 and the reason is a design constraint in disguise. Once "immutable" is off
 the table, the only honest claim left is that a change shows, and the
