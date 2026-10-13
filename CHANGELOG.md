@@ -18,6 +18,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - The README opens on a staged session that follows a payload Google reported from the public web in April 2026, says it is staged, and links the sources; the demo session, its tests and the package example follow (#515).
 - GROUNDING cites field evidence for the writer-as-adversary model: agents deleting their own traces (arXiv 2609.30266), Google's scan of the web and Salesforce's poisoning study (#515).
+- `docs/HISTORY.md` opens with a timeline, one line per chapter linking down to it, so a reader can take the short version before the long one; the chapters keep their words (#516).
 
 ### Fixed
 
