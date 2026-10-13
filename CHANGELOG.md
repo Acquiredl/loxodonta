@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Changed
 
 - `docs/HISTORY.md` opens with a timeline, one line per chapter linking down to it, so a reader can take the short version before the long one; the chapters keep their words (#516).
+- `docs/HISTORY.md` gains eight chapters, 2026-10-01 to 2026-10-13, v0.10.3 to v0.15.1, and their rows in the timeline (#TBD).
 
 ### Fixed
 
