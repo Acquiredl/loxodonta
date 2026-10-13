@@ -71,7 +71,7 @@ Two honesty labels. Everything the watch reads is testimony (writer-stamped time
 
 OWASP's entry names logs and telemetry as disclosure surfaces in their own right, and its foundational mitigations include restricting and scrubbing logs. loxodonta is itself a log store and says so. Its posture:
 
-- **Receipts are summaries, never transcripts.** An action line is one line by spec (§2), and the hook truncates it to 160 characters. Tool outputs, file contents, and conversation content never enter the chain.
+- **Receipts are summaries, never transcripts.** An action line is one line by spec (§2), and the hook cuts it at 160 characters and notes how many it dropped. Tool outputs, file contents, and conversation content never enter the chain.
 - **No secrets in receipts.** SPEC §8: action and path values are plaintext forever, and the logger must not put credentials or sensitive content in them. Wide coverage sharpens the rule rather than relaxing it: because the recall digest is injected into sessions, everything in a chain must survive being read by the next attacker.
 - **The store is local.** Chains live in `~/.loxodonta/receipts/` under a protective `.gitignore`; nothing ships anywhere. `serve` binds localhost only.
 - **Custody, not amnesia, is the control.** The recorder never redacts (ADR-0016), because in the forensic use case the sensitive-looking artifact is often the evidence. The operator therefore treats the drawer with log-store handling: it is part of the machine's sensitive surface, and pretending otherwise would be the overclaim.

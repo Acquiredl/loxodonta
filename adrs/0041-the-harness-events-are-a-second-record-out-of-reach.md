@@ -263,3 +263,7 @@ It does not claim:
 - #473, #474, #476; the red-team pass of 2026-10-05
 - `docs/GROUNDING.md` sections 2 and 3; Claude Code, *Monitoring usage*
   and *Deploy managed settings*, read 2026-10-05 and 2026-10-06
+
+## Addendum, 2026-10-12: on Claude Code 2.1.294 the hook sees the switch, not the exporter
+
+Ruling 8 said the hook runs in the harness's environment. The two-machine run measured what that environment holds on Claude Code 2.1.294: the hooks see `CLAUDE_CODE_ENABLE_TELEMETRY`, the launch value else `1`, and no `OTEL_*` variable at all, pinned or set at launch. Until #495 the hook read a missing exporter as a cut, so every chain at `full` carried `exporter-off`, and the claim that a cut run carries the hook's note held only by accident. From v0.15.0 the hook compares only what it can see (#495): on that harness a run launched with its telemetry off carries the note, and a run launched with its exporter or endpoint changed carries none. That session still reads `SECOND-RECORD-ABSENT` at the receiver, because its events never arrive, so "neither reads as clean" holds through the receiver alone. Ruling 8 reads from this date: *the hook compares the environment the harness hands it with the pin, and notes what it can see.*

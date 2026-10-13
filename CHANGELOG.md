@@ -10,6 +10,12 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-10-12
+
+### Fixed
+
+- The scan reads only what `verify` printed on stdout as a verdict, anchor or torn-tail line, so a chain path holding a newline and a planted line no longer reads as anchored or stands a refusal down (#504).
+
 ## [0.15.0] - 2026-10-12
 
 ### Added
@@ -388,7 +394,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.15.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.15.1...dev
+[0.15.1]: https://github.com/Acquiredl/loxodonta/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/Acquiredl/loxodonta/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Acquiredl/loxodonta/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Acquiredl/loxodonta/compare/v0.12.1...v0.13.0
