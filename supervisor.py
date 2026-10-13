@@ -300,7 +300,9 @@ def verify(log):
     verdict read from the exit code and the documented verdict lines.
     --anchors judges sidecar proofs offline too, because VALID and
     ANCHORED are different claims (ADR-0002) and an anchor contradicting
-    the log is the gravest finding there is."""
+    the log is the gravest finding there is. Returns the verdict, the
+    exit, the lines verify printed on stdout, and the lines the row
+    shows: those, plus its stderr when it printed no verdict."""
     # Both ends of the pipe pinned to UTF-8: verdict lines land in the
     # frontend, and a shell's codepage must never garble evidence —
     # errors="replace" because a verdict lost to a decode error is a
@@ -310,14 +312,18 @@ def verify(log):
          f"--log={log}"],
         capture_output=True, encoding="utf-8", errors="replace",
         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-    lines = result.stdout.strip().splitlines()
-    verdict = verdict_word(lines)
+    printed = result.stdout.strip().splitlines()
+    verdict = verdict_word(printed)
+    detail = list(printed)
     if verdict == "NO-VERDICT":
         # verify refused without a verdict line (an empty or unopenable
         # log). Its own words on stderr are the evidence; the supervisor
-        # invents no verdict of its own.
-        lines += result.stderr.strip().splitlines()
-    return verdict, result.returncode, lines
+        # invents no verdict of its own. Evidence to show, never lines to
+        # read as verify's: a refusal quotes the path raw, and a name a
+        # writer chose can hold a newline and then a line spelled like
+        # ANCHORED or a torn-tail BROKEN (#504).
+        detail += result.stderr.strip().splitlines()
+    return verdict, result.returncode, printed, detail
 
 
 # The words verify sets its exit by, gravest first, in the order its
@@ -365,14 +371,16 @@ def sibling_of(log):
     return log.with_name(f"{base}-{seq + 1:03d}.jsonl")
 
 
-def superseded(log, detail):
+def superseded(log, printed):
     """True when this chain's only damage is the honest crash pattern — a
     torn final line — and a sibling exists beside it: ADR-0004 already
     handled this tear, and recording continued. The tear stays in the
     report as evidence; only the exit code stands down, or the scan
     becomes an alarm that never stops sounding. Any other damage is
-    tampering to shout about, sibling or not."""
-    broken = [l for l in detail if l.startswith("BROKEN")]
+    tampering to shout about, sibling or not. `printed` is what verify
+    put on stdout; its stderr, which a refusal fills with a path the
+    writer named, never reaches here (#504)."""
+    broken = [l for l in printed if l.startswith("BROKEN")]
     return (len(broken) == 1 and "torn tail" in broken[0]
             and os.path.exists(sibling_of(log)))
 
@@ -2163,15 +2171,16 @@ def head_published(log, entries):
         Path(str(log) + ".published.jsonl"), "memo")
 
 
-def assess_anchors(detail, entries):
+def assess_anchors(printed, entries):
     """The panel's data, read from verify's own words (the documented
     verdict lines are the seam, ADR-0005): anchored spans with their
     block heights, pending proofs with their submission times, and the
     chain head with whether any anchor covers it. Ages are the reader's
-    to compute — the report carries timestamps, not clocks."""
+    to compute — the report carries timestamps, not clocks. `printed`
+    is what verify put on stdout, never its stderr (#504)."""
     anchored = []
     pending = []
-    for line in detail:
+    for line in printed:
         span = anchored_span(line)
         if span:
             anchored.append({"upto": span[0], "height": span[1]})
@@ -4314,10 +4323,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         if posted:
             keeper["publish:" + relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        verdict, code, detail = verify(log)
+        verdict, code, printed, detail = verify(log)
         exit_code = scan_exit(code)
-        stood_down = exit_code != 0 and superseded(log, detail)
-        anchors = assess_anchors(detail, entries)
+        # Both readers of verify's lines take what it printed on stdout,
+        # never the stderr `detail` adds to a refusal (#504).
+        stood_down = exit_code != 0 and superseded(log, printed)
+        anchors = assess_anchors(printed, entries)
         chain = {
             "log": log.as_posix(),
             # Stranded in a worktree: still this repo's history, but pruning

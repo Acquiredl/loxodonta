@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Fixed
+
+- The scan reads only what `verify` printed on stdout as a verdict, anchor or torn-tail line, so a chain path holding a newline and a planted line no longer reads as anchored or stands a refusal down (#504).
+
 ## [0.15.0] - 2026-10-12
 
 ### Added
