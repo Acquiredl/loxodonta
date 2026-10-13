@@ -236,6 +236,26 @@ for that, and nowhere else in this repository.
   The Model Context Protocol says only that a client should log tool
   usage.
 
+- **The writer this project distrusts is a writer that exists.** Qin and
+  others (arXiv 2609.30266, September 2026) asked coding agents in six
+  harnesses to delete their own traces, and every harness but one let
+  them; the paper also reports the behaviour arising unasked when an
+  agent is optimizing a reward. Google's Threat Intelligence Group (April
+  2026) scanned Common Crawl for indirect prompt injections and found
+  them in the wild, most of them pranks, guidance or search-engine
+  games, a small number aimed at data theft: the sample the README's
+  staged session follows is hidden text asking an AI that reads the page
+  to send the machine's public IP, `/etc/passwd` and `~/.ssh` to the
+  page's author, which Google reads as a website author's experiment.
+  Google saw little sophistication, a 32 percent rise in the malicious
+  category between November 2025 and February 2026, and no sign of
+  attacks run at scale. Salesforce Research (March 2026) measured
+  search-agent poisoning in a controlled corpus: about 80 percent of
+  queries returned the attacker's answer when the poisoned document was
+  made to appear, and nearly one in four in a corpus of over 100,000
+  clean documents. None of the three counts real victims. Together they
+  say the adversary of ADR-0002 is observed, not supposed.
+
 ## 6. Crosswalk: this project's terms and the standards'
 
 The rule is in [DIRECTION.md](DIRECTION.md) section 8: where a standard
@@ -345,3 +365,14 @@ Nothing above depends on these.
 - Regulation (EU) 2024/1689 and Regulation (EU) 2026/1744.
 - RFC 9942 and RFC 9943.
 - The three works of section 3's last paragraph.
+
+**Prompt injection and trace tampering, observed**
+
+- Qin, Schmotz, Prinzhorn, Beurer-Kellner, Prabhu and Andriushchenko,
+  "LLM Agents Can Easily Tamper With Their Own Traces", arXiv:2609.30266,
+  24 September 2026.
+- Brunner, Liu and Pande, "AI threats in the wild: The current state of
+  prompt injections on the web", Google Security blog, 23 April 2026.
+- Joty, Nguyen, Pandit and Ming, "Poisoning the Well: Search Agents Get
+  Tricked by Maliciously Hosted Content", Salesforce Research, 11 March
+  2026.

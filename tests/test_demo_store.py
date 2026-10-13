@@ -194,12 +194,15 @@ class DemoStoreTest(unittest.TestCase):
         self.assertIsNotNone(chain, "the bad-day session is missing")
         actions = [e["action"] for e in entries(chain)]
         # The story the receipts tell: a page fetched from the injected
-        # site, the credentials file read, then off the machine, then the
-        # recorder switched off. That last edit is the final receipt; the
-        # silence after it is the completeness alarm's job, not the
-        # chain's.
+        # site, the credentials file read, then off the machine with the
+        # two files the page asked for, then the recorder switched off.
+        # That last edit is the final receipt; the silence after it is
+        # the completeness alarm's job, not the chain's.
         self.assertTrue(any(a.startswith("WebFetch:")
-                            and "getrichnow.example.com" in a
+                            and "sshfixes.example.com" in a
+                            for a in actions), actions)
+        self.assertTrue(any(a.startswith("Bash: tar") and "~/.ssh" in a
+                            and "sshfixes.example.com" in a
                             for a in actions), actions)
         self.assertTrue(any(a.startswith("Read: .env") for a in actions),
                         actions)

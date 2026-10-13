@@ -8,6 +8,7 @@ with an agent, tests first, through the public CLI. The rules below are
 written so that a person or an agent can follow them equally, and the checks
 (the suite, the house checker, the front-door pin test) are what make that
 safe: a change is judged by what it does when run, not by who typed it.
+The long form, with what went wrong, is [docs/METHOD.md](docs/METHOD.md).
 
 Reading three files first saves everyone a round trip:
 
