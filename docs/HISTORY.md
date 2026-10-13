@@ -2,6 +2,39 @@
 
 This is the stage history that `CLAUDE.md` used to carry: what was built, in what order, with the dates, the issue and PR numbers, and the ADR that settled each step. The changelog starts at `v0.1.0` with no backfill (ADR-0022), so the story before the first tag lives in the ADRs and in this document.
 
+## The short version
+
+The movie version of the book: one line per chapter, in order, each linking to the chapter below. The chapters are the record and keep their words; this list is the way in.
+
+| When | Chapter | What landed |
+|---|---|---|
+| 2026-08-13 | [Stage A, the recorder](#stage-a--the-recorder-done-2026-08-13) | `init`, `log`, `run`, `head`, `verify`, `report`, standard library only; tamper tests for edit, delete, reorder, splice and regenerate; the format frozen at v0.1 (ADR-0001 to ADR-0003). |
+| 2026-08-13 | [Stage B, anchoring](#stage-b--anchoring-done-2026-08-13) | The chain head committed to Bitcoin through a minimal OpenTimestamps subset, the proof judged offline (ADR-0003). |
+| 2026-08-13 | [Stage C, the hook and explain](#stage-c--the-hook-and-explain-done-2026-08-13) | The Claude Code hook, one receipt per tool call, and `explain`, narration of the log by an external command. The tool was still called *receipts*. |
+| 2026-08-22 to 08-31 | [The dogfood and Stage D, the supervisor](#the-dogfood-and-stage-d--the-supervisor-built-2026-08-22-closed-2026-08-31) | A second single file that scans every chain and serves a local dashboard, with the completeness alarm counting receipts against the harness transcript; coverage goes wide to every tool call (ADR-0005, ADR-0016). |
+| 2026-08-26 | [Stage E, the recall surface](#stage-e--the-recall-surface-grilled-and-built-2026-08-26-adr-0009) | `digest`, `show`, `search`, `timeline`, so a new session is handed its own history; recall owns no verdicts (ADR-0009). |
+| 2026-08 | [Going public](#going-public-2026-08) | Public under the Acquiredl identity: show our claims, name others only when necessary, never overclaim. |
+| 2026-08-29 | [The rename and the store](#the-rename-and-the-store-2026-08-29) | The tool becomes loxodonta, what it writes are receipts, and every chain moves into one machine-wide store (ADR-0010 to ADR-0012). |
+| 2026-08-29 to 09-01 | [The watching layer deepens](#the-watching-layer-deepens-2026-08-29-to-2026-09-01) | The dashboard rebuilt inside `serve`, the day book, the recorder notice, transcript commitments and the session lifecycle reading (ADR-0013 to ADR-0018). |
+| 2026-09-02 | [Stage F, harness neutrality](#stage-f--harness-neutrality-built-2026-09-02) | A read-only MCP server for recall, hooks for Codex CLI, an adapter for the OpenAI Agents SDK (ADR-0019, ADR-0020). |
+| 2026-09-03 | [The share phase](#the-share-phase-2026-09-03) | The repo asks for field data: LICENSE, CI on three platforms, CONTRIBUTING, and `export`, redacted by construction (ADR-0021). |
+| 2026-09-03 to 09-07 | [The presentation arc](#the-presentation-arc-2026-09-03-to-2026-09-07) | A version, a release workflow, the house checker, the demo store with the bad-day session, the README rebuilt as a story, the pin test that runs its blocks; the first tag, v0.1.0 (ADR-0022). |
+| 2026-09-08 to 09-09 | [Evidence you can hand over](#evidence-you-can-hand-over-2026-09-08-to-2026-09-09) | The head record and the published head (ADR-0025), the package and `verify-package` (ADR-0026); every slice reviewed, every review finding a defect; v0.3.0. |
+| 2026-09-10 to 09-11 | [The reader starts counting](#the-reader-starts-counting-2026-09-10-to-2026-09-11) | The dashboard counts what the chain holds, an activity tab under a two-screen cap (ADR-0027); three faults that taught the operator to ignore the tool closed; v0.4.0. |
+| 2026-09-11 | [The witness learns its own edges](#the-witness-learns-its-own-edges-2026-09-11) | Sessions from before the supervisor's memory read `BEFORE-MEMORY`, judged not at all (ADR-0029), and subagent sidechains are read, closing every surplus in the author's store; v0.5.0. |
+| 2026-09-11 | [The front door, walked by someone who had not written it](#the-front-door-walked-by-someone-who-had-not-written-it-2026-09-11) | START.md walked as a stranger would and found to fail silently; the recorder writes down what coverage it wired and the supervisor reads it (ADR-0030); v0.6.0. |
+| 2026-09-13 | [Three reviews from outside, read against the tree](#three-reviews-from-outside-read-against-the-tree-2026-09-13) | Three machine-written reviews read against the tree: three fixes, two rulings left open, and a README that names the harnesses first; v0.7.0. |
+| 2026-09-15 to 09-18 | [The profiles, the receiver, and where the entries go](#the-profiles-the-receiver-and-where-the-entries-go-2026-09-15-to-2026-09-18) | Install profiles for what leaves the machine; `receiver.py`, a third file on a machine the writer cannot reach, that only adds; the authority timestamp beside the anchor; `/metrics` (ADR-0031 to ADR-0033). |
+| 2026-09-18 to 09-20 | [A round of rulings, run unattended](#a-round-of-rulings-run-unattended-2026-09-18-to-2026-09-20) | Eight pull requests from one brief: a failed call owes a receipt (ADR-0034), a headless `serve`, the transcript retention line, symlinks in the SPEC, TOPOLOGY.md. |
+| 2026-09-20 to 09-22 | [The direction, grounded](#the-direction-grounded-2026-09-20-to-2026-09-22) | An outside review tested claim by claim, then the direction grilled and written: the recipient first, a vertical complete or not counted, the verifier copied and never imported (ADR-0035), 1.0 as four gates; DIRECTION.md and GROUNDING.md; v0.8.0. |
+| 2026-09-22 to 09-23 | [The outside review, and the front door](#the-outside-review-and-the-front-door-2026-09-22-to-2026-09-23) | A review that tested the README's claims by experiment: nine fixes, and the presentation findings turned into `house_check --front-door`; v0.8.1. |
+| 2026-09-23 | [The recipient's verifier](#the-recipients-verifier-2026-09-23) | `verifier.py`, the recorder's verify side copied out, 35 conformance vectors both must pass, hashing frozen across format versions, exit 1 means `BROKEN` and nothing else (ADR-0036, ADR-0037); v0.9.0. |
+| 2026-09-24 to 09-29 | [The 0.9.x foundation](#the-09x-foundation-2026-09-24-to-2026-09-29) | Sidecar rows name their kind (ADR-0038), the SPEC gains its sidecar and package sections, TWINS.md and CONTROLS.md; 18 pull requests in one round, a defect found on almost every one; v0.10.0. |
+| 2026-09-30 | [The round after 0.10.0](#the-round-after-0100-2026-09-30) | Three ruled issues built in parallel: a pipe where a chain belongs, the worktree-guard refusal read right, `twin_check` layouts; the reviews file the next layer down; v0.10.1. |
+| 2026-09-30 to 10-01 | [The round that cleared its own findings](#the-round-that-cleared-its-own-findings-2026-09-30-to-2026-10-01) | The previous round's findings fixed before anything new: files opened without waiting, the baseline keeping a remembered head; the "file opened waiting" family named and turned into a check over the syntax trees (#405); v0.10.2. |
+
+The chapters stop at v0.10.2, on 2026-10-01. What came after, v0.10.3 to v0.15.0, is in [CHANGELOG.md](../CHANGELOG.md) until its chapters are written.
+
 ## Stage A — the recorder (done 2026-08-13)
 
 Spec review, then the stdlib-only CLI: `init` / `log` / `run` / `head` / `verify` / `report`. Tamper-demo tests (edit / delete / reorder / splice / regenerate, each caught) and a golden fixture pinning canonicalization. Stages A–C were implemented and merged together on 2026-08-13; SPEC v0.1 and ADR-0001/0002/0003 are `accepted`, and the format is frozen.
