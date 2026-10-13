@@ -11,7 +11,7 @@ loxodonta is how you would know. After each tool call, the app that runs the age
 
 It is for anyone who lets Claude Code, Codex CLI or the OpenAI Agents SDK loose on real code, and for whoever has to believe the record afterwards. Python 3.9 or newer, standard library only: download from the [releases page](https://github.com/Acquiredl/loxodonta/releases) and run `python loxodonta.py install-hook`.
 
-![A terminal recording: init, two receipts logged, verify says VALID, one word of entry 1 rewritten with sed, verify says BROKEN at entry 1.](docs/images/tamper-demo.gif)
+![A terminal recording of the staged session: report prints its six receipts, a web search, a page fetched, .env read and fingerprinted, the bundle sent off the machine, the recorder removed; then verify says VALID.](docs/images/bad-day-demo.gif)
 
 ## The problem
 
@@ -39,6 +39,8 @@ loxodonta assumes the writer of the record may be compromised, or following some
 ## See it catch a rewrite
 
 Two receipts, a verdict, one word of history rewritten, a second verdict:
+
+![A terminal recording: init, two receipts logged, verify says VALID, one word of entry 1 rewritten with sed, verify says BROKEN at entry 1.](docs/images/tamper-demo.gif)
 
 <!-- pin:tamper-demo -->
 
