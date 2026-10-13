@@ -164,34 +164,34 @@ A seal file the manifest does not declare (an anchor sidecar beside a manifest d
 
 ## 7. Worked example: the bad-day session
 
-The demo store (`python tools/demo_store.py --home <dir>`) holds a session that reads an injected page, reads `.env`, posts it off the machine, and switches the recorder off (`docs/demo/bad-day-session.jsonl`). Packaged and verified on a machine that is not the one that recorded it:
+The demo store (`python tools/demo_store.py --home <dir>`) holds a staged session that fetches an injected page, reads `.env`, bundles it with the two files the page asked for and sends them off the machine, then switches the recorder off (`docs/demo/bad-day-session.jsonl`; the README says how it is staged). Packaged and verified on a machine that is not the one that recorded it:
 
 ```
-package: loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907
+package: loxodonta-package-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.zip
 format: loxodonta-package/1
-packed: 2026-09-09T04:11:33Z by loxodonta supervisor 0.4.0 (testimony)
+packed: 2026-10-13T04:11:57Z by loxodonta supervisor 0.15.0 (testimony)
 unit: kind session, session b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907, project todo
 contents: 1 chain(s), 3 artifact(s), seals: none declared
-chain: receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl (manifest: head 751d054dfeff…, 6 entries)
+chain: receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl (manifest: head 243420595585…, 6 entries)
 NO-ANCHORS: receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl.anchors.jsonl is not in this package — anchoring is optional
 VALID
 file references: 1 recorded, not checkable off the machine
-project.json: matches the manifest (sha256 3076b53b4813…, 148 bytes)
-witness.json: matches the manifest (sha256 07f2525caddd…, 999 bytes) (testimony: the packing machine's reading, unaltered; no verdict is drawn from it)
-README.md: matches the manifest (sha256 656c8efc9c08…, 2929 bytes)
+project.json: matches the manifest (sha256 69c4dc15ce64…, 149 bytes)
+witness.json: matches the manifest (sha256 94d129e5a35b…, 999 bytes) (testimony: the packing machine's reading, unaltered; no verdict is drawn from it)
+README.md: matches the manifest (sha256 7aa730599886…, 3659 bytes)
 residual trust: this package is unaltered since it was packed. That the record inside is true and complete, that it existed before today, and which key packed it, rests on the issuer's word alone, since no seal is declared.
 SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest; indistinguishable from a wholesale regeneration, since no seal is declared
 ```
 
-Exit 0. Read it as a recipient would. The chain walks clean: the six entries, `Read: .env` and the `curl` that posted it included, are the ones the recorder wrote, in order, unedited since. The one file reference is the fingerprint of `.env` as the agent saw it; the file is not here and cannot be checked. The witness says `UNWITNESSED` in this build, because the demo store has no transcript layout; on the operator's machine it would say what the completeness alarm said, and either way the verifier repeats it without judging it. And the last two lines state what remains: nothing here changed since it was packed, and nothing here says the set existed before today or which key packed it, because no seal was declared.
+Exit 0. Read it as a recipient would. The chain walks clean: the six entries, `Read: .env` and the `tar` piped into `curl` that sent it included, are the ones the recorder wrote, in order, unedited since. The one file reference is the fingerprint of `.env` as the agent saw it; the file is not here and cannot be checked. The witness says `UNWITNESSED` in this build, because the demo store has no transcript layout; on the operator's machine it would say what the completeness alarm said, and either way the verifier repeats it without judging it. And the last two lines state what remains: nothing here changed since it was packed, and nothing here says the set existed before today or which key packed it, because no seal was declared.
 
 The manifest the verifier judged against:
 
 ```json
 {
   "format": "loxodonta-package/1",
-  "packed": "2026-09-09T04:11:33Z",
-  "tool": "loxodonta supervisor 0.4.0",
+  "packed": "2026-10-13T04:11:57Z",
+  "tool": "loxodonta supervisor 0.15.0",
   "unit": {
     "kind": "session",
     "session": "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907",
@@ -200,7 +200,7 @@ The manifest the verifier judged against:
   "chains": [
     {
       "path": "receipts-b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907.jsonl",
-      "head": "751d054dfefff992437ec1e9ff7f326b0cc5d745cd60097a98c3421a7cc0555e",
+      "head": "2434205955851bde10d8ce3785078eb87f7c209f7aba68a9fda0631b245fb0d3",
       "entries": 6,
       "anchors": null,
       "stamps": null
@@ -209,18 +209,18 @@ The manifest the verifier judged against:
   "artifacts": [
     {
       "path": "project.json",
-      "sha256": "3076b53b4813572928b66f8f0e196e4b1cd77257dfe2127aeba045b9f3b340fb",
-      "bytes": 148
+      "sha256": "69c4dc15ce646169b797c12394ca2f56e3a735e8d07b157e46bdabba1eccfb5c",
+      "bytes": 149
     },
     {
       "path": "witness.json",
-      "sha256": "07f2525caddd65331c147ceceaa402eede1925d0570246132ec84cfa003d1cd3",
+      "sha256": "94d129e5a35b226e8971759ad264e6bf2cb2d74797d0426542ee805e247ccd1c",
       "bytes": 999
     },
     {
       "path": "README.md",
-      "sha256": "656c8efc9c089c224c0d31264020a8a5c17054146a3c465714e64cf6cd1df4de",
-      "bytes": 2929
+      "sha256": "7aa730599886019a30e4bd25732435a03b41fa4feda9f6b8a4ade39bef697e33",
+      "bytes": 3659
     }
   ],
   "seals": []
