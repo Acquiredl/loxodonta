@@ -10,6 +10,15 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `docs/METHOD.md`, how the project was built: one person directing, an agent writing, and the checks, reviews and measurements that stand between them and the claims; linked from the README and CONTRIBUTING (#TBD).
+
+### Changed
+
+- The README opens on a staged session that follows a payload Google reported from the public web in April 2026, says it is staged, and links the sources; the demo session, its tests and the package example follow (#TBD).
+- GROUNDING cites field evidence for the writer-as-adversary model: agents deleting their own traces (arXiv 2609.30266), Google's scan of the web and Salesforce's poisoning study (#TBD).
+
 ### Fixed
 
 - The scan reads only what `verify` printed on stdout as a verdict, anchor or torn-tail line, so a chain path holding a newline and a planted line no longer reads as anchored or stands a refusal down (#504).
