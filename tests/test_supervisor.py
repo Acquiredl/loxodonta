@@ -165,14 +165,14 @@ def make_chain(log_dir, session, entries=2, action="step {i}", actions=None):
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"receipts-{session}.jsonl"
     subprocess.run([sys.executable, str(LOXODONTA), "init", "--log", str(log)],
-                   capture_output=True, check=True)
+                   capture_output=True, check=True, timeout=60)
     if actions is None:
         actions = [action.format(i=i) for i in range(entries)]
     for line in actions:
         subprocess.run(
             [sys.executable, str(LOXODONTA), "log", "--log", str(log),
              "--actor", "claude-code", "--action", line],
-            capture_output=True, check=True)
+            capture_output=True, check=True, timeout=60)
     return log
 
 
@@ -193,7 +193,7 @@ def run_store_scan(store_home, witness, *extra):
     return subprocess.run(
         [sys.executable, str(SUPERVISOR), "scan", "--json",
          "--witness", str(witness), *extra],
-        capture_output=True, encoding="utf-8",
+        capture_output=True, encoding="utf-8", timeout=120,
         env={**isolated_env(Path(store_home).parent / "home",
                             LOXODONTA_HOME=str(store_home)),
              "PYTHONIOENCODING": "utf-8"})
@@ -265,6 +265,81 @@ class StoreScanTest(unittest.TestCase):
 
         sessions = chains_by_session(json.loads(result.stdout))
         self.assertIn(("mystery-33333333", "sess-cccc"), sessions)
+
+    def plant(self, path):
+        """An empty file at `path`, its folders made on the way, or the
+        test skipped where the file system refuses a name on it: Windows
+        refuses a newline in a name, Linux and macOS take one (#504).
+        Tried, never read off the platform's name, so a system that can
+        make the name runs the test."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        except OSError as error:
+            self.skipTest(f"the file system refuses the name: {error}")
+        return path
+
+    def test_a_planted_anchored_line_in_a_chains_path_earns_nothing(self):
+        # #504: verify's refusal of an empty chain quotes the path raw on
+        # stderr, and a name in it can hold a newline on Linux and macOS,
+        # so a writer (ADR-0002) can put a line spelled like verify's own
+        # ANCHORED line into the scan's evidence with nothing but an
+        # empty file at a path it chose. Only a line verify printed on
+        # stdout earns the flag (#349); the refusal stays the evidence.
+        # The line sits in the drawer's name: as a file name, `receipts-`,
+        # a newline, the shortest ANCHORED line, a newline and `.jsonl`
+        # make 256 bytes, one over what Linux allows a name.
+        line = ("ANCHORED: entries 0..0: the attestation claims Bitcoin "
+                "block 0, and the block was not checked; that block's "
+                "merkle root must read " + "0" * 64 + ", which "
+                "--block-header with its header checks")
+        self.plant(self.home / "receipts" / f"p\n{line}\n"
+                   / "receipts-sess-aaaa.jsonl")
+
+        result = run_store_scan(self.home, self.witness)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotEqual(result.returncode, 0,
+                            result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        (chain,) = [c for chains in sessions.values() for c in chains]
+        self.assertEqual(chain["verdict"], "NO-VERDICT")
+        self.assertEqual(chain["exit"], 4)
+        self.assertFalse(chain["anchored"], chain["detail"])
+        self.assertEqual(chain["anchors"]["anchored"], [])
+        self.assertIn(line, chain["detail"],
+                      "verify's stderr stays in the row as evidence")
+        self.assertTrue(any("is empty" in said for said in chain["detail"]),
+                        chain["detail"])
+
+    def test_a_planted_torn_tail_line_in_a_chains_name_stands_nothing_down(
+            self):
+        # #504, the other reader of verify's lines: a lone BROKEN line
+        # saying "torn tail", with a sibling -002 beside it, stands a
+        # chain's exit down as ADR-0004's handled tear. Planted through
+        # the file name, which this line is short enough for, it must
+        # not: the refusal keeps its exit, and the scan counts it.
+        name = "sess-aaaa\nBROKEN at entry 3: torn tail\n"
+        drawer = self.drawer("alpha-11111111", "C:/work/alpha")
+        self.plant(drawer / f"receipts-{name}.jsonl")
+        # The sibling is a chain in good standing, so the scan's exit is
+        # the planted chain's alone.
+        make_chain(drawer, f"{name}-002")
+
+        result = run_store_scan(self.home, self.witness)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotEqual(result.returncode, 0,
+                            result.stdout + result.stderr)
+        sessions = chains_by_session(json.loads(result.stdout))
+        planted, sibling = sessions[("alpha", name)]
+        self.assertEqual(planted["verdict"], "NO-VERDICT")
+        self.assertEqual(planted["exit"], 4)
+        self.assertFalse(planted["superseded"], planted["detail"])
+        self.assertTrue(any("is empty" in said for said in planted["detail"]),
+                        planted["detail"])
+        self.assertEqual(sibling["verdict"], "VALID")
+        self.assertFalse(sibling["superseded"])
 
 
 def run_adopt(store_home, root, *extra):
