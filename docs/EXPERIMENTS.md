@@ -109,10 +109,11 @@ past it: `COMMITMENT HOLDS`. In-session growth is append-only as
 assumed. The **resume drill** ran the same day: the session was closed,
 restarted, and resumed, worked a few more calls, and the judge command
 re-run — `COMMITMENT HOLDS (entry 126)` again. Close-and-resume does
-not rewrite committed bytes, so the README carries the claim. The one
-behavior still unobserved is **compaction**: no commitment has yet been
-judged across a context compaction, and the claim's fine print stays
-honest about it until one is. (Indirect comfort, not proof: the
+not rewrite committed bytes, so docs/HOOK.md and docs/CLAIMS.md carry
+the claim. The one behavior still unobserved is **compaction**: no
+commitment has yet been judged across a context compaction, and
+ADR-0017's fine print stays honest about it until one is. (Indirect
+comfort, not proof: the
 completeness witness has paired transcripts with chains across weeks of
 long sessions without surplus scars, so compaction at least preserves
 tool events — byte-stability across it is the remaining question.)
@@ -222,8 +223,8 @@ file):
 the same session, by file size. Method: the session's chain file against
 its harness transcript file. Measured 2026-09-06 on the worktree
 session: chain `3,955` bytes, transcript `738,079` bytes — a **187×**
-ratio. This is the number behind "a few KB per session": the chain is the
-index, the transcript is the volume it indexes.
+ratio. This was the number behind the README's "a few KB per session" of
+the time: the chain is the index, the transcript is the volume it indexes.
 
 **Run.** Nine headless Claude Code sessions (`claude -p`, fresh, the arm
 prompt as the first message), all one model. Each agent worked in its
@@ -267,8 +268,9 @@ answered in full and four points for honesty: it answered two of six.
 pre-registered rubric governs, and the table above follows it.) Arm A answered Q1–Q4 and Q6 correct
 and specific, Q4 to the second (receipt 63 at 22:06:25Z, the full test
 run before it). On Q5 the digest labels its `VALID` line testimony and
-points at `verify`, which recall does not expose; all three A agents
-spent their remaining calls looking for it, hit the budget, and said
+points at `verify`, which recall did not expose then (resolved:
+`supervisor verify ADDRESS`, #155); all three A agents spent their
+remaining calls looking for it, hit the budget, and said
 "cannot determine" (1 point). Arm B answered all six; on Q5 it verified
 the transcript's own integrity (485 lines, every parent link resolves,
 every call has a result), not the chain's (1 point).
@@ -282,17 +284,19 @@ survive contact with the transcript arm.
   session renaming itself at 23:17:39Z; the transcript's final record is
   the operator's `/exit` at 23:20:35Z. Those receipts are in the store,
   in the 12-entry worktree drawer this section mentions above, which
-  repo-scoped recall does not reach. The key was derived from the drawer
-  recall shows. Arm B is right and scored 2; the budgeted A agents never
+  repo-scoped recall did not reach then (resolved: a repository's recall
+  reads its worktree drawers, ADR-0023). The key was derived from the
+  drawer recall shows. Arm B is right and scored 2; the budgeted A agents never
   reached that drawer and matched the key as written.
 - *Q6.* The transcript counts 38 PowerShell calls of 79; the main
   drawer's receipts give 24 of 61 (31 of 71 with the worktree drawer).
   Both arms named PowerShell and scored 2. The gap between 71 receipts
   and 79 calls is exactly the eight calls the transcript marks
-  `is_error` (seven PowerShell, one Read), which fire no hook: per tool,
-  calls minus failures equals receipts without remainder, `ToolSearch`,
-  `Skill`, and the MCP tool included (checked 2026-09-08, #158). That is
-  "every completed tool call" as the README states it.
+  `is_error` (seven PowerShell, one Read), which fired no hook then: per
+  tool, calls minus failures equals receipts without remainder,
+  `ToolSearch`, `Skill`, and the MCP tool included (checked 2026-09-08,
+  #158). That was "every completed tool call" as the README stated it;
+  since #239 a failed call fires its own event and leaves a receipt.
 
 **Pilot** (same day, no budget, `origin` left in place). Means: A 26.3
 calls, 62K out, 1.91M in; B 14.3, 42K, 925K; C 11.3, 22K, 619K. All
@@ -328,9 +332,14 @@ one harness's layout; the key's Q4 was wrong as pre-registered and is
 corrected above from the transcript. Productivity is not claimed.
 
 **Findings for the tool, from the run.** Repo-scoped recall does not
-reach a session's worktree-path drawer. The digest header's entry count
-(61) against the last sequence number (63) read as a possible gap to two
-agents. The digest hedges `VALID` as testimony and points at a command
-recall cannot run. The fast-forward merge is in the reflog and in
-neither chain. Action text is capped at 173 characters, twice cut
-mid-character. 71 receipts against 79 transcript tool calls (resolved: the eight are the failed calls, #158).
+reach a session's worktree-path drawer (resolved: ADR-0023). The digest
+header's entry count (61) against the last sequence number (63) read as
+a possible gap to two agents (resolved: #154). The digest hedges `VALID`
+as testimony and points at a command recall cannot run (resolved:
+`supervisor verify`, #155). The fast-forward merge is in the reflog and
+in neither chain (the stated coverage edge since #156). Action text is
+capped at 173 characters, twice cut mid-character (resolved: the cut
+lands between words, #157, and since #470 a cut line ends `… (+N)` with
+the dropped count). 71 receipts against 79 transcript tool calls
+(resolved: the eight are the failed calls, #158; since #239 a failed
+call leaves its own receipt).

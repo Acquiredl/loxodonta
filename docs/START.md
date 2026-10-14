@@ -1,10 +1,10 @@
 # Start here
 
 You were handed this because everything in these docs was measured on one
-machine: mine. The thresholds, the verdicts, the numbers all came out of one
-store. What I need is not another feature, it is evidence that the recorder
-holds up somewhere else, and a look at what agent sessions are like when they
-are not my sessions.
+machine, mine, and one other that I set up myself. The thresholds, the
+verdicts, the numbers all came out of one store. What I need is not another
+feature, it is evidence that the recorder holds up somewhere else, and a look
+at what agent sessions are like when they are not my sessions.
 
 Five steps. Nothing to install, no service, no account, no dependencies.
 Python 3.9 or newer is the whole requirement. The commands below say
@@ -23,11 +23,14 @@ and stop if anything looks wrong.
 ```
 
 Yes, that is asking an agent to wire up its own recorder, and it is worth
-saying what that means. The hook is one entry in your harness's settings
-file, which you can open and read afterward. Once it is wired it fires
-outside the agent's control, so what gets recorded no longer depends on the
-agent's cooperation, and `python loxodonta.py uninstall-hook` takes out
-exactly that entry and nothing else.
+saying what that means. The hook is a few entries in your harness's settings
+file, one per event it listens to, which you can open and read afterward.
+Once it is wired it fires outside the agent's control, so what gets recorded
+no longer depends on the agent's cooperation. One door stays open on a plain
+install: a run launched with hooks disabled on its command line writes
+nothing, and `install-hook --managed` is the wiring that flag does not reach
+([docs/HOOK.md](HOOK.md)). `python loxodonta.py uninstall-hook` takes out
+exactly those entries and nothing else.
 
 ## The five steps
 
@@ -41,7 +44,7 @@ the same release, then ask the file which version it is.
 
 ```
 sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Windows
-python loxodonta.py --version     # loxodonta 0.11.0 (format 0.1, commit unknown)
+python loxodonta.py --version     # loxodonta 0.15.1 (format 0.1, commit unknown)
 ```
 
 That last word is `unknown` on purpose, and it is the first thing you will
@@ -58,11 +61,16 @@ python loxodonta.py install-hook            # Claude Code
 python loxodonta.py install-hook --codex    # Codex CLI
 ```
 
+On the OpenAI Agents SDK there is no hook to install: the adapter in
+`adapters/` does this step from inside your program
+([docs/HOOK.md](HOOK.md#openai-agents-sdk)).
+
 Every new session on this machine now leaves a chain of receipts under
 `~/.loxodonta/receipts/`, one drawer per project (`C:\Users\<you>\.loxodonta\`
-on Windows). There is no daemon and no scheduled job. The command writes one
-entry into your harness's settings file, and the harness runs the recorder as
-a child process after each tool call that completes or fails.
+on Windows). There is no daemon and no scheduled job. The command writes its
+entries into your harness's settings file, one per event, and the harness
+runs the recorder as a child process after each tool call that completes or
+fails.
 
 On its own that is the lowest tier, `local`. An edit, a deletion, or a
 reorder of a receipt is caught unconditionally; a chain regenerated from

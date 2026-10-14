@@ -20,6 +20,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - GROUNDING cites field evidence for the writer-as-adversary model: agents deleting their own traces (arXiv 2609.30266), Google's scan of the web and Salesforce's poisoning study (#515).
 - `docs/HISTORY.md` opens with a timeline, one line per chapter linking down to it, so a reader can take the short version before the long one; the chapters keep their words (#516).
 - `docs/HISTORY.md` gains eight chapters, 2026-10-01 to 2026-10-13, v0.10.3 to v0.15.1, and their rows in the timeline (#517).
+- The README after the author's read-through: the crux on the first screen, one recording, a drawn flow and a drawn chain, the verdict table word-first, one block of caveats, the ladder by need, simpler why-nots, a call to test (#520).
+- `docs/METHOD.md` lists the layers with the finding that forced each (#520).
+- Five docs pages checked line by line against the tree and brought current, facts only: START, FIRE-DRILL, MCP, ANCHORING and EXPERIMENTS, with the first field run's findings marked resolved where the tool has since moved (#521).
 
 ## [0.15.1] - 2026-10-12
 

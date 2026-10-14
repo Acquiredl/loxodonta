@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 150" width="1000" height="150" role="img" aria-label="The agent makes a tool call; the harness runs the hook after the call; the hook writes one receipt onto the chain; verify and the supervisor read the chain back.">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 14px; fill: #111827; }
+    .small { font-size: 12px; fill: #4b5563; }
+    .box { fill: none; stroke: #0f766e; stroke-width: 2; }
+    .arrow { stroke: #0f766e; stroke-width: 2; fill: none; marker-end: url(#head); }
+    #head path { fill: #0f766e; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e5e7eb; }
+      .small { fill: #9ca3af; }
+      .box, .arrow { stroke: #5eead4; }
+      #head path { fill: #5eead4; }
+    }
+  </style>
+  <defs>
+    <marker id="head" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="box" x="20" y="45" width="130" height="60" rx="6"/>
+  <text x="85" y="80" text-anchor="middle">the agent</text>
+
+  <path class="arrow" d="M150,75 L200,75"/>
+  <text class="small" x="175" y="62" text-anchor="middle">a tool call</text>
+
+  <rect class="box" x="200" y="45" width="190" height="60" rx="6"/>
+  <text x="295" y="71" text-anchor="middle">the harness</text>
+  <text class="small" x="295" y="92" text-anchor="middle">Claude Code, Codex CLI</text>
+
+  <path class="arrow" d="M390,75 L450,75"/>
+  <text class="small" x="420" y="62" text-anchor="middle">after the call</text>
+
+  <rect class="box" x="450" y="45" width="140" height="60" rx="6"/>
+  <text x="520" y="80" text-anchor="middle">the hook</text>
+
+  <path class="arrow" d="M590,75 L650,75"/>
+  <text class="small" x="620" y="62" text-anchor="middle">one receipt</text>
+
+  <rect class="box" x="650" y="45" width="140" height="60" rx="6"/>
+  <text x="720" y="71" text-anchor="middle">the chain</text>
+  <text class="small" x="720" y="92" text-anchor="middle">each links the last</text>
+
+  <path class="arrow" d="M790,75 L850,75"/>
+  <text class="small" x="820" y="62" text-anchor="middle">read back</text>
+
+  <rect class="box" x="850" y="45" width="130" height="60" rx="6"/>
+  <text x="915" y="71" text-anchor="middle">verify</text>
+  <text class="small" x="915" y="92" text-anchor="middle">supervisor</text>
+
+  <text class="small" x="500" y="135" text-anchor="middle">The agent is what is recorded, not what decides whether a receipt is written.</text>
+</svg>
