@@ -182,7 +182,7 @@ Nobody is attacking this recorder today. The layers exist because a security too
 
 ## Try it, and try to break it
 
-Every number in these docs came from one store, mine, and one other machine. What the project needs now is not a feature but people who run it and people who try to defeat it. Wire it for a week and send what your machine saw: `supervisor export --send` publishes a redacted summary as a secret gist and opens an issue, and [docs/START.md](docs/START.md) has the five steps. Then attack it: `drill` rehearses four tampers on a sandbox copy, and [docs/CLAIMS.md](docs/CLAIMS.md) lists what the record promises, which is the list to go after. A hole in the threat model is the most useful issue this repository can receive.
+Every number in these docs came from one store, mine, and one other machine. What the project needs now is not a feature but people who run it and people who try to defeat it. Wire it for a week and send what your machine saw: `supervisor export --send` publishes a redacted summary as a secret gist and opens an issue, and [docs/START.md](docs/START.md) has the five steps. Then try to defeat it. `drill` rehearses four tampers on a sandbox copy, and that is only a starting point. [docs/CLAIMS.md](docs/CLAIMS.md) lists what the record promises, and the routes the drill never tried are the ones worth finding. A hole in the threat model is the most useful issue this repository can receive.
 
 ## How it was built
 
