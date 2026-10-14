@@ -36,19 +36,21 @@ That record is for two readings. After a compromise, it says how the agent was l
 
 The session is staged: these five calls were played through the real hook by [tools/demo_store.py](tools/demo_store.py), with no agent and no page involved, so the chain is real and the story is written. The payload it follows is one Google read as a website author's experiment, in a scan that found little sophistication and a rising count; the sources are in [docs/GROUNDING.md](docs/GROUNDING.md#5-agent-logs-in-research-and-standards).
 
-loxodonta assumes the writer of the record may be compromised, or following someone else's instructions ([ADR-0002](adrs/0002-writer-as-adversary.md)). It does not make the agent trustworthy and it does not stop it acting. It keeps a record of what the agent did that shows when it was changed, and gives you ways to keep evidence of it out of the agent's reach.
+Everything below assumes the agent writing the record may be compromised, or following someone else's instructions ([ADR-0002](adrs/0002-writer-as-adversary.md)).
 
 ## How it works
 
-Your agent works by tool calls: a file read, a command run, a page fetched. After each one, the app that runs the agent, the harness, runs a small hook, and the hook writes one receipt. Each receipt carries the fingerprint of the one before it, so the receipts form a chain, and one command walks the chain and says whether it is still what was written. That is the whole mechanism. The layers after it put copies and fingerprints where the agent cannot reach.
+Your agent works by tool calls: a file read, a command run, a page fetched. After each one, the app that runs the agent, the harness, runs a small hook, and the hook writes one receipt. Each receipt carries the fingerprint of the one before it, so the receipts form a chain.
 
 ![The agent makes a tool call; the harness runs the hook after the call; the hook writes one receipt onto the chain; verify and the supervisor read the chain back.](docs/images/flow.svg)
 
-A receipt is one line of JSON: its number, the time, who acted, a one-line action such as `Edit: todo.py` or `Bash: python -m unittest -q`, the fingerprint of each project file the call touched, and the two hashes that chain it, the previous receipt's and its own. Tool output and file contents are never recorded; commands and URLs are, so treat the store the way you treat logs.
+A receipt is one line of JSON, plain text you can open and read: its number, the time, who acted, a one-line action such as `Edit: todo.py` or `Bash: python -m unittest -q`, the fingerprint of each project file the call touched, and the two hashes that chain it, the previous receipt's and its own. Nothing is encrypted and nothing needs a key. Tool output and file contents are never recorded; commands and URLs are, so treat the store the way you treat logs.
 
 ![Three receipts from the staged session drawn as linked boxes, each holding its number, time, actor, action, files, the previous receipt's hash and its own; the prev of each is the entry_hash of the one before.](docs/images/receipt-chain.svg)
 
-## See it catch a rewrite
+Everything is driven from the command line. In `python loxodonta.py verify --files`, `verify` is the command and `--files` is a flag that changes what it does. Every example below has that shape, and the same commands are what anything built on top would call.
+
+### See it catch a rewrite
 
 Two receipts, a verdict, one word of history rewritten, a second verdict. This block runs anywhere `loxodonta.py` does:
 
@@ -68,22 +70,108 @@ $ python loxodonta.py verify
 BROKEN at entry 1: entry_hash does not match canonical form
 ```
 
-`BROKEN at entry 1` names the first receipt that no longer matches what was written; everything before it still holds. Nothing here stops an agent from editing its log; everything here makes the edit visible.
+`verify` names the first receipt that no longer matches, and everything before it still holds: if receipt 10 of a long session was touched, receipts 1 to 9 still stand as written. A receipt deleted or moved breaks the chain the same way.
+
+`verify --files` asks the same chain a different question: is each file a receipt fingerprinted still the same on disk? It fingerprints the file again, compares, and `FILES-DIVERGED` names the ones that changed since. Only a file a call named by its path inside the project gets a fingerprint, a read or an edit and not a file a shell command changed, and an edit of your own shows too, so it says where to look rather than who did it.
+
+### Out of the agent's reach
+
+So far everything sits on the agent's machine, and there are no keys. An agent that can write the chain can also rebuild it from scratch, every hash recomputed, and the rebuilt chain checks out on its own. Each layer below puts something the agent cannot touch somewhere else. The [recommended setup](#the-recommended-setup) turns them all on, so you do not have to pick.
+
+**A head kept elsewhere.** The head is the last receipt's hash, one line that stands for the whole chain up to it. Kept off the machine, it is what a rebuilt or cut chain cannot match.
+
+![The staged session's head is kept off the machine. The agent rebuilds the chain with receipt 4 rewritten to git push origin main; verify alone says VALID, verify --expect-head with the kept head says HEAD-MISMATCH.](docs/images/head.svg)
+
+The recommended setup posts the head to the receiver at every session end. By hand it is `python loxodonta.py head` after a session, kept anywhere the agent cannot reach, and `verify --expect-head` later. A head covers what was written before it was taken; receipts after it wait for the next one.
+
+**An anchor in Bitcoin.** A head is only as good as whoever keeps it, and if the one keeping it is the one rewriting, the machine's owner, it proves nothing to anyone else. An anchor sends the head's 32-byte digest to the public OpenTimestamps calendars at session end, and they commit it to Bitcoin a few hours later, at their pace and not ours. Nobody can issue that afterwards, so it holds against the owner too, and it carries a date.
+
+![The head's digest goes to the OpenTimestamps calendars at session end and into a Bitcoin block a few hours later. The proof is a file beside the chain on the agent's machine. The rebuilt chain, checked against it, reads ANCHOR-MISMATCH.](docs/images/anchor.svg)
+
+The proof that ties the chain to the block is a file beside the chain. The agent cannot forge it but can delete it, and for now nothing sends it off the machine ([#524](https://github.com/Acquiredl/loxodonta/issues/524)), so keep a copy elsewhere. A company's own timestamp authority (RFC 3161) can sit beside Bitcoin's clock, never instead of it ([docs/ANCHORING.md](docs/ANCHORING.md)).
+
+**A receiver on another machine.** `receiver.py` runs on a second machine and keeps what is sent to it: every receipt and every head at session end and, in the recommended setup, the harness's own record of each tool call.
+
+![Two machines. The hook on the agent's machine sends receipts and the head at session end to the receiver on another machine out of the agent's reach, and the harness sends its own events there. The receiver only ever adds.](docs/images/receiver.svg)
+
+It only ever adds, so a wiped machine's chain survives there as of the last send, and many machines can send to one receiver, though it has been run with one. Every command line leaves the machine with it, and whoever runs the receiver can read them ([docs/RECEIVER.md](docs/RECEIVER.md)).
+
+**A second record.** The chain answers one question: was the record changed? It cannot answer the other: did something happen that never reached it? That takes a second record, kept by something else, to count against. On Claude Code, the supervisor on the agent's machine counts the receipts against the harness's own transcript, tool by tool, but the agent can edit that transcript too, so a mismatch there is a reason to look. At the receiver it counts them against the events the harness sent there itself, out of the agent's reach, and that count holds.
+
+![At the receiver, the staged session counted tool by tool. Say receipt 5 was cut off the end before it was sent: Bash has one receipt for two calls, and the session reads ENDED-DEFICIT.](docs/images/second-record.svg)
+
+A session short of receipts reads `ENDED-DEFICIT`, tool by tool. One whose receipts arrived and whose events never did reads `SECOND-RECORD-ABSENT`.
+
+**Handing it to someone else.** `python supervisor.py package <session-id>` puts a session in a zip, and `python loxodonta.py verify-package <zip>` checks it on the other person's machine with one file, nothing running and nobody to ask ([docs/PACKAGE.md](docs/PACKAGE.md)). They can tell that what they hold is what you sent. A seal adds when it existed or who issued it; unsealed, a package rebuilt whole looks the same.
+
+### Every verdict in one place
+
+| `verify` says | What it means | What it needs |
+|---|---|---|
+| `VALID` | every receipt is what was written, as far as the chain alone can tell | the chain |
+| `BROKEN at entry N` | receipt N was edited, or one before it deleted or moved; receipts before N still hold | the chain |
+| `FILES-DIVERGED` | a file a receipt fingerprinted has changed on disk since | `--files`, on the machine that holds the files |
+| `HEAD-MISMATCH` | the chain was rebuilt, or cut short at the end, after the head was taken | a head kept elsewhere, given back with `--expect-head` |
+| `ANCHOR-MISMATCH` | the chain was rebuilt after its head went into Bitcoin | an anchor that has matured, and `--anchors` |
+
+Each has its own exit code for scripts and CI ([docs/SPEC.md](docs/SPEC.md#6-verification-algorithm)).
+
+### What it cannot know
+
+It does not stop anything. Say a page an agent reads turns it into free labour, running someone else's work on your machine and your tokens: it keeps doing that work. What changes is that every tool call it makes is on record, the commands and the addresses, though never what came back. Under the hook, an action line is what the harness reported, not what the agent claims; a line written by hand with `log` is only as true as whoever wrote it.
+
+It does not see what is not a tool call. Every call the harness fires a hook for gets a receipt, failed calls included. Configuration that runs when the harness starts, what happens inside an MCP server, a session with hooks switched off, a hook that failed to run: none of those leaves one, and whether a refused call does depends on the harness version ([#476](https://github.com/Acquiredl/loxodonta/issues/476)). The count against a second record is how a gap shows.
+
+What a verdict is worth depends on the setup. Set up as recommended, an edit, a deletion, a rebuild or a wipe of the record shows, and it can be dated by a clock nobody owns. That is what it is built to do, and it holds as far as anyone has tested it: a red-team round on 2026-10-05 attacked 29 of its promises, the integrity promises held, and what it found was fixed or sat on a limit [docs/CLAIMS.md](docs/CLAIMS.md) already stated. A route around it that nobody has found yet is the exception, and finding one is what the last section asks for. Who kept the head and who ran the receiver is process, yours, and no tool supplies it.
 
 ## Install
 
-Download what you need from the [releases page](https://github.com/Acquiredl/loxodonta/releases) into one folder, with `SHA256SUMS`, and check the files against the sums before running them:
+Python 3.9 or newer, and nothing else. The commands say `python`; on macOS and Linux it is often `python3`.
 
-- `loxodonta.py` records each session and judges the record. One install per machine covers every session that machine's harness runs from then on.
-- `supervisor.py` reads the record back: the dashboard, the scan, recall. It sits beside `loxodonta.py`.
-- `receiver.py` is optional: it keeps a copy on a second machine the agent cannot reach, and any number of machines can send to it. It has been run with one.
+### Let your agent do it
+
+Open Claude Code or Codex in an empty folder and paste:
 
 ```
-sha256sum -c --ignore-missing SHA256SUMS   # the sums published with the release; Windows: certutil -hashfile loxodonta.py SHA256, then compare
-python loxodonta.py --version   # prints the tool version, the format version (0.1) and the commit it was built from
+Install loxodonta from github.com/Acquiredl/loxodonta by following docs/START.md in that repo, one step at a time, showing me each command before you run it.
 ```
 
-Not on Claude Code or Codex? For a script, a scheduled job or an agent of your own, `run` wraps any command and writes its receipt after it exits:
+That is asking an agent to wire up its own recorder, which is fine for trying it out. The steps that make the record hold against the agent stay yours: check the files against the published sums yourself, since a sum your agent checked is only its word, and run the administrator install of the recommended setup from your own shell.
+
+### Just exploring
+
+Two files from the [releases page](https://github.com/Acquiredl/loxodonta/releases), side by side in one folder: `loxodonta.py` records each session and judges the record, and `supervisor.py` reads it back, with the dashboard, the scan and recall. They feed each other, so take both. Check them against `SHA256SUMS`, then wire the hook:
+
+```
+sha256sum -c --ignore-missing SHA256SUMS   # Windows: certutil -hashfile loxodonta.py SHA256, then compare
+python loxodonta.py install-hook            # Claude Code; then restart open sessions
+python loxodonta.py install-hook --codex    # Codex CLI; then trust the new hooks once with /hooks
+```
+
+`install-hook` adds entries to the harness's own settings file and nothing else, no service and no scheduled job, and `uninstall-hook` takes the same entries out. One install covers every session that harness runs on the machine from then on, and each leaves a chain under `~/.loxodonta/receipts/<project>-<hash>/`. To read them back:
+
+```
+python supervisor.py scan      # every chain, one verdict each
+python supervisor.py digest    # this project's recent history, the text a new session is handed at start
+python supervisor.py serve     # the dashboard, bound to 127.0.0.1 only
+```
+
+All of that runs on the agent's machine, so what it says is a reason to look, not proof.
+
+### The recommended setup
+
+The setup the promises in [docs/CLAIMS.md](docs/CLAIMS.md) are made for, and the one the red-team round attacked. It is for Claude Code, the one harness where every part of it exists; on Codex the head, the anchor and the receiver work, and there is no managed install or second record yet. Four things:
+
+1. A receiver on a machine the agent cannot reach. Copy `receiver.py` and `supervisor.py` there and run `python receiver.py serve`, which prints the URL to send to ([docs/RECEIVER.md](docs/RECEIVER.md)). I ran mine on a small rented server. A virtual machine or a container on the same computer counts only if the account the agent runs as cannot log in to it, open its files or reach its disk: no Docker access, no shared folder, no hand in the virtual machine's software.
+2. The hook, wired by an administrator: from an administrator shell, `python loxodonta.py install-hook --managed --profile full --remote URL`. The hook then lives in the harness's managed settings, which a run cannot switch off from its command line, and every session end sends the receipts and the head to the receiver and anchors the head, while the harness sends its own events there too.
+3. An agent without administrator rights. That one is about the account the agent runs as, and it is yours to set up: with those rights, the managed settings are as easy to rewrite as any other file.
+4. Somebody reading it. `python supervisor.py serve` on the agent's machine, and `python supervisor.py scan --receiver DIR` on the receiver's, where the count against the harness's events runs.
+
+Any other mix, the profiles one at a time and the raw flags, is in [docs/HOOK.md](docs/HOOK.md).
+
+### Not on Claude Code or Codex?
+
+The OpenAI Agents SDK has no hooks; a small adapter inside the agent's own process hands its spans to the recorder, so there the recorder is not outside the agent's reach ([docs/HOOK.md](docs/HOOK.md#other-harnesses)). For a script, a scheduled job or an agent of your own, `run` wraps any command and writes its receipt after it exits:
 
 <!-- pin:quickstart-tryit -->
 
@@ -93,25 +181,6 @@ python loxodonta.py run --actor agent -- python --version   # the receipt is wri
 python loxodonta.py verify
 python loxodonta.py head   # the chain head; keep a copy where the agent cannot reach it
 ```
-
-## Record real sessions
-
-```
-python loxodonta.py install-hook            # Claude Code; then restart open sessions
-python loxodonta.py install-hook --codex    # Codex CLI; then trust the new hooks once with /hooks
-```
-
-`install-hook` adds entries to the harness's own settings file and nothing else: no service, no scheduled job. The harness then runs the recorder after each tool call that runs, completed or failed, and `uninstall-hook` removes the same entries. The OpenAI Agents SDK has no hooks; a small adapter inside the agent's own process hands its spans to the same recorder, so there the recorder is not outside the agent's reach ([docs/HOOK.md](docs/HOOK.md#other-harnesses)).
-
-Every session leaves a chain under `~/.loxodonta/receipts/<project>-<hash>/`. To read it back:
-
-```
-python supervisor.py scan      # every chain, one verdict each
-python supervisor.py digest    # this project's recent history, the text a new session is handed at start
-python supervisor.py serve     # the dashboard, bound to 127.0.0.1 only
-```
-
-The supervisor reads the store on the same machine the agent works on, so what it says is a reason to look, never proof. [docs/TOPOLOGY.md](docs/TOPOLOGY.md) draws where each file runs and what a verdict is worth there. [docs/CLAIMS.md](docs/CLAIMS.md) says what the record promises, the setup to run when it has to hold against the agent, and what each part left out opens.
 
 ## Where it fits
 
@@ -128,46 +197,6 @@ python supervisor.py drill --root docs/demo --log docs/demo/bad-day-session.json
 
 **Agents on real repositories.** Git records what was committed. Receipts record every tool call, including the reads, the fetches and the commands that never led to a commit.
 
-## What it catches, and what it does not
-
-Two questions, kept apart. Was the record changed? The chain answers that. Did something happen that never reached the record? Only a second record can answer that: on the agent's machine the supervisor counts against the harness's transcript, which is a reason to look; at the receiver it counts against the harness's own events, and that reading holds.
-
-What `verify` prints, and what each line means:
-
-| `verify` says | What happened | What it takes |
-|---|---|---|
-| `BROKEN at entry N` | receipt N was edited, or a receipt before it was deleted or moved. N is the first receipt that no longer matches, and everything before it still holds | the chain alone |
-| `FILES-DIVERGED` | a file the agent touched has changed since its receipt fingerprinted it | `verify --files`, on the machine that holds the files |
-| `HEAD-MISMATCH` | the chain is not the one recorded: rebuilt from scratch, or cut short at the end | a head kept off the machine, given back with `verify --expect-head` |
-| `ANCHOR-MISMATCH` | the chain was rebuilt after its head was committed to Bitcoin | an anchor that has matured |
-| `VALID` | every receipt is what was written, as far as the chain alone can tell | |
-
-What the supervisor adds, counting against a second record: `ENDED-DEFICIT` names a session whose tool calls outnumber its receipts, tool by tool; at the receiver, `SECOND-RECORD-ABSENT` names a session whose receipts arrived and whose events never did.
-
-What none of it can know, said once:
-
-- **Whether the agent told the truth.** A receipt is what the hook was handed. A false action line, once written, stays false and intact.
-- **Whether every event has a receipt.** Coverage is the tool calls the harness fires a hook for; a denied or cancelled call fires none ([docs/HOOK.md](docs/HOOK.md)). The count against a second record is how a gap shows.
-- **What a verdict is worth as evidence.** Under the full setup the two promises, a change shows and a date holds, hold against the writer. Who kept the head, who ran the receiver and how a package changed hands is process, no tool supplies it, and that is where a verdict's weight is decided.
-
-Every verdict has its own exit code for scripts and CI ([docs/SPEC.md](docs/SPEC.md#6-verification-algorithm)).
-
-## How much you need
-
-Each rung puts one more piece of evidence out of the agent's reach. Start where your worry is.
-
-| If you want | Run | What it adds | What it does not |
-|---|---|---|---|
-| the order of events, and to know when the file was edited | `install-hook` | every tool call receipted; an edit, a deletion or a reorder named by `verify` | a chain rebuilt from scratch reads `VALID` |
-| to catch a chain rebuilt from scratch | `head` after a session, kept where the agent cannot reach, then `verify --expect-head` later; or `install-hook --publish-head URL` to post it at every session end | `HEAD-MISMATCH` on a rebuilt or cut chain | a head is a habit, not a one-time setup |
-| a date nobody issued | `install-hook --profile timestamped` | a 32-byte digest goes to the public OpenTimestamps calendars at each session end, and they commit it to Bitcoin ([docs/ANCHORING.md](docs/ANCHORING.md)) | the proof matures hours later, at the calendars' pace and not ours; a rebuild inside that window is caught when it does |
-| a copy the agent cannot wipe | `install-hook --profile full --remote URL`, with `python receiver.py serve` on a machine the agent cannot reach ([docs/RECEIVER.md](docs/RECEIVER.md)) | heads and receipts leave at session end; the receiver only adds; a wiped log survives there as of the last send | every entry leaves, command lines included, and the receiver's own operator can read them |
-| a hook the agent cannot switch off | `install-hook --managed`, from an administrator shell | the hook lives in the harness's managed settings, above anything a run passes on its command line (measured, [ADR-0040](adrs/0040-the-hook-wired-where-only-an-administrator-writes.md)) | an agent that runs as administrator |
-| a second record the agent cannot reach | the two above together: at `full`, the managed install also pins the harness's own tool-call events to the receiver | at the receiver, a tool call with no receipt shows, tool by tool, and a session whose events never arrived is named | a machine that sends nothing is invisible there; the receiver shows when it last heard from each |
-| to hand the record to someone else | `supervisor package <session-id>`, then `loxodonta verify-package <zip>` on their machine ([docs/PACKAGE.md](docs/PACKAGE.md)) | they can check that what they hold is what you sent, unaltered since; a seal adds when it existed (an anchor) or who issued it (a signature) | unsealed, a package cannot be told apart from one rebuilt whole |
-
-Nobody is attacking this recorder today. The layers exist because a security tool has to be hard to defeat before it protects anything, and the order above is close to the order they had to be built in. Profiles are chosen at install time; the raw flags are in [docs/HOOK.md](docs/HOOK.md). An RFC 3161 timestamp, a dated receipt from a timestamp authority, a company's clock beside Bitcoin's and never instead of it, is in [docs/ANCHORING.md](docs/ANCHORING.md) for operators who need one.
-
 ## Why not just…
 
 **…the vendor's own logs and safeguards?** They are the vendor's, cover the vendor's agent, and you take the vendor's word for them. A loxodonta chain is checked by anyone, with one standard-library file, whichever agent wrote it.
@@ -182,14 +211,17 @@ Nobody is attacking this recorder today. The layers exist because a security too
 
 ## Try it, and try to break it
 
-Every number in these docs came from one store, mine, and one other machine. What the project needs now is not a feature but people who run it and people who try to defeat it. Wire it for a week and send what your machine saw: `supervisor export --send` publishes a redacted summary as a secret gist and opens an issue, and [docs/START.md](docs/START.md) has the five steps. Then try to defeat it. `drill` rehearses four tampers on a sandbox copy, and that is only a starting point. [docs/CLAIMS.md](docs/CLAIMS.md) lists what the record promises, and the routes the drill never tried are the ones worth finding. A hole in the threat model is the most useful issue this repository can receive.
+Everything measured so far came from my machines: my sessions, my store, and one receiver I set up myself. That is the gap, and only other people, other setups and other workloads can close it.
 
-## How it was built
+Use it. Wire it into your own work for a week and see whether it adds anything, for security or not. One angle I have only started on: fresh agents quizzed on a repository's real history did a little better with the record than with git alone ([docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)), and there are likely uses I have not thought of. To share what your machine saw, `python supervisor.py export --send` publishes a redacted summary as a secret gist and opens an issue ([docs/START.md](docs/START.md)).
 
-I directed, an AI coding agent wrote, and neither of us was trusted: the checks were. Every plan was grilled before it was built, and what went wrong was written down so the next session would not repeat it. The vocabulary was settled first and a script enforces it ([docs/GLOSSARY.md](docs/GLOSSARY.md), `tools/house_check.py`). Every decision that is hard to reverse is an ADR with its prior art ([docs/GROUNDING.md](docs/GROUNDING.md)), and a changed mind is an addendum, never a rewrite. Tests run the public CLI only, and the README's own command blocks run in the suite. Reviews are kept apart: one read-only reviewer per pull request for the code, readers from outside for the claims, and red-team rounds that attack what the docs promise and build nothing. A second verifier was written from the spec by a session that never saw the code ([cleanroom/](cleanroom/README.md)). What the agent could not supply was whether any of it is true; that came from running it ([docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)). [docs/METHOD.md](docs/METHOD.md) is the long version, with each layer and the finding that forced it, and what went wrong. [docs/HISTORY.md](docs/HISTORY.md#the-short-version) is the timeline, one line per chapter.
+Break it, any way you can. `drill` rehearses four tampers on a sandbox copy, and that is only a start: strip the hooks, cut what is being sent, go after the receiver, find the indirect route nobody wrote down. [docs/CLAIMS.md](docs/CLAIMS.md) lists what the record promises and where it already says it stops, and a way around a promise is the most useful issue this repository can get.
+
+And tell me what you think. Does a receipt hold the right things, or too much, or too little? Does tying the recommended setup to Bitcoin through OpenTimestamps bother you, and would you rather have a clock with no money behind it? Criticism of how it is built is welcome too: the goal is a tool that works, and to keep learning while making it better.
 
 ## Read more
 
+- [docs/METHOD.md](docs/METHOD.md): how it was built and why: one person directing, an AI coding agent writing, and nobody trusted but the checks. [docs/HISTORY.md](docs/HISTORY.md#the-short-version) is the timeline, one line per chapter.
 - [docs/](docs/README.md): every page, sorted into using it, what it guarantees, and how it was decided.
 - [docs/SPEC.md](docs/SPEC.md): the receipt format in three parts, each with its own version: the chain (frozen at 0.1), the sidecar rows, and the package. Written so an independent implementation can reproduce every hash. [ADR-0001](adrs/0001-hash-chain-not-signatures.md): why a hash chain and no keys.
 - [docs/MCP.md](docs/MCP.md) and [docs/METRICS.md](docs/METRICS.md): recall as a read-only MCP server, and the counts `serve` answers for the monitoring you already run.
