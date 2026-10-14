@@ -154,6 +154,56 @@ as checked when it was not, and the correction became a rule, that a
 load-bearing claim from a subagent is read at its source before it is
 repeated.
 
+## The layers, and what forced each
+
+Each layer exists because something showed the one before it was not
+enough. The short form, newest at the bottom, with the finding that forced
+it; the ADRs hold the long form.
+
+1. **The chain** (ADR-0001). A log an agent can edit is worth what the
+   agent says it is. Each receipt carries the hash of the one before, so
+   an edit, a deletion or a reorder shows and `verify` names the entry.
+   Left open: a chain rebuilt from scratch is a valid chain.
+2. **The head, kept off the machine** (ADR-0002, ADR-0025). The rebuilt
+   chain. `head` prints the one line only the recorded history produces;
+   kept out of the agent's reach, it makes a rebuild read `HEAD-MISMATCH`.
+   Forced by the threat model itself, before any attacker existed.
+3. **The anchor** (ADR-0003). A head still needs a witness with a clock
+   nobody controls. A 32-byte digest goes to the OpenTimestamps calendars,
+   which commit it to Bitcoin, so the chain's existence by a date rests on
+   nobody's word. Left open: the hours until a proof matures.
+4. **The hook** (ADR-0002, Stage C). Asking an agent to log itself is
+   asking the adversary. The harness runs the recorder after each tool
+   call, so the agent is what is recorded, not what decides. Left open: a
+   call the harness fires no hook for.
+5. **The witness** (ADR-0016). Integrity says nothing about omission. The
+   supervisor counts a session's tool calls against the harness's
+   transcript and names the deficit. Forced by the first weeks of real
+   sessions, which the chain alone could not judge. Left open: the
+   transcript sits on the agent's machine.
+6. **The store, then the receiver** (ADR-0011, ADR-0031). Chains in each
+   project's folder are the agent's to find, so one machine-wide store
+   came first; then a remote that can only add, on a machine the agent
+   cannot reach, after two outside reviews converged on the same gap,
+   evidence that travels.
+7. **The package and the verifier** (ADR-0026, ADR-0035). A recipient has
+   to judge the record with nothing running and nobody to ask: one zip,
+   one file, one verdict. The verifier is copied out of the recorder and
+   never imported by it, after an experiment showed a module's bytecode
+   cache can be swapped with its checksum unmoved.
+8. **The managed install** (ADR-0040). One flag on the command line
+   switched the hook off and the chain went quiet (#259). The hook now
+   lives where only an administrator writes, measured against that flag
+   and against `--bare`.
+9. **The second record, out of reach** (ADR-0041). The red-team round
+   showed completeness fell to a writer who edits one or two files on its
+   own machine (#473). The harness's own tool-call events now go to the
+   receiver by a second door, and the reading that counts runs there.
+10. **The clean-room verifier** (#493). The spec claimed an independent
+    implementation reproduces every hash, and nothing had tested the
+    claim. A session that never saw the code wrote one from the spec: 34
+    of 35 on the first run, the miss an ambiguity in the spec.
+
 ## What went wrong
 
 The README has been re-led four times in six weeks, because the author's
