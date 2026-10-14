@@ -13,6 +13,11 @@ from the CLI:
 python supervisor.py drill --root <your-repos-folder> --log <path-to-chain>
 ```
 
+The hook's chains live in the store, so for one of those the root is the
+store itself: `--root ~/.loxodonta/receipts --log
+<project-slug>/receipts-<session>.jsonl`. The *drill* button fills both in
+for you.
+
 ## The automated battery
 
 The drill copies one chain into the sandbox and runs the four-way tamper
@@ -25,8 +30,11 @@ battery, verifying each copy through the public loxodonta CLI:
 | reorder | swaps two entries | `BROKEN` |
 | regenerate | rebuilds a fresh, internally-valid chain | `HEAD-MISMATCH` against the sandbox's known head |
 
-Exit 0 means every alarm fired. Anything else means detection is broken —
-do not trust the band until you know why.
+Exit 0 means every alarm fired. A drill that refuses to start, because the
+chain cannot be read (exit 66), the sandbox cannot be made (exit 73) or the
+chain is too short to play with (exit 1), says `error:` on stderr and
+rehearses nothing. Any other exit means detection is broken — do not trust
+the band until you know why.
 
 ## The manual checklist
 
