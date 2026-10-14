@@ -22,6 +22,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/HISTORY.md` gains eight chapters, 2026-10-01 to 2026-10-13, v0.10.3 to v0.15.1, and their rows in the timeline (#517).
 - The README after the author's read-through: the crux on the first screen, one recording, a drawn flow and a drawn chain, the verdict table word-first, one block of caveats, the ladder by need, simpler why-nots, a call to test (#520).
 - `docs/METHOD.md` lists the layers with the finding that forced each (#520).
+- Five docs pages checked line by line against the tree and brought current, facts only: START's install words and the managed door, FIRE-DRILL's refusals and the store path, MCP's unlistable drawer and escaping, ANCHORING's verdict lines and the session-end order, EXPERIMENTS' first-run findings marked resolved where the tool has since moved (#521).
 
 ## [0.15.1] - 2026-10-12
 
