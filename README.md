@@ -197,17 +197,7 @@ python supervisor.py drill --root docs/demo --log docs/demo/bad-day-session.json
 
 **Agents on real repositories.** Git records what was committed. Receipts record every tool call, including the reads, the fetches and the commands that never led to a commit.
 
-## Why not just…
-
-**…the vendor's own logs and safeguards?** They are the vendor's, cover the vendor's agent, and you take the vendor's word for them. A loxodonta chain is checked by anyone, with one standard-library file, whichever agent wrote it.
-
-**…git history?** Git records what was committed, and the agent can rewrite git history too.
-
-**…shipping logs to another machine?** Yes, do that; the `full` profile does. What the chain adds is that the copy can be checked for edits by anyone, without trusting the machine it sits on.
-
-**…a SIEM, EDR or tracing tool?** Those collect and correlate what happened; loxodonta does not try to. It is one narrow source beside them, built so that an agent rewriting its own record gets caught. A tool that reads many chains for the marks a known attack leaves could sit on top; none exists yet, and [docs/CLAIMS.md](docs/CLAIMS.md) says what such a tool may rely on.
-
-**…a public transparency log?** Those record signed artifacts and need an identity to sign with. Here nothing is signed by the agent, and at the `timestamped` profile only a 32-byte digest leaves the machine.
+**Beside the vendor's own logs.** Those are the vendor's, cover the vendor's agent, and you take the vendor's word for them. A loxodonta chain is checked by anyone, with one standard-library file, whichever agent wrote it.
 
 ## Try it, and try to break it
 

@@ -24,6 +24,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/METHOD.md` lists the layers with the finding that forced each (#520).
 - The README after the author's second read-through: How it works draws each layer on the staged session, Install leads with an agent and the recommended setup, and How it was built moves to `docs/METHOD.md`, which opens on why (#525).
 - `docs/START.md` names the two steps that stay the operator's when an agent installs (#525).
+- The README drops *Why not just…*, its answers now in How it works and one line in Where it fits, and `house_check.py --front-door` no longer requires the heading (#525).
 - Five docs pages checked line by line against the tree and brought current, facts only: START, FIRE-DRILL, MCP, ANCHORING and EXPERIMENTS, with the first field run's findings marked resolved where the tool has since moved (#521).
 
 ## [0.15.1] - 2026-10-12

@@ -837,17 +837,6 @@ class FrontDoorTest(Fixture):
         self.assertIn("README.md: first-image: ", late.stdout)
         self.assertEqual(tag.returncode, 0, tag.stdout + tag.stderr)
 
-    def test_a_readme_with_no_why_not_heading_fails(self):
-        # The words in prose or in a code block are not a heading.
-        self.write("README.md", COMPLIANT_README.replace(
-            "## Why not a plain log", "Why not a plain log?\n\n```\n# Why not\n```"))
-
-        result = self.front_door()
-
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(self.findings(result),
-                         ['README.md: why-not: no heading starts "Why not"'])
-
     # 2. Pictures.
 
     def test_a_picture_no_tracked_page_shows_fails(self):
