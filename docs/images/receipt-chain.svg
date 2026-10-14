@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 270" width="1000" height="270" role="img" aria-label="Three receipts from the staged session, drawn as linked boxes. Each holds its number, time, actor, action, the files it fingerprinted, the previous receipt's hash and its own. The prev of each receipt is the entry_hash of the one before it.">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; fill: #111827; }
+    .key { fill: #4b5563; }
+    .link { fill: #0f766e; font-weight: bold; }
+    .cap { fill: #4b5563; }
+    .box { fill: none; stroke: #0f766e; stroke-width: 2; }
+    .arrow { stroke: #0f766e; stroke-width: 2; fill: none; marker-end: url(#head); }
+    #head path { fill: #0f766e; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e5e7eb; }
+      .key, .cap { fill: #9ca3af; }
+      .link { fill: #5eead4; }
+      .box, .arrow { stroke: #5eead4; }
+      #head path { fill: #5eead4; }
+    }
+  </style>
+  <defs>
+    <marker id="head" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- receipt 2 -->
+  <rect class="box" x="20" y="20" width="290" height="170" rx="6"/>
+  <text x="34" y="44"><tspan class="key">n:          </tspan>2</text>
+  <text x="34" y="64"><tspan class="key">ts:         </tspan>2026-08-27T10:00:18Z</text>
+  <text x="34" y="84"><tspan class="key">actor:      </tspan>claude-code</text>
+  <text x="34" y="104"><tspan class="key">action:     </tspan>WebFetch: https://sshfixes…</text>
+  <text x="34" y="124"><tspan class="key">files:      </tspan>[]</text>
+  <text x="34" y="150"><tspan class="key">prev:       </tspan><tspan class="link">01ee27e1bfd9…</tspan></text>
+  <text x="34" y="174"><tspan class="key">entry_hash: </tspan><tspan class="link">0bd9306c8741…</tspan></text>
+
+  <!-- receipt 3 -->
+  <rect class="box" x="355" y="20" width="290" height="170" rx="6"/>
+  <text x="369" y="44"><tspan class="key">n:          </tspan>3</text>
+  <text x="369" y="64"><tspan class="key">ts:         </tspan>2026-08-27T10:00:43Z</text>
+  <text x="369" y="84"><tspan class="key">actor:      </tspan>claude-code</text>
+  <text x="369" y="104"><tspan class="key">action:     </tspan>Read: .env</text>
+  <text x="369" y="124"><tspan class="key">files:      </tspan>.env 49721109cb77…</text>
+  <text x="369" y="150"><tspan class="key">prev:       </tspan><tspan class="link">0bd9306c8741…</tspan></text>
+  <text x="369" y="174"><tspan class="key">entry_hash: </tspan><tspan class="link">43cf4177e3a2…</tspan></text>
+
+  <!-- receipt 4 -->
+  <rect class="box" x="690" y="20" width="290" height="170" rx="6"/>
+  <text x="704" y="44"><tspan class="key">n:          </tspan>4</text>
+  <text x="704" y="64"><tspan class="key">ts:         </tspan>2026-08-27T10:00:57Z</text>
+  <text x="704" y="84"><tspan class="key">actor:      </tspan>claude-code</text>
+  <text x="704" y="104"><tspan class="key">action:     </tspan>Bash: tar czf - ~/.ssh …</text>
+  <text x="704" y="124"><tspan class="key">files:      </tspan>[]</text>
+  <text x="704" y="150"><tspan class="key">prev:       </tspan><tspan class="link">43cf4177e3a2…</tspan></text>
+  <text x="704" y="174"><tspan class="key">entry_hash: </tspan><tspan class="link">c156fbd964af…</tspan></text>
+
+  <!-- entry_hash of 2 feeds prev of 3; entry_hash of 3 feeds prev of 4 -->
+  <path class="arrow" d="M310,170 C330,170 335,146 355,146"/>
+  <path class="arrow" d="M645,170 C665,170 670,146 690,146"/>
+
+  <text class="cap" x="500" y="222" text-anchor="middle">Each receipt's prev is the entry_hash of the one before it, and entry_hash covers everything in the receipt, prev included.</text>
+  <text class="cap" x="500" y="244" text-anchor="middle">Change one byte anywhere and every hash after it stops matching; verify names the first receipt that no longer does.</text>
+</svg>
