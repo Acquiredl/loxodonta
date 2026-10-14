@@ -11,7 +11,7 @@ A security layer has to be hard to defeat before it can protect anything, and an
 
 It is for anyone who lets Claude Code, Codex CLI or the OpenAI Agents SDK loose on real code, and for whoever has to believe the record afterwards. Python 3.9 or newer, standard library only: download from the [releases page](https://github.com/Acquiredl/loxodonta/releases) and run `python loxodonta.py install-hook`.
 
-![A terminal recording of the staged session: report prints its six receipts, a web search, a page fetched, .env read and fingerprinted, the three files sent off the machine, the recorder removed; then verify says VALID.](docs/images/bad-day-demo.gif)
+![A terminal recording of the staged session: report prints its six receipts, verify says VALID, one word of entry 3 is rewritten with sed, and verify says BROKEN at entry 3.](docs/images/bad-day-demo.gif)
 
 ## The problem
 
