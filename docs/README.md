@@ -27,7 +27,7 @@ Every page in this folder, sorted by what you came for: running loxodonta, check
 
 - [DIRECTION.md](DIRECTION.md): where the project is going, who it answers to first, and what it declines to build.
 - [GROUNDING.md](GROUNDING.md): the published research and standards each design choice stands on, and where nothing was found.
-- [METHOD.md](METHOD.md): how it was built: one person directing, an agent writing, and the checks, reviews and measurements that stand between the two and the claims.
+- [METHOD.md](METHOD.md): why it was built, and how: one person directing, an agent writing, and the checks, reviews and measurements that stand between the two and the claims.
 - [HISTORY.md](HISTORY.md): the stages built before the first release, with dates, issue and pull request numbers, and the deciding ADRs.
 - [EXPERIMENTS.md](EXPERIMENTS.md): what was actually tested behind the README's claims about agents using the chain, with protocol and numbers.
 - [TOUR.md](TOUR.md): a guided reading of `loxodonta.py`, top to bottom, explaining what the code does and why.

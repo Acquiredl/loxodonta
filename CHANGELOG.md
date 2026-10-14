@@ -22,6 +22,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/HISTORY.md` gains eight chapters, 2026-10-01 to 2026-10-13, v0.10.3 to v0.15.1, and their rows in the timeline (#517).
 - The README after the author's read-through: the crux on the first screen, one recording, a drawn flow and a drawn chain, the verdict table word-first, one block of caveats, the ladder by need, simpler why-nots, a call to test (#520).
 - `docs/METHOD.md` lists the layers with the finding that forced each (#520).
+- The README after the author's second read-through: How it works draws each layer on the staged session, Install leads with an agent and the recommended setup, and How it was built moves to `docs/METHOD.md`, which opens on why.
+- `docs/START.md` names the two steps that stay the operator's when an agent installs.
 - Five docs pages checked line by line against the tree and brought current, facts only: START, FIRE-DRILL, MCP, ANCHORING and EXPERIMENTS, with the first field run's findings marked resolved where the tool has since moved (#521).
 
 ## [0.15.1] - 2026-10-12
