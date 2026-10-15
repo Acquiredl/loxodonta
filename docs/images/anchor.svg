@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 360" width="1000" height="360" role="img" aria-label="The head's 32-byte digest goes to the public OpenTimestamps calendars at session end, and hours later into a Bitcoin block. The proof that links the chain to that block is a file beside the chain on the agent's machine. The rebuilt chain, checked against the proof, reads ANCHOR-MISMATCH.">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; fill: #111827; white-space: pre; }
+    .title { font-size: 14px; }
+    .key, .cap { fill: #4b5563; }
+    .link { fill: #0f766e; font-weight: bold; }
+    .bad { fill: #b91c1c; font-weight: bold; }
+    .box { fill: none; stroke: #0f766e; stroke-width: 2; }
+    .dashed { fill: none; stroke: #0f766e; stroke-width: 2; stroke-dasharray: 6 4; }
+    .arrow { stroke: #0f766e; stroke-width: 2; fill: none; marker-end: url(#head); }
+    #head path { fill: #0f766e; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e5e7eb; }
+      .key, .cap { fill: #9ca3af; }
+      .link { fill: #5eead4; }
+      .bad { fill: #fca5a5; }
+      .box, .dashed, .arrow { stroke: #5eead4; }
+      #head path { fill: #5eead4; }
+    }
+  </style>
+  <defs>
+    <marker id="head" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- the head leaves as a digest, and comes back as a date -->
+  <rect class="box" x="20" y="20" width="250" height="80" rx="6"/>
+  <text class="title" x="34" y="46">the head</text>
+  <text x="34" y="70"><tspan class="key">entry_hash of 5</tspan></text>
+  <text x="34" y="90"><tspan class="link">24342059…</tspan></text>
+
+  <text class="key" x="315" y="50" text-anchor="middle">32 bytes</text>
+  <text class="key" x="315" y="64" text-anchor="middle">session end</text>
+  <path class="arrow" d="M274,76 L356,76"/>
+
+  <rect class="box" x="360" y="20" width="290" height="80" rx="6"/>
+  <text class="title" x="374" y="46">OpenTimestamps calendars</text>
+  <text x="374" y="70"><tspan class="key">public servers that gather</tspan></text>
+  <text x="374" y="90"><tspan class="key">many digests into one</tspan></text>
+
+  <text class="key" x="695" y="50" text-anchor="middle">a few</text>
+  <text class="key" x="695" y="64" text-anchor="middle">hours</text>
+  <path class="arrow" d="M654,76 L736,76"/>
+
+  <rect class="box" x="740" y="20" width="240" height="80" rx="6"/>
+  <text class="title" x="754" y="46">a Bitcoin block</text>
+  <text x="754" y="70"><tspan class="key">a date no one issued</tspan></text>
+  <text x="754" y="90"><tspan class="key">and no one can move</tspan></text>
+
+  <!-- the proof is a file, and it sits where the agent works -->
+  <rect class="dashed" x="20" y="130" width="630" height="70" rx="6"/>
+  <text class="title" x="34" y="156">the proof: a file beside the chain, on the agent's machine</text>
+  <text x="34" y="182"><tspan class="key">it cannot be forged, but it can be deleted: keep a copy off the machine</tspan></text>
+
+  <!-- the rebuilt chain against the proof -->
+  <rect class="box" x="20" y="226" width="420" height="56" rx="6"/>
+  <text x="34" y="250"><tspan class="key">the rebuilt chain, head </tspan>0a403e94…</text>
+  <text x="34" y="270"><tspan class="key">no receipt in it has the hash 24342059…</tspan></text>
+
+  <path class="arrow" d="M444,254 L576,254"/>
+
+  <rect class="box" x="580" y="226" width="400" height="56" rx="6"/>
+  <text x="594" y="259"><tspan class="key">verify --anchors       </tspan><tspan class="bad">ANCHOR-MISMATCH</tspan></text>
+
+  <text class="cap" x="500" y="318" text-anchor="middle">A head is only as good as whoever keeps it. An anchor asks you to trust nobody, so it holds against</text>
+  <text class="cap" x="500" y="340" text-anchor="middle">the machine's owner as well as the agent, and it carries a date. The cost: it is ready hours later.</text>
+</svg>

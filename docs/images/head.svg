@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 340" width="1000" height="340" role="img" aria-label="The staged session's head, the entry_hash of receipt 5, is kept off the machine. The agent rebuilds the chain with receipt 4 rewritten to git push origin main and every hash after it recomputed. verify alone says VALID; verify --expect-head with the kept head says HEAD-MISMATCH.">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; fill: #111827; white-space: pre; }
+    .title { font-size: 14px; }
+    .key, .cap { fill: #4b5563; }
+    .link { fill: #0f766e; font-weight: bold; }
+    .bad { fill: #b91c1c; font-weight: bold; }
+    .box { fill: none; stroke: #0f766e; stroke-width: 2; }
+    .arrow { stroke: #0f766e; stroke-width: 2; fill: none; marker-end: url(#head); }
+    #head path { fill: #0f766e; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e5e7eb; }
+      .key, .cap { fill: #9ca3af; }
+      .link { fill: #5eead4; }
+      .bad { fill: #fca5a5; }
+      .box, .arrow { stroke: #5eead4; }
+      #head path { fill: #5eead4; }
+    }
+  </style>
+  <defs>
+    <marker id="head" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- the chain as recorded, and its head kept elsewhere -->
+  <rect class="box" x="20" y="20" width="420" height="96" rx="6"/>
+  <text class="title" x="34" y="46">the chain, on the agent's machine</text>
+  <text x="34" y="70"><tspan class="key">receipts 0 to 5, the staged session</tspan></text>
+  <text x="34" y="96"><tspan class="key">head = entry_hash of 5: </tspan><tspan class="link">24342059…</tspan></text>
+
+  <text class="key" x="510" y="58" text-anchor="middle">at session end</text>
+  <path class="arrow" d="M444,68 L576,68"/>
+
+  <rect class="box" x="580" y="20" width="400" height="96" rx="6"/>
+  <text class="title" x="594" y="46">kept where the agent cannot reach</text>
+  <text x="594" y="70"><tspan class="key">the receiver, or your own notes</tspan></text>
+  <text x="594" y="96"><tspan class="key">head: </tspan><tspan class="link">24342059…</tspan></text>
+
+  <!-- the rebuilt chain, and what verify says of it -->
+  <rect class="box" x="20" y="150" width="420" height="120" rx="6"/>
+  <text class="title" x="34" y="176">the same chain, rebuilt by the agent</text>
+  <text x="34" y="200"><tspan class="key">4  </tspan>Bash: git push origin main</text>
+  <text x="34" y="222"><tspan class="key">   (it was the upload of .env)</tspan></text>
+  <text x="34" y="246"><tspan class="key">every hash after it recomputed; head: </tspan>0a403e94…</text>
+
+  <path class="arrow" d="M444,186 L576,175"/>
+  <path class="arrow" d="M444,236 L576,247"/>
+
+  <rect class="box" x="580" y="150" width="400" height="50" rx="6"/>
+  <text x="594" y="180"><tspan class="key">verify                </tspan><tspan class="link">VALID</tspan></text>
+
+  <rect class="box" x="580" y="220" width="400" height="50" rx="6"/>
+  <text x="594" y="250"><tspan class="key">verify --expect-head 24342059…  </tspan><tspan class="bad">HEAD-MISMATCH</tspan></text>
+
+  <text class="cap" x="500" y="304" text-anchor="middle">With no keys, a rebuilt chain checks out on its own. It cannot match a head kept out of its reach.</text>
+  <text class="cap" x="500" y="326" text-anchor="middle">A head covers the chain up to the moment it was taken; what comes after waits for the next one.</text>
+</svg>

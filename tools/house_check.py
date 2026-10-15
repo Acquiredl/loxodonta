@@ -442,7 +442,6 @@ def excerpt(line, match):
 FIRST_PARAGRAPH_WORDS = 60       # the first prose paragraph, at most
 FIRST_IMAGE_WITHIN = 15          # a picture within the README's first lines,
 WORDMARK = "docs/images/wordmark.svg"  # and the wordmark is not that picture
-WHY_NOT = "Why not"              # a README heading starts with these words
 # 2. Pictures: every file here is shown by some tracked Markdown file,
 #    except the sources a picture is made from (a VHS `.tape` script).
 IMAGES = "docs/images/"
@@ -570,12 +569,6 @@ def readme_findings(text):
                       f"no image but the wordmark in the first "
                       f"{FIRST_IMAGE_WITHIN} lines (a badge is served from "
                       f"elsewhere and does not count)"))
-    headings = [line for line, fenced in unfenced(lines)
-                if not fenced and re.match(r"#{1,6}\s+" + re.escape(WHY_NOT) + r"\b",
-                                           line, re.IGNORECASE)]
-    if not headings:
-        found.append(("README.md", "why-not",
-                      f'no heading starts "{WHY_NOT}"'))
     return found
 
 

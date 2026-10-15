@@ -10,6 +10,50 @@ judge, and the open door at the end is real.
 The short version: one person directs, an agent writes, and neither of
 them is trusted. The checks are.
 
+## Why I built it
+
+I come from about 10 years in tech: tech support first, then networking,
+cloud and security, physical work like cabling, wiring and PCs, and
+enterprise migrations of databases, software versions and Windows. I had
+done penetration testing, so I knew how some of today's security settings
+get defeated, but I had never been the one putting them in place. So the
+goal was practice: a security tool that defends rather than attacks. I knew
+I could pick up the defensive side quickly once I had my hands on it, I
+just did not have it yet.
+
+The idea came out of a harness I built for myself. Along the way it grew
+gates that check whether what goes through an agent is still what I asked
+for, to catch drift. I took that one piece and went deep on it, and left
+the rest of the harness alone. The first premise was a log that is
+truthful and can show it is truthful, and from there it turned into
+building a tool that could actually do that.
+
+My blind spot was the engineering side, the programming. I understand the
+main security threats and I can follow the model of what was built here,
+because every decision was mine: I reviewed what the agent suggested,
+asked for the pros and cons of each option, and over time we settled into
+always testing. Thin slices, quick demos, try both and keep the better
+one. The agent fills the coding gap with good enough code, and the checks
+on this page are what make good enough hold.
+
+Some choices came straight from it being a security tool. A receipt is
+plain JSON text: nothing to decrypt, no proprietary format, no protocol to
+learn first, so anyone can open a chain and read it. No dependencies, four
+files you can read, easy to carry and easy to audit, because people need
+to be able to test a tool like this and see inside it. Keeping the code
+readable was a goal from the start too, and it got harder as the files
+grew, so it became one goal among others.
+
+At the start there was a lot of hand-holding from the agent; I knew I was
+an amateur at the engineering questions. With time I came to understand
+the reasoning behind most of the options, and now I keep adding to it to
+make it as strong as I can. The first motivation was fun, then it became a
+challenge, and a proof to myself that I could build something worth
+reading. If someone uses it as a security tool, takes something from the
+method, or just sees that you can build this way, that is a good outcome.
+
+The rest of this page calls me the author.
+
 ## Who does what
 
 The author decides what to build, in what order, and whether what came

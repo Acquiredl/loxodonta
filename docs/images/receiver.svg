@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 330" width="1000" height="330" role="img" aria-label="Two machines. On the agent's machine, the hook writes the chain. At session end the chain's receipts and its head go to the receiver on another machine the agent cannot reach. The harness also sends its own record of each tool call there. The receiver only adds.">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; fill: #111827; white-space: pre; }
+    .title { font-size: 14px; }
+    .key, .cap { fill: #4b5563; }
+    .link { fill: #0f766e; font-weight: bold; }
+    .box { fill: none; stroke: #0f766e; stroke-width: 2; }
+    .zone { fill: none; stroke: #6b7280; stroke-width: 1.5; stroke-dasharray: 6 4; }
+    .arrow { stroke: #0f766e; stroke-width: 2; fill: none; marker-end: url(#head); }
+    #head path { fill: #0f766e; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e5e7eb; }
+      .key, .cap { fill: #9ca3af; }
+      .link { fill: #5eead4; }
+      .box, .arrow { stroke: #5eead4; }
+      .zone { stroke: #9ca3af; }
+      #head path { fill: #5eead4; }
+    }
+  </style>
+  <defs>
+    <marker id="head" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- the agent's machine -->
+  <rect class="zone" x="20" y="20" width="400" height="240" rx="8"/>
+  <text class="key" x="36" y="44">the agent's machine</text>
+
+  <rect class="box" x="40" y="62" width="160" height="56" rx="6"/>
+  <text class="title" x="120" y="95" text-anchor="middle">the harness</text>
+
+  <path class="arrow" d="M120,122 L120,166"/>
+  <text class="key" x="130" y="149">after each call</text>
+
+  <rect class="box" x="40" y="170" width="160" height="70" rx="6"/>
+  <text class="title" x="120" y="198" text-anchor="middle">the hook</text>
+  <text x="120" y="222" text-anchor="middle"><tspan class="key">writes the chain</tspan></text>
+
+  <!-- the receiver's machine -->
+  <rect class="zone" x="580" y="20" width="400" height="240" rx="8"/>
+  <text class="key" x="596" y="44">another machine, out of the agent's reach</text>
+
+  <rect class="box" x="600" y="62" width="360" height="178" rx="6"/>
+  <text class="title" x="616" y="90">receiver.py serve</text>
+  <text x="616" y="118"><tspan class="link">chain copies</tspan><tspan class="key">  every receipt sent</tspan></text>
+  <text x="616" y="142"><tspan class="link">heads</tspan><tspan class="key">         one per session end</tspan></text>
+  <text x="616" y="166"><tspan class="link">events</tspan><tspan class="key">        the harness's own record</tspan></text>
+  <text x="616" y="186"><tspan class="key">              of each tool call</tspan></text>
+  <text x="616" y="222"><tspan class="key">it only ever adds</tspan></text>
+
+  <!-- what crosses -->
+  <text class="key" x="500" y="80" text-anchor="middle">its own events</text>
+  <path class="arrow" d="M204,90 L596,90"/>
+
+  <text class="key" x="500" y="186" text-anchor="middle">receipts and head</text>
+  <text class="key" x="500" y="202" text-anchor="middle">at session end</text>
+  <path class="arrow" d="M204,212 L596,212"/>
+
+  <text class="cap" x="500" y="292" text-anchor="middle">Wipe the agent's machine and the copy survives as of the last send. It is out of reach only</text>
+  <text class="cap" x="500" y="314" text-anchor="middle">if the account the agent runs as cannot log in to it, open its files or reach its disk.</text>
+</svg>
