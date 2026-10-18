@@ -44,6 +44,12 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
 - An ended session no longer reads awake for a day after the tail keeper commits its tail: growth that is bookkeeping alone carries the stillness clock forward, as it already never woke a session (#537).
 - After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
+- `install-hook --managed` writes the coverage marker into a store not made yet under a folder root owns, and a store not made yet under another account's folder is said to be that, not another account's (#465).
+- A managed file another program holds open on Windows is named as that, with the way out, instead of sending the reader for an administrator's shell that would not help (#465).
+- A harness settings file that is not JSON, nests too deep or holds no object is named in the scan's `settings_note`, in either home, instead of reading silently as no hook wired (#465).
+- `install-hook --managed` says to restart a running `supervisor serve` beside open sessions, since `serve` reads what is wired once, at its start (#465).
+- The managed folder's date stands in for a deleted managed file only when coverage narrows, so another tool's file in that folder no longer dates a widening later than the operator's change (#465).
+- The day book's note says a row that is not an object is no row of counts at all, instead of saying a count in it is not a number (#448).
 - `supervisor adopt` never moves one legacy chain over another bound for the same name in a drawer, case and Unicode form aside: every chain bound for that name is refused by name and left, in the dry run too (#447).
 - `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).
 - A page opened right after the keeper's own turn no longer counts a look on a day it paints unread: a turn's scan never answers a request, which scans again and writes the day's claims (#538).
