@@ -27,6 +27,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The README drops *Why not just…*, its answers now in How it works and one line in Where it fits, and `house_check.py --front-door` no longer requires the heading (#525).
 - Five docs pages checked line by line against the tree and brought current, facts only: START, FIRE-DRILL, MCP, ANCHORING and EXPERIMENTS, with the first field run's findings marked resolved where the tool has since moved (#521).
 - The social preview carries the README's current tagline; `tools/build_social_preview.py` rebuilds it from the wordmark and the README, so the two cannot drift (#528).
+- The markdownlint rule file lives under `.github/`, where the workflow names it; the root keeps the standard files and the two git dotfiles (#529).
 
 ## [0.15.1] - 2026-10-12
 
