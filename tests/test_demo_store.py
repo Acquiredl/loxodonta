@@ -12,7 +12,6 @@ import ast
 import getpass
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
-                     isolated_env, run)
+                     isolated_env, run, temp_folder)
 
 
 DEMO_STORE = REPO_ROOT / "tools" / "demo_store.py"
@@ -33,16 +32,6 @@ STORY_SESSION = "7c1f3a2e-4b8d-4f0e-9a61-2d5e8c3b7f10"
 # The bad-day session (#148), and its committed copy under docs/demo.
 BAD_DAY_SESSION = "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907"
 COMMITTED_BAD_DAY = REPO_ROOT / "docs" / "demo" / "bad-day-session.jsonl"
-
-
-def run(script, *args, env=None, cwd=None):
-    """`env`, when given, is the whole environment (see neutral_env), so
-    what it leaves out stays out."""
-    return subprocess.run(
-        [sys.executable, str(script), *args], cwd=cwd,
-        capture_output=True, encoding="utf-8", errors="replace",
-        env={**(os.environ if env is None else env),
-             "PYTHONIOENCODING": "utf-8"})
 
 
 def neutral_env(home):
@@ -80,14 +69,10 @@ class DemoStoreTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-        cls.home = Path(cls._tmp.name).resolve() / "home"
+        base = temp_folder(cls)
+        cls.home = base / "home"
         cls.home.mkdir()
         cls.result = build(cls.home)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls._tmp.cleanup()
 
     def test_one_command_writes_the_store_and_prints_where(self):
         self.assertEqual(self.result.returncode, 0, self.result.stderr)

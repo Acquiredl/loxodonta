@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (LOXODONTA, RECEIVER, SUPERVISOR,  # noqa: E402
-                     isolated_env, temp_folder)
+                     isolated_env, run, temp_folder)
 
 BASELINE_NAME = ".supervisor-baseline.json"
 
@@ -50,10 +50,7 @@ def ots_varint(n):
 
 
 def chain_head(log):
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), "head", "--log", str(log)],
-        capture_output=True, encoding="utf-8", check=True,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
+    return run(LOXODONTA, "head", "--log", str(log), check=True).stdout.strip()
 
 
 def ots_varbytes(b):
@@ -142,11 +139,8 @@ def run_scan(root, *extra, env):
     # `env` has no default: the one it had was the machine's own, and the
     # scan reads the coverage marker from there whatever --root says
     # (#242). Build it with isolated_env.
-    return subprocess.run(
-        [sys.executable, str(SUPERVISOR), "scan", "--root", str(root),
-         "--json", *extra],
-        capture_output=True, encoding="utf-8",
-        env={**env, "PYTHONIOENCODING": "utf-8"})
+    return run(SUPERVISOR, "scan", "--root", str(root), "--json", *extra,
+               env=env)
 
 
 def make_chain(log_dir, session, entries=2, action="step {i}", actions=None):
@@ -156,15 +150,12 @@ def make_chain(log_dir, session, entries=2, action="step {i}", actions=None):
     each, spelled as the hook spells them ("Bash: pytest -q")."""
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"receipts-{session}.jsonl"
-    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log", str(log)],
-                   capture_output=True, check=True, timeout=60)
+    run(LOXODONTA, "init", "--log", str(log), check=True, timeout=60)
     if actions is None:
         actions = [action.format(i=i) for i in range(entries)]
     for line in actions:
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", line],
-            capture_output=True, check=True, timeout=60)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", line, check=True, timeout=60)
     return log
 
 
@@ -182,13 +173,10 @@ def run_store_scan(store_home, witness, *extra):
     unpinned test would read the developer's real sessions — and the
     rest of the home sits beside the store, in the same temporary
     folder (#242)."""
-    return subprocess.run(
-        [sys.executable, str(SUPERVISOR), "scan", "--json",
-         "--witness", str(witness), *extra],
-        capture_output=True, encoding="utf-8", timeout=120,
-        env={**isolated_env(Path(store_home).parent / "home",
-                            LOXODONTA_HOME=str(store_home)),
-             "PYTHONIOENCODING": "utf-8"})
+    return run(SUPERVISOR, "scan", "--json", "--witness", str(witness), *extra,
+               timeout=120,
+               env=isolated_env(Path(store_home).parent / "home",
+                                LOXODONTA_HOME=str(store_home)))
 
 
 class StoreScanTest(unittest.TestCase):
@@ -197,10 +185,9 @@ class StoreScanTest(unittest.TestCase):
     these tests own the layout the same way the writer does."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name).resolve() / "storehome"
-        self.witness = Path(self._tmp.name).resolve() / "no-witness"
+        base = temp_folder(self)
+        self.home = base / "storehome"
+        self.witness = base / "no-witness"
         self.witness.mkdir()
 
     def drawer(self, slug, project_path):
@@ -337,15 +324,10 @@ class StoreScanTest(unittest.TestCase):
 def run_adopt(store_home, root, *extra):
     # adopt writes into the store alone, but no home is the machine's
     # (#274).
-    return subprocess.run(
-        [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root),
-         *extra],
-        capture_output=True, encoding="utf-8",
-        # Bounded: a pipe adopt opened would fail a test, not hang it.
-        timeout=120,
-        env=isolated_env(Path(store_home).parent / "home",
-                         LOXODONTA_HOME=str(store_home),
-                         PYTHONIOENCODING="utf-8"))
+    return run(SUPERVISOR, "adopt", "--root", str(root), *extra, timeout=120,
+               env=isolated_env(Path(store_home).parent / "home",
+                                LOXODONTA_HOME=str(store_home),
+                                PYTHONIOENCODING="utf-8"))
 
 
 class AdoptTest(unittest.TestCase):
@@ -354,11 +336,10 @@ class AdoptTest(unittest.TestCase):
     nothing is ever overwritten, running it twice is a no-op."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.home = Path(self._tmp.name).resolve() / "storehome"
+        self.home = self.base / "storehome"
 
     def drawers(self):
         receipts = self.home / "receipts"
@@ -508,7 +489,7 @@ class AdoptTest(unittest.TestCase):
         (name,) = self.drawers()
         legacy = make_chain(self.root / "alpha" / "receipts", "sess-bbbb")
         before = legacy.read_bytes()
-        elsewhere = Path(self._tmp.name).resolve() / "elsewhere.jsonl"
+        elsewhere = self.base / "elsewhere.jsonl"
         planted = self.home / "receipts" / name / legacy.name
         try:
             os.symlink(str(elsewhere), str(planted))
@@ -538,7 +519,7 @@ class AdoptTest(unittest.TestCase):
         write_completed_anchor(stranded, chain_head(stranded))
         sidecar = stranded.with_name(stranded.name + ".anchors.jsonl")
         before = sidecar.read_bytes()
-        elsewhere = Path(self._tmp.name).resolve() / "elsewhere.jsonl"
+        elsewhere = self.base / "elsewhere.jsonl"
         planted = self.home / "receipts" / name / sidecar.name
         try:
             os.symlink(str(elsewhere), str(planted))
@@ -637,7 +618,7 @@ class AdoptTest(unittest.TestCase):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
                    entries=3)
         run_adopt(self.home, self.root)
-        witness = Path(self._tmp.name).resolve() / "no-witness"
+        witness = self.base / "no-witness"
         witness.mkdir()
 
         result = run_store_scan(self.home, witness)
@@ -650,9 +631,7 @@ class AdoptTest(unittest.TestCase):
 
 class ScanCensusTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.env = isolated_env(temp_folder(self))
 
     def test_scan_reports_a_chain_with_its_verdict_as_json(self):
@@ -743,10 +722,7 @@ class ScanCensusTest(unittest.TestCase):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
 
         machine = run_scan(self.root, env=self.env)
-        human = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--root", str(self.root)],
-            capture_output=True, encoding="utf-8",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        human = run(SUPERVISOR, "scan", "--root", str(self.root), env=self.env)
 
         def shape(text):
             # Two runs are two moments, and the scan stamps itself: the
@@ -762,9 +738,7 @@ class ScanCensusTest(unittest.TestCase):
 
 class ScanVerdictTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.env = isolated_env(temp_folder(self))
 
     def tamper(self, log):
@@ -799,11 +773,10 @@ class ScanVerdictTest(unittest.TestCase):
         # renames it to 7 so one number never tells two stories.
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         for count in (18, 9):
-            subprocess.run(
-                [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-                 "--actor", "receipts", "--action",
-                 f"transcript-commitment: bytes={count} sha256=" + "0" * 64],
-                capture_output=True, check=True)
+            run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+                "--action",
+                f"transcript-commitment: bytes={count} sha256=" + "0" * 64,
+                check=True)
 
         result = run_scan(self.root, env=self.env)
 
@@ -822,11 +795,10 @@ class ScanVerdictTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         write_pending_anchor(log, "f" * 64, "2026-10-11T10:00:00Z")
         for count in (18, 9):
-            subprocess.run(
-                [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-                 "--actor", "receipts", "--action",
-                 f"transcript-commitment: bytes={count} sha256=" + "0" * 64],
-                capture_output=True, check=True, timeout=60)
+            run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+                "--action",
+                f"transcript-commitment: bytes={count} sha256=" + "0" * 64,
+                check=True, timeout=60)
 
         result = run_scan(self.root, env=self.env)
 
@@ -955,9 +927,7 @@ class ScanAnchorTest(unittest.TestCase):
     exit-3 tier — "this is not the recorded history"."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.env = isolated_env(temp_folder(self))
 
     def test_an_anchored_chain_is_a_distinct_claim_not_just_valid(self):
@@ -1133,9 +1103,7 @@ class BaselineTest(unittest.TestCase):
     never a verdict about which side is true."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.env = isolated_env(temp_folder(self))
         self.baseline = self.root / ".supervisor-baseline.json"
 
@@ -1145,10 +1113,8 @@ class BaselineTest(unittest.TestCase):
     def test_appends_between_ticks_raise_no_alarm(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         first = run_scan(self.root, env=self.env)  # cold start seeds silently
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "one more step"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "one more step", check=True)
 
         second = run_scan(self.root, env=self.env)
 
@@ -1166,16 +1132,11 @@ class BaselineTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root, env=self.env)
         log.unlink()
-        subprocess.run([sys.executable, str(LOXODONTA), "init",
-                        "--log", str(log)], capture_output=True, check=True)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "innocent-looking work"],
-            capture_output=True, check=True)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "nothing to see here"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "init", "--log", str(log), check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "innocent-looking work", check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "nothing to see here", check=True)
 
         result = run_scan(self.root, env=self.env)
 
@@ -1267,11 +1228,8 @@ class BaselineTest(unittest.TestCase):
     def bounded_scan(self):
         # Bounded: a scan that waited on a pipe at a chain's name would
         # fail here rather than hang the suite.
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan",
-             "--root", str(self.root), "--json"],
-            capture_output=True, encoding="utf-8", timeout=60,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                   timeout=60, env=self.env)
 
     def assert_remembered_through(self, hollow, clear):
         """A chain scanned once, then `hollow` puts what reads as no
@@ -1315,10 +1273,8 @@ class BaselineTest(unittest.TestCase):
             "a chain put back shorter shrank; it is not a new chain")
 
         log.write_bytes(whole)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "one more step"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "one more step", check=True)
         grown = self.bounded_scan()
         self.assertEqual(grown.returncode, 0, grown.stdout + grown.stderr)
         self.assertEqual(self.events(grown), [])
@@ -1390,8 +1346,7 @@ def hold(test, path):
     rather than beside it (#300). A hard link, in a folder of the test's
     own on the same volume, so it sits in no census. Skips where the
     filesystem has no hard links."""
-    held = Path(test._tmp.name).resolve() / "held" / path.name
-    held.parent.mkdir(exist_ok=True)
+    held = temp_folder(test) / path.name
     try:
         os.link(path, held)
     except (OSError, NotImplementedError) as refused:
@@ -1423,10 +1378,9 @@ class StateSwapTest(unittest.TestCase):
     old file is never written into, and nothing temporary is left."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name).resolve() / "storehome"
-        self.witness = Path(self._tmp.name).resolve() / "no-witness"
+        base = temp_folder(self)
+        self.home = base / "storehome"
+        self.witness = base / "no-witness"
         self.witness.mkdir()
         drawer = self.home / "receipts" / "alpha-11111111"
         drawer.mkdir(parents=True)
@@ -1440,10 +1394,8 @@ class StateSwapTest(unittest.TestCase):
         state = [self.home / "baseline.json", self.home / "daybook.json"]
         before = [path.read_text(encoding="utf-8") for path in state]
         held = [hold(self, path) for path in state]
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(self.log),
-             "--actor", "claude-code", "--action", "one more step"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(self.log), "--actor", "claude-code",
+            "--action", "one more step", check=True)
 
         second = run_store_scan(self.home, self.witness)
 
@@ -1625,14 +1577,13 @@ class SubagentWitnessTest(unittest.TestCase):
     while its subagents read and search."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         install_witness_hook(self.witness, matcher="*")
         prime_memory(self.root, matcher="*")
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(base / "home")
 
     def scan(self, *extra):
         return run_scan(self.root, "--witness", str(self.witness), *extra,
@@ -1783,9 +1734,7 @@ class DaybookTest(unittest.TestCase):
     baseline beside it: writer-reachable, trusted for nothing."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.env = isolated_env(temp_folder(self))
         self.daybook = self.root / ".supervisor-daybook.json"
 
@@ -1846,21 +1795,15 @@ class DaybookTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root, env=self.env)
         log.unlink()
-        subprocess.run([sys.executable, str(LOXODONTA), "init",
-                        "--log", str(log)], capture_output=True, check=True)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "step 0"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "init", "--log", str(log), check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "step 0", check=True)
         tripped = run_scan(self.root, env=self.env)
         # The alarm stands until the operator accepts the new head
         # (ADR-0039); after that, the wire is quiet again.
-        subprocess.run(
-            [sys.executable, str(SUPERVISOR), "acknowledge",
-             "alpha/receipts/receipts-sess-aaaa.jsonl", chain_head(log),
-             "--root", str(self.root)],
-            capture_output=True, encoding="utf-8", timeout=120, check=True,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        run(SUPERVISOR, "acknowledge",
+            "alpha/receipts/receipts-sess-aaaa.jsonl", chain_head(log),
+            "--root", str(self.root), timeout=120, check=True, env=self.env)
 
         settled = run_scan(self.root, env=self.env)
 
@@ -1919,14 +1862,13 @@ class CompletenessTest(unittest.TestCase):
     claim is (accident detection and latency, nothing more)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = self.base / "witness"
         install_witness_hook(self.witness)
         prime_memory(self.root)
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(self.base / "home")
 
     def scan(self, *extra, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -1940,7 +1882,7 @@ class CompletenessTest(unittest.TestCase):
     def store_holding(self, *sessions):
         """A store (ADR-0011) with a drawer holding these sessions'
         chains, and the env that points the supervisor at it."""
-        home = Path(self._tmp.name).resolve() / "store"
+        home = self.base / "store"
         for session in sessions:
             make_chain(home / "receipts" / "alpha-deadbeef", session)
         return {**self.env, "LOXODONTA_HOME": str(home)}
@@ -2250,11 +2192,9 @@ class CompletenessTest(unittest.TestCase):
         # session: a machine-wide self-inflicted false scar.
         log = make_chain(self.root / "alpha" / "receipts", "sess-mark",
                          entries=2)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "receipts", "--action",
-             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+            "--action", "transcript-commitment: bytes=9 sha256=" + "0" * 64,
+            check=True)
         write_transcript(self.witness, self.root / "alpha", "sess-mark",
                          event_times=[ago(120), ago(60)])
 
@@ -2272,11 +2212,9 @@ class CompletenessTest(unittest.TestCase):
         # transcript commitments and whose transcript still exists.
         log = make_chain(self.root / "alpha" / "receipts", "sess-judge",
                          entries=2)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "receipts", "--action",
-             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+            "--action", "transcript-commitment: bytes=9 sha256=" + "0" * 64,
+            check=True)
         transcript = write_transcript(self.witness, self.root / "alpha",
                                       "sess-judge",
                                       event_times=[ago(120), ago(60)])
@@ -2355,11 +2293,9 @@ class CompletenessTest(unittest.TestCase):
         install_witness_hook(self.witness, sessionend=True)
         log = make_chain(self.root / "alpha" / "receipts", "sess-sealed",
                          entries=2)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "receipts", "--action",
-             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+            "--action", "transcript-commitment: bytes=9 sha256=" + "0" * 64,
+            check=True)
         write_transcript(self.witness, self.root / "alpha", "sess-sealed",
                          event_times=[ago(7200), ago(7100)], idle=7000)
         self.scan()
@@ -2400,10 +2336,8 @@ class CompletenessTest(unittest.TestCase):
         self.edit_baseline(lambda data: [
             known.update({"last_grew": "2026-08-25T00:00:00Z"})
             for known in data["chains"].values()])
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "Bash: it stirs"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "Bash: it stirs", check=True)
 
         result = self.scan()
 
@@ -2428,11 +2362,9 @@ class CompletenessTest(unittest.TestCase):
         self.edit_baseline(lambda data: [
             known.update({"last_grew": "2026-08-25T00:00:00Z"})
             for known in data["chains"].values()])
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "receipts", "--action",
-             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+            "--action", "transcript-commitment: bytes=9 sha256=" + "0" * 64,
+            check=True)
 
         report = json.loads(self.scan().stdout)
 
@@ -2444,10 +2376,8 @@ class CompletenessTest(unittest.TestCase):
         write_transcript(self.witness, self.root / "alpha", "sess-busy",
                          event_times=[ago(120), ago(60)])
         self.scan()
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "Bash: still working"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "Bash: still working", check=True)
 
         report = json.loads(self.scan().stdout)
 
@@ -2528,7 +2458,7 @@ class CompletenessTest(unittest.TestCase):
 
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        nowhere = Path(self._tmp.name).resolve() / "no-such-layout" / "projects"
+        nowhere = self.base / "no-such-layout" / "projects"
 
         result = run_scan(self.root, "--witness", str(nowhere),
                           env=self.env)
@@ -2596,13 +2526,12 @@ class CalibrationTest(unittest.TestCase):
     honestly — and never excuses silence after the change."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         self.baseline = self.root / ".supervisor-baseline.json"
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(base / "home")
 
     def scan(self, *extra, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -2628,12 +2557,8 @@ class CalibrationTest(unittest.TestCase):
         run is BEFORE-MEMORY unless someone states what was wired then
         — which is the same thing the operator of a real machine does
         after installing the supervisor onto months of history."""
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "calibrate",
-             "--root", str(self.root), "--since", since,
-             "--matchers", matcher],
-            capture_output=True, encoding="utf-8",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "calibrate", "--root", str(self.root),
+                   "--since", since, "--matchers", matcher, env=self.env)
 
     def test_widening_does_not_rejudge_ended_sessions(self):
         # A session recorded honestly under the narrow matcher: three
@@ -2729,14 +2654,13 @@ class UsersOwnHookTest(unittest.TestCase):
     SYNC = "python ~/bin/receipts.py sync"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         self.witness.mkdir()
         self.baseline = self.root / ".supervisor-baseline.json"
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(base / "home")
 
     def wire(self, hooks):
         (self.witness.parent / "settings.json").write_text(
@@ -2806,16 +2730,15 @@ class FailedCallWitnessTest(unittest.TestCase):
     pays for one an owed call lost."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         install_witness_hook(self.witness, matcher="*", failures="*")
         prime_memory(self.root, matcher="*", failures="*")
         # Every home the tools read, pinned inside the test: the scan
         # reads neither this machine's marker nor its settings.
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(base / "home")
 
     def scan(self):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -3214,17 +3137,16 @@ class BeforeMemoryTest(unittest.TestCase):
     it never owed."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         install_witness_hook(self.witness)
         self.baseline = self.root / BASELINE_NAME
         # The coverage marker is machine-wide whatever --root says
         # (ADR-0030), so the memory these tests date is this home's, not
         # the machine's (#242).
-        self.home = Path(self._tmp.name).resolve() / "home"
+        self.home = base / "home"
         self.env = isolated_env(self.home)
 
     def scan(self, *extra):
@@ -3232,11 +3154,8 @@ class BeforeMemoryTest(unittest.TestCase):
                         env=self.env)
 
     def calibrate(self, *args):
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "calibrate",
-             "--root", str(self.root), *args],
-            capture_output=True, encoding="utf-8",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "calibrate", "--root", str(self.root), *args,
+                   env=self.env)
 
     def watch(self, result):
         return json.loads(result.stdout)["completeness"]
@@ -3418,15 +3337,14 @@ class CoverageMarkerTest(unittest.TestCase):
     is the thing that wired it, and now it writes that down."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
-        self.store = Path(self._tmp.name).resolve() / "store"
+        self.witness = self.base / "witness"
+        self.store = self.base / "store"
         self.store.mkdir()
         install_witness_hook(self.witness, matcher="*")
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home",
+        self.env = isolated_env(self.base / "home",
                                 LOXODONTA_HOME=str(self.store))
 
     def scan(self, *extra):
@@ -3520,16 +3438,14 @@ class CoverageMarkerTest(unittest.TestCase):
         # real installer writes both epochs, into the past, and the scan
         # reads them as ADR-0030 already reads a matcher epoch: told by
         # install-hook, never observed.
-        home = Path(self._tmp.name).resolve() / "home"
+        home = self.base / "home"
         (home / ".claude").mkdir(parents=True)
         for age, profile in ((7200, "local"), (5400, "timestamped")):
             stamp = str(int(datetime.datetime.now(
                 datetime.timezone.utc).timestamp()) - age)
-            subprocess.run(
-                [sys.executable, str(LOXODONTA), "install-hook",
-                 "--profile", profile],
-                capture_output=True, check=True,
-                env={**self.env, "HOME": str(home), "USERPROFILE": str(home),
+            run(LOXODONTA, "install-hook", "--profile", profile, check=True,
+                env={**self.env, "HOME": str(home),
+                     "USERPROFILE": str(home),
                      "SOURCE_DATE_EPOCH": stamp})
         self.a_session("sess-week", ago(3600))
 
@@ -3556,22 +3472,20 @@ class CoverageMarkerTest(unittest.TestCase):
         # they had just finished. An empty store means "nothing has run
         # yet" when the hook is wired and "nothing is recording" when it
         # is not, and those want opposite things from the reader.
-        store = Path(self._tmp.name).resolve() / "freshstore"
+        store = self.base / "freshstore"
         env = {**self.env, "LOXODONTA_HOME": str(store),
                "PYTHONIOENCODING": "utf-8"}
         # Its own parent: hook_matchers reads `<witness>/../settings.json`,
         # so a bare path beside the wired witness would read the wired
         # one's settings.
-        bare = Path(self._tmp.name).resolve() / "nohook" / "projects"
+        bare = self.base / "nohook" / "projects"
         bare.mkdir(parents=True)
 
         def scan_store(witness):
             # No --root: the empty-store note belongs to store mode,
             # which is the universe a new install lands in (ADR-0011).
-            return subprocess.run(
-                [sys.executable, str(SUPERVISOR), "scan", "--json",
-                 "--witness", str(witness)],
-                capture_output=True, encoding="utf-8", env=env)
+            return run(SUPERVISOR, "scan", "--json", "--witness", str(witness),
+                       env=env)
 
         unwired = scan_store(bare)
         wired = scan_store(self.witness)
@@ -3634,9 +3548,7 @@ class AnchorKeeperTest(unittest.TestCase):
     never sleeps."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.env = isolated_env(temp_folder(self))
 
     def start_calendar(self):
@@ -3731,10 +3643,8 @@ class AnchorKeeperTest(unittest.TestCase):
     def test_a_completed_calendar_upgrades_on_tick_with_no_operator(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
-             "--calendar", calendar.url],
-            capture_output=True, check=True, env=self.env)
+        run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
+            check=True, env=self.env)
         calendar.mode = "complete"
 
         result = run_scan(self.root, env=self.env)
@@ -3751,10 +3661,8 @@ class AnchorKeeperTest(unittest.TestCase):
     def test_upgrade_attempts_are_polite_between_ticks(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
-             "--calendar", calendar.url],
-            capture_output=True, check=True, env=self.env)
+        run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
+            check=True, env=self.env)
 
         first = run_scan(self.root, env=self.env)   # polls: pending
         calendar.mode = "complete"
@@ -3857,10 +3765,8 @@ class AnchorKeeperTest(unittest.TestCase):
                 encoding="utf-8")
         good = make_chain(self.root / "alpha" / "receipts", "sess-good",
                           action="sess-good step {i}")
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "anchor", "--log", str(good),
-             "--calendar", calendar.url],
-            capture_output=True, check=True, env=self.env)
+        run(LOXODONTA, "anchor", "--log", str(good), "--calendar",
+            calendar.url, check=True, env=self.env)
         calendar.submitted.clear()
 
         result = run_scan(self.root, "--anchor-every", "0s",
@@ -3976,17 +3882,13 @@ class DrillTest(unittest.TestCase):
     operator can trust the alarms before ever needing them."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.base = temp_folder(self)
+        self.root = self.base
         self.env = isolated_env(temp_folder(self))
 
     def drill(self, log):
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "drill", "--root",
-             str(self.root), "--log", str(log), "--json"],
-            capture_output=True, encoding="utf-8", timeout=300,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "drill", "--root", str(self.root), "--log",
+                   str(log), "--json", timeout=300, env=self.env)
 
     def test_the_four_way_battery_fires_every_expected_alarm(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
@@ -4045,7 +3947,7 @@ class DrillTest(unittest.TestCase):
                          "a refused drill writes nothing")
 
     def test_a_chain_outside_the_root_is_refused(self):
-        elsewhere = Path(self._tmp.name).resolve().parent
+        elsewhere = self.base.parent
 
         result = self.drill(elsewhere / "receipts-nope.jsonl")
 
@@ -4148,11 +4050,8 @@ class DrillTest(unittest.TestCase):
     def drill_from(self, cwd, root, log):
         """`drill` started in `cwd` with `--root` and `--log` spelled as
         a reader types them, relative to that folder (#297)."""
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "drill", "--root", root,
-             "--log", log, "--json"],
-            capture_output=True, encoding="utf-8", cwd=str(cwd),
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "drill", "--root", root, "--log", log, "--json",
+                   cwd=str(cwd), env=self.env)
 
     def test_a_log_relative_to_the_current_folder_is_drilled(self):
         # The README's line, `drill --root docs/demo --log
@@ -4204,11 +4103,10 @@ class WalkFindingsTest(unittest.TestCase):
     """Findings from the 2026-08-25 supervisor walk (issue #25 prep)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(self.base / "home")
 
     def test_scan_counts_entries_not_raw_lines(self):
         # GLOSSARY: an entry is a parsed record; a torn line is damage,
@@ -4228,7 +4126,7 @@ class WalkFindingsTest(unittest.TestCase):
         # name matches the layout) must cost one session's watch, never
         # the whole scan.
         make_chain(self.root / "alpha" / "receipts", "sess-dirx")
-        witness = Path(self._tmp.name).resolve() / "witness"
+        witness = self.base / "witness"
         install_witness_hook(witness)
         (witness / "anyproj").mkdir(parents=True)
         (witness / "anyproj" / "sess-dirx.jsonl").mkdir()
@@ -4295,12 +4193,11 @@ class RecorderDriftTest(unittest.TestCase):
     (ADR-0002). Reporting drift is the honest half of that trade."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.witness = self.base / "witness"
+        self.env = isolated_env(self.base / "home")
 
     def git(self, *args, cwd):
         return subprocess.run(["git", *args], cwd=str(cwd),
@@ -4308,7 +4205,7 @@ class RecorderDriftTest(unittest.TestCase):
 
     def make_checkout(self, branch="main"):
         """A git checkout holding a stand-in recorder, wired as the hook."""
-        home = Path(self._tmp.name).resolve() / "recorder"
+        home = self.base / "recorder"
         home.mkdir()
         script = home / "loxodonta.py"
         script.write_text("# stand-in recorder\n", encoding="utf-8")
@@ -4352,7 +4249,7 @@ class RecorderDriftTest(unittest.TestCase):
     def test_a_recorder_outside_git_is_unknown_never_an_error(self):
         # No repo, no git, no upstream: say so plainly rather than
         # guessing or failing the scan over it.
-        home = Path(self._tmp.name).resolve() / "loose"
+        home = self.base / "loose"
         home.mkdir()
         script = home / "loxodonta.py"
         script.write_text("# loose recorder\n", encoding="utf-8")
@@ -4385,7 +4282,7 @@ class RecorderDriftTest(unittest.TestCase):
         # and a failed call leaves no receipt until install-hook runs
         # again. One clause on the line that already reads the wired
         # command, never an alarm of its own.
-        home = Path(self._tmp.name).resolve() / "loose"
+        home = self.base / "loose"
         home.mkdir()
         script = home / "loxodonta.py"
         script.write_text("# loose recorder\n", encoding="utf-8")
@@ -4422,9 +4319,8 @@ class TranscriptRetentionTest(unittest.TestCase):
     machine's settings."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name).resolve() / "home"
+        base = temp_folder(self)
+        self.home = base / "home"
         self.witness = self.home / ".claude" / "projects"
         self.witness.mkdir(parents=True)
 
@@ -4439,11 +4335,8 @@ class TranscriptRetentionTest(unittest.TestCase):
         return path
 
     def scan(self, *extra):
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--witness",
-             str(self.witness), *extra],
-            capture_output=True, encoding="utf-8",
-            env={**isolated_env(self.home), "PYTHONIOENCODING": "utf-8"})
+        result = run(SUPERVISOR, "scan", "--witness", str(self.witness),
+                     *extra, env=isolated_env(self.home))
         self.assertEqual(result.returncode, 0,
                          "the harness's retention never moves the exit:\n"
                          + result.stdout + result.stderr)
@@ -4573,14 +4466,13 @@ class ConsumptionTest(unittest.TestCase):
     one."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
         # Pinned to an empty layout: consumption reads only chains, and
         # the completeness watch must not read the developer's machine.
-        self.witness = Path(self._tmp.name).resolve() / "witness" / "projects"
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.witness = base / "witness" / "projects"
+        self.env = isolated_env(base / "home")
 
     def scan(self, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -4690,13 +4582,10 @@ class DashLeadingStoreTest(unittest.TestCase):
             witness = root / "no-witness"
             witness.mkdir()
 
-            result = subprocess.run(
-                [sys.executable, str(SUPERVISOR), "scan", "--json",
-                 "--witness", str(witness)],
-                cwd=str(root), capture_output=True, encoding="utf-8",
-                env={**isolated_env(root / "home"),
-                     "PYTHONIOENCODING": "utf-8",
-                     "LOXODONTA_HOME": "-dashhome"})
+            result = run(SUPERVISOR, "scan", "--json", "--witness",
+                         str(witness), cwd=str(root),
+                         env={**isolated_env(root / "home"),
+                              "LOXODONTA_HOME": "-dashhome"})
 
             self.assertEqual(result.returncode, 0,
                              result.stdout + result.stderr)
@@ -4709,10 +4598,7 @@ class DashLeadingStoreTest(unittest.TestCase):
 def run_supervisor(home, *args):
     """Invoke the supervisor as an operator would, with nothing prepared
     in `home`: a usage error is decided before any store is read."""
-    return subprocess.run(
-        [sys.executable, str(SUPERVISOR), *args],
-        capture_output=True, encoding="utf-8",
-        env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
+    return run(SUPERVISOR, *args, env=isolated_env(home))
 
 
 class UsageExitTest(unittest.TestCase):
@@ -4759,9 +4645,7 @@ class ClosedFolderTest(unittest.TestCase):
     an event, never a traceback."""
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_folder(self)
         self.store = self.root / "store"
         self.home = self.root / "home"
         self.witness = self.home / ".claude" / "projects"
@@ -4783,10 +4667,7 @@ class ClosedFolderTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
 
     def recorder(self, *args):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), *args], capture_output=True,
-            encoding="utf-8", check=True, timeout=60,
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        return run(LOXODONTA, *args, check=True, timeout=60)
 
     def env(self):
         return isolated_env(self.home, LOXODONTA_HOME=str(self.store),
@@ -4795,10 +4676,8 @@ class ClosedFolderTest(unittest.TestCase):
     def supervisor(self, *args):
         """One supervisor command, bounded, so a regression that waits
         fails the test and never hangs the suite."""
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), *args], cwd=str(self.root),
-            capture_output=True, encoding="utf-8", timeout=120,
-            env=self.env())
+        return run(SUPERVISOR, *args, cwd=str(self.root), timeout=120,
+                   env=self.env())
 
     def scan(self):
         return self.supervisor("scan", "--json", "--witness",
@@ -5315,14 +5194,11 @@ def chain_copy(data, session, actions=FIXTURE_RECEIPTS, epoch=None,
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     if epoch is not None:
         env["SOURCE_DATE_EPOCH"] = str(epoch)
-    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log",
-                    str(log)], capture_output=True, check=True, timeout=60,
-                   env=env)
+    run(LOXODONTA, "init", "--log", str(log), check=True, timeout=60, env=env)
     for actor, action in ([("claude-code", a) for a in actions]
                           + [("receipts", n) for n in notes]):
-        subprocess.run([sys.executable, str(LOXODONTA), "log", "--log",
-                        str(log), "--actor", actor, "--action", action],
-                       capture_output=True, check=True, timeout=60, env=env)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", actor, "--action",
+            action, check=True, timeout=60, env=env)
     copy = Path(data) / log.name
     shutil.copyfile(log, copy)
     if settled:
@@ -5339,9 +5215,7 @@ class ReceiverReadingTest(unittest.TestCase):
     and the agent's machine read for nothing."""
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.base = Path(tmp.name).resolve()
+        self.base = temp_folder(self)
         self.home = self.base / "home"
         self.env = {**isolated_env(self.home), "PYTHONIOENCODING": "utf-8"}
         self.data = receiver_folder(self.base)
@@ -5352,10 +5226,8 @@ class ReceiverReadingTest(unittest.TestCase):
         env = dict(self.env)
         if settle is not None:
             env["SUPERVISOR_SETTLE_SECONDS"] = settle
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--receiver",
-             str(data or self.data), "--json", *extra],
-            capture_output=True, encoding="utf-8", timeout=180, env=env)
+        result = run(SUPERVISOR, "scan", "--receiver", str(data or self.data),
+                     "--json", *extra, timeout=180, env=env)
         self.assertNotIn("Traceback", result.stderr, result.stderr)
         return result
 
@@ -5641,8 +5513,7 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.base / "nowhere"))
 
     def test_another_verb_does_not_take_the_flag(self):
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "calibrate", "--receiver",
-             str(self.data), "--since", "2026-01-01", "--matchers", "*"],
-            capture_output=True, encoding="utf-8", timeout=60, env=self.env)
+        result = run(SUPERVISOR, "calibrate", "--receiver", str(self.data),
+                     "--since", "2026-01-01", "--matchers", "*", timeout=60,
+                     env=self.env)
         self.assertEqual(result.returncode, 64, result.stderr)

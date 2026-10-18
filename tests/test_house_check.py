@@ -13,10 +13,8 @@ firing on a fixture checkout and quiet on a compliant one.
 """
 
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,22 +22,14 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_house_check`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import REPO_ROOT, SUPERVISOR  # noqa: E402
+from support import REPO_ROOT, SUPERVISOR, run, temp_folder  # noqa: E402
 
 CHECKER = REPO_ROOT / "tools" / "house_check.py"
 
 
-def run_checker(*paths, cwd=None):
-    return subprocess.run(
-        [sys.executable, str(CHECKER), *map(str, paths)], cwd=cwd,
-        capture_output=True, encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-
-
 class Fixture(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp()).resolve()
-        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.root = temp_folder(self)
 
     def write(self, relative, text):
         path = self.root / relative
@@ -52,7 +42,7 @@ class AntiTermsTest(Fixture):
     def test_an_anti_term_anywhere_fails_and_names_file_line_rule_excerpt(self):
         doc = self.write("docs/NOTES.md", "# Notes\n\nThe log is an immutable record.\n")
 
-        result = run_checker(doc)
+        result = run(CHECKER, doc)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         finding = [line for line in result.stdout.splitlines() if "NOTES.md" in line]
@@ -76,7 +66,7 @@ class AntiTermsTest(Fixture):
             "Prior art: ai-audit-trail, which signs each line.",
         ]) + "\n")
 
-        result = run_checker(doc)
+        result = run(CHECKER, doc)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("anti-term", result.stdout)
@@ -86,7 +76,7 @@ class EmDashTest(Fixture):
     def test_an_em_dash_fails_on_a_front_door_file(self):
         readme = self.write("README.md", "# x\n\nOne command — one verdict.\n")
 
-        result = run_checker(readme)
+        result = run(CHECKER, readme)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("README.md:3: em-dash:", result.stdout)
@@ -97,7 +87,7 @@ class EmDashTest(Fixture):
         start = self.write("docs/START.md",
                            "# Start here\n\nFive steps — no service.\n")
 
-        result = run_checker(start)
+        result = run(CHECKER, start)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("START.md:3: em-dash:", result.stdout)
@@ -106,7 +96,7 @@ class EmDashTest(Fixture):
         glossary = self.write("docs/GLOSSARY.md", "- **Receipt** — one entry.\n")
         doc = self.write("docs/SPEC.md", "Canonical JSON — sorted keys.\n")
 
-        result = run_checker(glossary, doc)
+        result = run(CHECKER, glossary, doc)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -117,8 +107,8 @@ class OverclaimTest(Fixture):
         readme = self.write("README.md", "The chain proves nobody rewrote it.\n")
         adr = self.write("adrs/0001-x.md", "The chain proves internal consistency.\n")
 
-        front = run_checker(readme)
-        elsewhere = run_checker(adr)
+        front = run(CHECKER, readme)
+        elsewhere = run(CHECKER, adr)
 
         self.assertEqual(front.returncode, 1, front.stdout + front.stderr)
         self.assertIn("README.md:1: overclaim: ", front.stdout)
@@ -132,7 +122,7 @@ class OverclaimTest(Fixture):
             "This tool cannot prove an entry was never written.",
         ]) + "\n")
 
-        result = run_checker(readme)
+        result = run(CHECKER, readme)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -153,8 +143,8 @@ class RefutationTest(Fixture):
             "README.md",
             "The log is immutable and proves it, see **Rejected alternatives** below.\n")
 
-        inside = run_checker(adr)
-        outside = run_checker(readme)
+        inside = run(CHECKER, adr)
+        outside = run(CHECKER, readme)
 
         self.assertEqual(inside.returncode, 0, inside.stdout + inside.stderr)
         self.assertEqual(inside.stdout.strip(), "")
@@ -169,7 +159,7 @@ class RefutationTest(Fixture):
             with self.subTest(sentence=sentence):
                 readme = self.write("README.md", sentence + "\n")
 
-                result = run_checker(readme)
+                result = run(CHECKER, readme)
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("README.md:1: ", result.stdout)
@@ -188,7 +178,7 @@ class AttestationTest(Fixture):
                 page = self.write("docs/CONTROLS.md",
                                   f"# Controls\n\nThe anchor row {word} AU-9(2).\n")
 
-                result = run_checker(page)
+                result = run(CHECKER, page)
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("CONTROLS.md:3: attestation: ", result.stdout)
@@ -199,7 +189,7 @@ class AttestationTest(Fixture):
                 doc = self.write("docs/NOTES.md",
                                  f"# Notes\n\nThe anchor row {word} AU-9(2).\n")
 
-                result = run_checker(doc)
+                result = run(CHECKER, doc)
 
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("attestation", result.stdout)
@@ -212,7 +202,7 @@ class AttestationTest(Fixture):
             'This page never "meets" a control.',
         ]) + "\n")
 
-        result = run_checker(page)
+        result = run(CHECKER, page)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("CONTROLS.md:1: attestation: ", result.stdout)
@@ -229,7 +219,7 @@ class AttestationTest(Fixture):
             "review reads the whole deployment.",
         ]) + "\n")
 
-        result = run_checker(page)
+        result = run(CHECKER, page)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -253,7 +243,7 @@ class OldNameTest(Fixture):
             "```",
         ]) + "\n")
 
-        result = run_checker(doc)
+        result = run(CHECKER, doc)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         for number in (3, 4, 7, 8):
@@ -269,7 +259,7 @@ class OldNameTest(Fixture):
             "Wrap it in a receipts command of your own.",
         ]) + "\n")
 
-        result = run_checker(doc)
+        result = run(CHECKER, doc)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         for number in (1, 2, 3, 4, 5):
@@ -288,7 +278,7 @@ class OldNameTest(Fixture):
             "Read the receipts tooling notes first.",
         ]) + "\n")
 
-        result = run_checker(doc)
+        result = run(CHECKER, doc)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -306,7 +296,7 @@ class OldNameTest(Fixture):
             "No receipts tool calls are owed for a failed call.",
         ]) + "\n")
 
-        result = run_checker(doc)
+        result = run(CHECKER, doc)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -327,7 +317,7 @@ class OldNameTest(Fixture):
             "Then receipts will verify the chain.",
         ]) + "\n")
 
-        result = run_checker(doc)
+        result = run(CHECKER, doc)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -340,7 +330,7 @@ class OldNameTest(Fixture):
             "docs/HISTORY.md", "CHANGELOG.md", "docs/TOUR.md",
             "docs/TOUR-SUPERVISOR.md", "adrs/0005-x.md")]
 
-        result = run_checker(*pages)
+        result = run(CHECKER, *pages)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("old-name", result.stdout)
@@ -348,7 +338,7 @@ class OldNameTest(Fixture):
     def test_an_adr_from_the_rename_on_is_judged(self):
         adr = self.write("adrs/0011-x.md", "The operator runs `receipts verify`.\n")
 
-        result = run_checker(adr)
+        result = run(CHECKER, adr)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("0011-x.md:1: old-name: ", result.stdout)
@@ -365,7 +355,7 @@ class SynonymTest(Fixture):
             with self.subTest(sentence=sentence):
                 readme = self.write("README.md", sentence + "\n")
 
-                result = run_checker(readme)
+                result = run(CHECKER, readme)
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("README.md:1: synonym: ", result.stdout)
@@ -374,7 +364,7 @@ class SynonymTest(Fixture):
     def assert_passes_on_the_front_door(self, *sentences):
         readme = self.write("README.md", "\n".join(sentences) + "\n")
 
-        result = run_checker(readme)
+        result = run(CHECKER, readme)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -451,7 +441,7 @@ class SynonymTest(Fixture):
     def test_the_raw_export_is_a_raw_archive_not_a_package(self):
         readme = self.write("README.md", "The raw bundle carries command lines.\n")
 
-        result = run_checker(readme)
+        result = run(CHECKER, readme)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("say raw archive:", result.stdout)
@@ -474,7 +464,7 @@ class SynonymTest(Fixture):
     def test_a_synonym_warns_off_the_front_door(self):
         doc = self.write("docs/NOTES.md", "Pick a protection level at install.\n")
 
-        result = run_checker(doc)
+        result = run(CHECKER, doc)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("NOTES.md:1: synonym (warning): ", result.stdout)
@@ -485,7 +475,7 @@ class SynonymTest(Fixture):
         tour = self.write("docs/TOUR.md",
                           "The counter staples thousands of fingerprints into one bundle.\n")
 
-        result = run_checker(tour)
+        result = run(CHECKER, tour)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -503,7 +493,7 @@ class CodePassTest(Fixture):
             '    """Send the entries off the machine."""',
         ]) + "\n")
 
-        result = run_checker(code)
+        result = run(CHECKER, code)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("loxodonta.py:1: synonym: def backup_chain(log):", result.stdout)
@@ -516,7 +506,7 @@ class CodePassTest(Fixture):
             "AUDIT_LOG = None",
         ]) + "\n")
 
-        result = run_checker(code)
+        result = run(CHECKER, code)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("supervisor.py:2: anti-term: ", result.stdout)
@@ -536,7 +526,7 @@ class CodePassTest(Fixture):
             with self.subTest(source=source):
                 code = self.write("loxodonta.py", source + "\n")
 
-                result = run_checker(code)
+                result = run(CHECKER, code)
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
@@ -548,7 +538,7 @@ class CodePassTest(Fixture):
             'x = """never closed',
         ]) + "\n")
 
-        result = run_checker(code)
+        result = run(CHECKER, code)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("loxodonta.py:1: anti-term: ", result.stdout)
@@ -563,7 +553,7 @@ class CodePassTest(Fixture):
             "    return entries  # not an audit log, and no chain backup either",
         ]) + "\n")
 
-        result = run_checker(code)
+        result = run(CHECKER, code)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -580,7 +570,7 @@ class CodePassTest(Fixture):
             "    return had_backup",
         ]) + "\n")
 
-        result = run_checker(code)
+        result = run(CHECKER, code)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
@@ -593,7 +583,7 @@ class CodePassTest(Fixture):
         self.write("tests/test_x.py", 'FIXTURE = "an immutable record"\n')
         subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
 
-        result = run_checker(cwd=self.root)
+        result = run(CHECKER, cwd=self.root)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("loxodonta.py:1: synonym: ", result.stdout)
@@ -612,7 +602,7 @@ class CommandTest(Fixture):
         self.write("docs/scratch.md", "An immutable draft.\n")
         subprocess.run(["git", "-C", str(self.root), "add", "README.md"], check=True)
 
-        result = run_checker(cwd=self.root)
+        result = run(CHECKER, cwd=self.root)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("README.md:1: em-dash:", result.stdout)
@@ -635,7 +625,7 @@ class CommandTest(Fixture):
     def test_the_repo_itself_passes(self):
         # The claim CI makes, made here too: every tracked Markdown file in
         # this checkout satisfies the house rules.
-        result = run_checker(cwd=REPO_ROOT)
+        result = run(CHECKER, cwd=REPO_ROOT)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -693,7 +683,7 @@ class FrontDoorTest(Fixture):
 
     def front_door(self):
         self.track()
-        return run_checker("--front-door", cwd=self.root)
+        return run(CHECKER, "--front-door", cwd=self.root)
 
     def findings(self, result):
         return result.stdout.splitlines()
@@ -708,7 +698,7 @@ class FrontDoorTest(Fixture):
         self.write("GLOSSARY.md", "x\n")
         self.track()
 
-        result = run_checker("--front-door", cwd=self.root / "docs")
+        result = run(CHECKER, "--front-door", cwd=self.root / "docs")
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.findings(result), [
@@ -721,15 +711,15 @@ class FrontDoorTest(Fixture):
         self.write("notes.txt", "x\n")
         self.track()
 
-        front = run_checker("--front-door", cwd=self.root)
-        default = run_checker(cwd=self.root)
+        front = run(CHECKER, "--front-door", cwd=self.root)
+        default = run(CHECKER, cwd=self.root)
 
         self.assertEqual(front.returncode, 1, front.stdout + front.stderr)
         self.assertEqual(default.returncode, 0, default.stdout + default.stderr)
         self.assertEqual(default.stdout.strip(), "")
 
     def test_front_door_takes_no_paths(self):
-        result = run_checker("--front-door", "README.md", cwd=self.root)
+        result = run(CHECKER, "--front-door", "README.md", cwd=self.root)
 
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("usage:", result.stderr)
@@ -852,7 +842,7 @@ class FrontDoorTest(Fixture):
         self.track()
         self.write("docs/scratch.md", "![](images/dashboard.png)\n")
 
-        result = run_checker("--front-door", cwd=self.root)
+        result = run(CHECKER, "--front-door", cwd=self.root)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.findings(result), [
@@ -998,7 +988,7 @@ class FrontDoorTest(Fixture):
     # or not the presentation pass has landed yet.
 
     def test_it_runs_on_this_checkout(self):
-        result = run_checker("--front-door", cwd=REPO_ROOT)
+        result = run(CHECKER, "--front-door", cwd=REPO_ROOT)
 
         self.assertIn(result.returncode, (0, 1), result.stdout + result.stderr)
         self.assertEqual(result.stderr, "")

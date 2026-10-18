@@ -14,7 +14,6 @@ parser of their own; nothing is imported from the tool.
 
 import json
 import re
-import subprocess
 import sys
 import threading
 import unittest
@@ -26,7 +25,8 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_metrics`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import LOXODONTA, REPO_ROOT, clean_env  # noqa: E402
+from support import (LOXODONTA, REPO_ROOT, SUPERVISOR, clean_env,  # noqa: E402
+                     run)
 
 from test_publish import FakeReceiver, FakeReceiverHandler
 from test_serve import OPENER, ServerFixture, log_entry
@@ -291,11 +291,10 @@ class AcknowledgementsTest(MetricsFixture):
         lines = log.read_bytes().splitlines(keepends=True)
         log.write_bytes(b"".join(lines[:-1]))
         (event,) = self.scan()["baseline"]["events"]
-        accepted = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "supervisor.py"), "acknowledge",
-             event["log"], event["found"]["head"], "--root", str(self.root)],
-            capture_output=True, encoding="utf-8", timeout=120,
-            env={**self.env, **self.knobs, "PYTHONIOENCODING": "utf-8"})
+        accepted = run(SUPERVISOR, "acknowledge",
+                       event["log"], event["found"]["head"], "--root",
+                       str(self.root), timeout=120,
+                       env={**self.env, **self.knobs})
         self.assertEqual(accepted.returncode, 0,
                          accepted.stdout + accepted.stderr)
         self.serve()
@@ -434,10 +433,8 @@ class HeadsTest(MetricsFixture):
     def publish_by_hand(self, log):
         """One head through the public `publish`, to the fake receiver:
         a real memo row, written the way the recorder writes it."""
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "publish", "--log", str(log),
-             self.receiver.url],
-            capture_output=True, check=True, env=clean_env())
+        run(LOXODONTA, "publish", "--log", str(log), self.receiver.url,
+            check=True, env=clean_env())
 
     def test_unanchored_and_unpublished_heads_are_the_panels_counts(self):
         make_chain(self.root / "alpha" / "receipts", "sess-bare")

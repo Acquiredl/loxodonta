@@ -19,7 +19,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -27,7 +26,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_mcp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import SUPERVISOR, isolated_env  # noqa: E402
+from support import SUPERVISOR, isolated_env, temp_folder  # noqa: E402
 
 from test_recall import (HOSTILE_ACTION, HOSTILE_ACTOR, HOSTILE_SHOWN,
                          forge_chain, recall_home, run_py, steering)
@@ -138,9 +137,7 @@ def sha256_tree(folder):
 
 class McpBase(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name).resolve()
-        self.addCleanup(self._tmp.cleanup)
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         self.home.mkdir()
         self.env = {"LOXODONTA_HOME": str(self.home)}

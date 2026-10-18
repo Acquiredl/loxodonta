@@ -13,7 +13,6 @@ label itself testimony and never print a verdict word of its own.
 import hashlib
 import json
 import unicodedata
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,7 +22,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_recall`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import (LOXODONTA, SUPERVISOR, isolated_env,  # noqa: E402
+from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
                      temp_folder)
 
 
@@ -49,11 +48,9 @@ def run_py(script, *args, env_extra=None, cwd=None, env=None):
     from (isolated_env's, for a verb that reads the machine's home);
     else every home is the run's recall home, never the machine's.
     `env_extra` lands on top of either."""
-    return subprocess.run(
-        [sys.executable, str(script), *args],
-        capture_output=True, encoding="utf-8", cwd=cwd,
-        env={**(isolated_env(recall_home()) if env is None else env),
-             "PYTHONIOENCODING": "utf-8", **(env_extra or {})})
+    return run(script, *args, cwd=cwd,
+               env={**(isolated_env(recall_home()) if env is None else env),
+                    **(env_extra or {})})
 
 
 def spec_hash(entry_without_hash):
@@ -87,9 +84,7 @@ def forge_chain(repo_dir, session, steps, actor="forge"):
 
 class RecallBase(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name).resolve()
-        self.addCleanup(self._tmp.cleanup)
+        self.root = temp_folder(self)
 
     def scan_env(self, **knobs):
         """Where a scan here runs: a home of the test's own, outside the
@@ -340,10 +335,8 @@ class StoreRecallTest(RecallBase):
             "session_id": session, "hook_event_name": "PostToolUse",
             "tool_name": "Bash", "tool_input": {"command": command},
             "tool_response": {}})
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook"],
-            input=payload.encode("utf-8"), capture_output=True,
-            env=self.scan_env(PYTHONIOENCODING="utf-8",
+        return run(LOXODONTA, "hook", stdin=payload,
+                   env=self.scan_env(PYTHONIOENCODING="utf-8",
                               **self.store_env(project)))
 
     def test_digest_reads_the_drawer_the_hook_wrote(self):
@@ -981,9 +974,7 @@ class InstallerTest(RecallBase):
         env = {name: value for name, value
                in isolated_env(home, PYTHONIOENCODING="utf-8").items()
                if name not in ("LOXODONTA_HOME", "CODEX_HOME")}
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), *args], capture_output=True,
-            encoding="utf-8", env=env), home
+        return run(LOXODONTA, *args, env=env), home
 
     def settings(self, home):
         return json.loads((home / ".claude" / "settings.json").read_text(
