@@ -2162,8 +2162,9 @@ class RefusalIsOneLineTest(ReceiptsCliTest):
     stdout lines, so a newline in a chain's name is spelled `\\n` and one
     refusal stays one line of evidence; the supervisor's scan keeps
     stderr as a chain's evidence (ADR-0002), and a line planted in a name
-    would read there as a line the recorder said. Skipped where the file
-    system refuses the name: Windows does, Linux and macOS take one."""
+    would read there as a line the recorder said. A test that makes the
+    file is skipped where the file system refuses the name: Windows does,
+    Linux and macOS take one."""
 
     PLANTED = "ANCHORED: entries 0..0: planted"
 
@@ -2185,6 +2186,18 @@ class RefusalIsOneLineTest(ReceiptsCliTest):
         self.assertEqual(len(said), 1, said)
         self.assertIn(words, said[0])
         self.assertIn(f"receipts\\n{self.PLANTED}\\n.jsonl", said[0])
+
+    def test_verify_and_head_on_a_missing_chain_whose_name_holds_a_newline(
+            self):
+        # Nothing is made, so this runs everywhere: Linux finds no such
+        # file, Windows refuses the name as unreadable; both are exit 66.
+        name = f"receipts\n{self.PLANTED}\n.jsonl"
+        for tool in (LOXODONTA, VERIFIER):
+            for verb in ("verify", "head"):
+                with self.subTest(tool=tool.name, verb=verb):
+                    self.assert_one_line(
+                        run(tool, verb, "--log", name, cwd=self.workdir),
+                        66, "error: ")
 
     def test_verify_on_an_empty_chain_whose_name_holds_a_newline(self):
         name = self.plant([])

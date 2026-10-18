@@ -4902,7 +4902,7 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
             # A proof the calendar gave and this machine could not keep
             # anchors nothing, and no other calendar's would land either.
             print(f"error: calendar {url} answered, and the proof could not "
-                  f"be written to {anchors_path(target)}: "
+                  f"be written to {visible(anchors_path(target))}: "
                   f"{unwritable_why(anchors_path(target), e)}",
                   file=sys.stderr)
             return EX_CANTCREAT
