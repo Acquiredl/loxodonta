@@ -44,6 +44,12 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
 - An ended session no longer reads awake for a day after the tail keeper commits its tail: growth that is bookkeeping alone carries the stillness clock forward, as it already never woke a session (#537).
 - After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
+- `install-hook --managed` writes the coverage marker into a store not made yet under a folder root owns, and a store not made yet under another account's folder is said to be that, not another account's (#465).
+- A managed file another program holds open on Windows is named as that, with the way out, instead of sending the reader for an administrator's shell that would not help (#465).
+- A harness settings file that is not JSON, nests too deep or holds no object is named in the scan's `settings_note`, in either home, instead of reading silently as no hook wired (#465).
+- `install-hook --managed` says to restart a running `supervisor serve` beside open sessions, since `serve` reads what is wired once, at its start (#465).
+- A coverage change is dated where more calls are owed: one that only adds matchers by the first write since the last observation, so another tool's file in the managed folder no longer dates it later (#465).
+- The day book's note says a row that is not an object is no row of counts at all, instead of saying a count in it is not a number (#448).
 
 ## [0.15.1] - 2026-10-12
 

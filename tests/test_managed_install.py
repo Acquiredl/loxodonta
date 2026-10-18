@@ -853,24 +853,40 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         self.assertEqual(last["matchers"], [])
         self.assertGreater(last["since"], ago(3600))
 
-    def test_another_tools_file_never_dates_the_operators_change_later(self):
-        # #465: with no managed file its folder's date stands in for it,
-        # and another tool's file written there moves that date.
+    def operators_change_then_another_tools_file(self, *matchers):
+        """The operator's file wiring `matchers`, written two hours ago,
+        and another tool's file written in the managed folder now, with
+        no managed file of the recorder's: the folder's date then
+        stands in for that file's and is later than the change."""
         self.operator_file.write_text(json.dumps({"hooks": {"PostToolUse": [
-            {"matcher": "Bash", "hooks": [
-                {"type": "command", "command": "python loxodonta.py hook"}]}]}}),
-            encoding="utf-8")
+            {"matcher": matcher, "hooks": [
+                {"type": "command", "command": "python loxodonta.py hook"}]}
+            for matcher in matchers]}}), encoding="utf-8")
         changed = time.time() - 2 * 3600
         os.utime(self.operator_file, (changed, changed))
         self.managed_file.parent.mkdir(parents=True)
         (self.managed_file.parent / "another-tool.json").write_text(
             '{"env": {}}', encoding="utf-8")
-
         report = json.loads(self.scan().stdout)
-
         last = report["completeness"]["calibration"]["epochs"][-1]
-        self.assertEqual(last["matchers"], ["Bash"])
-        self.assertLess(last["since"], ago(3600))
+        self.assertEqual(last["matchers"], list(matchers))
+        return last["since"]
+
+    def test_a_widening_is_dated_by_the_first_write_since(self):
+        # #465: the newly wired tools are owed from the operator's
+        # write, not from whenever another tool touched the folder.
+        prime_memory(self.root, matcher="Bash")
+
+        since = self.operators_change_then_another_tools_file("Bash", "Edit")
+
+        self.assertLess(since, ago(3600))
+
+    def test_a_narrowing_is_dated_by_the_last_write_since(self):
+        # The louder reading either way (#465): the old, wider matchers
+        # stay owed for as long as the dates allow.
+        since = self.operators_change_then_another_tools_file("Bash")
+
+        self.assertGreater(since, ago(3600))
 
     def test_a_hooks_file_that_is_no_settings_is_named(self):
         # #465: it reads as no hook wired, and that was all the scan
