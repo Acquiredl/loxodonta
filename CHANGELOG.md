@@ -31,7 +31,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
-- Harness settings or a coverage marker nested past the JSON reader no longer end `install-hook`, `uninstall-hook`, `scan` or `serve` in a traceback: each reads it as not JSON, the installer refusing such settings by name (#463).
+- `python tools/house_check.py --help` prints both passes and the exit codes instead of a traceback; an unknown flag or a missing path is named and refused with exit 64, as `--front-door` with paths now is too (#464).
+- Harness settings or a coverage marker nested past the JSON reader no longer end `install-hook`, `uninstall-hook`, `scan`, `serve` or `drill` in a traceback: each reads it as not JSON, the installer refusing such settings by name (#463).
 - `digest --payload` reads a payload nested past the JSON reader as no payload, as one that is not JSON, instead of ending in a traceback (#487).
 
 ## [0.15.1] - 2026-10-12
