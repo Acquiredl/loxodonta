@@ -4037,6 +4037,35 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertTrue(sibling["anchors"]["failed"])
         self.assertTrue(sibling["left"]["failed"])
 
+    def test_a_stood_down_chain_still_has_its_proofs_upgraded(self):
+        # #533: only the head steps stand down. The upgrade reads the
+        # sidecar alone, never the tail, so a proof the chain holds from
+        # before its tear still completes.
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-tore")
+        write_pending_anchor(log, chain_head(log), submitted=ago(600),
+                             calendar=calendar.url)
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        make_chain(self.root / "alpha" / "receipts", "sess-tore-002")
+        env = {**self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"}
+        first = run_scan(self.root, env=env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        calendar.mode = "complete"
+
+        second = run_scan(self.root, env=env)
+
+        tore, _ = chains_by_session(json.loads(second.stdout))[
+            ("alpha", "sess-tore")]
+        self.assertTrue(tore["superseded"])
+        self.assertEqual(len(calendar.polled), 2, "an upgrade was skipped")
+        # verify judges no anchor on a chain that does not walk clean, so
+        # the completed proof is read where the upgrade put it.
+        pending, completed = (json.loads(line) for line in Path(
+            str(log) + ".anchors.jsonl").read_text(
+                encoding="utf-8").splitlines())
+        self.assertEqual(completed["head"], pending["head"])
+
     def test_one_turn_failing_twice_keeps_both_notes(self):
         # A single turn can fail twice — a refused upgrade AND a refused
         # fresh-head anchor. Both failures belong in the note: evidence

@@ -1213,6 +1213,33 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.assertEqual([(r["first"], r["last"]) for r in chain_rows(log)],
                          [(0, 2), (3, 3)])
 
+    def test_a_stood_down_chain_still_sends_its_intact_entries(self):
+        # #533: a chain the scan stood down (a torn tail with a sibling,
+        # ADR-0004) has its head left alone, which the recorder refuses,
+        # and its entries up to the tear still go: `publish --chain` sends
+        # the intact prefix by design, and never reads the tail.
+        receipts = self.root / "alpha" / "receipts"
+        log = make_store_chain(receipts, "sess-tore")
+        intact = log.read_bytes()
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        make_store_chain(receipts, "sess-tore-002")
+        first = self.scan("--publish-every", "0s",
+                          "--publish-url", self.receiver.url)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.receiver.received.clear()
+
+        second = self.scan("--publish-every", "0s",
+                           "--publish-url", self.receiver.url,
+                           "--publish-chain", self.receiver.url,
+                           SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertNotIn("application/json", self.kinds(),
+                         "no head went: the sibling's had, the torn one's "
+                         "is refused")
+        self.assertIn(intact, [sent["raw"] for sent in self.receiver.received])
+
     def test_the_heads_flags_alone_send_no_entry_and_the_chain_flag_alone_no_head(self):
         # Each route is its own opt-in (ADR-0031 rulings 1 and 6): an
         # operator whose --publish-url is a chat webhook never has
