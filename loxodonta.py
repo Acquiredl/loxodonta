@@ -10,7 +10,9 @@ import errno
 import hashlib
 import io
 import json
+import ntpath
 import os
+import posixpath
 import stat
 import subprocess
 import sys
@@ -198,6 +200,14 @@ def files_base(log):
         # Valid JSON with no path in it, `[]` say (#406).
         return None, f"{unread}: it holds no JSON object"
     path = held.get("path")
+    if isinstance(path, str) and not (posixpath.isabs(path)
+                                      or ntpath.isabs(path)):
+        # The record holds the project's absolute path; a relative one
+        # would resolve against wherever the verifier happens to run.
+        # Absolute is asked of both systems' paths, so a record written
+        # on one and read on the other is a missing project, not this.
+        return None, f"{unread}: the path it holds is not absolute " \
+            f"({visible(path)})"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
     return None, f"{record} points at a missing project ({visible(path)})"
@@ -3774,8 +3784,12 @@ def seal_session(log, transcript_path):
     except LockTimeout:
         return locked_out(log)
     except OSError:
-        # On POSIX a folder that refuses the lock file raises here
-        # rather than waiting (#398), and is skipped like the rest (#430).
+        # Any refusal in taking or letting go of the lock, not only the
+        # one first met (#448): on POSIX a folder that refuses the lock
+        # file raises rather than waiting (#398), and so do a lock line
+        # a full disk refuses and a folder gone from under the chain.
+        # The seal's own read and append answer their refusals inside.
+        # Each is skipped like the rest (#430).
         return 0
 
 
@@ -5649,9 +5663,11 @@ def cmd_hook(args):
     # name (#386), or content that cannot be taken apart or names a
     # project that is gone (#406), is in the writer's reach: the hook
     # takes the project it knows, as it does when it writes a new
-    # record, and says so rather than lose the receipt (SPEC §8).
-    named, problem = files_base(log)
-    if problem and file_paths:
+    # record, and says so rather than lose the receipt (SPEC §8). Read
+    # only for a call that names files: the record is the writer's to
+    # make large, and most calls name none (#448).
+    named, problem = files_base(log) if file_paths else (base, None)
+    if problem:
         print(f"warning: {problem} — the files are fingerprinted against "
               f"{base}", file=sys.stderr)
     files, code = build_references(
@@ -6369,14 +6385,24 @@ def bytes_at(path):
 def json_object(data):
     """The JSON object `data` holds, or None: not UTF-8, not JSON,
     nested past the reader, or JSON that is not an object. None in,
-    None out."""
+    None out. A byte-order mark, which some editors save, is read past:
+    somebody's JSON behind one is still somebody's JSON, and is refused
+    as theirs, never written over as a file that is not JSON (#487)."""
     if data is None:
         return None
     try:
-        settings = json.loads(data.decode("utf-8"))
+        settings = json.loads(data.decode("utf-8-sig"))
     except (ValueError, RecursionError):
         return None
     return settings if isinstance(settings, dict) else None
+
+
+def bom_led(data):
+    """True when the bytes `data` open on a UTF-8 byte-order mark, which
+    json_object reads past. Whether the harness reads a settings file
+    behind one is not known, so the installer's own file behind one is
+    written again without it, never taken as installed (#487)."""
+    return data is not None and data.startswith(b"\xef\xbb\xbf")
 
 
 def read_json_object(path):
@@ -6570,28 +6596,36 @@ def pin_in_the_way(path, found, unread):
     not JSON is nobody's pin and is written over, as the hooks file is,
     and put back as it stood if the install is refused after it."""
     if found is not None and pinned_env(found) is None:
-        why = ("a file that is not the installer's pin stands there. "
-               "Nothing was written, there or anywhere else, and the hook "
-               "is wired where it was. See what it holds, and move it "
-               "away by hand.")
-    elif unread is not None:
-        why = (f"{unread.strerror or unread}. Nothing was written, there "
-               "or anywhere else, and the hook is wired where it was. "
-               f"{managed_way_out(path, unread)}").rstrip()
-    else:
-        return None
-    print(f"cannot write {path}: {why}", file=sys.stderr)
+        print(f"cannot write {path}: a file that is not the installer's "
+              "pin stands there. Nothing was written, there or anywhere "
+              "else, and the hook is wired where it was. See what it "
+              "holds, and move it away by hand.", file=sys.stderr)
+        return EX_CANTCREAT
+    if unread is not None:
+        return cannot_write(path, unread)
+    return None
+
+
+def cannot_write(path, error):
+    """The refusal of a managed install that writes neither managed
+    file, printed with the way out, and 73 to exit with: `error` is
+    what refused the write, or what stands at `path` and would."""
+    print(f"cannot write {path}: {error.strerror or error}. Nothing was "
+          "written, there or anywhere else, and the hook is wired where it "
+          f"was. {managed_way_out(path, error)}".rstrip(), file=sys.stderr)
     return EX_CANTCREAT
 
 
-def settle_telemetry_pin(path, wanted, found, standing):
+def settle_telemetry_pin(path, wanted, found, standing, marked=False):
     """Bring the pin at `path` to `wanted`, the pin's content at `full`
     and None at any other profile (ADR-0041 ruling 7), say what was
     done, and return (what changed, "written", "removed" or None; the
     exit code, or None). `found` is what the file holds and `standing`
     whether anything is at its name, both read before the installer
-    writes anything. When none is wanted, whatever stands there that is
-    not the installer's pin is left alone and named. When one is, what
+    writes anything; `marked`, whether it opens on a byte-order mark,
+    which makes even the installer's own pin one to write again (#487).
+    When none is wanted, whatever stands there that is not the
+    installer's pin is left alone and named. When one is, what
     stood in the way was refused before anything was said
     (pin_in_the_way), so what is here is nothing, the installer's own
     pin, or a readable file that is not JSON, written over as the hooks
@@ -6603,16 +6637,11 @@ def settle_telemetry_pin(path, wanted, found, standing):
               file=sys.stderr)
         return None, None
     if wanted:
-        if found == wanted:
+        if found == wanted and not marked:
             return None, None
         refusal = write_managed_file(path, wanted)
         if refusal:
-            print(f"cannot write {path}: {refusal.strerror or refusal}. "
-                  "Nothing was written, there or anywhere else, and the "
-                  "hook is wired where it was. "
-                  f"{managed_way_out(path, refusal)}".rstrip(),
-                  file=sys.stderr)
-            return None, EX_CANTCREAT
+            return None, cannot_write(path, refusal)
         print(f"pinned the harness's events to {wanted['env'][PIN_ENDPOINT]} "
               f"in {path}")
         return "written", None
@@ -6630,18 +6659,18 @@ def settle_telemetry_pin(path, wanted, found, standing):
     return "removed", None
 
 
-def put_pin_back(path, data):
+def put_pin_back(path, data, mode):
     """Undo settle_telemetry_pin after a refused hooks write, so a
     refused install has written nothing anywhere (ADR-0040 ruling 2):
-    the very bytes that stood there, never a re-serialisation (a file
-    that was not JSON goes back as it was), or no file when nothing
-    did. Quiet on failure: the refusal being reported is the one that
-    matters."""
+    the very bytes that stood there under the permission bits `mode`
+    they had (#487), never a re-serialisation (a file that was not JSON
+    goes back as it was), or no file when nothing did. Quiet on
+    failure: the refusal being reported is the one that matters."""
     try:
         if data is None:
             os.unlink(path)
         else:
-            replace_file(path, data, mode=0o644)
+            replace_file(path, data, mode=mode)
     except OSError:
         pass
 
@@ -6985,7 +7014,8 @@ def install_managed_hooks(args):
     leaves two homes, never none (ruling 3). At `full`, a file at the
     pin's name that is not the installer's pin refuses the install
     before anything is said or written (pin_in_the_way); at any other
-    profile it is left alone and named. The coverage marker follows
+    profile it is left alone and named. A folder at the hooks file's
+    name refuses it so at every profile. The coverage marker follows
     the managed file, so a refused install records nothing. Run as
     another account than the one that owns the home, it writes the
     managed files and nothing under that home, and says the hook has
@@ -6996,14 +7026,24 @@ def install_managed_hooks(args):
     settings, refused = load_settings(path)
     if refused:
         return refused
+    if os.path.isdir(managed):
+        # No right moves a folder, so it is refused before anything is
+        # said or written, as one at the pin's name is (#487).
+        return cannot_write(managed,
+                            OSError(errno.EISDIR, IS_A_FOLDER, managed))
     # The pin goes with the tier whose chain goes to the receiver
     # (ADR-0041 ruling 7). What stands at its name is read before
     # anything is said: a refused install says nothing about what
-    # will leave, and the bytes are what a refusal later puts back.
+    # will leave, and the bytes and their bits are what a refusal
+    # later puts back.
     wanted_pin = telemetry_pin(args.remote) if args.profile == "full" else None
     pin_data, unread = bytes_at(pin_path)
     pin_standing = os.path.lexists(pin_path)
     found_pin = json_object(pin_data)
+    try:
+        pin_mode = os.stat(pin_path).st_mode & 0o7777
+    except OSError:
+        pin_mode = None
     if wanted_pin and pin_standing:
         refused = pin_in_the_way(pin_path, found_pin, unread)
         if refused:
@@ -7032,21 +7072,16 @@ def install_managed_hooks(args):
     installed, healed, wired, failures = wire_hooks(target, args)
 
     pinned, refused = settle_telemetry_pin(pin_path, wanted_pin, found_pin,
-                                           pin_standing)
+                                           pin_standing, bom_led(pin_data))
     if refused:
         return refused
-    changed = target != existing
+    changed = target != existing or bom_led(bytes_at(managed)[0])
     if changed:
         refusal = write_managed_file(managed, target)
         if refusal:
             if pinned:
-                put_pin_back(pin_path, pin_data)
-            print(f"cannot write {managed}: "
-                  f"{refusal.strerror or refusal}. Nothing was written, "
-                  "there or anywhere else, and the hook is wired where it "
-                  f"was. {managed_way_out(managed, refusal)}".rstrip(),
-                  file=sys.stderr)
-            return EX_CANTCREAT
+                put_pin_back(pin_path, pin_data, pin_mode)
+            return cannot_write(managed, refusal)
         # Every entry the file now holds, not only what this run wired:
         # entries that moved here from the operator's file were wired
         # by an earlier run, and this is the one place that lists them.

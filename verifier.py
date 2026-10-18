@@ -17,7 +17,9 @@ import errno
 import hashlib
 import io
 import json
+import ntpath
 import os
+import posixpath
 import stat
 import subprocess
 import sys
@@ -205,6 +207,14 @@ def files_base(log):
         # Valid JSON with no path in it, `[]` say (#406).
         return None, f"{unread}: it holds no JSON object"
     path = held.get("path")
+    if isinstance(path, str) and not (posixpath.isabs(path)
+                                      or ntpath.isabs(path)):
+        # The record holds the project's absolute path; a relative one
+        # would resolve against wherever the verifier happens to run.
+        # Absolute is asked of both systems' paths, so a record written
+        # on one and read on the other is a missing project, not this.
+        return None, f"{unread}: the path it holds is not absolute " \
+            f"({visible(path)})"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
     return None, f"{record} points at a missing project ({visible(path)})"

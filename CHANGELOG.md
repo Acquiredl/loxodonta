@@ -37,6 +37,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `digest --payload` reads a payload nested past the JSON reader as no payload, as one that is not JSON, instead of ending in a traceback (#487).
 - After `uninstall-hook`, `scan` no longer reads every session `UNWATCHED`: sessions recorded while the hook was wired, chainless ones included, are judged by the coverage in force at their time; `UNWATCHED` is kept for a machine that never wired it (#532).
 - A recorder refusal names the chain, its lock or its sidecar with steering characters escaped, as the verdict lines do, so a newline in a chain's name no longer splits one refusal into lines of the scan's evidence (#511).
+- A `full` managed install refuses somebody else's telemetry pin saved with a byte-order mark, as it refuses any foreign pin, instead of writing over it as a file that is not JSON (#487).
+- A pin put back after a refused hooks write keeps the permission bits it had, not the installer's 0o644 (#487).
+- A folder at the managed hooks file's name refuses `install-hook --managed` before anything is said or written, as a folder at the pin's name does, instead of after the notices and the pin (#487).
+- The hook reads the project record only for a tool call that names files, so a large record left by the writer is not read whole on every call (#448).
+- A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
 
 ## [0.15.1] - 2026-10-12
 
