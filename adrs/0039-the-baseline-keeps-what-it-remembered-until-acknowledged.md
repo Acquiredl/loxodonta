@@ -133,6 +133,9 @@ run.
    standing. A standing alarm colours the day it was found and the days
    somebody looks, and does not mark every later day as watched. A turn
    somebody asked for writes its row as always.
+   *(Addendum 2026-10-18, #448 item 7: a folder the census could not
+   list joins that list, kept on the row as a `closed` count beside
+   `blind` and never painted.)*
 
 Exit 5 and no new number: the ladder keeps its length, and a script that
 reads 5 as "investigate" already does the right thing. What the alarm is

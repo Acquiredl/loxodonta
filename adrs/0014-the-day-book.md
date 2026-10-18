@@ -89,6 +89,12 @@ The ratified shape, recorded because the trade-offs were argued:
   it found new, or whose change moved, and not for one already
   standing: the alarm colours the day it was found and the days
   somebody looks, and does not mark every later day as watched.)*
+  *(Addendum 2026-10-18, #538: the other edge is closed. A request that
+  lands inside the hold is no longer answered from the keeper's reading;
+  it scans again and writes its own row, at most one more walk per
+  keeper turn. The tooltip's "opened with no reading recorded" now means
+  a page closed before its first scan finished, or a row from before
+  this change.)*
 - **Gaps only count after the first watched day.** A fresh install is
   not scolded for the fortnight before it existed.
 - **Bounded by date, not by row count.** A season (90 days). A book

@@ -10,6 +10,13 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- SPEC §3 says the project record holds the project's absolute path, and that a record naming a relative one is refused as a bad record, as the recorder has done since #544 (#559).
+- ADR-0014, ADR-0039 and ADR-0037 gain addenda: a request inside the keeper's hold writes its own row, a folder the census could not list reaches the day book, and the keepers read 1, 64 and 73 by name (#559).
+- CONTRIBUTING says a pull request moved from `dev` to `main` keeps its one-target result, the skipped roll-ups reading as passed, until a new push or a close and reopen reruns it (#559).
+- `docs/RECEIVER.md` counts a log record naming no session with the lines it cannot parse; `docs/HOOK.md` says an unreadable settings file ends coverage as quietly as a hook taken out, which only a managed install survives (#559).
+
 ## [0.16.0] - 2026-10-18
 
 ### Added
