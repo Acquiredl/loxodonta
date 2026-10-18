@@ -34,6 +34,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `python tools/house_check.py --help` prints both passes and the exit codes instead of a traceback; an unknown flag or a missing path is named and refused with exit 64, as `--front-door` with paths now is too (#464).
 - Harness settings or a coverage marker nested past the JSON reader no longer end `install-hook`, `uninstall-hook`, `scan`, `serve` or `drill` in a traceback: each reads it as not JSON, the installer refusing such settings by name (#463).
 - `digest --payload` reads a payload nested past the JSON reader as no payload, as one that is not JSON, instead of ending in a traceback (#487).
+- A `full` managed install refuses somebody else's telemetry pin saved with a byte-order mark, as it refuses any foreign pin, instead of writing over it as a file that is not JSON (#487).
+- A pin put back after a refused hooks write keeps the permission bits it had, not the installer's 0o644 (#487).
+- A folder at the managed hooks file's name refuses `install-hook --managed` before anything is said or written, as a folder at the pin's name does, instead of after the notices and the pin (#487).
+- The hook reads the project record only for a tool call that names files, so a large record left by the writer is not read whole on every call (#448).
+- A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
 
 ## [0.15.1] - 2026-10-12
 
