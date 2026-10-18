@@ -1184,7 +1184,8 @@ class TelemetryPinTest(ManagedBase):
 
         done = self.full()
 
-        self.assertEqual(own.read_bytes(), clean)
+        self.assertFalse(own.read_bytes().startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(self.read(own), json.loads(clean))
         self.assertNotIn("nothing changed", done.stdout)
 
     def test_a_bom_led_copy_of_the_installers_hooks_file_is_rewritten(self):

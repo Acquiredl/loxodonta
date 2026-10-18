@@ -6397,6 +6397,14 @@ def json_object(data):
     return settings if isinstance(settings, dict) else None
 
 
+def bom_led(data):
+    """True when the bytes `data` open on a UTF-8 byte-order mark, which
+    json_object reads past. Whether the harness reads a settings file
+    behind one is not known, so the installer's own file behind one is
+    written again without it, never taken as installed (#487)."""
+    return data is not None and data.startswith(b"\xef\xbb\xbf")
+
+
 def read_json_object(path):
     """The JSON object in the file at `path`, or None, by the two
     above."""
@@ -6608,14 +6616,16 @@ def cannot_write(path, error):
     return EX_CANTCREAT
 
 
-def settle_telemetry_pin(path, wanted, found, standing):
+def settle_telemetry_pin(path, wanted, found, standing, marked=False):
     """Bring the pin at `path` to `wanted`, the pin's content at `full`
     and None at any other profile (ADR-0041 ruling 7), say what was
     done, and return (what changed, "written", "removed" or None; the
     exit code, or None). `found` is what the file holds and `standing`
     whether anything is at its name, both read before the installer
-    writes anything. When none is wanted, whatever stands there that is
-    not the installer's pin is left alone and named. When one is, what
+    writes anything; `marked`, whether it opens on a byte-order mark,
+    which makes even the installer's own pin one to write again (#487).
+    When none is wanted, whatever stands there that is not the
+    installer's pin is left alone and named. When one is, what
     stood in the way was refused before anything was said
     (pin_in_the_way), so what is here is nothing, the installer's own
     pin, or a readable file that is not JSON, written over as the hooks
@@ -6627,7 +6637,7 @@ def settle_telemetry_pin(path, wanted, found, standing):
               file=sys.stderr)
         return None, None
     if wanted:
-        if found == wanted:
+        if found == wanted and not marked:
             return None, None
         refusal = write_managed_file(path, wanted)
         if refusal:
@@ -7062,10 +7072,10 @@ def install_managed_hooks(args):
     installed, healed, wired, failures = wire_hooks(target, args)
 
     pinned, refused = settle_telemetry_pin(pin_path, wanted_pin, found_pin,
-                                           pin_standing)
+                                           pin_standing, bom_led(pin_data))
     if refused:
         return refused
-    changed = target != existing
+    changed = target != existing or bom_led(bytes_at(managed)[0])
     if changed:
         refusal = write_managed_file(managed, target)
         if refusal:
