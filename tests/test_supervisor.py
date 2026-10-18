@@ -675,8 +675,8 @@ class AdoptTest(unittest.TestCase):
         # macOS lands both forms of one name on one file, so the plan
         # folds them as a package's names are folded (#299, #447).
         stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
-                              / "w" / "receipts", "café", entries=2)
-        legacy = make_chain(self.root / "alpha" / "receipts", "café",
+                              / "w" / "receipts", "cafe\u0301", entries=2)
+        legacy = make_chain(self.root / "alpha" / "receipts", "caf\u00e9",
                             entries=1)
 
         self.assert_one_name_refused(stranded, legacy)
