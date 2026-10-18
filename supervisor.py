@@ -1967,11 +1967,14 @@ def recorder_refusal(doing, finished):
     machine and no calendar, authority or remote was asked, so the note
     names none, and it promises no retry, since the recorder refuses
     again until the tail is dealt with (#533). The recorder's stderr is
-    shown as it said it, never read for a verdict (#504)."""
+    shown as it said it, never read for a verdict (#504), and clipped, so
+    a traceback from a recorder that failed before it could refuse
+    cannot fill the note."""
     said = " ".join(line.strip() for line in finished.stderr.splitlines()
                     if line.strip())
     if said.startswith("error: "):
         said = said[len("error: "):]
+    said = clip(said, 300)
     return f"the recorder refused to {doing}" + (f": {said}" if said else "")
 
 
