@@ -30,18 +30,10 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_supervisor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import home_guard  # noqa: E402
+from support import (LOXODONTA, RECEIVER, SUPERVISOR,  # noqa: E402
+                     clean_env, isolated_env, run, temp_folder)
 
-# Every suite that starts scan, serve, calibrate, drill, export or
-# package takes isolated_env from this module, so arming the home guard
-# here arms it wherever those suites run, alone or under discovery
-# (#242).
-home_guard.arm()
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 BASELINE_NAME = ".supervisor-baseline.json"
-LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
@@ -58,10 +50,7 @@ def ots_varint(n):
 
 
 def chain_head(log):
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), "head", "--log", str(log)],
-        capture_output=True, encoding="utf-8", check=True,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
+    return run(LOXODONTA, "head", "--log", str(log), check=True).stdout.strip()
 
 
 def ots_varbytes(b):
@@ -150,11 +139,8 @@ def run_scan(root, *extra, env):
     # `env` has no default: the one it had was the machine's own, and the
     # scan reads the coverage marker from there whatever --root says
     # (#242). Build it with isolated_env.
-    return subprocess.run(
-        [sys.executable, str(SUPERVISOR), "scan", "--root", str(root),
-         "--json", *extra],
-        capture_output=True, encoding="utf-8",
-        env={**env, "PYTHONIOENCODING": "utf-8"})
+    return run(SUPERVISOR, "scan", "--root", str(root), "--json", *extra,
+               env=env)
 
 
 def make_chain(log_dir, session, entries=2, action="step {i}", actions=None):
@@ -164,15 +150,12 @@ def make_chain(log_dir, session, entries=2, action="step {i}", actions=None):
     each, spelled as the hook spells them ("Bash: pytest -q")."""
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"receipts-{session}.jsonl"
-    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log", str(log)],
-                   capture_output=True, check=True, timeout=60)
+    run(LOXODONTA, "init", "--log", str(log), check=True, timeout=60)
     if actions is None:
         actions = [action.format(i=i) for i in range(entries)]
     for line in actions:
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", line],
-            capture_output=True, check=True, timeout=60)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", line, check=True, timeout=60)
     return log
 
 
@@ -190,13 +173,10 @@ def run_store_scan(store_home, witness, *extra):
     unpinned test would read the developer's real sessions — and the
     rest of the home sits beside the store, in the same temporary
     folder (#242)."""
-    return subprocess.run(
-        [sys.executable, str(SUPERVISOR), "scan", "--json",
-         "--witness", str(witness), *extra],
-        capture_output=True, encoding="utf-8", timeout=120,
-        env={**isolated_env(Path(store_home).parent / "home",
-                            LOXODONTA_HOME=str(store_home)),
-             "PYTHONIOENCODING": "utf-8"})
+    return run(SUPERVISOR, "scan", "--json", "--witness", str(witness), *extra,
+               timeout=120,
+               env=isolated_env(Path(store_home).parent / "home",
+                                LOXODONTA_HOME=str(store_home)))
 
 
 class StoreScanTest(unittest.TestCase):
@@ -205,10 +185,9 @@ class StoreScanTest(unittest.TestCase):
     these tests own the layout the same way the writer does."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name).resolve() / "storehome"
-        self.witness = Path(self._tmp.name).resolve() / "no-witness"
+        base = temp_folder(self)
+        self.home = base / "storehome"
+        self.witness = base / "no-witness"
         self.witness.mkdir()
 
     def drawer(self, slug, project_path):
@@ -280,12 +259,14 @@ class StoreScanTest(unittest.TestCase):
         return path
 
     def test_a_planted_anchored_line_in_a_chains_path_earns_nothing(self):
-        # #504: verify's refusal of an empty chain quotes the path raw on
-        # stderr, and a name in it can hold a newline on Linux and macOS,
-        # so a writer (ADR-0002) can put a line spelled like verify's own
-        # ANCHORED line into the scan's evidence with nothing but an
-        # empty file at a path it chose. Only a line verify printed on
-        # stdout earns the flag (#349); the refusal stays the evidence.
+        # #504: verify's refusal of an empty chain quoted the path raw on
+        # stderr until #511, and a name in it can hold a newline on Linux
+        # and macOS, so a writer (ADR-0002) could put a line spelled like
+        # verify's own ANCHORED line into the scan's evidence with nothing
+        # but an empty file at a path it chose. Only a line verify printed
+        # on stdout earns the flag (#349); the refusal stays the evidence.
+        # Since #511 these asserts also hold because the recorder escapes
+        # the path: the #504 guard is a second layer the CLI cannot reach.
         # The line sits in the drawer's name: as a file name, `receipts-`,
         # a newline, the shortest ANCHORED line, a newline and `.jsonl`
         # make 256 bytes, one over what Linux allows a name.
@@ -299,18 +280,20 @@ class StoreScanTest(unittest.TestCase):
         result = run_store_scan(self.home, self.witness)
 
         self.assertNotIn("Traceback", result.stderr)
-        self.assertNotEqual(result.returncode, 0,
-                            result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
         (chain,) = [c for chains in sessions.values() for c in chains]
         self.assertEqual(chain["verdict"], "NO-VERDICT")
         self.assertEqual(chain["exit"], 4)
         self.assertFalse(chain["anchored"], chain["detail"])
         self.assertEqual(chain["anchors"]["anchored"], [])
-        self.assertIn(line, chain["detail"],
+        # #511: the refusal names the path escaped, so the planted line
+        # stays inside the one refusal and is no line of its own.
+        self.assertNotIn(line, chain["detail"])
+        refusals = [said for said in chain["detail"] if "is empty" in said]
+        self.assertEqual(len(refusals), 1, chain["detail"])
+        self.assertIn(f"p\\n{line}\\n", refusals[0],
                       "verify's stderr stays in the row as evidence")
-        self.assertTrue(any("is empty" in said for said in chain["detail"]),
-                        chain["detail"])
 
     def test_a_planted_torn_tail_line_in_a_chains_name_stands_nothing_down(
             self):
@@ -318,8 +301,13 @@ class StoreScanTest(unittest.TestCase):
         # saying "torn tail", with a sibling -002 beside it, stands a
         # chain's exit down as ADR-0004's handled tear. Planted through
         # the file name, which this line is short enough for, it must
-        # not: the refusal keeps its exit, and the scan counts it.
-        name = "sess-aaaa\nBROKEN at entry 3: torn tail\n"
+        # not: the refusal keeps its exit, and the scan counts it. Since
+        # #511 the recorder escapes the path too, so this guard is a
+        # second layer the CLI can no longer reach.
+        # Spelled as the recorder prints a torn tail, so the line holds if
+        # `superseded` is ever matched to that exact line (#512).
+        name = ("sess-aaaa\nBROKEN: torn tail at line 3 (crash-truncated "
+                "append; entries 0..2 intact)\n")
         drawer = self.drawer("alpha-11111111", "C:/work/alpha")
         self.plant(drawer / f"receipts-{name}.jsonl")
         # The sibling is a chain in good standing, so the scan's exit is
@@ -329,8 +317,7 @@ class StoreScanTest(unittest.TestCase):
         result = run_store_scan(self.home, self.witness)
 
         self.assertNotIn("Traceback", result.stderr)
-        self.assertNotEqual(result.returncode, 0,
-                            result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
         planted, sibling = sessions[("alpha", name)]
         self.assertEqual(planted["verdict"], "NO-VERDICT")
@@ -345,15 +332,10 @@ class StoreScanTest(unittest.TestCase):
 def run_adopt(store_home, root, *extra):
     # adopt writes into the store alone, but no home is the machine's
     # (#274).
-    return subprocess.run(
-        [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root),
-         *extra],
-        capture_output=True, encoding="utf-8",
-        # Bounded: a pipe adopt opened would fail a test, not hang it.
-        timeout=120,
-        env=isolated_env(Path(store_home).parent / "home",
-                         LOXODONTA_HOME=str(store_home),
-                         PYTHONIOENCODING="utf-8"))
+    return run(SUPERVISOR, "adopt", "--root", str(root), *extra, timeout=120,
+               env=isolated_env(Path(store_home).parent / "home",
+                                LOXODONTA_HOME=str(store_home),
+                                PYTHONIOENCODING="utf-8"))
 
 
 class AdoptTest(unittest.TestCase):
@@ -362,11 +344,10 @@ class AdoptTest(unittest.TestCase):
     nothing is ever overwritten, running it twice is a no-op."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.home = Path(self._tmp.name).resolve() / "storehome"
+        self.home = self.base / "storehome"
 
     def drawers(self):
         receipts = self.home / "receipts"
@@ -516,7 +497,7 @@ class AdoptTest(unittest.TestCase):
         (name,) = self.drawers()
         legacy = make_chain(self.root / "alpha" / "receipts", "sess-bbbb")
         before = legacy.read_bytes()
-        elsewhere = Path(self._tmp.name).resolve() / "elsewhere.jsonl"
+        elsewhere = self.base / "elsewhere.jsonl"
         planted = self.home / "receipts" / name / legacy.name
         try:
             os.symlink(str(elsewhere), str(planted))
@@ -546,7 +527,7 @@ class AdoptTest(unittest.TestCase):
         write_completed_anchor(stranded, chain_head(stranded))
         sidecar = stranded.with_name(stranded.name + ".anchors.jsonl")
         before = sidecar.read_bytes()
-        elsewhere = Path(self._tmp.name).resolve() / "elsewhere.jsonl"
+        elsewhere = self.base / "elsewhere.jsonl"
         planted = self.home / "receipts" / name / sidecar.name
         try:
             os.symlink(str(elsewhere), str(planted))
@@ -639,13 +620,191 @@ class AdoptTest(unittest.TestCase):
         self.assertEqual(len(left), 2, result.stdout)
         self.assertEqual(would, left)
 
+    def assert_one_name_refused(self, first, second):
+        # Two legacy chains bound for one name in one drawer (#447): the
+        # writer picks path order (ADR-0002), so neither takes the name.
+        # Both are refused by name, in the dry run and the real run
+        # alike, and both stay where they lie; the rest still moves.
+        bystander = make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        before = {first: first.read_bytes(), second: second.read_bytes()}
+
+        def said(log):
+            return log.relative_to(self.root).as_posix()
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        result = run_adopt(self.home, self.root)
+
+        for ran in (planned, result):
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            for me, other in ((first, second), (second, first)):
+                (line,) = [line for line in ran.stdout.splitlines()
+                           if line.startswith(f"refused {said(me)}: ")]
+                self.assertTrue(line.endswith(
+                    f"/{me.name} is where {said(other)} would land too — "
+                    "none of them is moved; evidence is never overwritten; "
+                    "reconcile by hand"), line)
+        self.assertEqual(planned.stdout.count("would adopt "), 1,
+                         planned.stdout)
+        self.assertIn(f"would adopt {said(bystander)} -> ", planned.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        for log, held in before.items():
+            self.assertEqual(log.read_bytes(), held,
+                             "a refused chain stays put")
+        (name,) = self.drawers()
+        self.assertTrue(name.startswith("beta-"), name)
+
+    def test_two_legacy_chains_of_one_name_are_both_refused(self):
+        stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
+                              / "w" / "receipts", "s1", entries=2)
+        legacy = make_chain(self.root / "alpha" / "receipts", "s1",
+                            entries=1)
+
+        self.assert_one_name_refused(stranded, legacy)
+
+    def test_two_legacy_chains_whose_names_differ_in_case_are_one_name(self):
+        # A disk that ignores case lands both on one file, so the plan
+        # reads them as one name on every system (#447).
+        stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
+                              / "w" / "receipts", "S1", entries=2)
+        legacy = make_chain(self.root / "alpha" / "receipts", "s1",
+                            entries=1)
+
+        self.assert_one_name_refused(stranded, legacy)
+
+    def test_two_legacy_chains_in_two_unicode_forms_are_one_name(self):
+        # macOS lands both forms of one name on one file, so the plan
+        # folds them as a package's names are folded (#299, #447).
+        stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
+                              / "w" / "receipts", "cafe\u0301", entries=2)
+        legacy = make_chain(self.root / "alpha" / "receipts", "caf\u00e9",
+                            entries=1)
+
+        self.assert_one_name_refused(stranded, legacy)
+
+    def test_a_chain_bound_for_a_sidecar_name_leaves_the_sidecar(self):
+        # A sidecar travels with its chain only where the run has not
+        # given its name already (#447): here to a stranded chain whose
+        # name is the sidecar's, but for its case.
+        stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
+                              / "w" / "receipts", "s1.jsonl.ANCHORS")
+        legacy = make_chain(self.root / "alpha" / "receipts", "s1")
+        write_completed_anchor(legacy, chain_head(legacy))
+        sidecar = legacy.with_name(legacy.name + ".anchors.jsonl")
+        before = {stranded: stranded.read_bytes(),
+                  sidecar: sidecar.read_bytes()}
+        taker = stranded.relative_to(self.root).as_posix()
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        result = run_adopt(self.home, self.root)
+
+        (name,) = self.drawers()
+        words = (f"sidecar alpha/receipts/{sidecar.name}: {name}/"
+                 f"{sidecar.name} is taken by {taker} in this run — evidence "
+                 "is never overwritten; reconcile by hand")
+        self.assertIn(f"would leave {words}", planned.stdout)
+        self.assertEqual(planned.stdout.count("would adopt "), 2,
+                         planned.stdout)
+        self.assertIn(f"left {words}", result.stdout)
+        self.assertIn("2 chain(s) adopted", result.stdout)
+        self.assertEqual(sidecar.read_bytes(), before[sidecar],
+                         "the refused sidecar stays put")
+        drawer = self.home / "receipts" / name
+        self.assertEqual((drawer / stranded.name).read_bytes(),
+                         before[stranded])
+
+    def test_dry_run_says_the_unlisted_marker_the_move_copies(self):
+        # The real run copies a legacy folder's .unlisted into the drawer
+        # once (#448 item 16); the dry run says so, and the real run's
+        # drawer is what it said.
+        receipts = self.root / "alpha" / "receipts"
+        make_chain(receipts, "sess-aaaa")
+        make_chain(receipts, "sess-bbbb")
+        (receipts / ".unlisted").write_text("", encoding="utf-8")
+        make_chain(self.root / "beta" / "receipts", "sess-cccc")
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        self.assertEqual(self.drawers(), [], "dry-run moves nothing")
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(planned.returncode, 0,
+                         planned.stdout + planned.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        alpha = next(n for n in self.drawers() if n.startswith("alpha-"))
+        copies = [line for line in planned.stdout.splitlines()
+                  if "marker" in line]
+        self.assertEqual(copies, [
+            f"would copy marker alpha/receipts/.unlisted -> {alpha}/"])
+        unlisted = [n for n in self.drawers()
+                    if (self.home / "receipts" / n / ".unlisted").exists()]
+        self.assertEqual(unlisted, [alpha])
+
+    def test_dry_run_names_a_marker_the_move_would_leave(self):
+        # A folder where the marker belongs is left by the real run
+        # (#386); the dry run says so in the real run's words.
+        receipts = self.root / "alpha" / "receipts"
+        make_chain(receipts, "sess-aaaa")
+        (receipts / ".unlisted").mkdir()
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        result = run_adopt(self.home, self.root)
+
+        left = [line for line in result.stdout.splitlines()
+                if line.startswith("left marker ")]
+        self.assertEqual(len(left), 1, result.stdout)
+        self.assertIn(f"would {left[0].replace('left', 'leave', 1)}",
+                      planned.stdout.splitlines())
+
+    @unittest.skipUnless(os.name == "nt",
+                         "only Windows refuses to move a file held open")
+    def test_a_chain_held_open_is_said_to_have_moved_part_way(self):
+        # A move that cannot rename copies, then removes (#448 item 13):
+        # here the removal fails, so a copy stands in the drawer and the
+        # chain is still where it lay. Said, never "left as it lies".
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        before = log.read_bytes()
+
+        with open(log, "rb"):
+            result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (name,) = self.drawers()
+        self.assertIn(f"refused alpha/receipts/{log.name}: the move failed "
+                      "part way: ", result.stdout)
+        self.assertIn(f"{name}/{log.name} may be a partial copy; reconcile "
+                      "by hand", result.stdout)
+        self.assertNotIn("chain(s) adopted", result.stdout)
+        self.assertEqual(log.read_bytes(), before)
+
+    @unittest.skipUnless(os.name == "nt",
+                         "only Windows refuses to move a file held open")
+    def test_a_sidecar_held_open_is_said_to_have_moved_part_way(self):
+        # The sidecar's twin of the case above (#448 item 13): the chain
+        # moves, and the sidecar's failed move is named with the copy it
+        # may have left in the drawer.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+        sidecar = log.with_name(log.name + ".anchors.jsonl")
+        before = sidecar.read_bytes()
+
+        with open(sidecar, "rb"):
+            result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (name,) = self.drawers()
+        self.assertIn(f"left sidecar alpha/receipts/{sidecar.name}: the move "
+                      "failed part way: ", result.stdout)
+        self.assertIn(f"{name}/{sidecar.name} may be a partial copy; "
+                      "reconcile by hand", result.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertEqual(sidecar.read_bytes(), before)
+
     def test_adopted_chains_are_scanned_and_recalled(self):
         # The move is an end-to-end success only if the store's readers
         # pick the history up where it landed.
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
                    entries=3)
         run_adopt(self.home, self.root)
-        witness = Path(self._tmp.name).resolve() / "no-witness"
+        witness = self.base / "no-witness"
         witness.mkdir()
 
         result = run_store_scan(self.home, witness)
@@ -658,10 +817,8 @@ class AdoptTest(unittest.TestCase):
 
 class ScanCensusTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.root = temp_folder(self)
+        self.env = isolated_env(temp_folder(self))
 
     def test_scan_reports_a_chain_with_its_verdict_as_json(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
@@ -751,10 +908,7 @@ class ScanCensusTest(unittest.TestCase):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
 
         machine = run_scan(self.root, env=self.env)
-        human = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--root", str(self.root)],
-            capture_output=True, encoding="utf-8",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        human = run(SUPERVISOR, "scan", "--root", str(self.root), env=self.env)
 
         def shape(text):
             # Two runs are two moments, and the scan stamps itself: the
@@ -770,10 +924,8 @@ class ScanCensusTest(unittest.TestCase):
 
 class ScanVerdictTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.root = temp_folder(self)
+        self.env = isolated_env(temp_folder(self))
 
     def tamper(self, log):
         lines = log.read_text(encoding="utf-8").splitlines()
@@ -807,11 +959,10 @@ class ScanVerdictTest(unittest.TestCase):
         # renames it to 7 so one number never tells two stories.
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         for count in (18, 9):
-            subprocess.run(
-                [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-                 "--actor", "receipts", "--action",
-                 f"transcript-commitment: bytes={count} sha256=" + "0" * 64],
-                capture_output=True, check=True)
+            run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+                "--action",
+                f"transcript-commitment: bytes={count} sha256=" + "0" * 64,
+                check=True)
 
         result = run_scan(self.root, env=self.env)
 
@@ -830,11 +981,10 @@ class ScanVerdictTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         write_pending_anchor(log, "f" * 64, "2026-10-11T10:00:00Z")
         for count in (18, 9):
-            subprocess.run(
-                [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-                 "--actor", "receipts", "--action",
-                 f"transcript-commitment: bytes={count} sha256=" + "0" * 64],
-                capture_output=True, check=True, timeout=60)
+            run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+                "--action",
+                f"transcript-commitment: bytes={count} sha256=" + "0" * 64,
+                check=True, timeout=60)
 
         result = run_scan(self.root, env=self.env)
 
@@ -963,10 +1113,8 @@ class ScanAnchorTest(unittest.TestCase):
     exit-3 tier — "this is not the recorded history"."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.root = temp_folder(self)
+        self.env = isolated_env(temp_folder(self))
 
     def test_an_anchored_chain_is_a_distinct_claim_not_just_valid(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
@@ -1141,10 +1289,8 @@ class BaselineTest(unittest.TestCase):
     never a verdict about which side is true."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.root = temp_folder(self)
+        self.env = isolated_env(temp_folder(self))
         self.baseline = self.root / ".supervisor-baseline.json"
 
     def events(self, result):
@@ -1153,10 +1299,8 @@ class BaselineTest(unittest.TestCase):
     def test_appends_between_ticks_raise_no_alarm(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         first = run_scan(self.root, env=self.env)  # cold start seeds silently
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "one more step"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "one more step", check=True)
 
         second = run_scan(self.root, env=self.env)
 
@@ -1174,16 +1318,11 @@ class BaselineTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root, env=self.env)
         log.unlink()
-        subprocess.run([sys.executable, str(LOXODONTA), "init",
-                        "--log", str(log)], capture_output=True, check=True)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "innocent-looking work"],
-            capture_output=True, check=True)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "nothing to see here"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "init", "--log", str(log), check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "innocent-looking work", check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "nothing to see here", check=True)
 
         result = run_scan(self.root, env=self.env)
 
@@ -1275,11 +1414,8 @@ class BaselineTest(unittest.TestCase):
     def bounded_scan(self):
         # Bounded: a scan that waited on a pipe at a chain's name would
         # fail here rather than hang the suite.
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan",
-             "--root", str(self.root), "--json"],
-            capture_output=True, encoding="utf-8", timeout=60,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                   timeout=60, env=self.env)
 
     def assert_remembered_through(self, hollow, clear):
         """A chain scanned once, then `hollow` puts what reads as no
@@ -1323,10 +1459,8 @@ class BaselineTest(unittest.TestCase):
             "a chain put back shorter shrank; it is not a new chain")
 
         log.write_bytes(whole)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "one more step"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "one more step", check=True)
         grown = self.bounded_scan()
         self.assertEqual(grown.returncode, 0, grown.stdout + grown.stderr)
         self.assertEqual(self.events(grown), [])
@@ -1398,8 +1532,7 @@ def hold(test, path):
     rather than beside it (#300). A hard link, in a folder of the test's
     own on the same volume, so it sits in no census. Skips where the
     filesystem has no hard links."""
-    held = Path(test._tmp.name).resolve() / "held" / path.name
-    held.parent.mkdir(exist_ok=True)
+    held = temp_folder(test) / path.name
     try:
         os.link(path, held)
     except (OSError, NotImplementedError) as refused:
@@ -1431,10 +1564,9 @@ class StateSwapTest(unittest.TestCase):
     old file is never written into, and nothing temporary is left."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name).resolve() / "storehome"
-        self.witness = Path(self._tmp.name).resolve() / "no-witness"
+        base = temp_folder(self)
+        self.home = base / "storehome"
+        self.witness = base / "no-witness"
         self.witness.mkdir()
         drawer = self.home / "receipts" / "alpha-11111111"
         drawer.mkdir(parents=True)
@@ -1448,10 +1580,8 @@ class StateSwapTest(unittest.TestCase):
         state = [self.home / "baseline.json", self.home / "daybook.json"]
         before = [path.read_text(encoding="utf-8") for path in state]
         held = [hold(self, path) for path in state]
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(self.log),
-             "--actor", "claude-code", "--action", "one more step"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(self.log), "--actor", "claude-code",
+            "--action", "one more step", check=True)
 
         second = run_store_scan(self.home, self.witness)
 
@@ -1490,8 +1620,9 @@ def prime_memory(root, matcher="Edit|Write|NotebookEdit|Bash", age=864000,
     it. A real machine's supervisor has been looking for weeks by the
     time these sessions run; this is that machine. `failures` is the
     matcher wired for failed calls (#239), when the memory saw one.
+    `matcher=None` is a memory that never saw the hook wired (#532).
     """
-    epoch = {"since": ago(age), "matchers": [matcher]}
+    epoch = {"since": ago(age), "matchers": [matcher] if matcher else []}
     if failures:
         epoch["failures"] = [failures]
     (root / BASELINE_NAME).write_text(json.dumps({
@@ -1633,14 +1764,13 @@ class SubagentWitnessTest(unittest.TestCase):
     while its subagents read and search."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         install_witness_hook(self.witness, matcher="*")
         prime_memory(self.root, matcher="*")
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(base / "home")
 
     def scan(self, *extra):
         return run_scan(self.root, "--witness", str(self.witness), *extra,
@@ -1791,10 +1921,8 @@ class DaybookTest(unittest.TestCase):
     baseline beside it: writer-reachable, trusted for nothing."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.root = temp_folder(self)
+        self.env = isolated_env(temp_folder(self))
         self.daybook = self.root / ".supervisor-daybook.json"
 
     def rows(self, result):
@@ -1854,21 +1982,15 @@ class DaybookTest(unittest.TestCase):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run_scan(self.root, env=self.env)
         log.unlink()
-        subprocess.run([sys.executable, str(LOXODONTA), "init",
-                        "--log", str(log)], capture_output=True, check=True)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "step 0"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "init", "--log", str(log), check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "step 0", check=True)
         tripped = run_scan(self.root, env=self.env)
         # The alarm stands until the operator accepts the new head
         # (ADR-0039); after that, the wire is quiet again.
-        subprocess.run(
-            [sys.executable, str(SUPERVISOR), "acknowledge",
-             "alpha/receipts/receipts-sess-aaaa.jsonl", chain_head(log),
-             "--root", str(self.root)],
-            capture_output=True, encoding="utf-8", timeout=120, check=True,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        run(SUPERVISOR, "acknowledge",
+            "alpha/receipts/receipts-sess-aaaa.jsonl", chain_head(log),
+            "--root", str(self.root), timeout=120, check=True, env=self.env)
 
         settled = run_scan(self.root, env=self.env)
 
@@ -1919,6 +2041,24 @@ class DaybookTest(unittest.TestCase):
         kept = json.loads(self.daybook.read_text(encoding="utf-8"))["days"]
         self.assertEqual(kept[self.today()]["worst"], 0)
 
+    def test_a_row_that_is_not_an_object_is_named_as_that(self):
+        # #448: a row that holds no counts at all was said to hold one
+        # that is not a number.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        first = run_scan(self.root, env=self.env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        book = json.loads(self.daybook.read_text(encoding="utf-8"))
+        book["days"][self.today()] = "x"
+        self.daybook.write_text(json.dumps(book), encoding="utf-8")
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        note = json.loads(result.stdout)["history_note"]
+        self.assertIn(f"the row for {self.today()} is not one the book "
+                      "writes, not a row of counts at all", note)
+        self.assertNotIn("not a number", note)
+
 
 class CompletenessTest(unittest.TestCase):
     """The flagship (issue #22): the ratified alarm state machine over
@@ -1927,14 +2067,13 @@ class CompletenessTest(unittest.TestCase):
     claim is (accident detection and latency, nothing more)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = self.base / "witness"
         install_witness_hook(self.witness)
         prime_memory(self.root)
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(self.base / "home")
 
     def scan(self, *extra, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -1948,7 +2087,7 @@ class CompletenessTest(unittest.TestCase):
     def store_holding(self, *sessions):
         """A store (ADR-0011) with a drawer holding these sessions'
         chains, and the env that points the supervisor at it."""
-        home = Path(self._tmp.name).resolve() / "store"
+        home = self.base / "store"
         for session in sessions:
             make_chain(home / "receipts" / "alpha-deadbeef", session)
         return {**self.env, "LOXODONTA_HOME": str(home)}
@@ -2258,11 +2397,9 @@ class CompletenessTest(unittest.TestCase):
         # session: a machine-wide self-inflicted false scar.
         log = make_chain(self.root / "alpha" / "receipts", "sess-mark",
                          entries=2)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "receipts", "--action",
-             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+            "--action", "transcript-commitment: bytes=9 sha256=" + "0" * 64,
+            check=True)
         write_transcript(self.witness, self.root / "alpha", "sess-mark",
                          event_times=[ago(120), ago(60)])
 
@@ -2280,11 +2417,9 @@ class CompletenessTest(unittest.TestCase):
         # transcript commitments and whose transcript still exists.
         log = make_chain(self.root / "alpha" / "receipts", "sess-judge",
                          entries=2)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "receipts", "--action",
-             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+            "--action", "transcript-commitment: bytes=9 sha256=" + "0" * 64,
+            check=True)
         transcript = write_transcript(self.witness, self.root / "alpha",
                                       "sess-judge",
                                       event_times=[ago(120), ago(60)])
@@ -2363,11 +2498,9 @@ class CompletenessTest(unittest.TestCase):
         install_witness_hook(self.witness, sessionend=True)
         log = make_chain(self.root / "alpha" / "receipts", "sess-sealed",
                          entries=2)
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "receipts", "--action",
-             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+            "--action", "transcript-commitment: bytes=9 sha256=" + "0" * 64,
+            check=True)
         write_transcript(self.witness, self.root / "alpha", "sess-sealed",
                          event_times=[ago(7200), ago(7100)], idle=7000)
         self.scan()
@@ -2408,10 +2541,8 @@ class CompletenessTest(unittest.TestCase):
         self.edit_baseline(lambda data: [
             known.update({"last_grew": "2026-08-25T00:00:00Z"})
             for known in data["chains"].values()])
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "Bash: it stirs"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "Bash: it stirs", check=True)
 
         result = self.scan()
 
@@ -2436,11 +2567,9 @@ class CompletenessTest(unittest.TestCase):
         self.edit_baseline(lambda data: [
             known.update({"last_grew": "2026-08-25T00:00:00Z"})
             for known in data["chains"].values()])
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "receipts", "--action",
-             "transcript-commitment: bytes=9 sha256=" + "0" * 64],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "receipts",
+            "--action", "transcript-commitment: bytes=9 sha256=" + "0" * 64,
+            check=True)
 
         report = json.loads(self.scan().stdout)
 
@@ -2452,10 +2581,8 @@ class CompletenessTest(unittest.TestCase):
         write_transcript(self.witness, self.root / "alpha", "sess-busy",
                          event_times=[ago(120), ago(60)])
         self.scan()
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "Bash: still working"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "Bash: still working", check=True)
 
         report = json.loads(self.scan().stdout)
 
@@ -2499,6 +2626,32 @@ class CompletenessTest(unittest.TestCase):
         self.assertNotIn("uncommitted_tail", after,
                          "the next look sees the tail committed")
 
+    def test_the_tail_keepers_commitment_never_restarts_the_clock(self):
+        # #537: the commitment the tail keeper writes moves the head, but
+        # it is the recorder speaking, not the session acting: the
+        # stillness clock carries forward, as the reawakening already
+        # reads that growth (ADR-0018).
+        make_chain(self.root / "alpha" / "receipts", "sess-still-kept",
+                   entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-still-kept",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+        install_witness_hook(self.witness, sessionend=True)
+        self.scan()
+        self.seed_epoch()
+        self.edit_baseline(lambda data: [
+            known.update({"last_grew": "2026-08-25T00:00:00Z"})
+            for known in data["chains"].values()])
+
+        swept = self.states(self.scan())["sess-still-kept"]
+        self.assertTrue(swept["uncommitted_tail"])
+        self.assertEqual(self.tail_entries("sess-still-kept")[-1]["actor"],
+                         "receipts", "the tail keeper committed the tail")
+        after = self.states(self.scan())["sess-still-kept"]
+
+        self.assertEqual(after["dormancy"]["since"], "2026-08-25T00:00:00Z",
+                         "the keeper's own commitment is no growth")
+        self.assertEqual(after["dormancy"]["tier"], "dormant")
+
     def test_the_keeper_is_disableable_and_leaves_the_annotation(self):
         make_chain(self.root / "alpha" / "receipts", "sess-off",
                    entries=2)
@@ -2536,7 +2689,7 @@ class CompletenessTest(unittest.TestCase):
 
     def test_an_absent_witness_is_reported_never_guessed_at(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        nowhere = Path(self._tmp.name).resolve() / "no-such-layout" / "projects"
+        nowhere = self.base / "no-such-layout" / "projects"
 
         result = run_scan(self.root, "--witness", str(nowhere),
                           env=self.env)
@@ -2570,8 +2723,11 @@ class CompletenessTest(unittest.TestCase):
 
     def test_no_wired_hook_means_nothing_owes_a_receipt(self):
         # A machine without the receipts hook has sessions that owe
-        # nothing — expecting receipts there would alarm forever.
+        # nothing — expecting receipts there would alarm forever. The
+        # memory never saw the hook either: one that did is the
+        # uninstall-hook case, judged by its epochs (#532).
         (self.witness.parent / "settings.json").unlink()
+        prime_memory(self.root, matcher=None)
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         write_transcript(self.witness, self.root / "alpha", "sess-aaaa",
                          event_times=[ago(300), ago(290)])
@@ -2583,6 +2739,19 @@ class CompletenessTest(unittest.TestCase):
         self.assertIn("no recorder hook", report["completeness"]["note"])
         self.assertEqual(self.states(result)["sess-aaaa"]["state"],
                          "UNWATCHED")
+
+    def test_a_chainless_session_on_a_never_wired_machine_is_skipped(self):
+        # The third reader of the never-wired test (#532): a transcript
+        # with no chain owed nothing, so it takes no row at all.
+        (self.witness.parent / "settings.json").unlink()
+        prime_memory(self.root, matcher=None)
+        write_transcript(self.witness, self.root / "alpha", "sess-none",
+                         event_times=[ago(300), ago(290)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("sess-none", self.states(result))
 
     def test_alarm_language_claims_detection_never_more(self):
         write_transcript(self.witness, self.root / "alpha", "sess-ghost",
@@ -2604,13 +2773,12 @@ class CalibrationTest(unittest.TestCase):
     honestly — and never excuses silence after the change."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         self.baseline = self.root / ".supervisor-baseline.json"
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(base / "home")
 
     def scan(self, *extra, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -2636,12 +2804,8 @@ class CalibrationTest(unittest.TestCase):
         run is BEFORE-MEMORY unless someone states what was wired then
         — which is the same thing the operator of a real machine does
         after installing the supervisor onto months of history."""
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "calibrate",
-             "--root", str(self.root), "--since", since,
-             "--matchers", matcher],
-            capture_output=True, encoding="utf-8",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "calibrate", "--root", str(self.root),
+                   "--since", since, "--matchers", matcher, env=self.env)
 
     def test_widening_does_not_rejudge_ended_sessions(self):
         # A session recorded honestly under the narrow matcher: three
@@ -2723,6 +2887,84 @@ class CalibrationTest(unittest.TestCase):
         self.assertEqual(again.returncode, 0,
                          again.stdout + again.stderr)
 
+    def unwire(self, age):
+        """What uninstall-hook leaves: settings with no recorder hook,
+        written `age` seconds ago, so the newest epoch wires nothing."""
+        settings = self.witness.parent / "settings.json"
+        settings.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        stamp = time.time() - age
+        os.utime(settings, (stamp, stamp))
+
+    def wired_then_unwired(self):
+        """Two epochs, matchers then none, with the wired one in force
+        from well before the sessions the tests write."""
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=7000)
+        first = self.scan()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.seed(ago(7000), "Edit|Write|NotebookEdit|Bash")
+
+    def test_a_session_recorded_while_wired_is_judged_after_unwiring(self):
+        # #532: after uninstall-hook the newest epoch has no matchers,
+        # but a session recorded under the wired one is still judged by
+        # the coverage in force at its time (ADR-0016), never UNWATCHED.
+        self.wired_then_unwired()
+        make_chain(self.root / "alpha" / "receipts", "sess-wired",
+                   entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-wired",
+                         event_times=[ago(6500), ago(6490), ago(6480)],
+                         idle=3600)
+        self.unwire(age=100)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        epochs = json.loads(self.baseline.read_text(
+            encoding="utf-8"))["calibration"]
+        self.assertEqual(epochs[-1]["matchers"], [],
+                         "the newest epoch wires nothing")
+        judged = self.states(result)["sess-wired"]
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+        self.assertEqual(judged["tools"], 3)
+        self.assertNotIn("nothing owes a receipt",
+                         report["completeness"].get("note") or "")
+
+    def test_a_chainless_session_while_wired_is_judged_after_unwiring(self):
+        # #532: the chainless skip takes the same test. A transcript
+        # with no chain at all, written while the hook was wired, is
+        # the disabled-hook case, and unwiring later does not erase it.
+        self.wired_then_unwired()
+        write_transcript(self.witness, self.root / "alpha", "sess-ghost",
+                         event_times=[ago(6500), ago(6490), ago(6480)],
+                         idle=3600)
+        self.unwire(age=100)
+
+        result = self.scan()
+
+        judged = self.states(result).get("sess-ghost")
+        self.assertIsNotNone(judged, "the chainless session was skipped")
+        self.assertEqual(judged["state"], "ENDED-DEFICIT",
+                         "three unreceipted calls under a wired hook")
+        self.assertEqual(judged["tools"], 3)
+
+    def test_the_watch_says_todays_settings_wire_nothing_after_unwiring(self):
+        # After uninstall-hook the wired weeks are still judged (#532),
+        # and the watch says that today's settings wire nothing: the
+        # sessions since owe nothing, which no row says alone.
+        self.wired_then_unwired()
+        self.unwire(age=100)
+
+        result = self.scan()
+
+        report = json.loads(result.stdout)
+        since = json.loads(self.baseline.read_text(
+            encoding="utf-8"))["calibration"][-1]["since"]
+        note = report["completeness"].get("note") or ""
+        self.assertIn("no recorder hook is wired", note)
+        self.assertIn(f"sessions since {since} owe nothing", note)
+        self.assertIn("in force at their time", note)
+
 
 class UsersOwnHookTest(unittest.TestCase):
     """The settings file is shared with the user's own hooks (#303): the
@@ -2737,14 +2979,13 @@ class UsersOwnHookTest(unittest.TestCase):
     SYNC = "python ~/bin/receipts.py sync"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         self.witness.mkdir()
         self.baseline = self.root / ".supervisor-baseline.json"
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(base / "home")
 
     def wire(self, hooks):
         (self.witness.parent / "settings.json").write_text(
@@ -2814,16 +3055,15 @@ class FailedCallWitnessTest(unittest.TestCase):
     pays for one an owed call lost."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         install_witness_hook(self.witness, matcher="*", failures="*")
         prime_memory(self.root, matcher="*", failures="*")
         # Every home the tools read, pinned inside the test: the scan
         # reads neither this machine's marker nor its settings.
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(base / "home")
 
     def scan(self):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -3222,17 +3462,16 @@ class BeforeMemoryTest(unittest.TestCase):
     it never owed."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
+        self.witness = base / "witness"
         install_witness_hook(self.witness)
         self.baseline = self.root / BASELINE_NAME
         # The coverage marker is machine-wide whatever --root says
         # (ADR-0030), so the memory these tests date is this home's, not
         # the machine's (#242).
-        self.home = Path(self._tmp.name).resolve() / "home"
+        self.home = base / "home"
         self.env = isolated_env(self.home)
 
     def scan(self, *extra):
@@ -3240,11 +3479,8 @@ class BeforeMemoryTest(unittest.TestCase):
                         env=self.env)
 
     def calibrate(self, *args):
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "calibrate",
-             "--root", str(self.root), *args],
-            capture_output=True, encoding="utf-8",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "calibrate", "--root", str(self.root), *args,
+                   env=self.env)
 
     def watch(self, result):
         return json.loads(result.stdout)["completeness"]
@@ -3426,15 +3662,14 @@ class CoverageMarkerTest(unittest.TestCase):
     is the thing that wired it, and now it writes that down."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
-        self.store = Path(self._tmp.name).resolve() / "store"
+        self.witness = self.base / "witness"
+        self.store = self.base / "store"
         self.store.mkdir()
         install_witness_hook(self.witness, matcher="*")
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home",
+        self.env = isolated_env(self.base / "home",
                                 LOXODONTA_HOME=str(self.store))
 
     def scan(self, *extra):
@@ -3528,16 +3763,14 @@ class CoverageMarkerTest(unittest.TestCase):
         # real installer writes both epochs, into the past, and the scan
         # reads them as ADR-0030 already reads a matcher epoch: told by
         # install-hook, never observed.
-        home = Path(self._tmp.name).resolve() / "home"
+        home = self.base / "home"
         (home / ".claude").mkdir(parents=True)
         for age, profile in ((7200, "local"), (5400, "timestamped")):
             stamp = str(int(datetime.datetime.now(
                 datetime.timezone.utc).timestamp()) - age)
-            subprocess.run(
-                [sys.executable, str(LOXODONTA), "install-hook",
-                 "--profile", profile],
-                capture_output=True, check=True,
-                env={**self.env, "HOME": str(home), "USERPROFILE": str(home),
+            run(LOXODONTA, "install-hook", "--profile", profile, check=True,
+                env={**self.env, "HOME": str(home),
+                     "USERPROFILE": str(home),
                      "SOURCE_DATE_EPOCH": stamp})
         self.a_session("sess-week", ago(3600))
 
@@ -3564,22 +3797,20 @@ class CoverageMarkerTest(unittest.TestCase):
         # they had just finished. An empty store means "nothing has run
         # yet" when the hook is wired and "nothing is recording" when it
         # is not, and those want opposite things from the reader.
-        store = Path(self._tmp.name).resolve() / "freshstore"
+        store = self.base / "freshstore"
         env = {**self.env, "LOXODONTA_HOME": str(store),
                "PYTHONIOENCODING": "utf-8"}
         # Its own parent: hook_matchers reads `<witness>/../settings.json`,
         # so a bare path beside the wired witness would read the wired
         # one's settings.
-        bare = Path(self._tmp.name).resolve() / "nohook" / "projects"
+        bare = self.base / "nohook" / "projects"
         bare.mkdir(parents=True)
 
         def scan_store(witness):
             # No --root: the empty-store note belongs to store mode,
             # which is the universe a new install lands in (ADR-0011).
-            return subprocess.run(
-                [sys.executable, str(SUPERVISOR), "scan", "--json",
-                 "--witness", str(witness)],
-                capture_output=True, encoding="utf-8", env=env)
+            return run(SUPERVISOR, "scan", "--json", "--witness", str(witness),
+                       env=env)
 
         unwired = scan_store(bare)
         wired = scan_store(self.witness)
@@ -3635,48 +3866,6 @@ class FakeCalendarHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def keeper_env(**knobs):
-    """Proxy-free env (urllib must reach 127.0.0.1 directly) with any
-    supervisor knobs applied."""
-    env = {k: v for k, v in os.environ.items()
-           if k.lower() not in ("http_proxy", "https_proxy", "all_proxy",
-                                "no_proxy")}
-    env.update(knobs)
-    return env
-
-
-def isolated_env(home, **knobs):
-    """`keeper_env` with every home the tools read pointed inside `home`:
-    the store, the user's settings and Codex's hooks, so a scan reads
-    neither this machine's own wiring nor its coverage marker, and the
-    folder that stands in for the harness's managed settings folder
-    (#259), which nothing creates until a test asks for a managed
-    install. Pair it with a `--witness` under a temporary folder. The
-    knobs land last, so a test that keeps its store or its project
-    somewhere of its own names it here (`LOXODONTA_HOME=...`,
-    `CLAUDE_PROJECT_DIR=...`). Every start of scan, serve, calibrate,
-    drill, export or package (#242), and of adopt, hook, install-hook or
-    uninstall-hook (#274), goes through this or sets all four homes
-    itself, and the managed folder where the verb reads it; the home
-    guard (tests/home_guard.py) refuses one that does neither."""
-    env = keeper_env(LOXODONTA_HOME=str(Path(home) / ".loxodonta"),
-                     HOME=str(home), USERPROFILE=str(home),
-                     CODEX_HOME=str(Path(home) / ".codex"),
-                     LOXODONTA_MANAGED_DIR=str(Path(home) / "managed"))
-    env.pop("CLAUDE_PROJECT_DIR", None)
-    env.update(knobs)
-    return env
-
-
-def home_outside(test):
-    """A temporary home for `test`, removed when it ends, for a test whose
-    scanned root is its whole temporary folder: a home inside the root
-    would sit in the census it is meant to stay out of."""
-    away = tempfile.TemporaryDirectory()
-    test.addCleanup(away.cleanup)
-    return Path(away.name).resolve()
-
-
 class AnchorKeeperTest(unittest.TestCase):
     """The anchor keeper (issue #19): freshness assessed every tick,
     pending proofs completed with no operator action — the ritual the
@@ -3684,10 +3873,8 @@ class AnchorKeeperTest(unittest.TestCase):
     never sleeps."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.root = temp_folder(self)
+        self.env = isolated_env(temp_folder(self))
 
     def start_calendar(self):
         server = HTTPServer(("127.0.0.1", 0), FakeCalendarHandler)
@@ -3781,10 +3968,8 @@ class AnchorKeeperTest(unittest.TestCase):
     def test_a_completed_calendar_upgrades_on_tick_with_no_operator(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
-             "--calendar", calendar.url],
-            capture_output=True, check=True, env=self.env)
+        run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
+            check=True, env=self.env)
         calendar.mode = "complete"
 
         result = run_scan(self.root, env=self.env)
@@ -3801,10 +3986,8 @@ class AnchorKeeperTest(unittest.TestCase):
     def test_upgrade_attempts_are_polite_between_ticks(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "anchor", "--log", str(log),
-             "--calendar", calendar.url],
-            capture_output=True, check=True, env=self.env)
+        run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
+            check=True, env=self.env)
 
         first = run_scan(self.root, env=self.env)   # polls: pending
         calendar.mode = "complete"
@@ -3907,10 +4090,8 @@ class AnchorKeeperTest(unittest.TestCase):
                 encoding="utf-8")
         good = make_chain(self.root / "alpha" / "receipts", "sess-good",
                           action="sess-good step {i}")
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "anchor", "--log", str(good),
-             "--calendar", calendar.url],
-            capture_output=True, check=True, env=self.env)
+        run(LOXODONTA, "anchor", "--log", str(good), "--calendar",
+            calendar.url, check=True, env=self.env)
         calendar.submitted.clear()
 
         result = run_scan(self.root, "--anchor-every", "0s",
@@ -3975,6 +4156,112 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertIn("anchoring failed", chain["anchors"]["note"])
         self.assertFalse(chain["anchors"]["head"]["anchored"])
 
+    # Both keepers due on every look, and nothing listening at either end.
+    UNREACHABLE_KEEPERS = ("--anchor-every", "0s",
+                           "--calendar", "http://127.0.0.1:1",
+                           "--publish-every", "0s",
+                           "--publish-url", "http://127.0.0.1:1")
+
+    def torn_chain(self, session):
+        log = make_chain(self.root / "alpha" / "receipts", session)
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        return log
+
+    def test_a_head_the_recorder_refuses_is_said_to_be_its_refusal(self):
+        # #533: the recorder will not anchor, stamp or publish a damaged
+        # tail (exit 1, ADR-0037), so no calendar and no remote was asked,
+        # and the note names neither and promises no retry.
+        self.torn_chain("sess-tore")
+
+        result = run_scan(self.root, *self.UNREACHABLE_KEEPERS, env=self.env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-tore")
+        self.assertFalse(chain["superseded"])
+        for said in (chain["anchors"], chain["left"]):
+            self.assertIn("the recorder refused", said["note"])
+            self.assertIn("damaged tail", said["note"],
+                          "the recorder's own words are shown")
+            self.assertNotIn("try again", said["note"])
+            self.assertNotIn("calendar", said["note"].lower())
+            self.assertNotIn("remote", said["note"].lower())
+            self.assertTrue(said["failed"], "the head did not leave")
+
+    def test_a_stood_down_chain_is_handed_to_neither_keeper_again(self):
+        # #533: a torn tail with a sibling is stood down (ADR-0004), and
+        # the recorder refuses its head on every turn, so once a look has
+        # said so neither keeper asks again. Its sibling is kept as
+        # before, and the calendar and the remote that did not answer are
+        # still blamed for it.
+        self.torn_chain("sess-tore")
+        make_chain(self.root / "alpha" / "receipts", "sess-tore-002")
+        env = {**self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"}
+        first = run_scan(self.root, *self.UNREACHABLE_KEEPERS, env=env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        tore, _ = chains_by_session(json.loads(first.stdout))[
+            ("alpha", "sess-tore")]
+        for said in (tore["anchors"], tore["left"]):
+            self.assertNotIn("calendar", said["note"].lower())
+            self.assertNotIn("remote", said["note"].lower())
+        # Every attempt time set long ago, so a turn on either chain shows.
+        baseline = self.root / BASELINE_NAME
+        memory = json.loads(baseline.read_text(encoding="utf-8"))
+        long_ago = "2026-01-01T00:00:00Z"
+        self.assertEqual(len(memory["keeper"]), 4, memory["keeper"])
+        memory["keeper"] = {key: long_ago for key in memory["keeper"]}
+        baseline.write_text(json.dumps(memory), encoding="utf-8")
+
+        second = run_scan(self.root, *self.UNREACHABLE_KEEPERS, env=env)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        tore, sibling = chains_by_session(json.loads(second.stdout))[
+            ("alpha", "sess-tore")]
+        self.assertTrue(tore["superseded"])
+        for said in (tore["anchors"], tore["left"]):
+            self.assertNotIn("note", said)
+            self.assertNotIn("failed", said)
+        kept = json.loads(baseline.read_text(encoding="utf-8"))["keeper"]
+        for key, when in kept.items():
+            if "sess-tore-002" in key:
+                self.assertNotEqual(when, long_ago, key)
+            else:
+                self.assertEqual(when, long_ago,
+                                 f"a keeper turned on the stood-down {key}")
+        self.assertIn("no calendar accepted", sibling["anchors"]["note"])
+        self.assertIn("the remote did not take", sibling["left"]["note"])
+        self.assertTrue(sibling["anchors"]["failed"])
+        self.assertTrue(sibling["left"]["failed"])
+
+    def test_a_stood_down_chain_still_has_its_proofs_upgraded(self):
+        # #533: only the head steps stand down. The upgrade reads the
+        # sidecar alone, never the tail, so a proof the chain holds from
+        # before its tear still completes.
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-tore")
+        write_pending_anchor(log, chain_head(log), submitted=ago(600),
+                             calendar=calendar.url)
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        make_chain(self.root / "alpha" / "receipts", "sess-tore-002")
+        env = {**self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"}
+        first = run_scan(self.root, env=env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        calendar.mode = "complete"
+
+        second = run_scan(self.root, env=env)
+
+        tore, _ = chains_by_session(json.loads(second.stdout))[
+            ("alpha", "sess-tore")]
+        self.assertTrue(tore["superseded"])
+        self.assertEqual(len(calendar.polled), 2, "an upgrade was skipped")
+        # verify judges no anchor on a chain that does not walk clean, so
+        # the completed proof is read where the upgrade put it.
+        pending, completed = (json.loads(line) for line in Path(
+            str(log) + ".anchors.jsonl").read_text(
+                encoding="utf-8").splitlines())
+        self.assertEqual(completed["head"], pending["head"])
+
     def test_one_turn_failing_twice_keeps_both_notes(self):
         # A single turn can fail twice — a refused upgrade AND a refused
         # fresh-head anchor. Both failures belong in the note: evidence
@@ -4026,17 +4313,13 @@ class DrillTest(unittest.TestCase):
     operator can trust the alarms before ever needing them."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.base = temp_folder(self)
+        self.root = self.base
+        self.env = isolated_env(temp_folder(self))
 
     def drill(self, log):
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "drill", "--root",
-             str(self.root), "--log", str(log), "--json"],
-            capture_output=True, encoding="utf-8", timeout=300,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "drill", "--root", str(self.root), "--log",
+                   str(log), "--json", timeout=300, env=self.env)
 
     def test_the_four_way_battery_fires_every_expected_alarm(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
@@ -4095,7 +4378,7 @@ class DrillTest(unittest.TestCase):
                          "a refused drill writes nothing")
 
     def test_a_chain_outside_the_root_is_refused(self):
-        elsewhere = Path(self._tmp.name).resolve().parent
+        elsewhere = self.base.parent
 
         result = self.drill(elsewhere / "receipts-nope.jsonl")
 
@@ -4198,11 +4481,8 @@ class DrillTest(unittest.TestCase):
     def drill_from(self, cwd, root, log):
         """`drill` started in `cwd` with `--root` and `--log` spelled as
         a reader types them, relative to that folder (#297)."""
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "drill", "--root", root,
-             "--log", log, "--json"],
-            capture_output=True, encoding="utf-8", cwd=str(cwd),
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        return run(SUPERVISOR, "drill", "--root", root, "--log", log, "--json",
+                   cwd=str(cwd), env=self.env)
 
     def test_a_log_relative_to_the_current_folder_is_drilled(self):
         # The README's line, `drill --root docs/demo --log
@@ -4254,11 +4534,10 @@ class WalkFindingsTest(unittest.TestCase):
     """Findings from the 2026-08-25 supervisor walk (issue #25 prep)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.env = isolated_env(self.base / "home")
 
     def test_scan_counts_entries_not_raw_lines(self):
         # GLOSSARY: an entry is a parsed record; a torn line is damage,
@@ -4278,7 +4557,7 @@ class WalkFindingsTest(unittest.TestCase):
         # name matches the layout) must cost one session's watch, never
         # the whole scan.
         make_chain(self.root / "alpha" / "receipts", "sess-dirx")
-        witness = Path(self._tmp.name).resolve() / "witness"
+        witness = self.base / "witness"
         install_witness_hook(witness)
         (witness / "anyproj").mkdir(parents=True)
         (witness / "anyproj" / "sess-dirx.jsonl").mkdir()
@@ -4345,20 +4624,20 @@ class RecorderDriftTest(unittest.TestCase):
     (ADR-0002). Reporting drift is the honest half of that trade."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        self.base = temp_folder(self)
+        self.root = self.base / "repos"
         self.root.mkdir()
-        self.witness = Path(self._tmp.name).resolve() / "witness"
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.witness = self.base / "witness"
+        self.env = isolated_env(self.base / "home")
 
     def git(self, *args, cwd):
         return subprocess.run(["git", *args], cwd=str(cwd),
-                              capture_output=True, encoding="utf-8")
+                              capture_output=True, encoding="utf-8",
+                              timeout=120)
 
     def make_checkout(self, branch="main"):
         """A git checkout holding a stand-in recorder, wired as the hook."""
-        home = Path(self._tmp.name).resolve() / "recorder"
+        home = self.base / "recorder"
         home.mkdir()
         script = home / "loxodonta.py"
         script.write_text("# stand-in recorder\n", encoding="utf-8")
@@ -4402,7 +4681,7 @@ class RecorderDriftTest(unittest.TestCase):
     def test_a_recorder_outside_git_is_unknown_never_an_error(self):
         # No repo, no git, no upstream: say so plainly rather than
         # guessing or failing the scan over it.
-        home = Path(self._tmp.name).resolve() / "loose"
+        home = self.base / "loose"
         home.mkdir()
         script = home / "loxodonta.py"
         script.write_text("# loose recorder\n", encoding="utf-8")
@@ -4435,7 +4714,7 @@ class RecorderDriftTest(unittest.TestCase):
         # and a failed call leaves no receipt until install-hook runs
         # again. One clause on the line that already reads the wired
         # command, never an alarm of its own.
-        home = Path(self._tmp.name).resolve() / "loose"
+        home = self.base / "loose"
         home.mkdir()
         script = home / "loxodonta.py"
         script.write_text("# loose recorder\n", encoding="utf-8")
@@ -4472,9 +4751,8 @@ class TranscriptRetentionTest(unittest.TestCase):
     machine's settings."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name).resolve() / "home"
+        base = temp_folder(self)
+        self.home = base / "home"
         self.witness = self.home / ".claude" / "projects"
         self.witness.mkdir(parents=True)
 
@@ -4489,11 +4767,8 @@ class TranscriptRetentionTest(unittest.TestCase):
         return path
 
     def scan(self, *extra):
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--witness",
-             str(self.witness), *extra],
-            capture_output=True, encoding="utf-8",
-            env={**isolated_env(self.home), "PYTHONIOENCODING": "utf-8"})
+        result = run(SUPERVISOR, "scan", "--witness", str(self.witness),
+                     *extra, env=isolated_env(self.home))
         self.assertEqual(result.returncode, 0,
                          "the harness's retention never moves the exit:\n"
                          + result.stdout + result.stderr)
@@ -4623,14 +4898,13 @@ class ConsumptionTest(unittest.TestCase):
     one."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve() / "repos"
+        base = temp_folder(self)
+        self.root = base / "repos"
         self.root.mkdir()
         # Pinned to an empty layout: consumption reads only chains, and
         # the completeness watch must not read the developer's machine.
-        self.witness = Path(self._tmp.name).resolve() / "witness" / "projects"
-        self.env = isolated_env(Path(self._tmp.name).resolve() / "home")
+        self.witness = base / "witness" / "projects"
+        self.env = isolated_env(base / "home")
 
     def scan(self, env=None):
         return run_scan(self.root, "--witness", str(self.witness),
@@ -4740,13 +5014,10 @@ class DashLeadingStoreTest(unittest.TestCase):
             witness = root / "no-witness"
             witness.mkdir()
 
-            result = subprocess.run(
-                [sys.executable, str(SUPERVISOR), "scan", "--json",
-                 "--witness", str(witness)],
-                cwd=str(root), capture_output=True, encoding="utf-8",
-                env={**isolated_env(root / "home"),
-                     "PYTHONIOENCODING": "utf-8",
-                     "LOXODONTA_HOME": "-dashhome"})
+            result = run(SUPERVISOR, "scan", "--json", "--witness",
+                         str(witness), cwd=str(root),
+                         env={**isolated_env(root / "home"),
+                              "LOXODONTA_HOME": "-dashhome"})
 
             self.assertEqual(result.returncode, 0,
                              result.stdout + result.stderr)
@@ -4759,10 +5030,7 @@ class DashLeadingStoreTest(unittest.TestCase):
 def run_supervisor(home, *args):
     """Invoke the supervisor as an operator would, with nothing prepared
     in `home`: a usage error is decided before any store is read."""
-    return subprocess.run(
-        [sys.executable, str(SUPERVISOR), *args],
-        capture_output=True, encoding="utf-8",
-        env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
+    return run(SUPERVISOR, *args, env=isolated_env(home))
 
 
 class UsageExitTest(unittest.TestCase):
@@ -4771,7 +5039,7 @@ class UsageExitTest(unittest.TestCase):
     ruling 7). Argparse's message stays on stderr; stdout stays empty."""
 
     def setUp(self):
-        self.home = home_outside(self)
+        self.home = temp_folder(self)
 
     def test_unknown_flag_exits_64_with_argparse_message(self):
         result = run_supervisor(self.home, "scan", "--no-such-flag")
@@ -4809,9 +5077,7 @@ class ClosedFolderTest(unittest.TestCase):
     an event, never a traceback."""
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_folder(self)
         self.store = self.root / "store"
         self.home = self.root / "home"
         self.witness = self.home / ".claude" / "projects"
@@ -4833,10 +5099,7 @@ class ClosedFolderTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
 
     def recorder(self, *args):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), *args], capture_output=True,
-            encoding="utf-8", check=True, timeout=60,
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        return run(LOXODONTA, *args, check=True, timeout=60)
 
     def env(self):
         return isolated_env(self.home, LOXODONTA_HOME=str(self.store),
@@ -4845,10 +5108,8 @@ class ClosedFolderTest(unittest.TestCase):
     def supervisor(self, *args):
         """One supervisor command, bounded, so a regression that waits
         fails the test and never hangs the suite."""
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), *args], cwd=str(self.root),
-            capture_output=True, encoding="utf-8", timeout=120,
-            env=self.env())
+        return run(SUPERVISOR, *args, cwd=str(self.root), timeout=120,
+                   env=self.env())
 
     def scan(self):
         return self.supervisor("scan", "--json", "--witness",
@@ -4881,18 +5142,18 @@ class ClosedFolderTest(unittest.TestCase):
                              command=f'python "{script.as_posix()}" hook')
         return folder
 
-    def serve(self):
+    def serve(self, *extra, **knobs):
         """`serve` over the store on an ephemeral port; its address."""
         server = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
-             "--witness", str(self.witness)],
+             "--witness", str(self.witness), *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            encoding="utf-8", env=self.env())
+            encoding="utf-8", env={**self.env(), **knobs})
         # Bounded: a server that never announces fails, never hangs.
         timer = threading.Timer(120, server.kill)
         timer.start()
         self.addCleanup(timer.cancel)
-        self.addCleanup(server.communicate)
+        self.addCleanup(server.communicate, timeout=30)
         self.addCleanup(server.kill)
         line = server.stdout.readline()
         found = re.search(r"http://127\.0\.0\.1:\d+", line)
@@ -4980,7 +5241,8 @@ class ClosedFolderTest(unittest.TestCase):
         result = self.supervisor("package", "sess-aaaa", "--witness",
                                  str(self.witness), "--out", str(out))
 
-        self.refused_by_name(result, self.store / "receipts")
+        # The home is what is closed, and is named (#448 item 8).
+        self.refused_by_name(result, self.store)
         self.assertFalse(os.path.lexists(out))
 
     def test_a_store_scan_names_a_closed_drawer_never_a_fresh_install(self):
@@ -5005,6 +5267,17 @@ class ClosedFolderTest(unittest.TestCase):
         self.assertEqual([c["folder"] for c in report["closed"]],
                          [later.as_posix()])
 
+    def test_a_drawer_looping_on_itself_is_named_itself(self):
+        # Only a refused permission names the folder above (#448 item
+        # 8's review): a link that loops is the drawer's own failure.
+        loop = self.store / "receipts" / "loop-00000000"
+        os.symlink(loop.name, loop)
+
+        result = self.scan()
+
+        self.answered(result, 5)
+        self.closed_named(json.loads(result.stdout), loop)
+
     def test_a_store_scan_names_a_closed_receipts_folder(self):
         self.close(self.store / "receipts")
 
@@ -5021,7 +5294,7 @@ class ClosedFolderTest(unittest.TestCase):
 
             self.answered(result, 5)
             report = json.loads(result.stdout)
-            self.closed_named(report, self.store / "receipts")
+            self.closed_named(report, self.store)
             self.assertEqual(report["baseline"]["blind"], "unreadable")
 
     def test_a_legacy_scan_names_a_closed_repo_folder(self):
@@ -5090,11 +5363,71 @@ class ClosedFolderTest(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as refused:
                     OPENER.open(url + route, timeout=30)
                 said = refused.exception.read().decode("utf-8")
+                kind = refused.exception.headers["Content-Type"]
                 refused.exception.close()
                 self.assertEqual(refused.exception.code, 503)
-                self.assertIn("cannot be listed", said)
+                # Words the page shows as they stand, never an HTML page
+                # it would parse as a report (#448 item 6).
+                self.assertTrue(kind.startswith("text/plain"), kind)
+                self.assertIn(f"{self.drawer.as_posix()} cannot be listed",
+                              said)
         with OPENER.open(f"{url}/api/status", timeout=30) as status:
             self.assertEqual(status.status, 200)
+
+    def test_a_turn_nobody_asked_for_books_a_folder_closed_at_first_look(self):
+        # #448 item 7: a drawer the baseline never knew, closed, is exit
+        # 5 and no alarm a turn finds new, so a keeper-only `serve` wrote
+        # no row and the day kept the clean row of the look before. Once,
+        # not on every turn: a closure the book already shows stands as
+        # an alarm already standing does (ADR-0039).
+        later = self.store / "receipts" / "later-00000000"
+        later.mkdir()
+        self.recorder("init", "--log", str(later / "receipts-sess-dddd.jsonl"))
+        self.close(later)
+        book = self.store / "daybook.json"
+        baseline = self.store / "baseline.json"
+        today = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%d")
+
+        def row():
+            try:
+                return json.loads(book.read_text(encoding="utf-8"))[
+                    "days"][today]
+            except (OSError, ValueError, KeyError):
+                return {}
+
+        def seconds_since(stamp):
+            try:
+                memory = json.loads(baseline.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return 0
+            then, now = (datetime.datetime.strptime(when, "%Y-%m-%dT%H:%M:%SZ")
+                         for when in (stamp, memory["scanned"]))
+            return (now - then).total_seconds()
+
+        self.assertEqual(row().get("worst"), 0, "setUp's look was clean")
+        before = row()["scans"]
+        # A day's cadence: the clock turns and no head is ever ripe, so
+        # nothing is sent to the address, which nothing answers.
+        self.serve("--publish-every", "1d", "--publish-url",
+                   "http://127.0.0.1:9", SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        deadline = time.monotonic() + 60
+        while row().get("worst") != 5 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        caught = row()
+        self.assertEqual(caught.get("worst"), 5,
+                         "no turn booked the closed folder")
+        # Several turns at half a second each past the one that booked it.
+        deadline = time.monotonic() + 60
+        while (seconds_since(caught["last"]) < 2
+               and time.monotonic() < deadline):
+            time.sleep(0.1)
+
+        self.assertGreaterEqual(seconds_since(caught["last"]), 2,
+                                "the clock stopped turning")
+        self.assertEqual(row()["scans"], before + 1,
+                         "a turn booked a closure the book already shows")
 
     def test_adopt_refuses_by_name_under_a_closed_legacy_repo_folder(self):
         beta = self.legacy / "beta"
@@ -5362,17 +5695,14 @@ def chain_copy(data, session, actions=FIXTURE_RECEIPTS, epoch=None,
     log = store / f"receipts-{session}.jsonl"
     if log.exists():
         log.unlink()
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    env = clean_env()
     if epoch is not None:
         env["SOURCE_DATE_EPOCH"] = str(epoch)
-    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log",
-                    str(log)], capture_output=True, check=True, timeout=60,
-                   env=env)
+    run(LOXODONTA, "init", "--log", str(log), check=True, timeout=60, env=env)
     for actor, action in ([("claude-code", a) for a in actions]
                           + [("receipts", n) for n in notes]):
-        subprocess.run([sys.executable, str(LOXODONTA), "log", "--log",
-                        str(log), "--actor", actor, "--action", action],
-                       capture_output=True, check=True, timeout=60, env=env)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", actor, "--action",
+            action, check=True, timeout=60, env=env)
     copy = Path(data) / log.name
     shutil.copyfile(log, copy)
     if settled:
@@ -5389,9 +5719,7 @@ class ReceiverReadingTest(unittest.TestCase):
     and the agent's machine read for nothing."""
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.base = Path(tmp.name).resolve()
+        self.base = temp_folder(self)
         self.home = self.base / "home"
         self.env = {**isolated_env(self.home), "PYTHONIOENCODING": "utf-8"}
         self.data = receiver_folder(self.base)
@@ -5402,10 +5730,8 @@ class ReceiverReadingTest(unittest.TestCase):
         env = dict(self.env)
         if settle is not None:
             env["SUPERVISOR_SETTLE_SECONDS"] = settle
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--receiver",
-             str(data or self.data), "--json", *extra],
-            capture_output=True, encoding="utf-8", timeout=180, env=env)
+        result = run(SUPERVISOR, "scan", "--receiver", str(data or self.data),
+                     "--json", *extra, timeout=180, env=env)
         self.assertNotIn("Traceback", result.stderr, result.stderr)
         return result
 
@@ -5574,6 +5900,17 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertRegex(row["last_heard"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertGreater(row["last_heard"], "2026-10-07T02:21:37Z")
 
+    def test_a_copy_with_no_mtime_past_the_epoch_is_not_heard_from(self):
+        # #535 review: a copy's mtime is an arrival only when it is past
+        # 0, as the fold took it before the refactor; a copy dated at the
+        # epoch says nothing of when it arrived.
+        copy = chain_copy(self.data, "epoch-session-0000")
+        os.utime(copy, (0, 0))
+
+        row = self.rows(self.report())["epoch-session-0000"]
+
+        self.assertNotIn("last_heard", row)
+
     def test_a_line_the_reader_cannot_parse_is_skipped_and_counted(self):
         chain_copy(self.data, FIXTURE_SESSION)
         with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
@@ -5600,6 +5937,127 @@ class ReceiverReadingTest(unittest.TestCase):
                          3)
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
+
+    def test_a_record_naming_no_session_is_counted_beside_the_lines(self):
+        # #487 item 6: a well-shaped line can hold records out of shape,
+        # one with no session.id, one whose attributes are not a list,
+        # one that is not an object. Each is said, not passed over.
+        chain_copy(self.data, FIXTURE_SESSION)
+        records = [
+            {"attributes": [{"key": "event.name",
+                             "value": {"stringValue": "tool_result"}}]},
+            {"attributes": {"session.id": FIXTURE_SESSION}},
+            7,
+        ]
+        with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
+                  encoding="utf-8") as events:
+            events.write(json.dumps({
+                "received": "2026-10-07T02:22:00Z", "from": "x",
+                "logs": {"resourceLogs": [{"scopeLogs": [
+                    {"logRecords": records}]}]}}) + "\n")
+
+        report = self.report()
+
+        second = report["completeness"]["second_record"]
+        self.assertEqual((second["unparsed"], second["sessionless"]), (0, 3))
+        self.assertIn("3 log record(s) naming no session skipped and counted",
+                      second["words"])
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_the_clean_fixture_names_no_sessionless_record(self):
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        second = self.report()["completeness"]["second_record"]
+
+        self.assertEqual(second["sessionless"], 0)
+        self.assertNotIn("naming no session", second["words"])
+
+    def test_an_events_file_that_cannot_be_read_sets_no_day(self):
+        # #487 item 9: a folder where the oldest day's file belongs is
+        # read for nothing, so its day is not where the memory begins. A
+        # copy dated between it and the fixture's day is before memory.
+        (self.data / "events-2026-10-01.jsonl").mkdir()
+        between = int(datetime.datetime(
+            2026, 10, 3, tzinfo=datetime.timezone.utc).timestamp())
+        chain_copy(self.data, "between-session-0000", epoch=between)
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report()
+        listed = self.report("--before-memory")
+
+        watch = report["completeness"]
+        self.assertEqual((watch["second_record"]["files"],
+                          watch["second_record"]["oldest"],
+                          watch["second_record"]["newest"]),
+                         (1, FIXTURE_DAY, FIXTURE_DAY))
+        self.assertNotIn("between-session-0000", self.rows(report))
+        self.assertEqual(watch["before_memory"]["count"], 1)
+        self.assertIn("events-2026-10-01.jsonl", watch["note"])
+        self.assertIn("nothing of them is counted, their day included: the "
+                      "second record's memory begins at the oldest file "
+                      "that was read", watch["note"])
+        self.assertNotIn("holds no events file", watch["note"])
+        # The unread file may hold the older session's events, so the
+        # words claim only what was read, never "never kept here".
+        block = listed["completeness"]["before_memory"]
+        (row,) = block["sessions"]
+        for words in (row["words"], block["words"]):
+            self.assertIn(f"predates {FIXTURE_DAY}, the day of the oldest "
+                          "events file read", words)
+            self.assertIn("is in no events file that was read", words)
+            self.assertNotIn("never kept here", words)
+
+    def test_a_folder_whose_every_events_file_is_unreadable_says_so(self):
+        # Review of #549, case A: files are there, none could be read.
+        # That is not a folder no harness has sent to.
+        data = receiver_folder(self.base / "closed", events=False)
+        (data / f"events-{FIXTURE_DAY}.jsonl").mkdir()
+        chain_copy(data, FIXTURE_SESSION)
+
+        report = self.report(data=data)
+
+        watch = report["completeness"]
+        self.assertIn("no events file the receiver holds could be read",
+                      watch["note"])
+        self.assertIn(f"events-{FIXTURE_DAY}.jsonl", watch["note"])
+        self.assertNotIn("holds no events file", watch["note"])
+        self.assertNotIn("no harness has sent", watch["note"])
+        self.assertNotIn("memory begins", watch["note"])
+        self.assertEqual(watch["second_record"]["files"], 0)
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "SECOND-RECORD-ABSENT")
+
+    def test_a_folder_with_no_events_file_says_so(self):
+        # #487 item 12: no harness has sent here yet.
+        data = receiver_folder(self.base / "bare", events=False)
+        chain_copy(data, FIXTURE_SESSION)
+
+        report = self.report(data=data)
+
+        watch = report["completeness"]
+        self.assertIn("the receiver holds no events file", watch["note"])
+        self.assertIn("reads SECOND-RECORD-ABSENT until one does",
+                      watch["note"])
+        self.assertEqual(watch["second_record"]["files"], 0)
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "SECOND-RECORD-ABSENT")
+
+    def test_a_listed_before_memory_row_says_why_it_is_not_judged(self):
+        # #487 item 12: the row's own words under --before-memory.
+        old = int(datetime.datetime(2026, 10, 1,
+                                    tzinfo=datetime.timezone.utc).timestamp())
+        chain_copy(self.data, "old-session-0000", epoch=old)
+
+        listed = self.report("--before-memory")
+
+        (row,) = listed["completeness"]["before_memory"]["sessions"]
+        self.assertEqual(row["state"], "BEFORE-MEMORY")
+        self.assertEqual(row["words"], (
+            f"this chain copy's newest entry predates {FIXTURE_DAY}, the "
+            "day of the oldest events file read, so its second record was "
+            "never kept here: counted, not judged, and not called absent "
+            "(ADR-0041)."))
 
     def test_an_int_value_int_cannot_read_ends_nothing(self):
         # str.isdigit() passes a superscript two and a string past the
@@ -5691,8 +6149,7 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.base / "nowhere"))
 
     def test_another_verb_does_not_take_the_flag(self):
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "calibrate", "--receiver",
-             str(self.data), "--since", "2026-01-01", "--matchers", "*"],
-            capture_output=True, encoding="utf-8", timeout=60, env=self.env)
+        result = run(SUPERVISOR, "calibrate", "--receiver", str(self.data),
+                     "--since", "2026-01-01", "--matchers", "*", timeout=60,
+                     env=self.env)
         self.assertEqual(result.returncode, 64, result.stderr)

@@ -19,7 +19,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -27,12 +26,12 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_mcp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import SUPERVISOR, isolated_env, temp_folder  # noqa: E402
+
 from test_recall import (HOSTILE_ACTION, HOSTILE_ACTOR, HOSTILE_SHOWN,
                          forge_chain, recall_home, run_py, steering)
-from test_supervisor import isolated_env, unreadable_depth
+from test_supervisor import unreadable_depth
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 LEGACY = "2025-11-25"
 MODERN = "2026-07-28"
@@ -110,7 +109,7 @@ class McpClient:
             out, err = self.proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             self.proc.kill()
-            out, err = self.proc.communicate()
+            out, err = self.proc.communicate(timeout=30)
             raise AssertionError("server did not exit on EOF")
         return self.proc.returncode, out.decode("utf-8"), err.decode("utf-8")
 
@@ -138,9 +137,7 @@ def sha256_tree(folder):
 
 class McpBase(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name).resolve()
-        self.addCleanup(self._tmp.cleanup)
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         self.home.mkdir()
         self.env = {"LOXODONTA_HOME": str(self.home)}
@@ -167,7 +164,7 @@ class McpBase(unittest.TestCase):
         for c in self.clients:
             if c.proc.poll() is None:
                 c.proc.kill()
-                c.proc.communicate()
+                c.proc.communicate(timeout=30)
 
 
 class HandshakeTest(McpBase):

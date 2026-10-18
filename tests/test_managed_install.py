@@ -25,12 +25,12 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_managed_install`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import (ago, chain_head, isolated_env,  # noqa: E402
-                             make_chain, prime_memory, run_scan,
-                             write_transcript)
+from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
+                     temp_folder)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+from test_supervisor import (ago, chain_head, make_chain,  # noqa: E402
+                             prime_memory, run_scan, write_transcript)
+
 OURS = ("loxodonta.py", "supervisor.py")
 REMOTE = "http://127.0.0.1:9/hook"
 
@@ -38,9 +38,7 @@ REMOTE = "http://127.0.0.1:9/hook"
 class ManagedBase(unittest.TestCase):
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.work = Path(self._tmp.name).resolve()
+        self.work = temp_folder(self)
         self.home = self.work / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = self.work / "store"
@@ -56,14 +54,9 @@ class ManagedBase(unittest.TestCase):
         self.pin_file = (self.managed / "managed-settings.d"
                          / "loxodonta-telemetry.json")
 
-    def run_tool(self, *args, env=None):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), *args], capture_output=True,
-            encoding="utf-8", timeout=120,
-            env=self.env if env is None else env)
-
     def install(self, *args, env=None):
-        done = self.run_tool("install-hook", *args, env=env)
+        done = run(LOXODONTA, "install-hook", *args,
+                   env=self.env if env is None else env)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         return done
 
@@ -112,7 +105,7 @@ class ManagedInstallTest(ManagedBase):
         env = self.without_the_right()
         before = self.everything()
 
-        done = self.run_tool("install-hook", "--managed", env=env)
+        done = run(LOXODONTA, "install-hook", "--managed", env=env)
 
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertNotIn("Traceback", done.stderr)
@@ -126,7 +119,7 @@ class ManagedInstallTest(ManagedBase):
         env = self.without_the_right()
         before = self.everything()
 
-        done = self.run_tool("install-hook", "--managed", "--profile",
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
                              "timestamped", env=env)
 
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
@@ -268,7 +261,7 @@ class ManagedInstallTest(ManagedBase):
         before = self.everything()
         for verb in ("install-hook", "uninstall-hook"):
             with self.subTest(verb=verb):
-                done = self.run_tool(verb, "--managed", "--codex")
+                done = run(LOXODONTA, verb, "--managed", "--codex", env=self.env)
 
                 self.assertEqual(done.returncode, 64,
                                  done.stdout + done.stderr)
@@ -280,7 +273,7 @@ class ManagedInstallTest(ManagedBase):
         self.install("--managed")
         before = self.everything()
 
-        done = self.run_tool("install-hook")
+        done = run(LOXODONTA, "install-hook", env=self.env)
 
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertIn(str(self.managed_file), done.stderr)
@@ -291,7 +284,7 @@ class ManagedInstallTest(ManagedBase):
     def test_a_plain_install_for_codex_is_another_harness_and_goes_ahead(self):
         self.install("--managed")
 
-        done = self.run_tool("install-hook", "--codex")
+        done = run(LOXODONTA, "install-hook", "--codex", env=self.env)
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
@@ -315,7 +308,7 @@ class ManagedInstallTest(ManagedBase):
                 ("uninstall-hook", ("--managed",), self.env, 0),
                 ("install-hook", (), self.env, 0)):
             with self.subTest(verb=verb, flags=flags, code=code):
-                done = self.run_tool(verb, *flags, env=env)
+                done = run(LOXODONTA, verb, *flags, env=env)
 
                 self.assertEqual(done.returncode, code,
                                  done.stdout + done.stderr)
@@ -328,7 +321,7 @@ class ManagedInstallTest(ManagedBase):
     def test_codex_reads_no_managed_folder_and_says_nothing_of_one(self):
         for verb in ("install-hook", "uninstall-hook"):
             with self.subTest(verb=verb):
-                done = self.run_tool(verb, "--codex")
+                done = run(LOXODONTA, verb, "--codex", env=self.env)
 
                 self.assertEqual(done.returncode, 0,
                                  done.stdout + done.stderr)
@@ -337,7 +330,7 @@ class ManagedInstallTest(ManagedBase):
     def test_the_help_says_whose_word_the_claim_is(self):
         # The harness documents it and ADR-0040 measured it: the help
         # names both, and never states the claim with no source.
-        done = self.run_tool("install-hook", "--help")
+        done = run(LOXODONTA, "install-hook", "--help", env=self.env)
 
         said = " ".join(done.stdout.split())
         self.assertIn("documented by the harness", said)
@@ -350,7 +343,7 @@ class ManagedInstallTest(ManagedBase):
         # file belongs, the refusal names that and does not send the
         # reader for rights that would not help.
         blocked = self.without_the_right()
-        done = self.run_tool("install-hook", "--managed", env=blocked)
+        done = run(LOXODONTA, "install-hook", "--managed", env=blocked)
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertIn(str(self.work / "blocker"), done.stderr)
         self.assertIn("is a file", done.stderr)
@@ -358,7 +351,7 @@ class ManagedInstallTest(ManagedBase):
 
         (self.managed_file / "kept").mkdir(parents=True)
         before = self.everything()
-        done = self.run_tool("install-hook", "--managed")
+        done = run(LOXODONTA, "install-hook", "--managed", env=self.env)
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertIn(str(self.managed_file), done.stderr)
         self.assertIn("a folder", done.stderr)
@@ -375,7 +368,7 @@ class ManagedInstallTest(ManagedBase):
                                               "timestamped")),
                             ("uninstall-hook", ("--managed",))):
             with self.subTest(verb=verb):
-                done = self.run_tool(verb, *flags)
+                done = run(LOXODONTA, verb, *flags, env=self.env)
 
                 self.assertEqual(done.returncode, 73,
                                  done.stdout + done.stderr)
@@ -393,7 +386,7 @@ class ManagedInstallTest(ManagedBase):
                 self.managed_file.parent.mkdir(parents=True, exist_ok=True)
                 self.managed_file.write_text(content, encoding="utf-8")
 
-                done = self.run_tool("install-hook")
+                done = run(LOXODONTA, "install-hook", env=self.env)
 
                 self.assertEqual(done.returncode, 0,
                                  done.stdout + done.stderr)
@@ -401,7 +394,7 @@ class ManagedInstallTest(ManagedBase):
                 self.assertEqual(
                     self.managed_file.read_text(encoding="utf-8"), content,
                     "a plain install never writes the managed file")
-                self.run_tool("uninstall-hook")
+                run(LOXODONTA, "uninstall-hook", env=self.env)
 
     def hold_two_homes(self):
         self.install()
@@ -425,7 +418,7 @@ class ManagedInstallTest(ManagedBase):
         os.chmod(self.operator_file.parent, 0o555)
         self.addCleanup(os.chmod, self.operator_file.parent, 0o755)
 
-        done = self.run_tool("install-hook", "--managed")
+        done = run(LOXODONTA, "install-hook", "--managed", env=self.env)
 
         self.two_homes_then_one(done)
         os.chmod(self.operator_file.parent, 0o755)
@@ -439,18 +432,28 @@ class ManagedInstallTest(ManagedBase):
         self.hold_two_homes()
 
         with open(self.operator_file, "rb"):
-            done = self.run_tool("install-hook", "--managed")
+            done = run(LOXODONTA, "install-hook", "--managed", env=self.env)
 
         self.two_homes_then_one(done)
         again = self.install("--managed")
         self.assertEqual(self.ours_in(self.operator_file), [])
         self.assertIn(str(self.operator_file), again.stdout)
 
+    def test_it_says_to_restart_serve_as_well(self):
+        # #465: `serve` reads what is wired once, at its start, so one
+        # started before the hook moved reads it where it was.
+        for flags in ((), ("--profile", "timestamped")):
+            with self.subTest(flags=flags):
+                done = self.install("--managed", *flags)
+
+                self.assertIn("`supervisor serve`",
+                              " ".join(done.stdout.split()))
+
     def test_an_operators_file_it_cannot_read_stops_it_before_it_writes(self):
         self.operator_file.write_text("{not json", encoding="utf-8")
         before = self.everything()
 
-        done = self.run_tool("install-hook", "--managed")
+        done = run(LOXODONTA, "install-hook", "--managed", env=self.env)
 
         self.assertEqual(done.returncode, 65, done.stdout + done.stderr)
         self.assertEqual(self.everything(), before)
@@ -469,7 +472,7 @@ class ManagedUninstallTest(ManagedBase):
         expected = self.everything()
         del expected[str(self.managed_file.relative_to(self.work))]
 
-        done = self.run_tool("uninstall-hook", "--managed")
+        done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn(str(self.managed_file), done.stdout)
@@ -483,7 +486,7 @@ class ManagedUninstallTest(ManagedBase):
     def test_with_nothing_there_it_says_so(self):
         before = self.everything()
 
-        done = self.run_tool("uninstall-hook", "--managed")
+        done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("nothing installed", done.stdout)
@@ -495,7 +498,7 @@ class ManagedUninstallTest(ManagedBase):
         (self.managed_file / "kept").mkdir(parents=True)
         before = self.everything()
 
-        done = self.run_tool("uninstall-hook", "--managed")
+        done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
 
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertNotIn("Traceback", done.stderr)
@@ -512,12 +515,29 @@ class ManagedUninstallTest(ManagedBase):
         self.addCleanup(os.chmod, self.managed_file.parent, 0o755)
         before = self.everything()
 
-        done = self.run_tool("uninstall-hook", "--managed")
+        done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
 
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertNotIn("Traceback", done.stderr)
         self.assertIn(str(self.managed_file), done.stderr)
         self.assertIn("sudo", done.stderr)
+        self.assertEqual(self.everything(), before)
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "a file held open refuses a delete on Windows")
+    def test_a_file_another_program_holds_open_is_named_as_that(self):
+        # #465: Windows answers a file held open with a PermissionError
+        # too, and no administrator's shell lets go of another's hold.
+        self.install("--managed")
+        before = self.everything()
+
+        with open(self.managed_file, "rb"):
+            done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertIn(str(self.managed_file), done.stderr)
+        self.assertIn("close it, then run this again", done.stderr)
+        self.assertNotIn("administrator", done.stderr)
         self.assertEqual(self.everything(), before)
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
@@ -528,8 +548,8 @@ class ManagedUninstallTest(ManagedBase):
         self.addCleanup(os.chmod, self.managed_file.parent, 0o755)
         before = self.everything()
 
-        done = self.run_tool("install-hook", "--managed", "--profile",
-                             "timestamped")
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
+                             "timestamped", env=self.env)
 
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertIn(str(self.managed_file), done.stderr)
@@ -543,12 +563,12 @@ class ManagedUninstallTest(ManagedBase):
         # still wired there.
         self.install("--managed")
         managed = self.managed_file.read_bytes()
-        self.run_tool("uninstall-hook", "--managed")
+        run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
         self.install()
         self.managed_file.write_bytes(managed)
         operators = self.operator_file.read_bytes()
 
-        done = self.run_tool("uninstall-hook", "--managed")
+        done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(self.managed_file.exists())
@@ -560,7 +580,7 @@ class ManagedUninstallTest(ManagedBase):
         self.install("--managed")
         before = self.everything()
 
-        done = self.run_tool("uninstall-hook")
+        done = run(LOXODONTA, "uninstall-hook", env=self.env)
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn(str(self.managed_file), done.stdout)
@@ -571,7 +591,7 @@ class ManagedUninstallTest(ManagedBase):
         # Ruling 6: an entry without `level` is the operator's own
         # settings file, as every entry written before this was.
         self.install("--managed")
-        self.run_tool("uninstall-hook", "--managed")
+        run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
         self.assertEqual(len(self.epochs()), 1,
                          "an uninstall writes no coverage marker")
 
@@ -657,7 +677,7 @@ class AnotherAccountTest(ManagedBase):
         self.assertIn("`uninstall-hook`", done.stdout)
 
         # What finishes it, run as the operator.
-        finished = self.run_tool("uninstall-hook")
+        finished = run(LOXODONTA, "uninstall-hook", env=self.env)
         self.assertEqual(finished.returncode, 0,
                          finished.stdout + finished.stderr)
         self.assertEqual(self.ours_in(self.operator_file), [])
@@ -689,6 +709,44 @@ class AnotherAccountTest(ManagedBase):
         self.assertFalse(self.managed_file.exists())
         self.assertEqual(self.under_the_home(), before)
         self.assertIn(f"still wired in {self.operator_file}", done.stdout)
+
+    def shared_folder(self, owner):
+        """A folder the account `owner` owns and every account may write
+        into, made through sudo: where the store is not made yet."""
+        shared = self.work / "shared"
+        for command in (["mkdir", str(shared)], ["chmod", "0777", str(shared)],
+                        ["chown", str(owner), str(shared)]):
+            done = subprocess.run(["sudo", "-n", *command],
+                                  capture_output=True, encoding="utf-8",
+                                  timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+        return shared
+
+    def test_a_store_not_made_yet_in_a_folder_root_owns_is_marked(self):
+        # #465: the store this account makes there is its own, and a
+        # folder root owns holds nothing another account planted.
+        shared = self.shared_folder(0)
+        env = {**self.env, "LOXODONTA_HOME": str(shared / "store")}
+
+        done = self.install("--managed", env=env)
+
+        self.assertTrue((shared / "store" / "coverage.json").is_file(),
+                        done.stdout)
+        self.assertNotIn("another account", done.stdout)
+
+    def test_a_store_not_made_yet_in_another_accounts_folder_is_said_so(self):
+        # #465: the store-only branch, which named a store that was not
+        # there as another account's.
+        shared = self.shared_folder(65534)
+        env = {**self.env, "LOXODONTA_HOME": str(shared / "store")}
+
+        done = self.install("--managed", env=env)
+
+        self.assertFalse(os.path.lexists(shared / "store"))
+        said = " ".join(done.stdout.split())
+        self.assertIn(f"the store at {shared / 'store'} is not made yet", said)
+        self.assertIn(f"{shared} belongs to another account", said)
+        self.assertIn("no coverage marker was written", said)
 
 
 class SupervisorReadsBothHomesTest(ManagedBase):
@@ -786,7 +844,7 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         long_ago = time.time() - 5 * 86400
         os.utime(self.operator_file, (long_ago, long_ago))
         self.scan()
-        done = self.run_tool("uninstall-hook", "--managed")
+        done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
         report = json.loads(self.scan().stdout)
@@ -794,6 +852,86 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         last = report["completeness"]["calibration"]["epochs"][-1]
         self.assertEqual(last["matchers"], [])
         self.assertGreater(last["since"], ago(3600))
+
+    def wire(self, settings, *matchers, written=None):
+        """A hooks file at `settings` wiring the recorder on `matchers`,
+        dated `written` when given."""
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": matcher, "hooks": [
+                {"type": "command", "command": "python loxodonta.py hook"}]}
+            for matcher in matchers]}}), encoding="utf-8")
+        if written is not None:
+            os.utime(settings, (written, written))
+
+    def test_a_session_judged_clean_stays_clean_after_a_later_widening(self):
+        # #548 review: the last epoch is not the last look, so a widening
+        # dated by the operator's older write re-judged a session a look
+        # had already found clean (ADR-0016 ruling 2).
+        prime_memory(self.root, matcher="Bash")
+        self.wire(self.operator_file, "Bash", written=time.time() - 5 * 86400)
+        write_transcript(self.witness, self.root / "beta", "sess-read",
+                         event_times=[ago(3 * 86400), ago(3 * 86400 - 60)],
+                         tool="Read")
+        (first,) = json.loads(self.scan().stdout)["completeness"]["sessions"]
+        self.assertEqual(first["state"], "ENDED-CLEAN")
+
+        self.wire(self.managed_file, "*")
+        result = self.scan()
+
+        (second,) = json.loads(result.stdout)["completeness"]["sessions"]
+        self.assertEqual(second["state"], "ENDED-CLEAN", result.stdout)
+
+    def operators_change_then_another_tools_file(self, *matchers):
+        """The operator's file wiring `matchers`, written two hours ago,
+        and another tool's file written in the managed folder now, with
+        no managed file of the recorder's: the folder's date then
+        stands in for that file's and is later than the change."""
+        self.wire(self.operator_file, *matchers, written=time.time() - 7200)
+        self.managed_file.parent.mkdir(parents=True)
+        (self.managed_file.parent / "another-tool.json").write_text(
+            '{"env": {}}', encoding="utf-8")
+        report = json.loads(self.scan().stdout)
+        last = report["completeness"]["calibration"]["epochs"][-1]
+        self.assertEqual(last["matchers"], list(matchers))
+        return last["since"]
+
+    def test_a_widening_is_dated_by_the_files_never_the_folder(self):
+        # #465: the newly wired tools are owed from the operator's
+        # write, not from whenever another tool touched the folder.
+        prime_memory(self.root, matcher="Bash")
+
+        since = self.operators_change_then_another_tools_file("Bash", "Edit")
+
+        self.assertLess(since, ago(3600))
+
+    def test_a_narrowing_is_still_dated_by_the_folder(self):
+        # A deleted managed file can only take matchers away, so the
+        # folder's date still stands in for one (#465).
+        since = self.operators_change_then_another_tools_file("Bash")
+
+        self.assertGreater(since, ago(3600))
+
+    def test_a_hooks_file_that_is_no_settings_is_named(self):
+        # #465: it reads as no hook wired, and that was all the scan
+        # said, in either home.
+        for content, why in (("{not json", "it is not JSON"),
+                             ("[" * 100000 + "]" * 100000,
+                              "it nests too deep to read"),
+                             ('["hooks"]', "it is not a JSON object")):
+            for settings in (self.operator_file, self.managed_file):
+                with self.subTest(file=settings.name, why=why):
+                    settings.parent.mkdir(parents=True, exist_ok=True)
+                    settings.write_text(content, encoding="utf-8")
+
+                    result = self.scan()
+
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    note = json.loads(result.stdout)["settings_note"]
+                    self.assertIn(f"{settings.as_posix()} cannot be read as "
+                                  f"harness settings: {why}", note)
+                    settings.unlink()
 
     def test_a_folder_where_the_managed_file_belongs_is_named(self):
         # #405's rule for the operator's file, held for the second home.
@@ -949,7 +1087,7 @@ class TelemetryPinTest(ManagedBase):
         for ours in (self.managed_file, self.pin_file):
             del expected[str(ours.relative_to(self.work))]
 
-        done = self.run_tool("uninstall-hook", "--managed")
+        done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn(str(self.pin_file), done.stdout)
@@ -961,7 +1099,7 @@ class TelemetryPinTest(ManagedBase):
         self.full()
         self.managed_file.unlink()
 
-        done = self.run_tool("uninstall-hook", "--managed")
+        done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(self.pin_file.exists())
@@ -974,8 +1112,8 @@ class TelemetryPinTest(ManagedBase):
         (self.pin_file / "kept").mkdir(parents=True)
         before = self.everything()
 
-        done = self.run_tool("install-hook", "--managed", "--profile",
-                             "full", "--remote", REMOTE)
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
+                             "full", "--remote", REMOTE, env=self.env)
 
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertNotIn("Traceback", done.stderr)
@@ -985,6 +1123,30 @@ class TelemetryPinTest(ManagedBase):
         self.assertNotIn("will leave", done.stdout,
                          "a refused install says nothing about what leaves")
         self.assertEqual(self.everything(), before)
+
+    def refuse_the_hooks_write(self):
+        """Make the hooks file's write fail after the pin's has gone
+        through, and return what undoes it: on Windows a read-only file
+        at its name, which refuses a replace; on POSIX a link from its
+        name into a folder nobody may write. A folder at its name is
+        refused before anything is written (#487), so it cannot."""
+        self.managed_file.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            self.plant(self.managed_file, {"hooks": {}})
+            os.chmod(self.managed_file, stat.S_IREAD)
+
+            def undo():
+                os.chmod(self.managed_file, stat.S_IWRITE)
+                self.managed_file.unlink()
+            return undo
+        if os.geteuid() == 0:
+            self.skipTest("root writes in a folder whatever its bits")
+        closed = self.work / "closed"
+        closed.mkdir(exist_ok=True)
+        os.chmod(closed, 0o555)
+        self.addCleanup(os.chmod, closed, 0o755)
+        self.managed_file.symlink_to(closed / "loxodonta.json")
+        return self.managed_file.unlink
 
     def test_a_refused_hooks_write_puts_the_pin_back_as_it_was(self):
         # The pin is written first; a refused hooks write afterwards
@@ -996,23 +1158,57 @@ class TelemetryPinTest(ManagedBase):
             with self.subTest(standing=standing):
                 if standing is not None:
                     self.plant(self.pin_file, standing)
-                (self.managed_file / "kept").mkdir(parents=True)
+                undo = self.refuse_the_hooks_write()
                 before = self.everything()
 
-                done = self.run_tool("install-hook", "--managed",
-                                     "--profile", "full", "--remote", REMOTE)
+                done = run(LOXODONTA, "install-hook", "--managed",
+                                     "--profile", "full", "--remote", REMOTE, env=self.env)
 
                 self.assertEqual(done.returncode, 73,
                                  done.stdout + done.stderr)
+                self.assertIn("pinned the harness's events", done.stdout,
+                              "the pin was written before the refusal")
                 self.assertIn(str(self.managed_file), done.stderr)
                 self.assertIn("Nothing was written", done.stderr)
                 self.assertEqual(self.everything(), before,
                                  "the pin as it stood, byte for byte, or "
                                  "no pin")
-                (self.managed_file / "kept").rmdir()
-                self.managed_file.rmdir()
+                undo()
                 if standing is not None:
                     self.pin_file.unlink()
+
+    @unittest.skipIf(sys.platform == "win32", "permission bits are POSIX")
+    def test_a_pin_put_back_keeps_the_mode_it_had(self):
+        # #487: the bytes go back under their own bits, not the 0o644 a
+        # pin of the installer's is written with.
+        self.plant(self.pin_file, {"env": {
+            **PIN_ENV, "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:9/old"}})
+        os.chmod(self.pin_file, 0o600)
+        self.refuse_the_hooks_write()
+
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
+                   "full", "--remote", REMOTE, env=self.env)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertEqual(os.stat(self.pin_file).st_mode & 0o777, 0o600)
+
+    def test_a_folder_at_the_hooks_files_name_is_refused_before_a_word(self):
+        # #487: as a folder at the pin's name is, before the notices and
+        # before the pin is written.
+        (self.managed_file / "kept").mkdir(parents=True)
+        before = self.everything()
+
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
+                   "full", "--remote", REMOTE, env=self.env)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "", "nothing said before the refusal")
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertIn(str(self.managed_file), done.stderr)
+        self.assertIn("a folder", done.stderr)
+        self.assertIn("Nothing was written", done.stderr)
+        self.assertNotIn("sudo", done.stderr)
+        self.assertEqual(self.everything(), before)
 
     def test_what_is_not_json_at_the_pins_name_is_nobodys_pin(self):
         # Left alone and named when no pin is wanted; written over at
@@ -1041,7 +1237,7 @@ class TelemetryPinTest(ManagedBase):
                                               "timestamped")),
                             ("uninstall-hook", ("--managed",))):
             with self.subTest(verb=verb):
-                done = self.run_tool(verb, *flags)
+                done = run(LOXODONTA, verb, *flags, env=self.env)
 
                 self.assertEqual(done.returncode, 73,
                                  done.stdout + done.stderr)
@@ -1061,7 +1257,7 @@ class TelemetryPinTest(ManagedBase):
                                               "timestamped")),
                             ("uninstall-hook", ("--managed",))):
             with self.subTest(verb=verb):
-                done = self.run_tool(verb, *flags)
+                done = run(LOXODONTA, verb, *flags, env=self.env)
 
                 self.assertEqual(done.returncode, 73,
                                  done.stdout + done.stderr)
@@ -1081,8 +1277,8 @@ class TelemetryPinTest(ManagedBase):
         self.plant(self.pin_file, foreign)
         before = self.everything()
 
-        done = self.run_tool("install-hook", "--managed", "--profile",
-                             "full", "--remote", REMOTE)
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
+                             "full", "--remote", REMOTE, env=self.env)
 
         self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
         self.assertNotIn("Traceback", done.stderr)
@@ -1097,7 +1293,7 @@ class TelemetryPinTest(ManagedBase):
                 ("install-hook", ("--managed", "--profile", "timestamped")),
                 ("uninstall-hook", ("--managed",))):
             with self.subTest(verb=verb):
-                done = self.run_tool(verb, *flags)
+                done = run(LOXODONTA, verb, *flags, env=self.env)
 
                 self.assertEqual(done.returncode, 0,
                                  done.stdout + done.stderr)
@@ -1105,6 +1301,43 @@ class TelemetryPinTest(ManagedBase):
                 self.assertEqual(self.pin_file.read_text(encoding="utf-8"),
                                  foreign)
         self.assertFalse(self.managed_file.exists())
+
+    def test_a_foreign_pin_with_a_byte_order_mark_is_refused_as_foreign(self):
+        # #487: an editor that saves with a byte-order mark leaves JSON
+        # all the same, and somebody else's JSON is refused, not
+        # written over as a file that is not JSON would be.
+        foreign = ('﻿{"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": '
+                   '"http://127.0.0.1:9/theirs", "THEIR_OWN": "1"}}')
+        self.plant(self.pin_file, foreign)
+        before = self.everything()
+
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
+                   "full", "--remote", REMOTE, env=self.env)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertIn(str(self.pin_file), done.stderr)
+        self.assertIn("move it away by hand", done.stderr)
+        self.assertEqual(self.everything(), before)
+
+    def assert_rewritten_without_a_bom(self, own):
+        # #487: whether the harness reads a file behind a byte-order
+        # mark is not known, so the installer's own content behind one
+        # is no install, and a re-run writes it clean.
+        self.full()
+        clean = own.read_bytes()
+        own.write_bytes(b"\xef\xbb\xbf" + clean)
+
+        done = self.full()
+
+        self.assertFalse(own.read_bytes().startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(self.read(own), json.loads(clean))
+        self.assertNotIn("nothing changed", done.stdout)
+
+    def test_a_bom_led_copy_of_the_installers_hooks_file_is_rewritten(self):
+        self.assert_rewritten_without_a_bom(self.managed_file)
+
+    def test_a_bom_led_copy_of_the_installers_pin_is_rewritten(self):
+        self.assert_rewritten_without_a_bom(self.pin_file)
 
     def test_another_managed_source_of_the_events_is_named_not_quoted(self):
         policy = self.managed / "managed-settings.json"
@@ -1165,7 +1398,7 @@ class TelemetryPinTest(ManagedBase):
         self.assertNotIn("warning: " + str(self.managed), done.stderr)
 
     def test_the_help_names_the_pin(self):
-        done = self.run_tool("install-hook", "--help")
+        done = run(LOXODONTA, "install-hook", "--help", env=self.env)
 
         self.assertIn("loxodonta-telemetry.json", " ".join(done.stdout.split()))
 
@@ -1200,10 +1433,8 @@ class SecondRecordNoteWitnessTest(ManagedBase):
                               "tool_name": "Bash",
                               "tool_input": {"command": command},
                               "tool_response": {}})
-        done = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook"],
-            input=payload.encode("utf-8"), capture_output=True, timeout=120,
-            env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
+        done = run(LOXODONTA, "hook", stdin=payload,
+                   env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
         self.assertEqual(done.returncode, 0, done.stderr)
 
     def chain(self):
@@ -1224,22 +1455,16 @@ class SecondRecordNoteWitnessTest(ManagedBase):
         write_transcript(self.witness, self.project, self.SESSION,
                          event_times=[ago(6000), ago(5990)])
 
-        result = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "supervisor.py"), "scan",
-             "--json", "--witness", str(self.witness)],
-            capture_output=True, encoding="utf-8", timeout=120,
-            env=self.env)
+        result = run(SUPERVISOR, "scan", "--json", "--witness",
+                     str(self.witness), env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         (judged,) = json.loads(result.stdout)["completeness"]["sessions"]
         self.assertEqual(judged["receipts"], 2)
         self.assertEqual(judged["state"], "ENDED-CLEAN")
 
-        digest = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "supervisor.py"), "digest",
-             "--repo", str(self.project)],
-            capture_output=True, encoding="utf-8", timeout=120,
-            env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
+        digest = run(SUPERVISOR, "digest", "--repo", str(self.project),
+                     env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
 
         self.assertEqual(digest.returncode, 0, digest.stdout + digest.stderr)
         self.assertIn("step 1", digest.stdout)

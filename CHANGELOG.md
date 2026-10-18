@@ -10,6 +10,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-18
+
 ### Added
 
 - `docs/METHOD.md`, how the project was built: one person directing, an agent writing, and the checks, reviews and measurements that stand between them and the claims; linked from the README and CONTRIBUTING (#515).
@@ -26,6 +28,42 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/START.md` names the two steps that stay the operator's when an agent installs (#525).
 - The README drops *Why not just…*, its answers now in How it works and one line in Where it fits, and `house_check.py --front-door` no longer requires the heading (#525).
 - Five docs pages checked line by line against the tree and brought current, facts only: START, FIRE-DRILL, MCP, ANCHORING and EXPERIMENTS, with the first field run's findings marked resolved where the tool has since moved (#521).
+- The social preview carries the README's current tagline; `tools/build_social_preview.py` rebuilds it from the wordmark and the README, so the two cannot drift (#528).
+- The markdownlint rule file lives under `.github/`, where the workflow names it; the root keeps the standard files and the two git dotfiles (#529).
+- CONTRIBUTING says a pull request moved from `dev` to `main` needs a new push to run all five targets, and `tests.yml` no longer says a run waiting on `main` or `dev` is never cancelled (#453).
+
+### Fixed
+
+- `python tools/house_check.py --help` prints both passes and the exit codes instead of a traceback; an unknown flag or a missing path is named and refused with exit 64, as `--front-door` with paths now is too (#464).
+- Harness settings or a coverage marker nested past the JSON reader no longer end `install-hook`, `uninstall-hook`, `scan`, `serve` or `drill` in a traceback: each reads it as not JSON, the installer refusing such settings by name (#463).
+- `digest --payload` reads a payload nested past the JSON reader as no payload, as one that is not JSON, instead of ending in a traceback (#487).
+- After `uninstall-hook`, `scan` no longer reads every session `UNWATCHED`: sessions recorded while the hook was wired, chainless ones included, are judged by the coverage in force at their time; `UNWATCHED` is kept for a machine that never wired it (#532).
+- A recorder refusal names the chain, its lock or its sidecar with steering characters escaped, as the verdict lines do, so a newline in a chain's name no longer splits one refusal into lines of the scan's evidence (#511).
+- A `full` managed install refuses somebody else's telemetry pin saved with a byte-order mark, as it refuses any foreign pin, instead of writing over it as a file that is not JSON (#487).
+- A pin put back after a refused hooks write keeps the permission bits it had, not the installer's 0o644 (#487).
+- A folder at the managed hooks file's name refuses `install-hook --managed` before anything is said or written, as a folder at the pin's name does, instead of after the notices and the pin (#487).
+- The hook reads the project record only for a tool call that names files, so a large record left by the writer is not read whole on every call (#448).
+- A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
+- An ended session no longer reads awake for a day after the tail keeper commits its tail: growth that is bookkeeping alone carries the stillness clock forward, as it already never woke a session (#537).
+- After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
+- `install-hook --managed` writes the coverage marker into a store not made yet under a folder root owns, and a store not made yet under another account's folder is said to be that, not another account's (#465).
+- A managed file another program holds open on Windows is named as that, with the way out, instead of sending the reader for an administrator's shell that would not help (#465).
+- A harness settings file that is not JSON, nests too deep or holds no object is named in the scan's `settings_note`, in either home, instead of reading silently as no hook wired (#465).
+- `install-hook --managed` says to restart a running `supervisor serve` beside open sessions, since `serve` reads what is wired once, at its start (#465).
+- The managed folder's date stands in for a deleted managed file only when coverage narrows, so another tool's file in that folder no longer dates a widening later than the operator's change (#465).
+- The day book's note says a row that is not an object is no row of counts at all, instead of saying a count in it is not a number (#448).
+- `supervisor adopt` never moves one legacy chain over another bound for the same name in a drawer, case and Unicode form aside: every chain bound for that name is refused by name and left, in the dry run too (#447).
+- `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).
+- A page opened right after the keeper's own turn no longer counts a look on a day it paints unread: a turn's scan never answers a request, which scans again and writes the day's claims (#538).
+- A keeper turn writes the day book for a folder the census could not list from its first look; a closed store home is named, not its receipts folder (#448).
+- The page shows the folder named by `serve`'s refusal instead of a SyntaxError, and the status strip reads FOLDER CANNOT BE LISTED when that is the only alarm (#448).
+- A refusal the receiver judges on the headers alone (404, 405, 415, a chain name's 400) reaches the sender as its status, not as a dropped connection: the door reads up to 64 KiB of the body before closing (#450).
+- Over a receiver's folder, a log record that names no session, or is not an object, is counted as `sessionless` and said in the second record's words, instead of skipped unsaid (#487).
+- An events file the receiver's reading cannot open no longer counts as a day kept: it sets neither the memory's edge nor the oldest or newest day, and the note says so (#487).
+- `serve --receiver` answers `/api/recall`, `/api/activity`, `/api/search` and `/api/shape` from the receiver's chain copies, as its census counts them, where each answered empty (#487).
+- The hook says on stderr, one line, when the store's receipts folder cannot be listed, so a session it may split across two drawers is named; the receipt is still written (#452).
+- A session that never recorded, its transcript a folder or a pipe, reads `UNWITNESSED` with why in the completeness watch, as a chained session's unreadable transcript does, instead of passing in silence (#452).
+- The keepers stop asking the recorder for the head of a chain the scan stood down, which it refuses on every turn, and a refused head reads as the recorder's refusal, in its words, not a calendar's or remote's (#533).
 
 ## [0.15.1] - 2026-10-12
 
@@ -411,7 +449,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.15.1...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.16.0...dev
+[0.16.0]: https://github.com/Acquiredl/loxodonta/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/Acquiredl/loxodonta/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/Acquiredl/loxodonta/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Acquiredl/loxodonta/compare/v0.13.0...v0.14.0

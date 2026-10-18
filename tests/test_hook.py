@@ -11,7 +11,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,17 +20,14 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_hook`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import isolated_env  # noqa: E402
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+from support import LOXODONTA, isolated_env, run, temp_folder  # noqa: E402
 
 
-def run_hook(payload, cwd, *args, extra_env=None, timeout=None):
+
+
+def run_hook(payload, cwd, *args, extra_env=None, timeout=120):
     # The harness pipes the payload as raw UTF-8 bytes; feeding the hook the
-    # same way keeps the console codepage out of the test's path (bytes in,
-    # decoded output out — never `text=True`, whose locale codec would mask
-    # an encoding fault on Windows).
+    # same way keeps the console codepage out of the test's path.
     if isinstance(payload, str):
         stdin = payload.encode("utf-8")
     elif isinstance(payload, bytes):
@@ -43,37 +39,12 @@ def run_hook(payload, cwd, *args, extra_env=None, timeout=None):
     with tempfile.TemporaryDirectory() as home:
         # CLAUDE_PROJECT_DIR steers the default log dir; isolated_env
         # scrubs the ambient one so tests are deterministic wherever they
-        # run, and a test exercising that resolution injects it. The
-        # decode below assumes UTF-8, so tell the child to emit UTF-8 —
-        # otherwise a cp1252 console codepage on Windows breaks the
-        # agreement.
-        env = isolated_env(Path(home).resolve(), PYTHONIOENCODING="utf-8")
+        # run, and a test exercising that resolution injects it.
+        env = isolated_env(Path(home).resolve())
         if extra_env:
             env.update(extra_env)
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook", *args],
-            cwd=cwd,
-            input=stdin,
-            capture_output=True,
-            env=env,
-            timeout=timeout,
-        )
-    result.stdout = result.stdout.decode("utf-8", errors="replace")
-    result.stderr = result.stderr.decode("utf-8", errors="replace")
-    return result
-
-
-def run_receipts(*args, cwd):
-    # Both ends of the pipe pinned to UTF-8 (PYTHONIOENCODING for the child,
-    # encoding= for the parent) — `text=True` alone decodes with the locale
-    # codec, cp1252 on Windows, and disagrees with a UTF-8-emitting child.
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), *args],
-        cwd=cwd,
-        capture_output=True,
-        encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
+        return run(LOXODONTA, "hook", *args, cwd=cwd, stdin=stdin, env=env,
+                   timeout=timeout)
 
 
 def payload(session="sess-1234abcd", tool="Write", tool_input=None):
@@ -100,12 +71,7 @@ def drawer_of(store_home, project_name):
 
 class HookTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        # Resolved: macOS's temp root is a symlink (/var -> /private/var)
-        # and the hook judges "inside the project" by path spelling
-        # against the cwd the process reports, which is the real path.
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
 
     def session_log(self, session="sess-1234abcd"):
         return self.workdir / f"receipts-{session}.jsonl"
@@ -135,7 +101,7 @@ class HookTest(unittest.TestCase):
         self.assertIn("notes.md", entry["action"])
         self.assertEqual(entry["files"][0]["path"], "notes.md")
 
-        verify = run_receipts(
+        verify = run(LOXODONTA, 
             "verify", "--log", self.session_log().name, cwd=self.workdir
         )
         self.assertEqual(verify.returncode, 0, verify.stdout)
@@ -355,9 +321,7 @@ class HookTest(unittest.TestCase):
         # "Under the project" is judged on the path as given (SPEC §3,
         # #224): a link inside it is followed wherever it points, and the
         # receipt carries the link's path with the target's bytes.
-        elsewhere = tempfile.TemporaryDirectory()
-        self.addCleanup(elsewhere.cleanup)
-        target = Path(elsewhere.name) / "outside.md"
+        target = temp_folder(self) / "outside.md"
         target.write_text("bytes that live outside the project\n",
                           encoding="utf-8")
         link = self.workdir / "link.md"
@@ -459,7 +423,7 @@ class HookTest(unittest.TestCase):
         run_hook(payload(tool="Bash", tool_input={"command": "ls"}),
                  cwd=self.workdir)
         self.assertEqual([e["n"] for e in self.entries()], [0, 1, 2])
-        verify = run_receipts("verify", "--log", self.session_log().name,
+        verify = run(LOXODONTA, "verify", "--log", self.session_log().name,
                               cwd=self.workdir)
         self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
         self.assertEqual(verify.stdout.strip(), "VALID")
@@ -670,9 +634,7 @@ class HookWorktreeTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.store = self.workdir / "storehome"
 
     def env_for(self, project):
@@ -761,6 +723,66 @@ class HookWorktreeTest(unittest.TestCase):
         self.assertFalse(any(n.startswith("beta-") for n in names),
                          f"a second drawer opened for the session: {names}")
 
+    def unlistable_store(self):
+        """A session's first receipt in alpha's drawer, then the store's
+        receipts folder closed to listing and left open to lookups and
+        writes, as a chmod by the writer leaves it."""
+        first = self.workdir / "alpha"
+        first.mkdir()
+        elsewhere = self.workdir / "beta"
+        elsewhere.mkdir()
+        run_hook(payload(session="sess-split"), self.workdir,
+                 extra_env=self.env_for(first))
+        receipts = self.store / "receipts"
+        os.chmod(receipts, 0o300)
+        self.addCleanup(os.chmod, receipts, 0o755)
+        return receipts, elsewhere
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_an_unlistable_store_names_the_split_it_cannot_rule_out(self):
+        # #452: the drawer lookup caught every OSError and opened a second
+        # drawer for the session in silence (ADR-0023).
+        receipts, elsewhere = self.unlistable_store()
+
+        result = run_hook(
+            payload(session="sess-split", tool="Bash",
+                    tool_input={"command": "ls"}),
+            self.workdir, extra_env=self.env_for(elsewhere))
+
+        self.assertEqual(result.returncode, 0,
+                         "the receipt is kept, never lost to the warning")
+        said = result.stderr.splitlines()
+        self.assertEqual(len(said), 1, result.stderr)
+        self.assertIn(f"{receipts} cannot be listed", said[0])
+        self.assertIn("ADR-0023", said[0])
+        # Once per session: the drawer it chose now holds the chain, so
+        # the next call never looks for another.
+        again = run_hook(
+            payload(session="sess-split", tool="Bash",
+                    tool_input={"command": "pwd"}),
+            self.workdir, extra_env=self.env_for(elsewhere))
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(again.stderr, "")
+        os.chmod(receipts, 0o755)
+        chain = drawer_of(self.store, "beta") / "receipts-sess-split.jsonl"
+        self.assertIn("Bash: ls", chain.read_text(encoding="utf-8"))
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_an_unlistable_store_leaves_the_session_end_silent(self):
+        # An exit hook that complains is noise nobody can act on
+        # (ADR-0017): SessionEnd skips in silence, as it always has.
+        _, elsewhere = self.unlistable_store()
+        ending = {"session_id": "sess-split",
+                  "hook_event_name": "SessionEnd"}
+
+        result = run_hook(ending, self.workdir,
+                          extra_env=self.env_for(elsewhere))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+
     def test_sessions_from_two_worktrees_collect_in_one_drawer(self):
         _, first = self.make_worktree(worktree_name="feature-one")
         _, second = self.make_worktree(main_name="mainrepo",
@@ -848,9 +870,7 @@ class TranscriptCommitmentTest(unittest.TestCase):
     CADENCE = 25
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.transcript = self.workdir / "transcript.jsonl"
 
     def entries(self, session="sess-1234abcd"):
@@ -888,7 +908,7 @@ class TranscriptCommitmentTest(unittest.TestCase):
             commitment["action"],
             "transcript-commitment: bytes=20 sha256=f29203b62a3754c1"
             "0035541fc436ac31ef426b6d56cfd9bf81e89fc44cac08a7")
-        verify = run_receipts("verify", "--log",
+        verify = run(LOXODONTA, "verify", "--log",
                               "receipts-sess-1234abcd.jsonl",
                               cwd=self.workdir)
         self.assertEqual(verify.returncode, 0, verify.stdout)
@@ -983,9 +1003,7 @@ class TranscriptCommitmentTest(unittest.TestCase):
         home = self.workdir / "home"
         (home / ".claude").mkdir(parents=True)
         env = isolated_env(home, PYTHONIOENCODING="utf-8")
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "install-hook"],
-            capture_output=True, encoding="utf-8", env=env)
+        result = run(LOXODONTA, "install-hook", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         settings = json.loads(
             (home / ".claude" / "settings.json").read_text(
@@ -996,9 +1014,7 @@ class TranscriptCommitmentTest(unittest.TestCase):
                             for b in end for h in b.get("hooks", [])))
         self.assertTrue(all(h.get("timeout")
                             for b in end for h in b.get("hooks", [])))
-        again = subprocess.run(
-            [sys.executable, str(LOXODONTA), "install-hook"],
-            capture_output=True, encoding="utf-8", env=env)
+        again = run(LOXODONTA, "install-hook", env=env)
         self.assertIn("already installed", again.stdout)
 
     def test_unreadable_transcript_skips_the_commitment_never_fails(self):
@@ -1081,9 +1097,7 @@ class SecondRecordCutTest(unittest.TestCase):
     controlled environment, like every hook behavior."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.transcript = self.workdir / "transcript.jsonl"
         self.managed = self.workdir / "managed"
         self.pin = (self.managed / "managed-settings.d"
@@ -1133,7 +1147,7 @@ class SecondRecordCutTest(unittest.TestCase):
         note = entries[2]
         self.assertEqual(note["actor"], "receipts")
         self.assertEqual(note["files"], [])
-        verify = run_receipts("verify", "--log",
+        verify = run(LOXODONTA, "verify", "--log",
                               "receipts-sess-1234abcd.jsonl",
                               cwd=self.workdir)
         self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
@@ -1254,9 +1268,7 @@ class CoverageMarkerTest(unittest.TestCase):
     watching it."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.work = Path(self._tmp.name).resolve()
+        self.work = temp_folder(self)
         self.home = self.work / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = self.work / "store"
@@ -1265,11 +1277,6 @@ class CoverageMarkerTest(unittest.TestCase):
                                 CODEX_HOME=str(self.codex),
                                 PYTHONIOENCODING="utf-8")
 
-    def run_tool(self, *args):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), *args],
-            capture_output=True, encoding="utf-8", env=self.env)
-
     def marker(self):
         path = self.store / "coverage.json"
         if not path.exists():
@@ -1277,7 +1284,7 @@ class CoverageMarkerTest(unittest.TestCase):
         return json.loads(path.read_text(encoding="utf-8"))
 
     def test_install_writes_down_the_coverage_it_wired(self):
-        result = self.run_tool("install-hook")
+        result = run(LOXODONTA, "install-hook", env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         marker = self.marker()
@@ -1293,10 +1300,10 @@ class CoverageMarkerTest(unittest.TestCase):
         # ADR-0031 ruling 1: the profile is written beside the matchers,
         # so a profile that later changes is as visible to the supervisor
         # as a matcher change. The flagless install is `local`.
-        self.run_tool("install-hook")
+        run(LOXODONTA, "install-hook", env=self.env)
         self.assertEqual(self.marker()["epochs"][-1]["profile"], "local")
 
-        result = self.run_tool("install-hook", "--profile", "timestamped")
+        result = run(LOXODONTA, "install-hook", "--profile", "timestamped", env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         epochs = self.marker()["epochs"]
@@ -1308,11 +1315,11 @@ class CoverageMarkerTest(unittest.TestCase):
     def test_the_raw_flags_are_written_down_as_custom(self):
         # With no profile named, the raw flags speak for themselves and
         # the marker says so; naming `custom` says the same thing.
-        self.run_tool("install-hook", "--anchor-at-session-end")
+        run(LOXODONTA, "install-hook", "--anchor-at-session-end", env=self.env)
         self.assertEqual(self.marker()["epochs"][-1]["profile"], "custom")
 
-        self.run_tool("install-hook", "--profile", "custom",
-                      "--anchor-at-session-end")
+        run(LOXODONTA, "install-hook", "--profile", "custom",
+                      "--anchor-at-session-end", env=self.env)
 
         self.assertEqual([e["profile"] for e in self.marker()["epochs"]],
                          ["custom"], "the same choice appends nothing")
@@ -1321,17 +1328,17 @@ class CoverageMarkerTest(unittest.TestCase):
         # The heal rule applied to matchers: re-running the installer is
         # the documented way to fix a moved script, and it must not grow
         # a file every time.
-        self.run_tool("install-hook")
+        run(LOXODONTA, "install-hook", env=self.env)
 
-        self.run_tool("install-hook")
+        run(LOXODONTA, "install-hook", env=self.env)
 
         self.assertEqual(len(self.marker()["epochs"]), 1)
 
     def test_codex_coverage_never_speaks_for_claude_code(self):
         # Codex wires `.*` into a different settings file, and the
         # completeness witness reads Claude Code's transcripts alone.
-        self.run_tool("install-hook")
-        self.run_tool("install-hook", "--codex")
+        run(LOXODONTA, "install-hook", env=self.env)
+        run(LOXODONTA, "install-hook", "--codex", env=self.env)
 
         harnesses = {epoch["harness"]: epoch["matchers"]
                      for epoch in self.marker()["epochs"]}
@@ -1342,8 +1349,8 @@ class CoverageMarkerTest(unittest.TestCase):
         # #239: the witness owes a failed command a receipt only under an
         # install that wired the failure event, so the marker says which
         # installs did. Codex has no such event, and its epoch says none.
-        self.run_tool("install-hook")
-        self.run_tool("install-hook", "--codex")
+        run(LOXODONTA, "install-hook", env=self.env)
+        run(LOXODONTA, "install-hook", "--codex", env=self.env)
 
         epochs = {epoch["harness"]: epoch
                   for epoch in self.marker()["epochs"]}
@@ -1356,7 +1363,7 @@ class CoverageMarkerTest(unittest.TestCase):
         # and a marker epoch naming no failures. The re-run that adds the
         # failure event writes that down once, and the next writes
         # nothing, because nothing changed.
-        self.run_tool("install-hook")
+        run(LOXODONTA, "install-hook", env=self.env)
         path = self.home / ".claude" / "settings.json"
         settings = json.loads(path.read_text(encoding="utf-8"))
         del settings["hooks"]["PostToolUseFailure"]
@@ -1366,8 +1373,8 @@ class CoverageMarkerTest(unittest.TestCase):
         (self.store / "coverage.json").write_text(json.dumps(marker),
                                                   encoding="utf-8")
 
-        self.run_tool("install-hook")
-        self.run_tool("install-hook")
+        run(LOXODONTA, "install-hook", env=self.env)
+        run(LOXODONTA, "install-hook", env=self.env)
 
         self.assertEqual([epoch.get("failures")
                           for epoch in self.marker()["epochs"]],
@@ -1378,10 +1385,10 @@ class CoverageMarkerTest(unittest.TestCase):
         # claim says more calls owe receipts, an end claim says fewer,
         # and "nothing was owed from here" is the silence the
         # completeness alarm exists to catch.
-        self.run_tool("install-hook")
+        run(LOXODONTA, "install-hook", env=self.env)
         before = self.marker()
 
-        self.run_tool("uninstall-hook")
+        run(LOXODONTA, "uninstall-hook", env=self.env)
 
         self.assertEqual(self.marker(), before,
                          "removing the hook never records an end")
@@ -1395,9 +1402,7 @@ class ClockOverrideTest(unittest.TestCase):
     liked (ADR-0002)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
 
     def entries(self):
         log = self.workdir / "receipts-sess-1234abcd.jsonl"

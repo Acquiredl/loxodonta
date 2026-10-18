@@ -16,7 +16,6 @@ bounded, so a regression fails and never hangs.
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import threading
@@ -29,15 +28,14 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_acknowledge`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
+                     temp_folder)
+
 from test_anchor import FakeCalendar
 from test_supervisor import (BASELINE_NAME, FIXTURE_SESSION,
                              FakeCalendarHandler, ago, chain_copy,
-                             home_outside, isolated_env, receiver_folder,
-                             write_pending_anchor)
+                             receiver_folder, write_pending_anchor)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 BOUND = 180  # seconds any one process may take before the test fails
 SESSION = "sess-aaaa"
@@ -51,10 +49,8 @@ class LegacyRoot(unittest.TestCase):
     own outside it."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = {**isolated_env(home_outside(self)),
+        self.root = temp_folder(self)
+        self.env = {**isolated_env(temp_folder(self)),
                     "PYTHONIOENCODING": "utf-8"}
         self.baseline = self.root / BASELINE_NAME
         self.log = self.root / LOG
@@ -65,9 +61,7 @@ class LegacyRoot(unittest.TestCase):
     # --- the recorder and the supervisor, bounded ---------------------------
 
     def recorder(self, *args):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), *args], capture_output=True,
-            encoding="utf-8", timeout=BOUND, env=self.env, check=True)
+        return run(LOXODONTA, *args, timeout=BOUND, env=self.env, check=True)
 
     def logged(self, *actions, log=None):
         for action in actions:
@@ -75,9 +69,7 @@ class LegacyRoot(unittest.TestCase):
                           "--actor", "claude-code", "--action", action)
 
     def supervisor(self, *args):
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), *args], capture_output=True,
-            encoding="utf-8", timeout=BOUND, env=self.env)
+        result = run(SUPERVISOR, *args, timeout=BOUND, env=self.env)
         self.assertNotIn("Traceback", result.stderr)
         return result
 
@@ -422,32 +414,26 @@ class StoreFixture(unittest.TestCase):
     of five entries, and a home of the test's own."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
-        self.home = base / "storehome"
-        self.witness = base / "no-witness"
+        self.base = temp_folder(self)
+        self.home = self.base / "storehome"
+        self.witness = self.base / "no-witness"
         self.witness.mkdir()
         drawer = self.home / "receipts" / "alpha-11111111"
         drawer.mkdir(parents=True)
         (drawer / "project.json").write_text(
             json.dumps({"path": "C:/work/alpha"}), encoding="utf-8")
         self.log = drawer / f"receipts-{SESSION}.jsonl"
-        self.env = {**isolated_env(base / "home",
+        self.env = {**isolated_env(self.base / "home",
                                    LOXODONTA_HOME=str(self.home)),
                     "PYTHONIOENCODING": "utf-8"}
         steps = [["init"]] + [["log", "--actor", "claude-code",
                                "--action", f"step {i}"] for i in range(4)]
         for args in steps:
-            subprocess.run([sys.executable, str(LOXODONTA), args[0],
-                            "--log", str(self.log), *args[1:]],
-                           capture_output=True, timeout=BOUND, check=True,
-                           env=self.env)
+            run(LOXODONTA, args[0], "--log", str(self.log), *args[1:],
+                timeout=BOUND, check=True, env=self.env)
 
     def run_supervisor(self, *args):
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), *args], capture_output=True,
-            encoding="utf-8", timeout=BOUND, env=self.env)
+        result = run(SUPERVISOR, *args, timeout=BOUND, env=self.env)
         self.assertNotIn("Traceback", result.stderr)
         return result
 
@@ -1132,7 +1118,7 @@ class DigestAcrossMemoriesTest(StoreFixture):
         acknowledged = self.run_supervisor("acknowledge", "--baseline")
         self.assertEqual(acknowledged.returncode, 0, acknowledged.stderr)
         self.look(0)
-        self.legacy = Path(self._tmp.name).resolve() / "legacy"
+        self.legacy = self.base / "legacy"
         self.repo = self.legacy / "beta"
         self.chain = self.repo / "receipts" / "receipts-sess-bbbb.jsonl"
         self.chain.parent.mkdir(parents=True)
@@ -1140,10 +1126,8 @@ class DigestAcrossMemoriesTest(StoreFixture):
                                "--action", f"other step {i}"]
                               for i in range(3)]
         for args in steps:
-            subprocess.run([sys.executable, str(LOXODONTA), args[0],
-                            "--log", str(self.chain), *args[1:]],
-                           capture_output=True, timeout=BOUND, check=True,
-                           env=self.env)
+            run(LOXODONTA, args[0], "--log", str(self.chain), *args[1:],
+                timeout=BOUND, check=True, env=self.env)
 
     def last_scan(self):
         result = self.run_supervisor("digest", "--repo", str(self.repo))
@@ -1180,7 +1164,7 @@ class StoreReadersTest(StoreFixture):
 
     def test_export_over_a_blind_baseline_says_so_and_ships_exit_5(self):
         self.blind()
-        out = Path(self._tmp.name) / "export.json"
+        out = self.base / "export.json"
 
         result = self.run_supervisor("export", "--witness", str(self.witness),
                                      "--out", str(out))
@@ -1192,7 +1176,7 @@ class StoreReadersTest(StoreFixture):
 
     def test_package_over_a_blind_baseline_says_so(self):
         self.blind()
-        out = Path(self._tmp.name) / "package"
+        out = self.base / "package"
 
         result = self.run_supervisor("package", SESSION, "--folder",
                                      "--out", str(out),
@@ -1211,9 +1195,7 @@ class ReceiverAcknowledgeTest(unittest.TestCase):
     other memory."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
+        base = temp_folder(self)
         self.home = base / "home"
         self.data = receiver_folder(base)
         self.log = chain_copy(self.data, FIXTURE_SESSION)
@@ -1222,9 +1204,7 @@ class ReceiverAcknowledgeTest(unittest.TestCase):
         self.relpath = f"receipts-{FIXTURE_SESSION}.jsonl"
 
     def run_supervisor(self, *args):
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), *args], capture_output=True,
-            encoding="utf-8", timeout=BOUND, env=self.env)
+        result = run(SUPERVISOR, *args, timeout=BOUND, env=self.env)
         self.assertNotIn("Traceback", result.stderr)
         return result
 

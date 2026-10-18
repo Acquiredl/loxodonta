@@ -16,7 +16,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 import urllib.error
@@ -28,15 +27,13 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_serve`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import (FIXTURE_SESSION, assert_replaced_whole,
-                             chain_copy, hold, home_outside,
-                             read_line_within, receiver_folder,
-                             unreadable_depth,
-                             isolated_env)
+from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
+                     temp_folder)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SUPERVISOR = REPO_ROOT / "supervisor.py"
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+from test_supervisor import (FIXTURE_SESSION, assert_replaced_whole,
+                             chain_copy, hold, read_line_within,
+                             receiver_folder, unreadable_depth)
+
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 
@@ -49,13 +46,10 @@ def make_chain(log_dir, session, entries=2):
     fixture — so the face is tested against what the tool writes."""
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"receipts-{session}.jsonl"
-    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log", str(log)],
-                   capture_output=True, check=True)
+    run(LOXODONTA, "init", "--log", str(log), check=True)
     for i in range(entries):
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", f"step {i}"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", f"step {i}", check=True)
     return log
 
 
@@ -77,10 +71,7 @@ def write_completed_anchor(log, height=850000):
     # for the child, encoding= for the parent) — `text=True` alone decodes
     # with the locale codec, cp1252 on Windows, and disagrees with a
     # UTF-8-emitting child.
-    head = subprocess.run(
-        [sys.executable, str(LOXODONTA), "head", "--log", str(log)],
-        capture_output=True, encoding="utf-8", check=True,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
+    head = run(LOXODONTA, "head", "--log", str(log), check=True).stdout.strip()
     payload = ots_varint(height)
     proof = (b"\x08"
              + b"\x00" + TAG_BITCOIN + ots_varint(len(payload)) + payload)
@@ -95,10 +86,8 @@ def log_entry(log, action, actor="claude-code", files=()):
     """One more receipt through the public CLI, optionally fingerprinting
     files (which must exist — receipts hashes them at log time)."""
     file_args = [arg for f in files for arg in ("--file", str(f))]
-    subprocess.run(
-        [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-         "--actor", actor, "--action", action, *file_args],
-        capture_output=True, check=True)
+    run(LOXODONTA, "log", "--log", str(log), "--actor", actor, "--action",
+        action, *file_args, check=True)
 
 
 class ServerFixture(unittest.TestCase):
@@ -108,10 +97,8 @@ class ServerFixture(unittest.TestCase):
     remote (#242)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.root = temp_folder(self)
+        self.env = isolated_env(temp_folder(self))
 
     def serve(self, extra_env=None, extra_args=(), cwd=None):
         """Start `serve` on an ephemeral port and read the announced URL.
@@ -130,13 +117,13 @@ class ServerFixture(unittest.TestCase):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = match.group()
 
     def _stop(self):
         self.proc.kill()
-        self.proc.communicate()
+        self.proc.communicate(timeout=30)
 
     def get(self, path):
         with OPENER.open(self.url + path, timeout=30) as response:
@@ -172,7 +159,7 @@ class StoreServeTest(ServerFixture):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = match.group()
 
@@ -813,7 +800,7 @@ class TranscriptRetentionPanelTest(ServerFixture):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = match.group()
 
@@ -939,11 +926,8 @@ class ServeTest(ServerFixture):
 
         self.assertEqual(status, 200)
         self.assertIn("application/json", ctype)
-        cli = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--root",
-             str(self.root), "--json"],
-            capture_output=True, encoding="utf-8",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        cli = run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                  env=self.env)
         served, printed = json.loads(body), json.loads(cli.stdout)
         # Two ticks, two clocks: the freshness stamp is the one field
         # allowed to differ between them.
@@ -994,6 +978,15 @@ class ServeTest(ServerFixture):
 
         self.assertIn("CHANGED SINCE LAST LOOK", page)
         self.assertIn('id="tripwire"', page)
+
+    def test_the_strip_gives_a_closed_folder_its_own_words(self):
+        # #448 item 9: a folder the census cannot list is exit 5 with no
+        # change behind it, and the strip called it a change.
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn("FOLDER CANNOT BE LISTED", page)
 
     def test_the_tripwire_draws_what_stands_and_what_was_accepted(self):
         # ADR-0039: an alarm stands until it clears or is acknowledged,
@@ -1466,10 +1459,11 @@ class PageScriptTest(ServerFixture):
         page = self.get("/")[2]
 
         script = page.split("<script>")[1].split("</script>")[0]
-        probe = Path(self._tmp.name) / "page.js"
+        probe = self.root / "page.js"
         probe.write_text(script, encoding="utf-8")
         result = subprocess.run([node, "--check", str(probe)],
-                                capture_output=True, encoding="utf-8")
+                                capture_output=True, encoding="utf-8",
+                                timeout=120)
 
         self.assertEqual(result.returncode, 0,
                          "the inline script does not parse:\n"
@@ -1665,11 +1659,8 @@ class ReceiverServeTest(ServerFixture):
         self.assertEqual(served["completeness"]["last_heard"]["addresses"],
                          [{"from": "127.0.0.1",
                            "received": "2026-10-07T02:21:37.488585+00:00"}])
-        cli = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--receiver",
-             str(self.data), "--json"],
-            capture_output=True, encoding="utf-8", timeout=180,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        cli = run(SUPERVISOR, "scan", "--receiver", str(self.data), "--json",
+                  timeout=180, env=self.env)
         printed = json.loads(cli.stdout)
         # Two ticks, two clocks: the freshness stamp is the one field
         # allowed to differ between them.
@@ -1689,6 +1680,42 @@ class ReceiverServeTest(ServerFixture):
         self.assertTrue(os.path.isfile(shelf / "daybook.json"))
         self.assertTrue(os.path.isfile(shelf / "baseline.json"))
         self.assertFalse(os.path.exists(self.root / ".supervisor-daybook.json"))
+
+    def test_the_startup_line_says_no_keeper_runs_at_the_far_end(self):
+        # #487 item 12.
+        self.assertIsNotNone(self.serve_receiver())
+
+        keeper = read_line_within(self.proc.stdout)
+
+        self.assertEqual(keeper.strip(), (
+            "keeper: none over a receiver's folder; nothing is anchored, "
+            "sent or appended from the far end (ADR-0041)"))
+
+    def test_the_recall_routes_read_the_receivers_copies(self):
+        # #487 item 10: the census counts the copies, and so must the
+        # routes that read them; empty beside a census of one reads as
+        # a bug. The folder stands for the repo.
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, recall = self.get("/api/recall")
+        _, _, activity = self.get("/api/activity")
+        _, _, search = self.get("/api/search?q=git+status")
+        status, _, shape = self.get(
+            "/api/shape?" + urllib.parse.urlencode(
+                {"repo": "receiver", "session": FIXTURE_SESSION}))
+
+        (story,) = json.loads(recall)["sessions"]
+        self.assertEqual((story["repo"], story["session"], story["entries"]),
+                         ("receiver", FIXTURE_SESSION, 5))
+        self.assertEqual(story["paths"], [f"receipts-{FIXTURE_SESSION}.jsonl"])
+        activity = json.loads(activity)
+        self.assertEqual(sum(activity["activity"]["receiver"].values()), 4)
+        self.assertEqual(activity["tools"], {"Bash": 4})
+        (hit,) = json.loads(search)["hits"]
+        self.assertEqual((hit["repo"], hit["session"], hit["action"]),
+                         ("receiver", FIXTURE_SESSION, "Bash: git status"))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(shape)["receipts"], 4)
 
     def test_receiver_with_root_is_a_usage_error(self):
         self.assertIsNone(self.serve_receiver("--root", str(self.root)))

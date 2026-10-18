@@ -11,10 +11,7 @@ an exact key set, so a new scan field cannot slip in unnamed.
 
 import json
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 import unittest
 import zipfile
 from pathlib import Path
@@ -23,11 +20,10 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_export`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import isolated_env
+from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
+                     temp_folder)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
+
 
 HOME_SECRET = "HOMESECRET-q7x"
 PROJECT_SECRET = "PROJSECRET-m4k"
@@ -37,31 +33,13 @@ SESSION = "e1e1e1e1-aaaa-bbbb-cccc-000000000001"
 OTHER_SESSION = "e2e2e2e2-aaaa-bbbb-cccc-000000000002"
 
 
-def run(script, *args, stdin=None, env=None, cwd=None):
-    """`env`, when given, is the whole environment, so what it leaves out
-    (the test process's own project, say) stays out."""
-    return subprocess.run(
-        [sys.executable, str(script), *args], cwd=cwd,
-        input=stdin.encode("utf-8") if isinstance(stdin, str) else stdin,
-        capture_output=True, encoding=None,
-        env={**(os.environ if env is None else env),
-             "PYTHONIOENCODING": "utf-8"})
-
-
-def text(result):
-    return (result.stdout.decode("utf-8", "replace"),
-            result.stderr.decode("utf-8", "replace"))
-
-
 class ExportBase(unittest.TestCase):
     """A store with one project, two sessions, and every kind of entry
     the histogram must sort: hook receipts, a bookkeeping entry, and a
     hand-logged entry from a non-harness actor."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / HOME_SECRET
         self.store = self.home / ".loxodonta"
         self.project = self.root / PROJECT_SECRET
@@ -93,7 +71,7 @@ class ExportBase(unittest.TestCase):
         result = run(LOXODONTA, "hook", *(["--actor", actor] if actor else []),
                      stdin=payload,
                      env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
-        self.assertEqual(result.returncode, 0, text(result)[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def drawer(self):
         drawers = [p for p in (self.store / "receipts").iterdir() if p.is_dir()]
@@ -114,7 +92,7 @@ class ExportBase(unittest.TestCase):
 class ExportFileTest(ExportBase):
     def test_writes_prints_and_leaks_nothing(self):
         result = self.export()
-        out, err = text(result)
+        out, err = result.stdout, result.stderr
         self.assertEqual(result.returncode, 0, err)
         path = self.exported_file()
         body = path.read_text("utf-8")
@@ -207,7 +185,7 @@ class ExportFileTest(ExportBase):
         self.hook(SESSION, "handoff", {"summary": "to triage"},
                   actor="openai-agents")
         result = self.export()
-        self.assertEqual(result.returncode, 0, text(result)[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
         body = self.exported_file().read_text("utf-8")
         for name in ("Acme_Jira", "Other_Server", "create_ticket", "do_thing",
                      "payroll"):
@@ -240,7 +218,7 @@ class ExportFileTest(ExportBase):
                            "command": "python loxodonta.py hook"}]}]}}),
             encoding="utf-8")
         result = self.export()
-        self.assertEqual(result.returncode, 0, text(result)[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(self.exported_file().read_text("utf-8"))
         self.assertEqual(data["machine"]["matchers"], ["Edit|Write"])
 
@@ -253,7 +231,7 @@ class ExportFileTest(ExportBase):
         self.assertIn(b"pytest -q", raw)
         self.log.write_bytes(raw.replace(b"pytest -q", b"pytest -x"))
         result = self.export()
-        self.assertEqual(result.returncode, 0, text(result)[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(self.exported_file().read_text("utf-8"))
         row = next(s for s in data["sessions"] if s["session"] == SESSION)
         self.assertEqual(row["siblings"], 2)
@@ -262,7 +240,7 @@ class ExportFileTest(ExportBase):
     def test_out_names_the_file(self):
         target = self.work / "mine.json"
         result = self.export("--out", str(target))
-        self.assertEqual(result.returncode, 0, text(result)[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(target.exists())
         self.assertFalse(list(self.work.glob("loxodonta-export-*.json")))
 
@@ -271,7 +249,7 @@ class ExportRawTest(ExportBase):
     def test_raw_shows_a_sample_line_and_refuses_without_yes(self):
         for answer in ("no", "", "y\n"):
             result = self.export("--raw", stdin=answer)
-            out, err = text(result)
+            out, err = result.stdout, result.stderr
             self.assertNotEqual(result.returncode, 0, answer)
             # The sample is a real hook receipt from the sender's own
             # chains, secrets and all: that is the point of showing it.
@@ -286,7 +264,7 @@ class ExportRawTest(ExportBase):
 
     def test_raw_archive_is_the_chains_byte_for_byte_without_project_json(self):
         result = self.export("--raw", stdin="yes\n")
-        out, err = text(result)
+        out, err = result.stdout, result.stderr
         self.assertEqual(result.returncode, 0, err)
         archives = list(self.work.glob("loxodonta-export-*-raw.zip"))
         self.assertEqual(len(archives), 1)
@@ -333,7 +311,7 @@ class ExportSendTest(ExportBase):
         fake_gh(self.bin, self.gh_log)
         env = {"PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", "")}
         result = self.export("--send", env=env)
-        out, err = text(result)
+        out, err = result.stdout, result.stderr
         self.assertEqual(result.returncode, 0, err)
         calls = self.gh_log.read_text("utf-8").strip().splitlines()
         self.assertEqual(len(calls), 2, calls)
@@ -365,7 +343,7 @@ class ExportSendTest(ExportBase):
         empty = self.root / "empty-bin"
         empty.mkdir()
         result = self.export("--send", env={"PATH": str(empty)})
-        out, err = text(result)
+        out, err = result.stdout, result.stderr
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("gh", err)
         self.exported_file()
@@ -375,7 +353,7 @@ class ExportSendTest(ExportBase):
         fake_gh(self.bin, self.gh_log)
         env = {"PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", "")}
         result = self.export("--raw", "--send", stdin="yes\n", env=env)
-        self.assertEqual(result.returncode, 0, text(result)[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
         gist = self.gh_log.read_text("utf-8").splitlines()[0]
         self.assertIn("-raw.zip", gist)
         body = next(self.work.glob("*.issue.md")).read_text("utf-8")

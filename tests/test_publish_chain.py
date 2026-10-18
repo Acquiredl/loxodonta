@@ -18,7 +18,6 @@ import re
 import shlex
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -29,19 +28,17 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_publish_chain`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
+from support import (LOXODONTA, RECEIVER, SUPERVISOR, clean_env,  # noqa: E402
+                     isolated_env, run, temp_folder)
+
+from test_anchor import FakeCalendar, FakeCalendarHandler
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
 from test_receiver import make_chain, post, run_recorder
 from test_supervisor import (ago, chain_head, chains_by_session,
-                             home_outside, install_witness_hook,
-                             isolated_env, keeper_env,
+                             install_witness_hook,
                              make_chain as make_store_chain, run_scan,
                              write_chain_row)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-RECEIVER = REPO_ROOT / "receiver.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 NDJSON = "application/x-ndjson"
 # What a quick session-end step writes when the window has closed on
@@ -91,8 +88,7 @@ def run_capped(cap, *args):
     env knob the recorder reads (LOXODONTA_CHAIN_BATCH_BYTES)."""
     env = clean_env()
     env["LOXODONTA_CHAIN_BATCH_BYTES"] = str(cap)
-    return subprocess.run([sys.executable, str(LOXODONTA), *map(str, args)],
-                          capture_output=True, encoding="utf-8", env=env)
+    return run(LOXODONTA, *args, env=env)
 
 
 def memo_of(log):
@@ -196,9 +192,7 @@ class PublishChainCommandTest(unittest.TestCase):
     SESSION = "sess-chain-0001"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.data = self.root / "receiver"
         self.log = self.root / f"receipts-{self.SESSION}.jsonl"
 
@@ -991,9 +985,7 @@ class InstallPublishChainTest(unittest.TestCase):
     HEAD_URL = "https://hooks.example.test/services/T000/B000/XXXX"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = self.root / "store"
@@ -1005,10 +997,8 @@ class InstallPublishChainTest(unittest.TestCase):
                     "LOXODONTA_MANAGED_DIR": str(self.home / "managed")}
 
     def install(self, *args):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), "install-hook", *args],
-            cwd=self.root, capture_output=True, encoding="utf-8",
-            env={**clean_env(), **self.env})
+        return run(LOXODONTA, "install-hook", *args, cwd=self.root,
+                   env={**clean_env(), **self.env})
 
     def settings_text(self):
         path = self.home / ".claude" / "settings.json"
@@ -1108,10 +1098,8 @@ class InstallPublishChainTest(unittest.TestCase):
     def test_uninstall_removes_the_flag_with_the_hook(self):
         self.install("--publish-chain", self.URL)
 
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "uninstall-hook"],
-            cwd=self.root, capture_output=True, encoding="utf-8",
-            env={**clean_env(), **self.env})
+        result = run(LOXODONTA, "uninstall-hook", cwd=self.root,
+                     env={**clean_env(), **self.env})
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("loxodonta.py", self.settings_text())
@@ -1165,14 +1153,12 @@ class PublishChainKeeperTest(unittest.TestCase):
     an entry anywhere."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.receiver = serve_fake(self)
         # Outside the scanned root, a home of its own: the keeper reads
         # the coverage marker, and at `full` would follow its remote
         # (#242).
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
 
     def scan(self, *extra, **knobs):
         return run_scan(self.root, *extra, env={**self.env, **knobs})
@@ -1210,10 +1196,8 @@ class PublishChainKeeperTest(unittest.TestCase):
 
         # A chain that grew, on the next window: the new head, and only
         # the lines after the cursor.
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", "step 3"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "step 3", check=True)
         grown = self.scan("--publish-every", "0s",
                           "--publish-url", self.receiver.url,
                           "--publish-chain", self.receiver.url,
@@ -1228,6 +1212,33 @@ class PublishChainKeeperTest(unittest.TestCase):
                          log.read_bytes().splitlines(True)[-1])
         self.assertEqual([(r["first"], r["last"]) for r in chain_rows(log)],
                          [(0, 2), (3, 3)])
+
+    def test_a_stood_down_chain_still_sends_its_intact_entries(self):
+        # #533: a chain the scan stood down (a torn tail with a sibling,
+        # ADR-0004) has its head left alone, which the recorder refuses,
+        # and its entries up to the tear still go: `publish --chain` sends
+        # the intact prefix by design, and never reads the tail.
+        receipts = self.root / "alpha" / "receipts"
+        log = make_store_chain(receipts, "sess-tore")
+        intact = log.read_bytes()
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        make_store_chain(receipts, "sess-tore-002")
+        first = self.scan("--publish-every", "0s",
+                          "--publish-url", self.receiver.url)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.receiver.received.clear()
+
+        second = self.scan("--publish-every", "0s",
+                           "--publish-url", self.receiver.url,
+                           "--publish-chain", self.receiver.url,
+                           SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertNotIn("application/json", self.kinds(),
+                         "no head went: the sibling's had, the torn one's "
+                         "is refused")
+        self.assertIn(intact, [sent["raw"] for sent in self.receiver.received])
 
     def test_the_heads_flags_alone_send_no_entry_and_the_chain_flag_alone_no_head(self):
         # Each route is its own opt-in (ADR-0031 rulings 1 and 6): an
@@ -1367,14 +1378,14 @@ class PublishChainKeeperTest(unittest.TestCase):
         def stop():
             if proc.poll() is None:
                 proc.kill()
-                proc.communicate()
+                proc.communicate(timeout=30)
 
         self.addCleanup(stop)
         line = proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             proc.kill()
-            _, err = proc.communicate()
+            _, err = proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         # The keeper line, read before anything stops the process: a
         # kill sent the instant the URL line arrives can beat the second
@@ -1414,9 +1425,7 @@ class InstallProfileFullTest(unittest.TestCase):
     OTHER = "https://hooks.example.test/services/T000/B000/XXXX"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = self.root / "store"
@@ -1428,10 +1437,8 @@ class InstallProfileFullTest(unittest.TestCase):
                     "LOXODONTA_MANAGED_DIR": str(self.home / "managed")}
 
     def install(self, *args):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), "install-hook", *args],
-            cwd=self.root, capture_output=True, encoding="utf-8",
-            env={**clean_env(), **self.env})
+        return run(LOXODONTA, "install-hook", *args, cwd=self.root,
+                   env={**clean_env(), **self.env})
 
     def settings_text(self):
         path = self.home / ".claude" / "settings.json"
@@ -1585,10 +1592,8 @@ class InstallProfileFullTest(unittest.TestCase):
         self.install("--profile", "full", "--remote", self.URL)
         before = self.epochs()
 
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "uninstall-hook"],
-            cwd=self.root, capture_output=True, encoding="utf-8",
-            env={**clean_env(), **self.env})
+        result = run(LOXODONTA, "uninstall-hook", cwd=self.root,
+                     env={**clean_env(), **self.env})
 
         self.assertEqual(result.returncode, 0, result.stderr)
         left = self.settings_text()
@@ -1634,10 +1639,8 @@ class SessionEndUnderFullTest(PublishBase):
         (self.home / ".claude").mkdir(parents=True)
 
     def install(self, *args):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), "install-hook", *args],
-            cwd=self.root, capture_output=True, encoding="utf-8",
-            env={**clean_env(), "HOME": str(self.home),
+        return run(LOXODONTA, "install-hook", *args, cwd=self.root,
+                   env={**clean_env(), "HOME": str(self.home),
                  "USERPROFILE": str(self.home),
                  "LOXODONTA_HOME": str(self.store),
                  "CODEX_HOME": str(self.home / ".codex"),
@@ -1677,7 +1680,7 @@ class SessionEndUnderFullTest(PublishBase):
         ended = subprocess.run(
             self.wired_session_end() + ["--calendar", calendar.url],
             cwd=self.project, input=json.dumps(payload).encode("utf-8"),
-            capture_output=True, env=env)
+            capture_output=True, env=env, timeout=120)
 
         self.assertEqual(ended.returncode, 0,
                          ended.stderr.decode("utf-8", "replace"))
@@ -1708,9 +1711,7 @@ class FullProfileKeeperTest(unittest.TestCase):
     also go."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
+        base = temp_folder(self)
         self.root = base / "repos"
         self.root.mkdir()
         self.home = base / "home"
@@ -1736,10 +1737,8 @@ class FullProfileKeeperTest(unittest.TestCase):
     def install(self, *args):
         """The real installer writes the marker the keeper reads, into
         this test's store; its settings land in a throwaway home."""
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "install-hook", *args],
-            capture_output=True, check=True,
-            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+        run(LOXODONTA, "install-hook", *args, check=True,
+            env=clean_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
                            CODEX_HOME=str(self.home / ".codex"),
                            LOXODONTA_MANAGED_DIR=str(self.home / "managed")))
@@ -1748,17 +1747,13 @@ class FullProfileKeeperTest(unittest.TestCase):
         """A chain through the public CLI whose entries are `age` seconds
         old (SOURCE_DATE_EPOCH, the recorder's clock override), so a
         cadence shorter than `age` finds its head ripe."""
-        env = keeper_env(SOURCE_DATE_EPOCH=str(int(time.time()) - age))
+        env = clean_env(SOURCE_DATE_EPOCH=str(int(time.time()) - age))
         log_dir = self.root / "alpha" / "receipts"
         log_dir.mkdir(parents=True, exist_ok=True)
         log = log_dir / f"receipts-{session}.jsonl"
-        subprocess.run([sys.executable, str(LOXODONTA), "init",
-                        "--log", str(log)],
-                       capture_output=True, check=True, env=env)
-        subprocess.run([sys.executable, str(LOXODONTA), "log",
-                        "--log", str(log), "--actor", "claude-code",
-                        "--action", "step"],
-                       capture_output=True, check=True, env=env)
+        run(LOXODONTA, "init", "--log", str(log), check=True, env=env)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "step", check=True, env=env)
         return log
 
     def serve(self, *extra):
@@ -1774,7 +1769,7 @@ class FullProfileKeeperTest(unittest.TestCase):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = match.group()
         # The keeper line, read here rather than after the tick: `serve`
@@ -1786,7 +1781,7 @@ class FullProfileKeeperTest(unittest.TestCase):
     def _stop(self):
         if self.proc.poll() is None:
             self.proc.kill()
-            self.proc.communicate()
+            self.proc.communicate(timeout=30)
 
     def tick(self):
         """One request, which is one tick of both keepers."""
@@ -1836,22 +1831,17 @@ class FullProfileKeeperTest(unittest.TestCase):
                          "a flag names the target, and names it alone")
 
     def uninstall(self, *args):
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "uninstall-hook", *args],
-            capture_output=True, check=True,
-            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+        run(LOXODONTA, "uninstall-hook", *args, check=True,
+            env=clean_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
                            CODEX_HOME=str(self.home / ".codex"),
                            LOXODONTA_MANAGED_DIR=str(self.home / "managed")))
 
     def serve_refused(self, *extra):
         """`serve` as a command that is refused before it binds a port."""
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "serve", "--root",
-             str(self.root), "--port", "0", "--witness", str(self.witness),
-             *extra],
-            capture_output=True, encoding="utf-8", timeout=60,
-            env=isolated_env(self.home, LOXODONTA_HOME=str(self.store),
+        return run(SUPERVISOR, "serve", "--root", str(self.root), "--port",
+                   "0", "--witness", str(self.witness), *extra, timeout=60,
+                   env=isolated_env(self.home, LOXODONTA_HOME=str(self.store),
                              PYTHONIOENCODING="utf-8"))
 
     def test_uninstall_stands_both_keepers_down(self):
@@ -1976,9 +1966,7 @@ class DrillUnderFullTest(unittest.TestCase):
     already somewhere else."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
+        base = temp_folder(self)
         self.root = base / "repos"
         self.root.mkdir()
         self.home = base / "home"
@@ -1987,19 +1975,15 @@ class DrillUnderFullTest(unittest.TestCase):
         self.receiver = serve_fake(self)
 
     def drill(self, log):
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), "drill", "--root",
-             str(self.root), "--log", log, "--json"],
-            capture_output=True, encoding="utf-8",
-            env=isolated_env(self.home, LOXODONTA_HOME=str(self.store),
+        return run(SUPERVISOR, "drill", "--root", str(self.root), "--log", log,
+                   "--json",
+                   env=isolated_env(self.home, LOXODONTA_HOME=str(self.store),
                              PYTHONIOENCODING="utf-8"))
 
     def test_a_rehearsal_names_the_tier_and_sends_nothing(self):
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "install-hook", "--profile",
-             "full", "--remote", self.receiver.url],
-            capture_output=True, check=True,
-            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+        run(LOXODONTA, "install-hook", "--profile", "full", "--remote",
+            self.receiver.url, check=True,
+            env=clean_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
                            CODEX_HOME=str(self.home / ".codex"),
                            LOXODONTA_MANAGED_DIR=str(self.home / "managed")))
@@ -2042,9 +2026,7 @@ class ChangedRemoteTest(unittest.TestCase):
     SESSION = "sess-remote-0001"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.log = self.root / f"receipts-{self.SESSION}.jsonl"
         self.first = start_receiver(self, self.root / "first")
         self.second = start_receiver(self, self.root / "second")
@@ -2225,9 +2207,7 @@ class ChangedRemoteKeeperTest(unittest.TestCase):
     a home and beside a witness of its own, never this machine's."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
+        base = temp_folder(self)
         self.root = base / "repos"
         self.root.mkdir()
         self.home = base / "home"
@@ -2336,9 +2316,7 @@ class ChangedRemoteReadingTest(unittest.TestCase):
     machine's own settings, store or Codex hooks."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
+        base = temp_folder(self)
         self.root = base / "repos"
         self.root.mkdir()
         self.home = base / "home"
@@ -2393,9 +2371,7 @@ class ChainRowsTravelNowhereTest(unittest.TestCase):
     SESSION = "c4c4c4c4-aaaa-bbbb-cccc-000000000001"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         self.work = self.root / "work"
         self.witness = self.root / "no-witness"
@@ -2411,11 +2387,8 @@ class ChainRowsTravelNowhereTest(unittest.TestCase):
         self.assertEqual(len(chain_rows(self.log)), 1)
 
     def supervise(self, *args):
-        return subprocess.run(
-            [sys.executable, str(SUPERVISOR), *map(str, args),
-             "--witness", str(self.witness)],
-            capture_output=True, encoding="utf-8", cwd=str(self.work),
-            env=self.env)
+        return run(SUPERVISOR, *map(str, args), "--witness", str(self.witness),
+                   cwd=str(self.work), env=self.env)
 
     def test_the_export_keeps_its_shape_and_never_sees_the_memo(self):
         result = self.supervise("export")

@@ -14,9 +14,7 @@ claiming the same `n`).
 import hashlib
 import json
 import os
-import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -26,26 +24,10 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_concurrency`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import home_outside, isolated_env  # noqa: E402
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+from support import (LOXODONTA, clean_env, isolated_env, run,  # noqa: E402
+                     temp_folder)
 
 
-def run_receipts(*args, cwd, extra_env=None):
-    env = dict(os.environ)
-    env.pop("CLAUDE_PROJECT_DIR", None)
-    env.pop("LOXODONTA_LOCK_TIMEOUT", None)
-    # Both ends of the pipe pinned to UTF-8 (PYTHONIOENCODING for the child,
-    # encoding= for the parent) — `text=True` alone decodes with the locale
-    # codec, cp1252 on Windows, and disagrees with a UTF-8-emitting child.
-    env["PYTHONIOENCODING"] = "utf-8"
-    if extra_env:
-        env.update(extra_env)
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), *args],
-        cwd=cwd, capture_output=True, encoding="utf-8", env=env,
-    )
 
 
 def spec_hash(entry_without_hash):
@@ -54,6 +36,18 @@ def spec_hash(entry_without_hash):
     canonical = json.dumps(entry_without_hash, sort_keys=True,
                            separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def quiet_env(**knobs):
+    """`clean_env` without two variables a shell may carry that these
+    tests set for themselves: CLAUDE_PROJECT_DIR (the chain stays in
+    the working folder) and LOXODONTA_LOCK_TIMEOUT (a test names its
+    own)."""
+    env = clean_env(**knobs)
+    for name in ("CLAUDE_PROJECT_DIR", "LOXODONTA_LOCK_TIMEOUT"):
+        if name not in knobs:
+            env.pop(name, None)
+    return env
 
 
 def hook_payload(session="sess-1234abcd", tool="Bash", command="ls"):
@@ -67,11 +61,9 @@ def hook_payload(session="sess-1234abcd", tool="Bash", command="ls"):
 
 class ConcurrentAppendTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        self.workdir = temp_folder(self)
         self.log = self.workdir / "receipts.jsonl"
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir, env=quiet_env())
 
     def entries(self, path=None):
         text = (path or self.log).read_text(encoding="utf-8")
@@ -82,9 +74,9 @@ class ConcurrentAppendTest(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=writers) as pool:
             results = list(pool.map(
-                lambda i: run_receipts(
+                lambda i: run(LOXODONTA, 
                     "log", "--actor", "agent", "--action", f"step {i}",
-                    cwd=self.workdir),
+                    cwd=self.workdir, env=quiet_env()),
                 range(writers)))
 
         for result in results:
@@ -98,7 +90,7 @@ class ConcurrentAppendTest(unittest.TestCase):
         self.assertEqual(actions, sorted(f"step {i}" for i in range(writers)),
                          "every writer's entry survives")
 
-        verify = run_receipts("verify", "--log", str(self.log), cwd=self.workdir)
+        verify = run(LOXODONTA, "verify", "--log", str(self.log), cwd=self.workdir, env=quiet_env())
         self.assertEqual(verify.returncode, 0, verify.stdout)
 
     def test_parallel_hook_calls_all_land(self):
@@ -108,15 +100,12 @@ class ConcurrentAppendTest(unittest.TestCase):
         log_dir = self.workdir / "receipts"
         # Every home the test's own (#274), though --log-dir keeps the
         # chain in the working folder.
-        env = isolated_env(home_outside(self), PYTHONIOENCODING="utf-8")
+        env = isolated_env(temp_folder(self), PYTHONIOENCODING="utf-8")
 
         def fire(i):
-            return subprocess.run(
-                [sys.executable, str(LOXODONTA), "hook",
-                 "--log-dir", str(log_dir)],
-                cwd=self.workdir, input=hook_payload(command=f"cmd {i}"),
-                capture_output=True, encoding="utf-8", env=env,
-            )
+            return run(LOXODONTA, "hook", "--log-dir", str(log_dir),
+                       cwd=self.workdir, env=env,
+                       stdin=hook_payload(command=f"cmd {i}"))
 
         with ThreadPoolExecutor(max_workers=calls) as pool:
             results = list(pool.map(fire, range(calls)))
@@ -129,12 +118,12 @@ class ConcurrentAppendTest(unittest.TestCase):
         self.assertEqual(len(entries), calls + 1)
         self.assertEqual([e["n"] for e in entries], list(range(calls + 1)))
 
-        verify = run_receipts("verify", "--log", str(chain), cwd=self.workdir)
+        verify = run(LOXODONTA, "verify", "--log", str(chain), cwd=self.workdir, env=quiet_env())
         self.assertEqual(verify.returncode, 0, verify.stdout)
 
     def test_the_lock_is_released_after_a_normal_append(self):
-        run_receipts("log", "--actor", "agent", "--action", "one",
-                     cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "one",
+                     cwd=self.workdir, env=quiet_env())
 
         leftovers = list(self.workdir.glob("*.lock"))
         self.assertEqual(leftovers, [], "a held lock would wedge the next run")
@@ -147,8 +136,8 @@ class ConcurrentAppendTest(unittest.TestCase):
         old = time.time() - 3600
         os.utime(lock, (old, old))
 
-        result = run_receipts("log", "--actor", "agent", "--action", "after",
-                              cwd=self.workdir)
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "after",
+                              cwd=self.workdir, env=quiet_env())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.entries()[-1]["action"], "after")
@@ -160,9 +149,9 @@ class ConcurrentAppendTest(unittest.TestCase):
         lock = Path(str(self.log) + ".lock")
         lock.write_text("held\n", encoding="utf-8")
 
-        result = run_receipts("log", "--actor", "agent", "--action", "lost",
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "lost",
                               cwd=self.workdir,
-                              extra_env={"LOXODONTA_LOCK_TIMEOUT": "0.5"})
+                              env=quiet_env(LOXODONTA_LOCK_TIMEOUT="0.5"))
 
         # EX_TEMPFAIL (ADR-0037): try again, and never 1, which is BROKEN.
         self.assertEqual(result.returncode, 75, result.stderr)
@@ -178,9 +167,9 @@ class ConcurrentAppendTest(unittest.TestCase):
         old = time.time() - 3600
         os.utime(lock, (old, old))
 
-        result = run_receipts("log", "--actor", "agent", "--action", "lost",
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "lost",
                               cwd=self.workdir,
-                              extra_env={"LOXODONTA_LOCK_TIMEOUT": "0.5"})
+                              env=quiet_env(LOXODONTA_LOCK_TIMEOUT="0.5"))
 
         self.assertEqual(result.returncode, 73, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -198,9 +187,9 @@ class ConcurrentAppendTest(unittest.TestCase):
         lock.write_text("held\n", encoding="utf-8")
         os.chmod(lock, 0)
 
-        result = run_receipts("log", "--actor", "agent", "--action", "lost",
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "lost",
                               cwd=self.workdir,
-                              extra_env={"LOXODONTA_LOCK_TIMEOUT": "0.5"})
+                              env=quiet_env(LOXODONTA_LOCK_TIMEOUT="0.5"))
 
         self.assertEqual(result.returncode, 75, result.stderr)
         self.assertIn("another writer", result.stderr)
@@ -210,20 +199,14 @@ class SiblingChainTest(unittest.TestCase):
     """A damaged tail ends a chain, not the recording (ADR-0004)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        self.workdir = temp_folder(self)
         self.log_dir = self.workdir / "receipts"
-        self.home = home_outside(self)  # every home the test's own (#274)
+        self.home = temp_folder(self)  # every home the test's own (#274)
 
     def fire_hook(self, command="ls"):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook",
-             "--log-dir", str(self.log_dir)],
-            cwd=self.workdir, input=hook_payload(command=command),
-            capture_output=True, encoding="utf-8",
-            env=isolated_env(self.home, PYTHONIOENCODING="utf-8"),
-        )
+        return run(LOXODONTA, "hook", "--log-dir", str(self.log_dir),
+                   cwd=self.workdir, stdin=hook_payload(command=command),
+                   env=isolated_env(self.home, PYTHONIOENCODING="utf-8"))
 
     def chain(self, suffix=""):
         return self.log_dir / f"receipts-sess-1234abcd{suffix}.jsonl"
@@ -255,8 +238,8 @@ class SiblingChainTest(unittest.TestCase):
         self.tear(self.chain())
         self.fire_hook()
 
-        verify = run_receipts("verify", "--log", str(self.chain("-002")),
-                              cwd=self.workdir)
+        verify = run(LOXODONTA, "verify", "--log", str(self.chain("-002")),
+                              cwd=self.workdir, env=quiet_env())
         self.assertEqual(verify.returncode, 0, verify.stdout)
 
     def test_damage_to_a_sibling_advances_to_the_next(self):
@@ -284,13 +267,13 @@ class SiblingChainTest(unittest.TestCase):
         # cannot stop and ask. A human at the CLI gets the refusal, so the
         # no-repair rule (ADR-0002) keeps its teeth.
         log = self.workdir / "receipts.jsonl"
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "one",
-                     cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir, env=quiet_env())
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "one",
+                     cwd=self.workdir, env=quiet_env())
         self.tear(log)
 
-        result = run_receipts("log", "--actor", "agent", "--action", "two",
-                              cwd=self.workdir)
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "two",
+                              cwd=self.workdir, env=quiet_env())
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("damaged", result.stderr)
@@ -306,20 +289,14 @@ class TailDamageCase(unittest.TestCase):
     it, for the tests of a chain whose tail cannot be built on."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        self.workdir = temp_folder(self)
         self.log_dir = self.workdir / "receipts"
-        self.home = home_outside(self)  # every home the test's own (#274)
+        self.home = temp_folder(self)  # every home the test's own (#274)
 
     def fire_hook(self, command="ls"):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook",
-             "--log-dir", str(self.log_dir)],
-            cwd=self.workdir, input=hook_payload(command=command),
-            capture_output=True, encoding="utf-8",
-            env=isolated_env(self.home, PYTHONIOENCODING="utf-8"),
-        )
+        return run(LOXODONTA, "hook", "--log-dir", str(self.log_dir),
+                   cwd=self.workdir, stdin=hook_payload(command=command),
+                   env=isolated_env(self.home, PYTHONIOENCODING="utf-8"))
 
     def chain(self, suffix=""):
         return self.log_dir / f"receipts-sess-1234abcd{suffix}.jsonl"
@@ -365,14 +342,14 @@ class ForkedTailTest(TailDamageCase):
 
     def test_the_log_command_refuses_to_extend_a_fork(self):
         log = self.workdir / "receipts.jsonl"
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "one",
-                     cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir, env=quiet_env())
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "one",
+                     cwd=self.workdir, env=quiet_env())
         self.fork(log)
         before = log.read_bytes()
 
-        result = run_receipts("log", "--actor", "agent", "--action", "two",
-                              cwd=self.workdir)
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "two",
+                              cwd=self.workdir, env=quiet_env())
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("damaged tail", result.stderr)
@@ -382,12 +359,12 @@ class ForkedTailTest(TailDamageCase):
     def test_verify_still_names_the_fork_as_broken(self):
         # The refusal changes nothing about the verdict: two entries at
         # one n is BROKEN, as it was, at the second of them.
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "one",
-                     cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir, env=quiet_env())
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "one",
+                     cwd=self.workdir, env=quiet_env())
         self.fork(self.workdir / "receipts.jsonl")
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir, env=quiet_env())
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("BROKEN at entry 2", result.stdout)

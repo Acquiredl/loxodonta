@@ -32,7 +32,9 @@ Reading three files first saves everyone a round trip:
    that says why beats a trick that saves a line.
 3. **Tests first, through the public CLI.** Every behavior is tested by
    running the command a user would run and reading what it printed or wrote.
-   No mocking of internals. Run the suite with:
+   No mocking of internals. What every test shares, the one way to run a
+   tool and the temporary homes the tools are pointed at, is in
+   `tests/support.py`. Run the suite with:
 
    ```
    python -m unittest discover -s tests
@@ -101,7 +103,7 @@ line, so a blank line is `
 shell version of this check silently passes everything.
 
 The rest of the Markdown checks run in CI only: the remaining markdownlint
-rules (in `.markdownlint.yml`) and lychee, the link checker (exclusions and
+rules (in `.github/.markdownlint.yml`) and lychee, the link checker (exclusions and
 their reasons in `.github/lychee.toml`; it also runs weekly, so a link that dies
 quietly still gets noticed). Neither needs anything installed here.
 
@@ -137,6 +139,8 @@ different case: that path is `docs/HOOK.md`, and the README says so.
 A green pull request into `dev` means the suite passed on
 `ubuntu-latest / py3.9` only; the push to `dev` that merges it runs all five
 targets, and a pull request into `main` waits on all five.
+Changing a pull request's base starts no new run, so one moved from `dev` to
+`main` keeps its one-target result until it gets a new push.
 
 ## What helps most right now
 

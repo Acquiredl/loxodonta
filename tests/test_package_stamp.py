@@ -27,7 +27,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 import zipfile
@@ -38,9 +37,11 @@ from types import SimpleNamespace
 # when the module runs alone (`python -m unittest tests.test_package_stamp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import LOXODONTA, SUPERVISOR, run, temp_folder  # noqa: E402
+
 from test_anchor import start_calendar
 from test_package_anchor import released_verifier
-from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run
+from test_package import PackageCase, neutral_env
 from test_stamp import (GRANTED, MISSING_AUTHORITY_TOOLING,
                         MISSING_EXPIRY_TOOLING, NO_TOKEN, REQ_CONFIG,
                         TSA_CONFIG, answering, dated_authority,
@@ -57,11 +58,8 @@ def hook_call(env, project, session, tool, tool_input):
                           "hook_event_name": "PostToolUse",
                           "tool_name": tool, "tool_input": tool_input,
                           "tool_response": {}})
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), "hook"],
-        input=payload.encode("utf-8"), capture_output=True,
-        env={**env, "PYTHONIOENCODING": "utf-8",
-             "CLAUDE_PROJECT_DIR": str(project)})
+    return run(LOXODONTA, "hook", stdin=payload,
+               env={**env, "CLAUDE_PROJECT_DIR": str(project)})
 
 
 class StampedStoreCase(PackageCase):
@@ -70,9 +68,7 @@ class StampedStoreCase(PackageCase):
     tests of its own."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         self.home.mkdir()
         self.project = self.root / "project"
@@ -401,7 +397,7 @@ class JudgedPackageStampTest(StampedStoreCase):
         return subprocess.run(["openssl", *args],
                               cwd=str(where or self.authority_dir),
                               capture_output=True, encoding="utf-8",
-                              errors="replace")
+                              errors="replace", timeout=120)
 
     def openssl_authority(self, name):
         """An authority of its own, made here with openssl in a folder
@@ -554,7 +550,7 @@ class JudgedPackageStampTest(StampedStoreCase):
              "-keyout", "tsa.key", "-out", "tsa.crt", "-days", "2",
              "-config", "req.cnf", "-extensions", "tsa_cert"],
             cwd=str(stranger), capture_output=True, encoding="utf-8",
-            errors="replace")
+            errors="replace", timeout=120)
         self.assertEqual(made.returncode, 0, made.stderr)
 
         judged = self.judge(folder, stranger / "tsa.crt")
@@ -655,9 +651,7 @@ class OutlivedPackageStampTest(PackageCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-        cls.addClassCleanup(cls._tmp.cleanup)
-        cls.root = Path(cls._tmp.name).resolve()
+        cls.root = temp_folder(cls)
         cls.home = cls.root / "home"
         cls.project = cls.root / "project"
         cls.witness = cls.root / "no-witness"
@@ -696,9 +690,7 @@ class OutlivedPackageStampTest(PackageCase):
         outlive(expires)
 
     def setUp(self):
-        self._work = tempfile.TemporaryDirectory()
-        self.addCleanup(self._work.cleanup)
-        self.work = Path(self._work.name).resolve()
+        self.work = temp_folder(self)
         self.folder = self.work / "pkg"
         shutil.copytree(self.package_folder, self.folder)
 
@@ -858,7 +850,7 @@ class OutlivedPackageStampTest(PackageCase):
             ["openssl", "ts", "-query", "-digest", digest, "-sha256",
              "-cert", "-out", "manifest.tsq"],
             cwd=str(self.work / "current"), capture_output=True,
-            encoding="utf-8", errors="replace")
+            encoding="utf-8", errors="replace", timeout=120)
         self.assertEqual(asked.returncode, 0, asked.stderr)
         reply = answering(self.work / "current")(
             (self.work / "current" / "manifest.tsq").read_bytes())
@@ -1097,11 +1089,9 @@ class ReleasedVerifierTest(StampedStoreCase):
     def assert_the_same_under_both(self, folder, *extra):
         released = released_verifier(self, self.root)
         now = self.verify_package(folder, *extra)
-        then = subprocess.run(
-            [sys.executable, "-I", str(released), "verify-package",
-             str(folder), *extra], capture_output=True, cwd=str(self.work),
-            env=self.env)
-        then_out = then.stdout.decode("utf-8", "replace")
+        then = run(released, "verify-package", str(folder), *extra,
+                   cwd=str(self.work), env=self.env, isolated=True)
+        then_out = then.stdout
         self.assertEqual((then.returncode, bare_sidecars(then_out)),
                          (now.returncode, now.stdout.splitlines()))
         return now

@@ -41,16 +41,16 @@ from types import SimpleNamespace
 # when the module runs alone (`python -m unittest tests.test_stamp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import (LOXODONTA, StoreCase, isolated_env, run,  # noqa: E402
+                     temp_folder)
+
 from test_anchor import (HOSTILE, HOSTILE_HEAD, SHOWN, SHOWN_HEAD,
                          FakeCalendar, FakeCalendarHandler,
-                         assert_printed_escaped, clean_env)
+                         assert_printed_escaped)
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
-from test_supervisor import (ago, chain_head, chains_by_session,
-                             home_outside, isolated_env, make_chain,
+from test_supervisor import (ago, chain_head, chains_by_session, make_chain,
                              run_scan)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 SHA256_OID = "2.16.840.1.101.3.4.2.1"
 QUERY_TYPE = "application/timestamp-query"
@@ -60,13 +60,6 @@ SIDECARS = (".anchors.jsonl", ".published.jsonl", ".stamps.jsonl")
 # How a verdict about the one row of a test's stamps sidecar begins: the
 # row by its line, then the head it names.
 INVALID_ROW_1 = "STAMP-INVALID: line 1 of receipts.jsonl.stamps.jsonl, "
-
-
-def run_receipts(*args, cwd, env=None):
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), *args],
-        cwd=cwd, capture_output=True, encoding="utf-8",
-        env={**clean_env(), **(env or {})})
 
 
 # --- An independent DER reader and writer (RFC 3161 §2.4) ---------------------
@@ -259,30 +252,27 @@ def attempt_rows(sidecar):
 
 # --- The verb ----------------------------------------------------------------
 
-class StampCommandTest(unittest.TestCase):
+class StampCommandTest(StoreCase):
     """`loxodonta stamp --authority URL`: one query, one row; and the
     offline halves of `verify --stamps` that need no openssl."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        super().setUp()
         self.log = self.workdir / "receipts.jsonl"
         self.sidecar = self.workdir / "receipts.jsonl.stamps.jsonl"
         self.authority = start_authority(self)
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 2",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 2",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
     def stamp(self, url=None):
-        return run_receipts("stamp", "--authority", url or self.authority.url,
+        return run(LOXODONTA, "stamp", "--authority", url or self.authority.url,
                             cwd=self.workdir)
 
     def verify(self, *extra, env=None):
-        return run_receipts("verify", "--stamps", *extra, cwd=self.workdir,
+        return run(LOXODONTA, "verify", "--stamps", *extra, cwd=self.workdir,
                             env=env)
 
     def test_stamp_asks_the_authority_and_writes_one_row(self):
@@ -328,7 +318,7 @@ class StampCommandTest(unittest.TestCase):
         # Two heads, so two queries: the same head twice is the dedupe's
         # case below, not this one.
         self.stamp()
-        run_receipts("log", "--actor", "agent", "--action", "step 3",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 3",
                      cwd=self.workdir)
 
         self.stamp()
@@ -360,9 +350,9 @@ class StampCommandTest(unittest.TestCase):
 
     def test_a_new_head_is_stamped_although_the_old_one_holds_a_token(self):
         self.stamp()
-        run_receipts("log", "--actor", "agent", "--action", "step 3",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 3",
                      cwd=self.workdir)
-        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        newer = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
         result = self.stamp()
 
@@ -379,15 +369,15 @@ class StampCommandTest(unittest.TestCase):
         unwritable = self.workdir / "sealed"
         unwritable.mkdir()
         log = unwritable / "receipts.jsonl"
-        run_receipts("init", "--log", str(log), cwd=self.workdir)
-        run_receipts("log", "--log", str(log), "--actor", "agent",
+        run(LOXODONTA, "init", "--log", str(log), cwd=self.workdir)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "agent",
                      "--action", "step 1", cwd=self.workdir)
         sidecar = unwritable / "receipts.jsonl.stamps.jsonl"
         # A directory where the sidecar's file belongs: every open for
         # append raises, on every platform, without touching permissions.
         sidecar.mkdir()
 
-        result = run_receipts("stamp", "--log", str(log),
+        result = run(LOXODONTA, "stamp", "--log", str(log),
                               "--authority", self.authority.url,
                               cwd=self.workdir)
 
@@ -513,7 +503,7 @@ class StampCommandTest(unittest.TestCase):
         chain_file.write_text("not read: the flag is refused first\n",
                               encoding="utf-8")
 
-        result = run_receipts("verify", "--authority-chain", str(chain_file),
+        result = run(LOXODONTA, "verify", "--authority-chain", str(chain_file),
                               cwd=self.workdir)
 
         self.assertEqual(result.returncode, 64, result.stdout)
@@ -566,8 +556,8 @@ class StampCommandTest(unittest.TestCase):
         # not the stamped history, beside ANCHOR-MISMATCH's tier.
         self.stamp()
         self.log.unlink()
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "innocent step",
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "innocent step",
                      cwd=self.workdir)
 
         result = self.verify()
@@ -622,7 +612,7 @@ class StampCommandTest(unittest.TestCase):
         self.assertNotIn("anchor", self.sidecar.name)
 
 
-class StampRowKindTest(unittest.TestCase):
+class StampRowKindTest(StoreCase):
     """ADR-0038: every row of the stamps sidecar names its kind. A new
     token row is written `"kind": "stamp"`; a row with no kind reads as a
     token, whenever it was written, so every sidecar already shipped
@@ -636,15 +626,13 @@ class StampRowKindTest(unittest.TestCase):
     UNKNOWN = "STAMP-UNKNOWN-KIND"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        # By name, not super(): StampFieldEscapeTest borrows this setUp.
+        StoreCase.setUp(self)
         self.sidecar = self.workdir / "receipts.jsonl.stamps.jsonl"
         self.authority = start_authority(self)
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
     def token_row(self, **extra):
         """A token row over the head, as the recorder writes one, keys
@@ -660,11 +648,11 @@ class StampRowKindTest(unittest.TestCase):
                                 encoding="utf-8")
 
     def stamp(self):
-        return run_receipts("stamp", "--authority", self.authority.url,
+        return run(LOXODONTA, "stamp", "--authority", self.authority.url,
                             cwd=self.workdir)
 
     def verify(self):
-        return run_receipts("verify", "--stamps", cwd=self.workdir)
+        return run(LOXODONTA, "verify", "--stamps", cwd=self.workdir)
 
     def without_notes(self, stdout):
         return [line for line in stdout.splitlines()
@@ -896,9 +884,9 @@ class StampRowKindTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         (token,) = [r for r in rows_of(self.sidecar)
                     if r.get("kind") == "stamp"]
-        run_receipts("log", "--actor", "agent", "--action", "step 2",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 2",
                      cwd=self.workdir)
-        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        newer = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
         for name, response in (("forged", FORGED_GRANTED),
                                ("copied", token["response"])):
             with self.subTest(row=name):
@@ -936,7 +924,7 @@ class StampRowKindTest(unittest.TestCase):
                          (self.head, "stamp"))
 
 
-class StampReplyStatusTest(unittest.TestCase):
+class StampReplyStatusTest(StoreCase):
     """#370: `verify --stamps` reads each reply's status offline, as
     `stamp` reads it, and whether a token follows the status, and never
     what the token holds. A reply the authority refused, bytes that are
@@ -946,15 +934,12 @@ class StampReplyStatusTest(unittest.TestCase):
     about one row. An honest granted reply is judged as before."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        super().setUp()
         self.sidecar = self.workdir / "receipts.jsonl.stamps.jsonl"
         self.authority = start_authority(self)
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
         self.chain_file = self.workdir / "authority.pem"
         self.chain_file.write_text("not a certificate\n", encoding="utf-8")
         self.nowhere = self.workdir / "empty-path"
@@ -971,12 +956,12 @@ class StampReplyStatusTest(unittest.TestCase):
         no openssl on PATH; with one and whatever PATH this machine has."""
         chain = ("--authority-chain", str(self.chain_file))
         return {
-            "no chain file": run_receipts("verify", "--stamps",
+            "no chain file": run(LOXODONTA, "verify", "--stamps",
                                           cwd=self.workdir),
-            "no openssl": run_receipts("verify", "--stamps", *chain,
+            "no openssl": run(LOXODONTA, "verify", "--stamps", *chain,
                                        cwd=self.workdir,
                                        env={"PATH": str(self.nowhere)}),
-            "this machine": run_receipts("verify", "--stamps", *chain,
+            "this machine": run(LOXODONTA, "verify", "--stamps", *chain,
                                          cwd=self.workdir),
         }
 
@@ -1019,7 +1004,7 @@ class StampReplyStatusTest(unittest.TestCase):
                 self.authority.received.clear()
                 self.write_row(response)
 
-                result = run_receipts("stamp", "--authority",
+                result = run(LOXODONTA, "stamp", "--authority",
                                       self.authority.url, cwd=self.workdir)
 
                 self.assertEqual(result.returncode, 0,
@@ -1034,7 +1019,7 @@ class StampReplyStatusTest(unittest.TestCase):
         # token: the query reads it by the same rule.
         self.authority.answer = reply(0)
 
-        result = run_receipts("stamp", "--authority", self.authority.url,
+        result = run(LOXODONTA, "stamp", "--authority", self.authority.url,
                               cwd=self.workdir)
 
         self.assertEqual(result.returncode, 69, result.stdout + result.stderr)
@@ -1046,7 +1031,7 @@ class StampReplyStatusTest(unittest.TestCase):
                                           "(granted) and sent no token")
 
 
-class StampFieldEscapeTest(unittest.TestCase):
+class StampFieldEscapeTest(StoreCase):
     """#349: a field of a stamp row that `verify --stamps` prints is the
     writer's text, and is printed escaped (#295). The row's authority is
     printed only beside a token openssl accepted, so that one is
@@ -1071,7 +1056,7 @@ class StampFieldEscapeTest(unittest.TestCase):
     def test_no_sidecar_is_named_by_its_bare_name(self):
         log = self.workdir / "receipts.jsonl"
 
-        result = run_receipts("verify", "--stamps", "--log", str(log),
+        result = run(LOXODONTA, "verify", "--stamps", "--log", str(log),
                               cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1118,7 +1103,7 @@ def start_slow_body(case, body, content_type):
     return server
 
 
-class ReplyBodyTest(unittest.TestCase):
+class ReplyBodyTest(StoreCase):
     """The head publish is done when the status line arrives: its body is
     a chat service's bookkeeping nobody here reads, and waiting for one
     would let a remote that took the head be written down as a remote
@@ -1127,18 +1112,15 @@ class ReplyBodyTest(unittest.TestCase):
     holds the two apart."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        super().setUp()
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
 
     def test_the_head_publish_returns_on_the_status_not_the_body(self):
         remote = start_slow_body(self, b"ok", "application/json")
 
         started = time.monotonic()
-        result = run_receipts("publish", remote.url, cwd=self.workdir)
+        result = run(LOXODONTA, "publish", remote.url, cwd=self.workdir)
         elapsed = time.monotonic() - started
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1149,13 +1131,13 @@ class ReplyBodyTest(unittest.TestCase):
         memo = self.workdir / "receipts.jsonl.published.jsonl"
         (row,) = [r for r in rows_of(memo) if r.get("kind") != "attempt"]
         self.assertEqual(row["head"],
-                         run_receipts("head", cwd=self.workdir).stdout.strip())
+                         run(LOXODONTA, "head", cwd=self.workdir).stdout.strip())
 
     def test_the_stamp_waits_for_the_body_because_it_is_the_token(self):
         remote = start_slow_body(self, GRANTED, "application/timestamp-reply")
 
         started = time.monotonic()
-        result = run_receipts("stamp", "--authority", remote.url,
+        result = run(LOXODONTA, "stamp", "--authority", remote.url,
                               cwd=self.workdir)
         elapsed = time.monotonic() - started
 
@@ -1577,7 +1559,7 @@ def missing_authority_tooling():
         for step in steps:
             tried = subprocess.run(["openssl", *step], cwd=scratch,
                                    capture_output=True, encoding="utf-8",
-                                   errors="replace")
+                                   errors="replace", timeout=120)
             if tried.returncode != 0:
                 said = tried.stderr.strip().splitlines()
                 return (f"this openssl cannot run `openssl {step[0]} "
@@ -1593,7 +1575,7 @@ MISSING_AUTHORITY_TOOLING = missing_authority_tooling()
 @unittest.skipIf(MISSING_AUTHORITY_TOOLING,
                  f"{MISSING_AUTHORITY_TOOLING}; the authority timestamp is "
                  "judged by openssl, and this suite's authority is made by it")
-class JudgedStampTest(unittest.TestCase):
+class JudgedStampTest(StoreCase):
     """`verify --stamps --authority-chain FILE` with a real token: an
     authority made here with openssl (a key, a self-signed certificate
     with the timestamping extended key usage, a `tsa` section) answers
@@ -1601,9 +1583,7 @@ class JudgedStampTest(unittest.TestCase):
     recorder judges what came back through `openssl ts -verify`."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        super().setUp()
         self.sidecar = self.workdir / "receipts.jsonl.stamps.jsonl"
         self.authority_dir = self.workdir / "authority"
         self.authority_dir.mkdir()
@@ -1617,17 +1597,16 @@ class JudgedStampTest(unittest.TestCase):
         self.assertEqual(made.returncode, 0, made.stderr)
         self.queries = 0
         self.authority = start_authority(self, answer=self.sign)
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 2",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 2",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
     def openssl(self, *args):
         return subprocess.run(["openssl", *args], cwd=str(self.authority_dir),
                               capture_output=True, encoding="utf-8",
-                              errors="replace")
+                              errors="replace", timeout=120)
 
     def sign(self, query):
         """What a real authority does with the recorder's query: answer
@@ -1641,13 +1620,13 @@ class JudgedStampTest(unittest.TestCase):
         return (self.authority_dir / f"{name}.tsr").read_bytes()
 
     def stamp(self):
-        result = run_receipts("stamp", "--authority", self.authority.url,
+        result = run(LOXODONTA, "stamp", "--authority", self.authority.url,
                               cwd=self.workdir)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
     def verify(self, *extra):
-        return run_receipts("verify", "--stamps", "--authority-chain",
+        return run(LOXODONTA, "verify", "--stamps", "--authority-chain",
                             str(self.chain_file), *extra, cwd=self.workdir)
 
     def rewrite_row(self, **changes):
@@ -1695,9 +1674,9 @@ class JudgedStampTest(unittest.TestCase):
         # The row's head is in the chain, but the token's imprint is not
         # that head: openssl says so, and the verdict is the same tier.
         self.stamp()
-        run_receipts("log", "--actor", "agent", "--action", "step 3",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 3",
                      cwd=self.workdir)
-        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        newer = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
         self.rewrite_row(head=newer, n=3)
 
         result = self.verify()
@@ -1714,9 +1693,9 @@ class JudgedStampTest(unittest.TestCase):
         # no query is sent. With openssl and the chain file, verify calls
         # either one STAMP-INVALID, never STAMPED.
         self.stamp()
-        run_receipts("log", "--actor", "agent", "--action", "step 3",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 3",
                      cwd=self.workdir)
-        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        newer = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
         (row,) = rows_of(self.sidecar)
         for name, response in (("forged", FORGED_GRANTED),
                                ("copied", row["response"])):
@@ -1751,10 +1730,10 @@ class JudgedStampTest(unittest.TestCase):
              "-keyout", "tsa.key", "-out", "tsa.crt", "-days", "2",
              "-config", "req.cnf", "-extensions", "tsa_cert"],
             cwd=str(stranger), capture_output=True, encoding="utf-8",
-            errors="replace")
+            errors="replace", timeout=120)
         self.assertEqual(made.returncode, 0, made.stderr)
 
-        result = run_receipts("verify", "--stamps", "--authority-chain",
+        result = run(LOXODONTA, "verify", "--stamps", "--authority-chain",
                               str(stranger / "tsa.crt"), cwd=self.workdir)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
@@ -1763,7 +1742,7 @@ class JudgedStampTest(unittest.TestCase):
     def test_without_the_chain_file_even_a_real_token_is_not_judged(self):
         self.stamp()
 
-        result = run_receipts("verify", "--stamps", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--stamps", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("stamp not judged: no --authority-chain FILE given",
@@ -1843,7 +1822,7 @@ CERTIFICATE_LIFE = 4
 def openssl_in(folder, *args):
     return subprocess.run(["openssl", *args], cwd=str(folder),
                           capture_output=True, encoding="utf-8",
-                          errors="replace")
+                          errors="replace", timeout=120)
 
 
 def openssl_date(epoch):
@@ -2020,16 +1999,14 @@ class OutlivedCertificateTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-        cls.addClassCleanup(cls._tmp.cleanup)
-        root = Path(cls._tmp.name).resolve()
+        root = temp_folder(cls)
         cls.stamped = root / "stamped"
         cls.stamped.mkdir()
-        run_receipts("init", cwd=cls.stamped)
+        run(LOXODONTA, "init", cwd=cls.stamped)
         for step in ("step 1", "step 2"):
-            run_receipts("log", "--actor", "agent", "--action", step,
+            run(LOXODONTA, "log", "--actor", "agent", "--action", step,
                          cwd=cls.stamped)
-        cls.head = run_receipts("head", cwd=cls.stamped).stdout.strip()
+        cls.head = run(LOXODONTA, "head", cwd=cls.stamped).stdout.strip()
         cls.chain_file, expires = dated_authority(
             root / "authority", "short-lived", -3600, CERTIFICATE_LIFE)
         # start_authority closes its server when the case it is given
@@ -2037,7 +2014,7 @@ class OutlivedCertificateTest(unittest.TestCase):
         authority = start_authority(
             SimpleNamespace(addCleanup=cls.addClassCleanup),
             answer=answering(root / "authority"))
-        stamped = run_receipts("stamp", "--authority", authority.url,
+        stamped = run(LOXODONTA, "stamp", "--authority", authority.url,
                                cwd=cls.stamped)
         assert stamped.returncode == 0, stamped.stdout + stamped.stderr
         # The premise every test here stands on: the token was issued
@@ -2048,15 +2025,13 @@ class OutlivedCertificateTest(unittest.TestCase):
         outlive(expires)
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.scratch = Path(self._tmp.name).resolve()
+        self.scratch = temp_folder(self)
         self.workdir = self.scratch / "chain"
         shutil.copytree(self.stamped, self.workdir)
         self.sidecar = self.workdir / "receipts.jsonl.stamps.jsonl"
 
     def verify(self, env=None):
-        return run_receipts("verify", "--stamps", "--authority-chain",
+        return run(LOXODONTA, "verify", "--stamps", "--authority-chain",
                             str(self.chain_file), cwd=self.workdir, env=env)
 
     def rewrite_row(self, **changes):
@@ -2129,9 +2104,9 @@ class OutlivedCertificateTest(unittest.TestCase):
     def test_a_token_over_another_head_is_still_stamp_invalid(self):
         # The row's head is in the chain and the token's imprint is not
         # that head: a reason of its own, which expiry must not hide.
-        run_receipts("log", "--actor", "agent", "--action", "step 3",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 3",
                      cwd=self.workdir)
-        newer = run_receipts("head", cwd=self.workdir).stdout.strip()
+        newer = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
         self.rewrite_row(head=newer, n=3)
 
         result = self.verify()
@@ -2150,10 +2125,10 @@ class OutlivedCertificateTest(unittest.TestCase):
         lapsed = start_authority(self, answer=answering(self.scratch / "lapsed"))
         fresh = self.scratch / "fresh"
         fresh.mkdir()
-        run_receipts("init", cwd=fresh)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "init", cwd=fresh)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=fresh)
-        stamped = run_receipts("stamp", "--authority", lapsed.url, cwd=fresh)
+        stamped = run(LOXODONTA, "stamp", "--authority", lapsed.url, cwd=fresh)
         self.assertEqual(stamped.returncode, 0,
                          stamped.stdout + stamped.stderr)
         return fresh, chain_file
@@ -2164,7 +2139,7 @@ class OutlivedCertificateTest(unittest.TestCase):
         # certificate's life too, so no calendar excuses it.
         fresh, chain_file = self.stamped_after_expiry()
 
-        result = run_receipts("verify", "--stamps", "--authority-chain",
+        result = run(LOXODONTA, "verify", "--stamps", "--authority-chain",
                               str(chain_file), cwd=fresh)
 
         out = result.stdout
@@ -2189,7 +2164,7 @@ class OutlivedCertificateTest(unittest.TestCase):
             "ok\nTime stamp: " + openssl_print_time(inside))).decode()
         sidecar.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
-        result = run_receipts("verify", "--stamps", "--authority-chain",
+        result = run(LOXODONTA, "verify", "--stamps", "--authority-chain",
                               str(chain_file), cwd=fresh)
 
         out = result.stdout
@@ -2234,9 +2209,7 @@ class InstallAuthorityTest(unittest.TestCase):
     WEBHOOK = "https://hooks.example.test/services/T000/B000/XXXX"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.store = self.root / "store"
@@ -2246,7 +2219,7 @@ class InstallAuthorityTest(unittest.TestCase):
                     "LOXODONTA_MANAGED_DIR": str(self.home / "managed")}
 
     def install(self, *args):
-        return run_receipts("install-hook", *args, cwd=self.root,
+        return run(LOXODONTA, "install-hook", *args, cwd=self.root,
                             env=self.env)
 
     def settings(self):
@@ -2464,7 +2437,7 @@ class InstallAuthorityTest(unittest.TestCase):
     def test_uninstall_removes_the_stamping_session_end_hook(self):
         self.install("--authority", self.URL)
 
-        result = run_receipts("uninstall-hook", cwd=self.root, env=self.env)
+        result = run(LOXODONTA, "uninstall-hook", cwd=self.root, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         path = self.home / ".claude" / "settings.json"
@@ -2482,9 +2455,7 @@ class ScanStampTest(unittest.TestCase):
     rows (#240)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
 
     def write_rows(self, log, rows):
         with open(str(log) + ".stamps.jsonl", "a", encoding="utf-8") as out:
@@ -2507,7 +2478,7 @@ class ScanStampTest(unittest.TestCase):
              "budget": 3.0,
              "outcome": "the authority answered status 2 (rejection)"}])
 
-        result = run_scan(self.root, env=isolated_env(home_outside(self)))
+        result = run_scan(self.root, env=isolated_env(temp_folder(self)))
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
@@ -2549,7 +2520,7 @@ class ScanStampTest(unittest.TestCase):
                                       "ts": ago(60), **fields}) + "\n")
             planted[f"sess-proof-{number}"] = fields
 
-        result = run_scan(self.root, env=isolated_env(home_outside(self)))
+        result = run_scan(self.root, env=isolated_env(temp_folder(self)))
 
         self.assertNotIn("Traceback", result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))

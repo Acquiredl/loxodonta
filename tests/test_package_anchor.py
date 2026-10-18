@@ -17,7 +17,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import unittest
 import zipfile
@@ -32,14 +31,15 @@ except ImportError:  # Windows has no limit on file size to set
 # when the module runs alone (`python -m unittest tests.test_package_anchor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import LOXODONTA, SUPERVISOR, run, temp_folder  # noqa: E402
+
 from test_anchor import (DROP, GENESIS_HASH, GENESIS_HEADER, HOSTILE,
                          HOSTILE_HEAD, MALFORMED_ROWS, SHOWN, SHOWN_HEAD_12,
                          FakeCalendar, FakeCalendarHandler,
                          assert_printed_escaped, block_header, completed_row,
                          expected_merkle_root, header_hash, pending_proof,
                          replayed_root, start_calendar)
-from test_package import (LOXODONTA, SUPERVISOR, PackageCase, completed_anchor,
-                          neutral_env, run)
+from test_package import PackageCase, completed_anchor, neutral_env
 
 SESSION = "d0d0d0d0-aaaa-bbbb-cccc-000000000001"
 SIDECAR = "manifest.json.anchors.jsonl"
@@ -64,9 +64,7 @@ class AnchoredStoreCase(PackageCase):
     pending and can complete on request. No tests of its own."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         self.home.mkdir()
         self.project = self.root / "project"
@@ -105,11 +103,8 @@ class AnchoredStoreCase(PackageCase):
                               "hook_event_name": "PostToolUse",
                               "tool_name": tool, "tool_input": tool_input,
                               "tool_response": {}})
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook"],
-            input=payload.encode("utf-8"), capture_output=True,
-            env={**self.env, "PYTHONIOENCODING": "utf-8",
-                 "CLAUDE_PROJECT_DIR": str(self.project)})
+        result = run(LOXODONTA, "hook", stdin=payload,
+                     env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def anchored_folder(self, name="pkg"):
@@ -533,12 +528,10 @@ class SealedPackageTest(AnchoredStoreCase):
                 self.assertEqual(logged.returncode, 0, logged.stderr)
         out = self.work / "made" / "pkg.zip"
 
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "package", "--witness",
-             str(self.witness), SESSION, "--out", str(out)],
-            cwd=str(self.work), capture_output=True, encoding="utf-8",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"}, timeout=300,
-            preexec_fn=lambda: resource.setrlimit(
+        result = run(SUPERVISOR, "package", "--witness", str(self.witness),
+                     SESSION, "--out", str(out), cwd=str(self.work),
+                     env=self.env, timeout=300,
+                     preexec_fn=lambda: resource.setrlimit(
                 resource.RLIMIT_FSIZE, (FILE_SIZE_CAP, FILE_SIZE_CAP)))
 
         said = result.stdout + result.stderr
@@ -909,7 +902,7 @@ def released_verifier(case, folder):
     try:
         shown = subprocess.run(
             ["git", "-C", str(LOXODONTA.parent), "show",
-             f"{RELEASE}:verifier.py"], capture_output=True)
+             f"{RELEASE}:verifier.py"], capture_output=True, timeout=120)
     except OSError:
         case.skipTest("git is not on PATH, so the released verifier's "
                       "bytes cannot be read")
@@ -946,10 +939,9 @@ class ReleasedVerifierTest(AnchoredStoreCase):
         self.assertEqual(kinds, ["anchor", "anchor"])
 
         now = self.verify_package(folder)
-        then = subprocess.run(
-            [sys.executable, "-I", str(released), "verify-package",
-             str(folder)], capture_output=True, cwd=str(self.work))
-        then_out = then.stdout.decode("utf-8", "replace")
+        then = run(released, "verify-package", str(folder),
+                   cwd=str(self.work), isolated=True)
+        then_out = then.stdout
 
         self.assertEqual(now.returncode, 0, now.stdout + now.stderr)
         self.assertTrue(now.stdout.splitlines()[-1]
