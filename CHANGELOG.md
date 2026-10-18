@@ -42,7 +42,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A folder at the managed hooks file's name refuses `install-hook --managed` before anything is said or written, as a folder at the pin's name does, instead of after the notices and the pin (#487).
 - The hook reads the project record only for a tool call that names files, so a large record left by the writer is not read whole on every call (#448).
 - A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
-- `supervisor adopt` never moves a second legacy chain over the first when both are bound for one name in a drawer, case aside: each name is given once per run, and the dry run refuses the second too (#447).
+- `supervisor adopt` never moves one legacy chain over another bound for the same name in a drawer, case and Unicode form aside: every chain bound for that name is refused by name and left, in the dry run too (#447).
 - `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).
 
 ## [0.15.1] - 2026-10-12

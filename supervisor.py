@@ -4794,15 +4794,24 @@ def sidecars_of(log):
 
 
 def landing(drawer, name):
-    """The key a run gives a name in a drawer by: folded for case, since
-    a disk that ignores it lands two such names on one file (#447)."""
-    return drawer, name.casefold()
+    """The key a run counts a name in a drawer by, folded as a package's
+    names are (`landing_name`, #299): two names one system lands on one
+    file are one name on every system (#447)."""
+    return drawer, landing_name(name)
 
 
 def exists_words(drawer, name):
     """The refusal for a name the drawer already holds."""
     return (f"{drawer.name}/{name} already exists in the store — evidence "
             "is never overwritten; reconcile by hand")
+
+
+def contested_words(drawer, name, others):
+    """The refusal for a chain bound for a name `others` are bound for
+    too, each as the operator's root reads it (#447)."""
+    return (f"{drawer.name}/{name} is where {', '.join(others)} would land "
+            "too — none of them is moved; evidence is never overwritten; "
+            "reconcile by hand")
 
 
 def taken_words(drawer, name, taker):
@@ -4855,11 +4864,12 @@ def cmd_adopt(args):
         return path.relative_to(root).as_posix()
 
     # Every refusal is asked here, before anything moves, so --dry-run
-    # meets the real run's (#422). `given` holds each name the plan has
-    # handed out in a drawer, and to which file: the drawer alone cannot
-    # say, before anything moves, that two legacy chains share a name,
-    # and the second would be moved over the first (#447).
-    moves, refused, stays, given = [], [], [], {}
+    # meets the real run's (#422). The drawer alone cannot say, before
+    # anything moves, that two legacy chains share a name, and the
+    # second would be moved over the first (#447): `bound` counts the
+    # chains bound for each name, and `given` holds each name the plan
+    # has handed out, and to which file.
+    moves, refused, stays, chains, bound, given = [], [], [], [], {}, {}
 
     def taker(drawer, path):
         holder = given.get(landing(drawer, path.name))
@@ -4875,10 +4885,21 @@ def cmd_adopt(args):
             continue
         project = adoption_project(root, log)
         drawer = store_receipts() / project_slug(project)
+        chains.append((log, drawer, project))
+        bound.setdefault(landing(drawer, log.name), []).append(log)
+    for log, drawer, project in chains:
         # lexists: a link to nowhere at the name stands there too, and a
         # move across two filesystems would copy through it (#422).
         if os.path.lexists(drawer / log.name):
             refused.append((log, exists_words(drawer, log.name)))
+            continue
+        # None of the chains bound for one name moves: the writer picks
+        # path order (ADR-0002), and the one left out of the store would
+        # be out of every census for ever.
+        others = [said(other) for other in bound[landing(drawer, log.name)]
+                  if other != log]
+        if others:
+            refused.append((log, contested_words(drawer, log.name, others)))
             continue
         holder = taker(drawer, log)
         if holder is not None:
