@@ -1924,6 +1924,9 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                              "the proof could not be written beside the "
                              "chain; it stays unanchored until the sidecar "
                              "can be written")
+            elif finished.returncode == 1:
+                failed = True
+                notes.append(recorder_refusal("anchor this head", finished))
             elif finished.returncode != 0:
                 failed = True
                 notes.append("anchoring failed — no calendar accepted "
@@ -1942,6 +1945,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("stamping failed — the token could not be "
                              "written beside the chain; it stays unstamped "
                              "until the sidecar can be written")
+            elif finished.returncode == 1:
+                notes.append(recorder_refusal("stamp this head", finished))
             elif finished.returncode != 0:
                 notes.append("stamping failed — the authority did not "
                              "grant a token for this head; it stays "
@@ -1965,6 +1970,23 @@ def run_verb(args, env):
                               timeout=VERB_BACKSTOP)
     except subprocess.TimeoutExpired:
         return None
+
+
+def recorder_refusal(doing, finished):
+    """The keeper's note when the recorder refused a verb with exit 1: a
+    damaged tail it will not build on (ADR-0037). Nothing left the
+    machine and no calendar, authority or remote was asked, so the note
+    names none, and it promises no retry, since the recorder refuses
+    again until the tail is dealt with (#533). The recorder's stderr is
+    shown as it said it, never read for a verdict (#504), and clipped, so
+    a traceback from a recorder that failed before it could refuse
+    cannot fill the note."""
+    said = " ".join(line.strip() for line in finished.stderr.splitlines()
+                    if line.strip())
+    if said.startswith("error: "):
+        said = said[len("error: "):]
+    said = clip(said, 300)
+    return f"the recorder refused to {doing}" + (f": {said}" if said else "")
 
 
 # --- Publish keeper -----------------------------------------------------------
@@ -2055,7 +2077,9 @@ def publish_through_recorder(log, url, what):
     Returns the note for the panel when it did not land, else None. The
     recorder's stderr names the failure and never the URL, but it is
     not repeated here: the note is the panel's, and one sentence the
-    operator can act on beats a transport error."""
+    operator can act on beats a transport error. A refusal is the one
+    exception: there the recorder's own sentence is the one to act on
+    (`recorder_refusal`)."""
     flags = ["--chain"] if what == "chain" else []
     stays = ("the head stays unpublished" if what == "head"
              else "the entries stay unsent")
@@ -2084,6 +2108,8 @@ def publish_through_recorder(log, url, what):
         # written (#364), so the next turn posts it again.
         return (f"published the {what}, and the memo could not be written; "
                 "the keeper will post it again until it can be")
+    if finished.returncode == 1:
+        return recorder_refusal(f"publish the {what}", finished)
     if finished.returncode != 0:
         return (f"publishing failed — the remote did not take this {what}; "
                 f"{stays} and the keeper will try again")
@@ -4530,9 +4556,16 @@ def keepers_turn(look, place, entries, memory, now, stamp):
     if not look.keeping(memory["blind"]):
         return moved, said
     keeper = memory["keeper"]
+    # A chain the last look stood down has a torn tail (ADR-0004), and the
+    # recorder refuses its head on every turn (#533), so the head steps
+    # are skipped. The upgrade of proofs it holds and the send of its
+    # intact entries still run: neither reads the tail. The stand-down is
+    # the remembered row's, testimony like the attempt times, and a look
+    # whose verify no longer stands the chain down writes it false again.
+    torn = (memory["chains"].get(relpath) or {}).get("superseded") is True
     attempted, note, failed = keep_anchors(
-        log, keeper.get(relpath), now, entries, look.anchor_every,
-        look.calendars, look.authority)
+        log, keeper.get(relpath), now, entries,
+        None if torn else look.anchor_every, look.calendars, look.authority)
     if attempted:
         moved[relpath] = stamp
     if note:
@@ -4541,7 +4574,8 @@ def keepers_turn(look, place, entries, memory, now, stamp):
         said["anchors"]["failed"] = True
     posted, note, failed = keep_published(
         log, keeper.get("publish:" + relpath), now, entries,
-        look.publish_every, look.publish_url, look.publish_chain)
+        look.publish_every, None if torn else look.publish_url,
+        look.publish_chain)
     if posted:
         moved["publish:" + relpath] = stamp
     if note:
