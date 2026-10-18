@@ -29,6 +29,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The social preview carries the README's current tagline; `tools/build_social_preview.py` rebuilds it from the wordmark and the README, so the two cannot drift (#528).
 - The markdownlint rule file lives under `.github/`, where the workflow names it; the root keeps the standard files and the two git dotfiles (#529).
 
+### Fixed
+
+- `supervisor adopt` never moves a second legacy chain over the first when both are bound for one name in a drawer, case aside: each name is given once per run, and the dry run refuses the second too (#447).
+- `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).
+
 ## [0.15.1] - 2026-10-12
 
 ### Fixed
