@@ -101,7 +101,7 @@ line, so a blank line is `
 shell version of this check silently passes everything.
 
 The rest of the Markdown checks run in CI only: the remaining markdownlint
-rules (in `.markdownlint.yml`) and lychee, the link checker (exclusions and
+rules (in `.github/.markdownlint.yml`) and lychee, the link checker (exclusions and
 their reasons in `.github/lychee.toml`; it also runs weekly, so a link that dies
 quietly still gets noticed). Neither needs anything installed here.
 
