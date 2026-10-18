@@ -8,7 +8,6 @@ on:
   push:
     branches: [main, dev]
   pull_request:
-    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
 # A new push to a pull request cancels that pull request's older run, which
@@ -39,7 +38,6 @@ jobs:
   suite:
     name: ${{ matrix.target.os }} / py${{ matrix.target.python }} / shard ${{ matrix.shard }}
     runs-on: ${{ matrix.target.os }}
-    if: ${{ (github.event.action != 'edited' || github.event.changes.base) }}
     strategy:
       fail-fast: false
       matrix:
@@ -111,7 +109,7 @@ jobs:
   py39:
     name: ubuntu-latest / py3.9
     needs: suite
-    if: ${{ always() && (github.event.action != 'edited' || github.event.changes.base) }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: every shard passed
@@ -120,7 +118,7 @@ jobs:
   py311:
     name: ubuntu-latest / py3.11
     needs: suite
-    if: ${{ always() && (github.event.action != 'edited' || github.event.changes.base) && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
     runs-on: ubuntu-latest
     steps:
       - name: every shard passed
@@ -129,7 +127,7 @@ jobs:
   py313:
     name: ubuntu-latest / py3.13
     needs: suite
-    if: ${{ always() && (github.event.action != 'edited' || github.event.changes.base) && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
     runs-on: ubuntu-latest
     steps:
       - name: every shard passed
@@ -138,7 +136,7 @@ jobs:
   windows:
     name: windows-latest / py3.13
     needs: suite
-    if: ${{ always() && (github.event.action != 'edited' || github.event.changes.base) && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
     runs-on: ubuntu-latest
     steps:
       - name: every shard passed
@@ -147,7 +145,7 @@ jobs:
   macos:
     name: macos-latest / py3.13
     needs: suite
-    if: ${{ always() && (github.event.action != 'edited' || github.event.changes.base) && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.base_ref == 'dev') }}
     runs-on: ubuntu-latest
     steps:
       - name: every shard passed
@@ -164,7 +162,6 @@ jobs:
   # files, not operating systems.
   house:
     name: house checker
-    if: ${{ (github.event.action != 'edited' || github.event.changes.base) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
