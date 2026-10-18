@@ -117,13 +117,13 @@ class ServerFixture(unittest.TestCase):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = match.group()
 
     def _stop(self):
         self.proc.kill()
-        self.proc.communicate()
+        self.proc.communicate(timeout=30)
 
     def get(self, path):
         with OPENER.open(self.url + path, timeout=30) as response:
@@ -159,7 +159,7 @@ class StoreServeTest(ServerFixture):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = match.group()
 
@@ -800,7 +800,7 @@ class TranscriptRetentionPanelTest(ServerFixture):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = match.group()
 
@@ -1453,7 +1453,8 @@ class PageScriptTest(ServerFixture):
         probe = self.root / "page.js"
         probe.write_text(script, encoding="utf-8")
         result = subprocess.run([node, "--check", str(probe)],
-                                capture_output=True, encoding="utf-8")
+                                capture_output=True, encoding="utf-8",
+                                timeout=120)
 
         self.assertEqual(result.returncode, 0,
                          "the inline script does not parse:\n"

@@ -166,7 +166,7 @@ class ServedTooDeepTest(unittest.TestCase):
              "--witness", str(home / "witness")],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env=isolated_env(home))
-        self.addCleanup(proc.communicate)
+        self.addCleanup(proc.communicate, timeout=BOUND)
         self.addCleanup(proc.kill)
         said = []
         reader = threading.Thread(target=lambda: said.extend(

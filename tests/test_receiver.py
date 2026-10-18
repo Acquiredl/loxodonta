@@ -736,9 +736,11 @@ class DepthTest(ReceiverFixture):
         super().setUp()
         self.proc = self.start()
         self.said = []
-        for stream in (self.proc.stdout, self.proc.stderr):
-            threading.Thread(target=self.drain, args=(stream,),
-                             daemon=True).start()
+        self.drains = [threading.Thread(target=self.drain, args=(stream,),
+                                        daemon=True)
+                       for stream in (self.proc.stdout, self.proc.stderr)]
+        for drain in self.drains:
+            drain.start()
 
     def drain(self, stream):
         # Everything the receiver prints, so a sweep of a few hundred
@@ -748,6 +750,17 @@ class DepthTest(ReceiverFixture):
                 self.said.append(line)
         except (ValueError, OSError):
             pass  # the fixture closed the stream at cleanup
+
+    def everything_said(self):
+        """All the receiver printed: stopped, and each drain joined at
+        the end of its pipe, so a line still on its way is counted too
+        (#487)."""
+        self.proc.kill()
+        self.proc.wait(timeout=30)
+        for drain in self.drains:
+            drain.join(30)
+            self.assertFalse(drain.is_alive(), "a pipe never reached its end")
+        return "".join(self.said)
 
     @staticmethod
     def nested(depth):
@@ -791,7 +804,7 @@ class DepthTest(ReceiverFixture):
                         self.assertEqual(seen[depth],
                                          200 if depth < first else 400, depth)
                 self.assertEqual(sorted(set(seen.values())), [200, 400])
-        said = "".join(self.said)
+        said = self.everything_said()
         self.assertEqual(said.count("Traceback"), 0,
                          "the receiver printed a traceback")
         self.assertNotIn(self.proc.url.rsplit("/", 1)[1], said)
@@ -1113,7 +1126,7 @@ class TlsTest(ReceiverFixture):
             ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
              "-keyout", str(self.key), "-out", str(self.cert),
              "-subj", "/CN=localhost", "-days", "2"],
-            capture_output=True, encoding="utf-8")
+            capture_output=True, encoding="utf-8", timeout=120)
         self.assertEqual(minted.returncode, 0, minted.stderr)
 
     def trusting_opener(self):

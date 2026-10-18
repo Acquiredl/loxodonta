@@ -46,6 +46,11 @@ needs one.
 
 Every LOXODONTA_*, RECEIPTS_*, SUPERVISOR_* or RECEIVER_* variable a
 page under docs/ or the README names is one the scripts read (#397).
+
+Every start a test makes, and every wait on one, is bounded (#512): a
+walk of tests/ fails on a `subprocess.run` with no timeout, and on a
+`communicate` or a `wait` that names none, so a regression fails and
+never hangs. It keeps no list: no call needs one.
 """
 
 import ast
@@ -72,6 +77,12 @@ EVERY_HOME = {"LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME"}
 # The managed settings folder (#259), refused beside the homes for every
 # verb that reads the recorder's file in it. A `hook` does not.
 MANAGED = "LOXODONTA_MANAGED_DIR"
+# A folder that is no temporary one, for a home the machine leaves unset:
+# the temp root's own parent, never under it. Not the checkout, which
+# may itself sit under the temp root and then pass the guard (#465).
+OUTSIDE_TEMP = os.path.dirname(os.path.realpath(tempfile.gettempdir()))
+# The bound on every start made here, as support.run bounds its own.
+BOUND = 120
 
 
 class EveryModuleRunsAlone(unittest.TestCase):
@@ -87,7 +98,8 @@ class EveryModuleRunsAlone(unittest.TestCase):
                      "import importlib; "
                      "importlib.import_module('tests.%s')" % name],
                     cwd=str(REPO_ROOT), capture_output=True, encoding="utf-8",
-                    env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                    timeout=BOUND)
                 self.assertEqual(
                     done.returncode, 0,
                     "tests/%s.py does not import on its own — a contributor "
@@ -111,7 +123,7 @@ class HomeGuardTest(unittest.TestCase):
 
     def test_a_start_with_the_inherited_home_is_refused_where_it_was_made(self):
         with self.assertRaises(AssertionError) as refused:
-            subprocess.run(self.command, capture_output=True)
+            subprocess.run(self.command, capture_output=True, timeout=BOUND)
 
         said = str(refused.exception)
         self.assertIn("supervisor.py scan", said)
@@ -140,15 +152,16 @@ class HomeGuardTest(unittest.TestCase):
                     # that is no temporary one: an unset store or Codex
                     # home is allowed beside the test's HOME (#274).
                     leaky = {**isolated,
-                             name: os.environ.get(name) or str(REPO_ROOT)}
+                             name: os.environ.get(name) or OUTSIDE_TEMP}
                     with self.assertRaises(AssertionError) as refused:
                         subprocess.run(self.command, capture_output=True,
-                                       env=leaky)
+                                       env=leaky, timeout=BOUND)
                     self.assertEqual(named_homes(refused.exception), {name})
 
             # Every one the test's own, and the same start goes ahead.
             done = subprocess.run(self.command, capture_output=True,
-                                  encoding="utf-8", env=isolated)
+                                  encoding="utf-8", env=isolated,
+                                  timeout=BOUND)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("usage", done.stdout)
 
@@ -166,7 +179,8 @@ class WriterHomeGuardTest(unittest.TestCase):
         for verb in ("hook", "install-hook", "uninstall-hook"):
             with self.subTest(verb=verb):
                 with self.assertRaises(AssertionError) as refused:
-                    subprocess.run(self.command(verb), capture_output=True)
+                    subprocess.run(self.command(verb), capture_output=True,
+                                   timeout=BOUND)
                 said = str(refused.exception)
                 self.assertIn("loxodonta.py %s started" % verb, said)
                 # Only a hook reads the project, so only a hook is
@@ -204,14 +218,15 @@ class WriterHomeGuardTest(unittest.TestCase):
                         if k not in ("LOXODONTA_HOME", "CODEX_HOME")}
             done = subprocess.run(self.command("install-hook"),
                                   capture_output=True, encoding="utf-8",
-                                  env=fallback)
+                                  env=fallback, timeout=BOUND)
             self.assertEqual(done.returncode, 0, done.stderr)
 
             machine = {**fallback,
-                       "HOME": os.environ.get("HOME") or str(REPO_ROOT)}
+                       "HOME": os.environ.get("HOME") or OUTSIDE_TEMP}
             with self.assertRaises(AssertionError) as refused:
                 subprocess.run(self.command("install-hook"),
-                               capture_output=True, env=machine)
+                               capture_output=True, env=machine,
+                               timeout=BOUND)
         self.assertEqual(named_homes(refused.exception),
                          {"HOME", "LOXODONTA_HOME", "CODEX_HOME"})
 
@@ -228,31 +243,35 @@ class WriterHomeGuardTest(unittest.TestCase):
                 with self.subTest(verb=verb):
                     with self.assertRaises(AssertionError) as refused:
                         subprocess.run(self.command(verb),
-                                       capture_output=True, env=unset)
+                                       capture_output=True, env=unset,
+                                       timeout=BOUND)
                     self.assertEqual(named_homes(refused.exception),
                                      {MANAGED})
 
             done = subprocess.run(self.command("hook"), capture_output=True,
-                                  encoding="utf-8", env=isolated)
+                                  encoding="utf-8", env=isolated,
+                                  timeout=BOUND)
         self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_a_hook_with_a_project_the_test_did_not_choose_is_refused(self):
         # The project names the drawer a hook writes into: the inherited
         # one if this process runs under a harness, else a folder that is
         # no temporary one of the test's own.
-        project = os.environ.get("CLAUDE_PROJECT_DIR") or str(REPO_ROOT)
+        project = os.environ.get("CLAUDE_PROJECT_DIR") or OUTSIDE_TEMP
         with tempfile.TemporaryDirectory() as home:
             isolated = {**isolated_env(Path(home).resolve()),
                         "PYTHONIOENCODING": "utf-8"}
             with self.assertRaises(AssertionError) as refused:
                 subprocess.run(self.command("hook"), capture_output=True,
-                               env={**isolated, "CLAUDE_PROJECT_DIR": project})
+                               env={**isolated, "CLAUDE_PROJECT_DIR": project},
+                               timeout=BOUND)
             self.assertEqual(named_homes(refused.exception),
                              {"CLAUDE_PROJECT_DIR"})
 
             # The test's own homes and no project: the same start goes ahead.
             done = subprocess.run(self.command("hook"), capture_output=True,
-                                  encoding="utf-8", env=isolated)
+                                  encoding="utf-8", env=isolated,
+                                  timeout=BOUND)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("usage", done.stdout)
 
@@ -1159,8 +1178,9 @@ class ExistenceIsAskedThroughOsPathTest(SpoiledScript, unittest.TestCase):
 # What the listing walk collects (#431): a call that lists a folder.
 # pathlib's glob passes a folder it may not list in silence on every
 # Python, and before 3.13 raises on some others; os's listings raise.
-LISTING_METHODS = {"glob", "rglob", "iterdir"}
-OS_LISTINGS = {"listdir", "scandir", "walk"}
+# `glob.iglob` and `Path.walk` (3.12) list as glob and os.walk do (#448).
+LISTING_METHODS = {"glob", "rglob", "iglob", "iterdir", "walk"}
+OS_LISTINGS = {"listdir", "scandir", "walk", "fwalk"}
 
 # Every function of the supervisor that lists a folder:
 # function -> (how many such calls, and why).
@@ -1226,6 +1246,97 @@ class EveryStoreListingIsNamedTest(SpoiledScript, unittest.TestCase):
         self.assertEqual(listings_beyond_the_list(calls),
                          [("store_receipts", 0,
                            [self.line_of(text, line) for line in added])])
+
+    def test_an_iglob_a_path_walk_or_an_fwalk_added_is_named(self):
+        old = "def store_receipts():\n"
+        added = ("    glob.iglob(str(store_home()))",
+                 "    Path(store_home()).walk()",
+                 "    os.fwalk(store_home())")
+        calls, text = self.spoiled("supervisor.py", old, old + "".join(
+            line + "\n" for line in added), lists_a_folder)
+        self.assertEqual(listings_beyond_the_list(calls),
+                         [("store_receipts", 0,
+                           [self.line_of(text, line) for line in added])])
+
+
+# What the bound walk collects (#512): a start through subprocess's
+# run, call, check_call or check_output with no `timeout`, and a
+# `communicate` or a `wait` called, or handed to `addCleanup`, with
+# none. A `**` hides whether one is there, so it does not count as one.
+STARTS = {"run", "call", "check_call", "check_output"}
+# Where each wait takes its timeout by position: `wait(timeout)`,
+# `communicate(input, timeout)`.
+WAITS = {"wait": 0, "communicate": 1}
+
+
+def names_a_timeout(call, place=None):
+    """Whether `call` passes a timeout: as a keyword, or at `place`."""
+    return (any(given.arg == "timeout" for given in call.keywords)
+            or (place is not None and len(call.args) > place))
+
+
+def unbounded_start(call):
+    """Whether the bound walk collects `call`."""
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    if func.attr in STARTS and isinstance(func.value, ast.Name) \
+            and func.value.id == "subprocess":
+        return not names_a_timeout(call)
+    if func.attr in WAITS:
+        return not names_a_timeout(call, WAITS[func.attr])
+    handed = call.args[0] if call.args else None
+    # addCleanup(function, *args): the wait's own arguments start at 1.
+    return (func.attr == "addCleanup" and isinstance(handed, ast.Attribute)
+            and handed.attr in WAITS
+            and not names_a_timeout(call, 1 + WAITS[handed.attr]))
+
+
+class EveryStartIsBoundedTest(unittest.TestCase):
+    """The rule of #512 as a check: a test that starts a process, or
+    waits on one, says how long it will wait, so a regression fails the
+    test and never hangs the suite. support.run bounds every start made
+    through it; this holds the starts made around it. tests/ is walked,
+    tests/fixtures/ included, and the tools are not: they are judged by
+    their own rules.
+
+    What the walk does not see: a start through `os.system` or
+    `os.spawn*`, a read of a `Popen`'s pipe with `readline` or `read`,
+    which waits for as long as the child keeps the pipe open, and a
+    wait reached through `getattr` or under another name."""
+
+    def test_every_start_in_the_suite_is_bounded(self):
+        found = [f"{path.relative_to(REPO_ROOT).as_posix()} {where}, line "
+                 f"{', '.join(map(str, lines))}"
+                 for path in sorted(TESTS_DIR.rglob("*.py"))
+                 for where, lines in sorted(file_calls(
+                     path, unbounded_start).opens.items())]
+        self.assertEqual(found, [], "give it a timeout, so a regression "
+                         "fails and never hangs (#512)")
+
+    def test_an_unbounded_start_or_wait_is_named_and_a_bounded_one_is_not(
+            self):
+        lines = ("    subprocess.run(['x'])",
+                 "    subprocess.check_output(['x'], **knobs)",
+                 "    proc.communicate()",
+                 "    proc.communicate(b'x')",
+                 "    proc.wait()",
+                 "    case.addCleanup(proc.communicate)",
+                 "    case.addCleanup(proc.communicate, b'x')",
+                 "    subprocess.run(['x'], timeout=60)",
+                 "    proc.communicate(timeout=30)",
+                 "    proc.communicate(None, 30)",
+                 "    proc.wait(30)",
+                 "    case.addCleanup(proc.wait, 30)",
+                 "    case.addCleanup(proc.communicate, None, 30)",
+                 "    case.addCleanup(proc.kill)")
+        probe = temp_folder(self) / "probe.py"
+        probe.write_text("def starts(case, proc, knobs):\n"
+                         + "".join(line + "\n" for line in lines),
+                         encoding="utf-8")
+        # The first seven lines, the def being line 1.
+        self.assertEqual(file_calls(probe, unbounded_start).opens,
+                         {"starts": list(range(2, 9))})
 
 
 # The prefixes of the variables the scripts read for themselves; a name

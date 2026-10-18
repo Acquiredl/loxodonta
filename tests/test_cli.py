@@ -1458,7 +1458,7 @@ class BrokenPipeTest(ReceiptsCliTest):
         # thread dies with its own traceback in the test output.
         stderr = process.stderr.read()
         process.stderr.close()
-        process.wait()
+        process.wait(timeout=30)
 
         self.assertNotIn("Traceback", stderr)
         # 128 + SIGPIPE, as a shell reports a pipe's writer that the

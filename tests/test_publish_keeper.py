@@ -714,13 +714,13 @@ class DashboardLeftTest(ReceiverFixture):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         return match.group()
 
     def _stop(self):
         self.proc.kill()
-        self.proc.communicate()
+        self.proc.communicate(timeout=30)
 
     def get(self, url, path):
         with OPENER.open(url + path, timeout=30) as response:
@@ -804,7 +804,7 @@ class HeadlessKeeperTest(ReceiverFixture):
         found = re.search(r"http://127\.0\.0\.1:\d+", line)
         if found is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = found.group()
         self.said = read_line_within(self.proc.stdout)
@@ -812,7 +812,7 @@ class HeadlessKeeperTest(ReceiverFixture):
     def _stop(self):
         if self.proc.poll() is None:
             self.proc.kill()
-            self.proc.communicate()
+            self.proc.communicate(timeout=30)
 
     def get(self, path):
         with OPENER.open(self.url + path, timeout=30) as answer:
@@ -1077,7 +1077,7 @@ class HeadlessKeeperTest(ReceiverFixture):
         time.sleep(2)  # many more turns, each failing the same way
         alive = self.proc.poll() is None
         self.proc.kill()
-        _, rest = self.proc.communicate()
+        _, rest = self.proc.communicate(timeout=30)
 
         # The line's promise is its shape: the failure named by kind.
         # Which kind is the platform's to say, so the test pins the
@@ -1193,14 +1193,14 @@ class ProfileKeeperTest(unittest.TestCase):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = match.group()
 
     def _stop(self):
         if self.proc.poll() is None:
             self.proc.kill()
-            self.proc.communicate()
+            self.proc.communicate(timeout=30)
 
     def tick(self):
         """One request, which is one tick of the keeper."""
@@ -1216,7 +1216,7 @@ class ProfileKeeperTest(unittest.TestCase):
         macOS showed; the line is deterministic, the race was the test's."""
         line = read_line_within(self.proc.stdout)
         self.proc.kill()
-        self.proc.communicate()
+        self.proc.communicate(timeout=30)
         return line
 
     def test_a_timestamped_marker_puts_the_anchor_keeper_on_six_hours(self):

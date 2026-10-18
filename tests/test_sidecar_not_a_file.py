@@ -1685,7 +1685,7 @@ class ServedMarkerNotAFileTest(unittest.TestCase):
              "--witness", str(home / "witness")],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
             env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
-        self.addCleanup(proc.communicate)
+        self.addCleanup(proc.communicate, timeout=BOUND)
         self.addCleanup(proc.kill)
         # Both startup lines, read on a thread joined to a bound: a start
         # held at the marker prints neither, and is killed above.
