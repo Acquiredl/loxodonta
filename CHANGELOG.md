@@ -46,6 +46,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
 - `supervisor adopt` never moves one legacy chain over another bound for the same name in a drawer, case and Unicode form aside: every chain bound for that name is refused by name and left, in the dry run too (#447).
 - `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).
+- A page opened right after the keeper's own turn no longer counts a look on a day it paints unread: a turn's scan never answers a request, which scans again and writes the day's claims (#538).
+- A keeper turn writes the day book for a folder the census could not list from its first look; a closed store home is named, not its receipts folder (#448).
+- The page shows the folder named by `serve`'s refusal instead of a SyntaxError, and the status strip reads FOLDER CANNOT BE LISTED when that is the only alarm (#448).
 
 ## [0.15.1] - 2026-10-12
 
