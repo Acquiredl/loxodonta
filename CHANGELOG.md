@@ -44,6 +44,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
 - An ended session no longer reads awake for a day after the tail keeper commits its tail: growth that is bookkeeping alone carries the stillness clock forward, as it already never woke a session (#537).
 - After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
+- `supervisor adopt` never moves one legacy chain over another bound for the same name in a drawer, case and Unicode form aside: every chain bound for that name is refused by name and left, in the dry run too (#447).
+- `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).
 - The keepers stop asking the recorder for the head of a chain the scan stood down, which it refuses on every turn, and a refused head reads as the recorder's refusal, in its words, not a calendar's or remote's (#533).
 
 ## [0.15.1] - 2026-10-12

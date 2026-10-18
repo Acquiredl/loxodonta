@@ -5077,17 +5077,65 @@ def move_refused(root, log, drawer):
     return None
 
 
-def sidecar_stays(sidecar, drawer):
+def sidecars_of(log):
+    """Where each sidecar of `log` lies, whether or not one is there."""
+    return [log.parent / (log.name + suffix) for suffix in SIDECAR_SUFFIXES]
+
+
+def landing(drawer, name):
+    """The key a run counts a name in a drawer by, folded as a package's
+    names are (`landing_name`, #299): two names one system lands on one
+    file are one name on every system (#447)."""
+    return drawer, landing_name(name)
+
+
+def exists_words(drawer, name):
+    """The refusal for a name the drawer already holds."""
+    return (f"{drawer.name}/{name} already exists in the store — evidence "
+            "is never overwritten; reconcile by hand")
+
+
+def contested_words(drawer, name, others):
+    """The refusal for a chain bound for a name `others` are bound for
+    too, each as the operator's root reads it (#447)."""
+    return (f"{drawer.name}/{name} is where {', '.join(others)} would land "
+            "too — none of them is moved; evidence is never overwritten; "
+            "reconcile by hand")
+
+
+def taken_words(drawer, name, taker):
+    """The refusal for a name the run has given another file already
+    (#447), `taker` as the operator's root reads it."""
+    return (f"{drawer.name}/{name} is taken by {taker} in this run — "
+            "evidence is never overwritten; reconcile by hand")
+
+
+def sidecar_stays(sidecar, drawer, taker=None):
     """Why adopt leaves `sidecar` where it lies, or None: it is not a
-    file, or its name is taken in the drawer. Asked by the move and by
-    `--dry-run` alike (#422). Proofs left behind are still proofs, and
-    silence would read as everything having travelled."""
+    file, the run gave its name to `taker` (#447), or its name is taken
+    in the drawer. Asked by the move and by `--dry-run` alike (#422).
+    Proofs left behind are still proofs, and silence would read as
+    everything having travelled."""
     problem = file_problem(sidecar)
     if problem is not None:
         return f"{problem} — not moved; reconcile by hand"
+    if taker is not None:
+        return taken_words(drawer, sidecar.name, taker)
     if os.path.lexists(drawer / sidecar.name):
-        return (f"{drawer.name}/{sidecar.name} already exists in the store "
-                "— evidence is never overwritten; reconcile by hand")
+        return exists_words(drawer, sidecar.name)
+    return None
+
+
+def marker_stays(marker, drawer):
+    """Why adopt cannot copy a legacy folder's .unlisted `marker` into
+    `drawer`, or None, in the words the copy fails by: asked by
+    `--dry-run` alone, so the plan says what the real run leaves (#448
+    item 16)."""
+    problem = file_problem(marker)
+    if problem is not None:
+        return problem
+    if os.path.lexists(drawer / UNLISTED_NAME):
+        return os.strerror(errno.EEXIST)
     return None
 
 
@@ -5100,9 +5148,22 @@ def cmd_adopt(args):
     the plan. Empty legacy folders are left for the operator to
     prune."""
     root = Path(args.root).resolve()
+
+    def said(path):
+        return path.relative_to(root).as_posix()
+
     # Every refusal is asked here, before anything moves, so --dry-run
-    # meets the real run's (#422).
-    moves, refused, stays = [], [], []
+    # meets the real run's (#422). The drawer alone cannot say, before
+    # anything moves, that two legacy chains share a name, and the
+    # second would be moved over the first (#447): `bound` counts the
+    # chains bound for each name, and `given` holds each name the plan
+    # has handed out, and to which file.
+    moves, refused, stays, chains, bound, given = [], [], [], [], {}, {}
+
+    def taker(drawer, path):
+        holder = given.get(landing(drawer, path.name))
+        return None if holder in (None, path) else said(holder)
+
     for log in find_chains(root):
         problem = file_problem(log)
         if problem is not None:
@@ -5113,31 +5174,69 @@ def cmd_adopt(args):
             continue
         project = adoption_project(root, log)
         drawer = store_receipts() / project_slug(project)
+        chains.append((log, drawer, project))
+        bound.setdefault(landing(drawer, log.name), []).append(log)
+    for log, drawer, project in chains:
         # lexists: a link to nowhere at the name stands there too, and a
         # move across two filesystems would copy through it (#422).
         if os.path.lexists(drawer / log.name):
-            refused.append((log, drawer, project))
+            refused.append((log, exists_words(drawer, log.name)))
+            continue
+        # None of the chains bound for one name moves: the writer picks
+        # path order (ADR-0002), and the one left out of the store would
+        # be out of every census for ever.
+        others = [said(other) for other in bound[landing(drawer, log.name)]
+                  if other != log]
+        if others:
+            refused.append((log, contested_words(drawer, log.name, others)))
+            continue
+        holder = taker(drawer, log)
+        if holder is not None:
+            refused.append((log, taken_words(drawer, log.name, holder)))
             continue
         why = move_refused(root, log, drawer)
         if why is not None:
             stays.append((log, why))
             continue
         moves.append((log, drawer, project))
+        given[landing(drawer, log.name)] = log
+        for sidecar in sidecars_of(log):
+            if os.path.exists(sidecar) and sidecar_stays(
+                    sidecar, drawer, taker(drawer, sidecar)) is None:
+                given[landing(drawer, sidecar.name)] = sidecar
     if not moves and not refused and not stays:
         print(f"nothing to adopt under {root.as_posix()}")
         return 0
     adopted = 0
+    unlisted = set()
     for log, drawer, project in moves:
-        line = f"{log.relative_to(root).as_posix()} -> {drawer.name}/"
+        line = f"{said(log)} -> {drawer.name}/"
+        marker = log.parent / UNLISTED_NAME
         if args.dry_run:
             print(f"would adopt {line}")
-            for suffix in SIDECAR_SUFFIXES:
-                sidecar = log.parent / (log.name + suffix)
+            for sidecar in sidecars_of(log):
                 why = os.path.exists(sidecar) \
-                    and sidecar_stays(sidecar, drawer)
+                    and sidecar_stays(sidecar, drawer, taker(drawer, sidecar))
                 if why:
-                    print(f"would leave sidecar "
-                          f"{sidecar.relative_to(root).as_posix()}: {why}")
+                    print(f"would leave sidecar {said(sidecar)}: {why}")
+            # The real run copies the marker once per drawer, so the
+            # plan counts the drawers it has unlisted (#448 item 16).
+            if os.path.exists(marker) and drawer not in unlisted \
+                    and not os.path.exists(drawer / UNLISTED_NAME):
+                why = marker_stays(marker, drawer)
+                if why is None:
+                    unlisted.add(drawer)
+                    print(f"would copy marker {said(marker)} -> "
+                          f"{drawer.name}/")
+                else:
+                    print(f"would leave marker {said(marker)}: {why} — not "
+                          f"copied, so {drawer.name}/ is listed; unlist it "
+                          "by hand")
+            continue
+        if os.path.lexists(drawer / log.name):
+            # Asked again right before the move (#447): a name taken
+            # since the plan is refused, never moved over.
+            print(f"refused {said(log)}: {exists_words(drawer, log.name)}")
             continue
         record = drawer / "project.json"
         try:
@@ -5152,12 +5251,11 @@ def cmd_adopt(args):
             if not os.path.lexists(record):
                 # A drawer, or the store around it, closed to this user
                 # (#421): named, and the chain left where it lies.
-                print(f"refused {log.relative_to(root).as_posix()}: "
+                print(f"refused {said(log)}: "
                       f"{drawer.name}/ cannot be written: "
                       f"{error.strerror or error} — not adopted; left as "
                       "it lies")
                 continue
-        marker = log.parent / UNLISTED_NAME
         try:
             shutil.move(str(log), str(drawer / log.name))
         except OSError as error:
@@ -5165,7 +5263,7 @@ def cmd_adopt(args):
             if os.path.lexists(drawer / log.name):
                 # A move across two filesystems copies, then removes:
                 # what failed part way is said, never "left as it lies".
-                print(f"refused {log.relative_to(root).as_posix()}: the "
+                print(f"refused {said(log)}: the "
                       f"move failed part way: {why} — "
                       f"{drawer.name}/{log.name} may be a partial copy; "
                       "reconcile by hand")
@@ -5174,26 +5272,29 @@ def cmd_adopt(args):
                 # already in it, refuses the move itself (#430); on
                 # POSIX so does a legacy folder that may not be written,
                 # so the words blame neither.
-                print(f"refused {log.relative_to(root).as_posix()}: "
+                print(f"refused {said(log)}: "
                       f"cannot be moved into {drawer.name}/: {why} — not "
                       "adopted; left as it lies")
             continue
-        for suffix in SIDECAR_SUFFIXES:
-            sidecar = log.parent / (log.name + suffix)
+        for sidecar in sidecars_of(log):
             if not os.path.exists(sidecar):
                 continue
-            why = sidecar_stays(sidecar, drawer)
+            why = sidecar_stays(sidecar, drawer, taker(drawer, sidecar))
             if why is not None:
-                print(f"left sidecar "
-                      f"{sidecar.relative_to(root).as_posix()}: {why}")
-            else:
-                try:
-                    shutil.move(str(sidecar), str(drawer / sidecar.name))
-                except OSError as error:
-                    print(f"left sidecar "
-                          f"{sidecar.relative_to(root).as_posix()}: "
-                          f"{error.strerror or error} — not moved; "
-                          "reconcile by hand")
+                print(f"left sidecar {said(sidecar)}: {why}")
+                continue
+            try:
+                shutil.move(str(sidecar), str(drawer / sidecar.name))
+            except OSError as error:
+                why = error.strerror or error
+                # The chain's twin above: a copy may stand in the drawer.
+                if os.path.lexists(drawer / sidecar.name):
+                    print(f"left sidecar {said(sidecar)}: the move failed "
+                          f"part way: {why} — {drawer.name}/{sidecar.name} "
+                          "may be a partial copy; reconcile by hand")
+                else:
+                    print(f"left sidecar {said(sidecar)}: {why} — not "
+                          "moved; reconcile by hand")
         if os.path.exists(marker) \
                 and not os.path.exists(drawer / UNLISTED_NAME):
             try:
@@ -5201,18 +5302,16 @@ def cmd_adopt(args):
             except OSError as error:
                 # A folder or a pipe in the marker's place is named and
                 # left, never waited on or copied (#386).
-                print(f"left marker {marker.relative_to(root).as_posix()}: "
+                print(f"left marker {said(marker)}: "
                       f"{error.strerror or error} — not copied, so "
                       f"{drawer.name}/ is listed; unlist it by hand")
         print(f"adopted {line}")
         adopted += 1
-    for log, drawer, _ in refused:
-        print(f"refused {log.relative_to(root).as_posix()}: "
-              f"{drawer.name}/{log.name} already exists in the store — "
-              "evidence is never overwritten; reconcile by hand")
+    for log, words in refused:
+        print(f"refused {said(log)}: {words}")
     for log, problem in stays:
-        print(f"refused {log.relative_to(root).as_posix()}: {problem} — "
-              "not adopted; left as it lies")
+        print(f"refused {said(log)}: {problem} — not adopted; left as it "
+              "lies")
     if adopted:
         print(f"{adopted} chain(s) adopted into "
               f"{store_receipts().as_posix()}")
