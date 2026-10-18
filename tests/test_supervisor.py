@@ -2608,6 +2608,32 @@ class CompletenessTest(unittest.TestCase):
         self.assertNotIn("uncommitted_tail", after,
                          "the next look sees the tail committed")
 
+    def test_the_tail_keepers_commitment_never_restarts_the_clock(self):
+        # #537: the commitment the tail keeper writes moves the head, but
+        # it is the recorder speaking, not the session acting: the
+        # stillness clock carries forward, as the reawakening already
+        # reads that growth (ADR-0018).
+        make_chain(self.root / "alpha" / "receipts", "sess-still-kept",
+                   entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-still-kept",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+        install_witness_hook(self.witness, sessionend=True)
+        self.scan()
+        self.seed_epoch()
+        self.edit_baseline(lambda data: [
+            known.update({"last_grew": "2026-08-25T00:00:00Z"})
+            for known in data["chains"].values()])
+
+        swept = self.states(self.scan())["sess-still-kept"]
+        self.assertTrue(swept["uncommitted_tail"])
+        self.assertEqual(self.tail_entries("sess-still-kept")[-1]["actor"],
+                         "receipts", "the tail keeper committed the tail")
+        after = self.states(self.scan())["sess-still-kept"]
+
+        self.assertEqual(after["dormancy"]["since"], "2026-08-25T00:00:00Z",
+                         "the keeper's own commitment is no growth")
+        self.assertEqual(after["dormancy"]["tier"], "dormant")
+
     def test_the_keeper_is_disableable_and_leaves_the_annotation(self):
         make_chain(self.root / "alpha" / "receipts", "sess-off",
                    entries=2)
@@ -2695,6 +2721,19 @@ class CompletenessTest(unittest.TestCase):
         self.assertIn("no recorder hook", report["completeness"]["note"])
         self.assertEqual(self.states(result)["sess-aaaa"]["state"],
                          "UNWATCHED")
+
+    def test_a_chainless_session_on_a_never_wired_machine_is_skipped(self):
+        # The third reader of the never-wired test (#532): a transcript
+        # with no chain owed nothing, so it takes no row at all.
+        (self.witness.parent / "settings.json").unlink()
+        prime_memory(self.root, matcher=None)
+        write_transcript(self.witness, self.root / "alpha", "sess-none",
+                         event_times=[ago(300), ago(290)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("sess-none", self.states(result))
 
     def test_alarm_language_claims_detection_never_more(self):
         write_transcript(self.witness, self.root / "alpha", "sess-ghost",
@@ -2890,6 +2929,23 @@ class CalibrationTest(unittest.TestCase):
         self.assertEqual(judged["state"], "ENDED-DEFICIT",
                          "three unreceipted calls under a wired hook")
         self.assertEqual(judged["tools"], 3)
+
+    def test_the_watch_says_todays_settings_wire_nothing_after_unwiring(self):
+        # After uninstall-hook the wired weeks are still judged (#532),
+        # and the watch says that today's settings wire nothing: the
+        # sessions since owe nothing, which no row says alone.
+        self.wired_then_unwired()
+        self.unwire(age=100)
+
+        result = self.scan()
+
+        report = json.loads(result.stdout)
+        since = json.loads(self.baseline.read_text(
+            encoding="utf-8"))["calibration"][-1]["since"]
+        note = report["completeness"].get("note") or ""
+        self.assertIn("no recorder hook is wired", note)
+        self.assertIn(f"sessions since {since} owe nothing", note)
+        self.assertIn("in force at their time", note)
 
 
 class UsersOwnHookTest(unittest.TestCase):
@@ -5647,6 +5703,17 @@ class ReceiverReadingTest(unittest.TestCase):
         # newest arrival is the copy's own time.
         self.assertRegex(row["last_heard"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertGreater(row["last_heard"], "2026-10-07T02:21:37Z")
+
+    def test_a_copy_with_no_mtime_past_the_epoch_is_not_heard_from(self):
+        # #535 review: a copy's mtime is an arrival only when it is past
+        # 0, as the fold took it before the refactor; a copy dated at the
+        # epoch says nothing of when it arrived.
+        copy = chain_copy(self.data, "epoch-session-0000")
+        os.utime(copy, (0, 0))
+
+        row = self.rows(self.report())["epoch-session-0000"]
+
+        self.assertNotIn("last_heard", row)
 
     def test_a_line_the_reader_cannot_parse_is_skipped_and_counted(self):
         chain_copy(self.data, FIXTURE_SESSION)
