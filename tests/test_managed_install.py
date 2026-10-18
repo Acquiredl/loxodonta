@@ -979,6 +979,30 @@ class TelemetryPinTest(ManagedBase):
                          "a refused install says nothing about what leaves")
         self.assertEqual(self.everything(), before)
 
+    def refuse_the_hooks_write(self):
+        """Make the hooks file's write fail after the pin's has gone
+        through, and return what undoes it: on Windows a read-only file
+        at its name, which refuses a replace; on POSIX a link from its
+        name into a folder nobody may write. A folder at its name is
+        refused before anything is written (#487), so it cannot."""
+        self.managed_file.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            self.plant(self.managed_file, {"hooks": {}})
+            os.chmod(self.managed_file, stat.S_IREAD)
+
+            def undo():
+                os.chmod(self.managed_file, stat.S_IWRITE)
+                self.managed_file.unlink()
+            return undo
+        if os.geteuid() == 0:
+            self.skipTest("root writes in a folder whatever its bits")
+        closed = self.work / "closed"
+        closed.mkdir(exist_ok=True)
+        os.chmod(closed, 0o555)
+        self.addCleanup(os.chmod, closed, 0o755)
+        self.managed_file.symlink_to(closed / "loxodonta.json")
+        return self.managed_file.unlink
+
     def test_a_refused_hooks_write_puts_the_pin_back_as_it_was(self):
         # The pin is written first; a refused hooks write afterwards
         # puts back the very bytes that stood there, a file that was
@@ -989,7 +1013,7 @@ class TelemetryPinTest(ManagedBase):
             with self.subTest(standing=standing):
                 if standing is not None:
                     self.plant(self.pin_file, standing)
-                (self.managed_file / "kept").mkdir(parents=True)
+                undo = self.refuse_the_hooks_write()
                 before = self.everything()
 
                 done = run(LOXODONTA, "install-hook", "--managed",
@@ -997,15 +1021,49 @@ class TelemetryPinTest(ManagedBase):
 
                 self.assertEqual(done.returncode, 73,
                                  done.stdout + done.stderr)
+                self.assertIn("pinned the harness's events", done.stdout,
+                              "the pin was written before the refusal")
                 self.assertIn(str(self.managed_file), done.stderr)
                 self.assertIn("Nothing was written", done.stderr)
                 self.assertEqual(self.everything(), before,
                                  "the pin as it stood, byte for byte, or "
                                  "no pin")
-                (self.managed_file / "kept").rmdir()
-                self.managed_file.rmdir()
+                undo()
                 if standing is not None:
                     self.pin_file.unlink()
+
+    @unittest.skipIf(sys.platform == "win32", "permission bits are POSIX")
+    def test_a_pin_put_back_keeps_the_mode_it_had(self):
+        # #487: the bytes go back under their own bits, not the 0o644 a
+        # pin of the installer's is written with.
+        self.plant(self.pin_file, {"env": {
+            **PIN_ENV, "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:9/old"}})
+        os.chmod(self.pin_file, 0o600)
+        self.refuse_the_hooks_write()
+
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
+                   "full", "--remote", REMOTE, env=self.env)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertEqual(os.stat(self.pin_file).st_mode & 0o777, 0o600)
+
+    def test_a_folder_at_the_hooks_files_name_is_refused_before_a_word(self):
+        # #487: as a folder at the pin's name is, before the notices and
+        # before the pin is written.
+        (self.managed_file / "kept").mkdir(parents=True)
+        before = self.everything()
+
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
+                   "full", "--remote", REMOTE, env=self.env)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "", "nothing said before the refusal")
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertIn(str(self.managed_file), done.stderr)
+        self.assertIn("a folder", done.stderr)
+        self.assertIn("Nothing was written", done.stderr)
+        self.assertNotIn("sudo", done.stderr)
+        self.assertEqual(self.everything(), before)
 
     def test_what_is_not_json_at_the_pins_name_is_nobodys_pin(self):
         # Left alone and named when no pin is wanted; written over at
@@ -1098,6 +1156,43 @@ class TelemetryPinTest(ManagedBase):
                 self.assertEqual(self.pin_file.read_text(encoding="utf-8"),
                                  foreign)
         self.assertFalse(self.managed_file.exists())
+
+    def test_a_foreign_pin_with_a_byte_order_mark_is_refused_as_foreign(self):
+        # #487: an editor that saves with a byte-order mark leaves JSON
+        # all the same, and somebody else's JSON is refused, not
+        # written over as a file that is not JSON would be.
+        foreign = ('﻿{"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": '
+                   '"http://127.0.0.1:9/theirs", "THEIR_OWN": "1"}}')
+        self.plant(self.pin_file, foreign)
+        before = self.everything()
+
+        done = run(LOXODONTA, "install-hook", "--managed", "--profile",
+                   "full", "--remote", REMOTE, env=self.env)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertIn(str(self.pin_file), done.stderr)
+        self.assertIn("move it away by hand", done.stderr)
+        self.assertEqual(self.everything(), before)
+
+    def assert_rewritten_without_a_bom(self, own):
+        # #487: whether the harness reads a file behind a byte-order
+        # mark is not known, so the installer's own content behind one
+        # is no install, and a re-run writes it clean.
+        self.full()
+        clean = own.read_bytes()
+        own.write_bytes(b"\xef\xbb\xbf" + clean)
+
+        done = self.full()
+
+        self.assertFalse(own.read_bytes().startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(self.read(own), json.loads(clean))
+        self.assertNotIn("nothing changed", done.stdout)
+
+    def test_a_bom_led_copy_of_the_installers_hooks_file_is_rewritten(self):
+        self.assert_rewritten_without_a_bom(self.managed_file)
+
+    def test_a_bom_led_copy_of_the_installers_pin_is_rewritten(self):
+        self.assert_rewritten_without_a_bom(self.pin_file)
 
     def test_another_managed_source_of_the_events_is_named_not_quoted(self):
         policy = self.managed / "managed-settings.json"
