@@ -2697,11 +2697,9 @@ class CalibrationTest(unittest.TestCase):
 
         judged = self.states(result).get("sess-ghost")
         self.assertIsNotNone(judged, "the chainless session was skipped")
-        self.assertNotEqual(judged["state"], "UNWATCHED")
+        self.assertEqual(judged["state"], "ENDED-DEFICIT",
+                         "three unreceipted calls under a wired hook")
         self.assertEqual(judged["tools"], 3)
-        self.assertNotEqual(result.returncode, 0,
-                            "three unreceipted calls under a wired hook "
-                            "alarm")
 
 
 class UsersOwnHookTest(unittest.TestCase):

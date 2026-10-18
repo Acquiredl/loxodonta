@@ -29,6 +29,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The social preview carries the README's current tagline; `tools/build_social_preview.py` rebuilds it from the wordmark and the README, so the two cannot drift (#528).
 - The markdownlint rule file lives under `.github/`, where the workflow names it; the root keeps the standard files and the two git dotfiles (#529).
 
+### Fixed
+
+- After `uninstall-hook`, `scan` no longer reads every session `UNWATCHED`: sessions recorded while the hook was wired, chainless ones included, are judged by the coverage in force at their time; `UNWATCHED` is kept for a machine that never wired it (#532).
+
 ## [0.15.1] - 2026-10-12
 
 ### Fixed
