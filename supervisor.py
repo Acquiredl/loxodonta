@@ -4400,15 +4400,24 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                 {"n": newest[0], "head": newest[1]} if newest
                 else {"n": None, "head": None}))
         elif newest:
+            # Bookkeeping-only growth (the cadence or the tail keeper
+            # writing commitments) is the recorder speaking, not the
+            # session acting: it neither moves the clock (#537) nor
+            # wakes anything.
+            acted = any(isinstance(e.get("n"), int)
+                        and e["n"] > (known.get("n") or 0)
+                        and e.get("actor") != "receipts"
+                        for e in entries)
             # The lifecycle's clock (ADR-0018): the reader's own diary
-            # of when it last saw this head move. An unchanged head
-            # carries its stamp forward; a new or moved head — or a
-            # baseline that predates the field — stamps this look, so
-            # stillness only exists once it has actually been observed.
-            # A blind look has observed nothing and stamps nothing.
+            # of when it last saw the session move. A head that did not
+            # move, or moved by bookkeeping alone, carries its stamp
+            # forward; a session that acted, or a baseline that predates
+            # the field, stamps this look, so stillness only exists once
+            # it has actually been observed. A blind look has observed
+            # nothing and stamps nothing.
             last_grew = (known.get("last_grew")
-                         if known.get("head") == newest[1]
-                         and known.get("last_grew")
+                         if known.get("last_grew")
+                         and (known.get("head") == newest[1] or not acted)
                          else None if blind else stamp)
             heads[relpath] = {"n": newest[0],
                               "head": newest[1],
@@ -4424,18 +4433,10 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                               "last_grew": last_grew}
             # The reawakening (ADR-0018): clean growth after dormant-tier
             # observed stillness — one-shot, spoken in the investigate
-            # voice, never the exit. Rewrites belong to the tripwire, and
-            # bookkeeping-only growth (the cadence or the tail keeper
-            # writing commitments) is the recorder speaking, not the
-            # session acting — it never wakes anything.
+            # voice, never the exit. Rewrites belong to the tripwire.
             woke = lifecycle_tier(known.get("last_grew"), now)
             if (known.get("head") and newest[1] != known.get("head")
-                    and woke and woke[0] == "dormant"
-                    and any(isinstance(e, dict)
-                            and isinstance(e.get("n"), int)
-                            and e["n"] > (known.get("n") or 0)
-                            and e.get("actor") != "receipts"
-                            for e in entries)):
+                    and woke and woke[0] == "dormant" and acted):
                 awakened[(repo, session)] = {
                     "repo": repo, "session": session, "log": relpath,
                     "still_seconds": woke[1],
