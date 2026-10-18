@@ -7,11 +7,18 @@ name: tests
 on:
   push:
     branches: [main, dev]
+  # No `edited` type, even gated on a base change (#453): a title edit
+  # still starts a run, which cancels the running suite and reports every
+  # required name as skipped, which counts as passed. A pull request moved
+  # from dev to main needs a new push instead (CONTRIBUTING, Branches).
   pull_request:
   workflow_dispatch:
 
 # A new push to a pull request cancels that pull request's older run, which
-# nobody will read. Runs on main and dev are never cancelled.
+# nobody will read. A run on main or dev is never cancelled once it starts,
+# but only one run may wait behind it: a newer push to the same branch
+# replaces the waiting run, and its tree holds the replaced run's merge too
+# (#453).
 concurrency:
   group: tests-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

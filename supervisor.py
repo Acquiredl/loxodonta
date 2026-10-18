@@ -319,9 +319,10 @@ def verify(log):
         # verify refused without a verdict line (an empty or unopenable
         # log). Its own words on stderr are the evidence; the supervisor
         # invents no verdict of its own. Evidence to show, never lines to
-        # read as verify's: a refusal quotes the path raw, and a name a
-        # writer chose can hold a newline and then a line spelled like
-        # ANCHORED or a torn-tail BROKEN (#504).
+        # read as verify's (#504): the recorder escapes the path in its
+        # refusals since #511, and stderr is still never parsed, so a
+        # recorder that printed a name raw could not plant an ANCHORED or
+        # torn-tail BROKEN line here either.
         detail += result.stderr.strip().splitlines()
     return verdict, result.returncode, printed, detail
 
@@ -1114,7 +1115,7 @@ def marker_harnesses():
         # In the writer's reach: a folder or a pipe there reads as no
         # marker, never waited on, and the scan names it (#405).
         data = json.loads(read_whole(Path(store_home()) / COVERAGE_NAME))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # too deep, #463
         return {}
     declared = {}
     # Sorted is stable, so two epochs stamped the same second keep the
@@ -2329,7 +2330,7 @@ def read_settings(settings_file):
         # recorder wired there.
         settings = json.loads(read_whole(settings_file),
                               parse_constant=refuse)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # too deep, #463
         return None
     return settings if isinstance(settings, dict) else None
 
@@ -2843,7 +2844,7 @@ def coverage_epochs(harness="claude-code"):
         # In the writer's reach: a folder or a pipe there reads as no
         # marker, never waited on, and the scan names it (#405).
         data = json.loads(read_whole(Path(store_home()) / COVERAGE_NAME))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # too deep, #463
         return []
     epochs = []
     for epoch in (data.get("epochs") or []):
@@ -3444,7 +3445,11 @@ def watch_completeness(root, witness, families, everywhere=False,
         calibration = [coverage_epoch(
             None, hook_matchers(witness),
             hook_matchers(witness, "PostToolUseFailure"))]
-    matchers = calibration[-1]["matchers"]
+    # Nothing to watch only when no epoch ever wired a matcher: after
+    # uninstall-hook the newest epoch is empty, but the sessions of the
+    # wired weeks are still judged by the epoch in force at their time
+    # (ADR-0016 ruling 2, #532).
+    ever_wired = any(epoch["matchers"] for epoch in calibration)
     said = []
     # The most recent epoch whose matchers actually differ from the one
     # before it, the failed-call event's included (#239). More than one
@@ -3487,7 +3492,7 @@ def watch_completeness(root, witness, families, everywhere=False,
         watch["note"] = (f"witness absent — no transcript layout at "
                          f"{witness.as_posix()}; completeness cannot be "
                          "watched this look")
-    if os.path.isdir(witness) and not matchers:
+    if os.path.isdir(witness) and not ever_wired:
         watch["note"] = ("no recorder hook is wired into the harness "
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
@@ -3583,7 +3588,7 @@ def watch_completeness(root, witness, families, everywhere=False,
         if transcript is None:
             add(repo, session, "UNWITNESSED", 0, receipts, spans)
             continue
-        if not matchers:
+        if not ever_wired:
             add(repo, session, "UNWATCHED", 0, receipts, spans,
                 transcript=transcript)
             continue
@@ -3648,7 +3653,7 @@ def watch_completeness(root, witness, families, everywhere=False,
     elsewhere = 0
     for stem, transcript in transcripts.items():
         folder = transcript.parent.name
-        if not matchers or (not everywhere and not folder.startswith(ours)):
+        if not ever_wired or (not everywhere and not folder.startswith(ours)):
             continue
         if stem in stored:
             # Its receipts exist; they are in the store, where a plain
@@ -6187,7 +6192,8 @@ def payload_cwd():
     is the wire."""
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError,
+            RecursionError):  # too deep, #487 item 16
         return None
     cwd = payload.get("cwd") if isinstance(payload, dict) else None
     return cwd if isinstance(cwd, str) and os.path.isdir(cwd) else None

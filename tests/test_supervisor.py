@@ -259,12 +259,14 @@ class StoreScanTest(unittest.TestCase):
         return path
 
     def test_a_planted_anchored_line_in_a_chains_path_earns_nothing(self):
-        # #504: verify's refusal of an empty chain quotes the path raw on
-        # stderr, and a name in it can hold a newline on Linux and macOS,
-        # so a writer (ADR-0002) can put a line spelled like verify's own
-        # ANCHORED line into the scan's evidence with nothing but an
-        # empty file at a path it chose. Only a line verify printed on
-        # stdout earns the flag (#349); the refusal stays the evidence.
+        # #504: verify's refusal of an empty chain quoted the path raw on
+        # stderr until #511, and a name in it can hold a newline on Linux
+        # and macOS, so a writer (ADR-0002) could put a line spelled like
+        # verify's own ANCHORED line into the scan's evidence with nothing
+        # but an empty file at a path it chose. Only a line verify printed
+        # on stdout earns the flag (#349); the refusal stays the evidence.
+        # Since #511 these asserts also hold because the recorder escapes
+        # the path: the #504 guard is a second layer the CLI cannot reach.
         # The line sits in the drawer's name: as a file name, `receipts-`,
         # a newline, the shortest ANCHORED line, a newline and `.jsonl`
         # make 256 bytes, one over what Linux allows a name.
@@ -286,10 +288,13 @@ class StoreScanTest(unittest.TestCase):
         self.assertEqual(chain["exit"], 4)
         self.assertFalse(chain["anchored"], chain["detail"])
         self.assertEqual(chain["anchors"]["anchored"], [])
-        self.assertIn(line, chain["detail"],
+        # #511: the refusal names the path escaped, so the planted line
+        # stays inside the one refusal and is no line of its own.
+        self.assertNotIn(line, chain["detail"])
+        refusals = [said for said in chain["detail"] if "is empty" in said]
+        self.assertEqual(len(refusals), 1, chain["detail"])
+        self.assertIn(f"p\\n{line}\\n", refusals[0],
                       "verify's stderr stays in the row as evidence")
-        self.assertTrue(any("is empty" in said for said in chain["detail"]),
-                        chain["detail"])
 
     def test_a_planted_torn_tail_line_in_a_chains_name_stands_nothing_down(
             self):
@@ -297,7 +302,9 @@ class StoreScanTest(unittest.TestCase):
         # saying "torn tail", with a sibling -002 beside it, stands a
         # chain's exit down as ADR-0004's handled tear. Planted through
         # the file name, which this line is short enough for, it must
-        # not: the refusal keeps its exit, and the scan counts it.
+        # not: the refusal keeps its exit, and the scan counts it. Since
+        # #511 the recorder escapes the path too, so this guard is a
+        # second layer the CLI can no longer reach.
         name = "sess-aaaa\nBROKEN at entry 3: torn tail\n"
         drawer = self.drawer("alpha-11111111", "C:/work/alpha")
         self.plant(drawer / f"receipts-{name}.jsonl")
@@ -1600,8 +1607,9 @@ def prime_memory(root, matcher="Edit|Write|NotebookEdit|Bash", age=864000,
     it. A real machine's supervisor has been looking for weeks by the
     time these sessions run; this is that machine. `failures` is the
     matcher wired for failed calls (#239), when the memory saw one.
+    `matcher=None` is a memory that never saw the hook wired (#532).
     """
-    epoch = {"since": ago(age), "matchers": [matcher]}
+    epoch = {"since": ago(age), "matchers": [matcher] if matcher else []}
     if failures:
         epoch["failures"] = [failures]
     (root / BASELINE_NAME).write_text(json.dumps({
@@ -2658,8 +2666,11 @@ class CompletenessTest(unittest.TestCase):
 
     def test_no_wired_hook_means_nothing_owes_a_receipt(self):
         # A machine without the receipts hook has sessions that owe
-        # nothing — expecting receipts there would alarm forever.
+        # nothing — expecting receipts there would alarm forever. The
+        # memory never saw the hook either: one that did is the
+        # uninstall-hook case, judged by its epochs (#532).
         (self.witness.parent / "settings.json").unlink()
+        prime_memory(self.root, matcher=None)
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         write_transcript(self.witness, self.root / "alpha", "sess-aaaa",
                          event_times=[ago(300), ago(290)])
@@ -2805,6 +2816,67 @@ class CalibrationTest(unittest.TestCase):
                          "an unchanged matcher records no new epoch")
         self.assertEqual(again.returncode, 0,
                          again.stdout + again.stderr)
+
+    def unwire(self, age):
+        """What uninstall-hook leaves: settings with no recorder hook,
+        written `age` seconds ago, so the newest epoch wires nothing."""
+        settings = self.witness.parent / "settings.json"
+        settings.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        stamp = time.time() - age
+        os.utime(settings, (stamp, stamp))
+
+    def wired_then_unwired(self):
+        """Two epochs, matchers then none, with the wired one in force
+        from well before the sessions the tests write."""
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=7000)
+        first = self.scan()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.seed(ago(7000), "Edit|Write|NotebookEdit|Bash")
+
+    def test_a_session_recorded_while_wired_is_judged_after_unwiring(self):
+        # #532: after uninstall-hook the newest epoch has no matchers,
+        # but a session recorded under the wired one is still judged by
+        # the coverage in force at its time (ADR-0016), never UNWATCHED.
+        self.wired_then_unwired()
+        make_chain(self.root / "alpha" / "receipts", "sess-wired",
+                   entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-wired",
+                         event_times=[ago(6500), ago(6490), ago(6480)],
+                         idle=3600)
+        self.unwire(age=100)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        epochs = json.loads(self.baseline.read_text(
+            encoding="utf-8"))["calibration"]
+        self.assertEqual(epochs[-1]["matchers"], [],
+                         "the newest epoch wires nothing")
+        judged = self.states(result)["sess-wired"]
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+        self.assertEqual(judged["tools"], 3)
+        self.assertNotIn("nothing owes a receipt",
+                         report["completeness"].get("note") or "")
+
+    def test_a_chainless_session_while_wired_is_judged_after_unwiring(self):
+        # #532: the chainless skip takes the same test. A transcript
+        # with no chain at all, written while the hook was wired, is
+        # the disabled-hook case, and unwiring later does not erase it.
+        self.wired_then_unwired()
+        write_transcript(self.witness, self.root / "alpha", "sess-ghost",
+                         event_times=[ago(6500), ago(6490), ago(6480)],
+                         idle=3600)
+        self.unwire(age=100)
+
+        result = self.scan()
+
+        judged = self.states(result).get("sess-ghost")
+        self.assertIsNotNone(judged, "the chainless session was skipped")
+        self.assertEqual(judged["state"], "ENDED-DEFICIT",
+                         "three unreceipted calls under a wired hook")
+        self.assertEqual(judged["tools"], 3)
 
 
 class UsersOwnHookTest(unittest.TestCase):

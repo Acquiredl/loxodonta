@@ -17,7 +17,9 @@ import errno
 import hashlib
 import io
 import json
+import ntpath
 import os
+import posixpath
 import stat
 import subprocess
 import sys
@@ -127,7 +129,7 @@ def read_log(path):
 
 
 def missing_log(path):
-    print(f"error: {path} not found — run `loxodonta init` first", file=sys.stderr)
+    print(f"error: {visible(path)} not found — run `loxodonta init` first", file=sys.stderr)
     return EX_NOINPUT
 
 
@@ -136,7 +138,7 @@ def unreadable_log(path, error):
     pipe or a device, or a file this user may not open. No input, like a
     missing one (ADR-0037); a line that cannot be read is another
     matter, and the walk names it."""
-    print(f"error: {path} cannot be read as a receipt log: "
+    print(f"error: {visible(path)} cannot be read as a receipt log: "
           f"{error.strerror or error}", file=sys.stderr)
     return EX_NOINPUT
 
@@ -205,6 +207,14 @@ def files_base(log):
         # Valid JSON with no path in it, `[]` say (#406).
         return None, f"{unread}: it holds no JSON object"
     path = held.get("path")
+    if isinstance(path, str) and not (posixpath.isabs(path)
+                                      or ntpath.isabs(path)):
+        # The record holds the project's absolute path; a relative one
+        # would resolve against wherever the verifier happens to run.
+        # Absolute is asked of both systems' paths, so a record written
+        # on one and read on the other is a missing project, not this.
+        return None, f"{unread}: the path it holds is not absolute " \
+            f"({visible(path)})"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
     return None, f"{record} points at a missing project ({visible(path)})"
@@ -1587,7 +1597,7 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
     except OSError as e:
         return unreadable_log(log, e)
     if not lines:
-        print(f"error: {log} is empty — not a receipt log", file=sys.stderr)
+        print(f"error: {visible(log)} is empty — not a receipt log", file=sys.stderr)
         return EX_NOINPUT
 
     # SPEC §2.1: read the genesis version first, to know which field rules
@@ -1759,11 +1769,11 @@ def cmd_head(args):
     except OSError as e:
         return unreadable_log(args.log, e)
     if not lines:
-        print(f"error: {args.log} is empty — no chain head to print", file=sys.stderr)
+        print(f"error: {visible(args.log)} is empty — no chain head to print", file=sys.stderr)
         return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged tail — run "
+        print(f"error: {visible(args.log)} has a damaged tail — run "
               "`loxodonta verify` (a torn tail has no head to record)",
               file=sys.stderr)
         return 1
@@ -1773,7 +1783,7 @@ def cmd_head(args):
     # walk calls it BROKEN, since no such value matches a canonical form.
     if not (isinstance(head, str) and len(head) == 64
             and all(c in "0123456789abcdef" for c in head)):
-        print(f"error: {args.log} ends in an entry whose entry_hash is not "
+        print(f"error: {visible(args.log)} ends in an entry whose entry_hash is not "
               "a chain head — run `loxodonta verify`", file=sys.stderr)
         return 1
     print(head)
