@@ -16,6 +16,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - ADR-0014, ADR-0039 and ADR-0037 gain addenda: a request inside the keeper's hold writes its own row, a folder the census could not list reaches the day book, and the keepers read 1, 64 and 73 by name (#559).
 - CONTRIBUTING says a pull request moved from `dev` to `main` keeps its one-target result, the skipped roll-ups reading as passed, until a new push or a close and reopen reruns it (#559).
 - `docs/RECEIVER.md` counts a log record naming no session with the lines it cannot parse; `docs/HOOK.md` says an unreadable settings file ends coverage as quietly as a hook taken out, which only a managed install survives (#559).
+- At the receiver, the second record's memory begins at the oldest events file held, readable or not: a session dated after an unreadable file with no events read is `SECOND-RECORD-ABSENT`, listed, where it read `BEFORE-MEMORY`, only counted (#559).
 
 ## [0.16.0] - 2026-10-18
 
