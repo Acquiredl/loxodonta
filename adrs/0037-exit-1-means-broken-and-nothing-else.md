@@ -131,6 +131,10 @@ The supervisor reads the recorder's codes, and follows:
   is unchanged.
 - The keepers and `package` read only zero against non-zero, and are
   unchanged.
+  *(Addendum 2026-10-18: the keepers now read three codes by name, 64
+  and 73 since #364 and 1 since #550, the damaged tail the recorder will
+  not build on; every other non-zero code reads as it did. `package` is
+  unchanged.)*
 
 **Scope.** The recorder's verbs, `verifier.py`'s three, and the
 supervisor's readings of them. The supervisor's own exits (`scan`'s
