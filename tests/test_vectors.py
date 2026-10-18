@@ -23,18 +23,20 @@ changed without its vectors, fails here.
 
 import hashlib
 import json
-import os
-import subprocess
 import sys
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_vectors`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import LOXODONTA, REPO_ROOT, VERIFIER, run  # noqa: E402
+
 VECTORS = REPO_ROOT / "tests" / "vectors"
 MANIFEST = VECTORS / "vectors.json"
 BUILD = REPO_ROOT / "tools" / "build_vectors.py"
-TOOLS = {"loxodonta.py": REPO_ROOT / "loxodonta.py",
-         "verifier.py": REPO_ROOT / "verifier.py"}
+TOOLS = {"loxodonta.py": LOXODONTA, "verifier.py": VERIFIER}
 
 
 def rows():
@@ -57,15 +59,6 @@ def sidecars(row):
             if f"--{kind}" in row["args"]]
 
 
-def run_row(tool, row):
-    """One row, run the way the README says: from inside tests/vectors/,
-    so every path a row names is relative to that folder."""
-    return subprocess.run(
-        [sys.executable, str(TOOLS[tool]), *row["args"]], cwd=VECTORS,
-        capture_output=True, encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-
-
 def last_line(stdout):
     """The final line of stdout, or "" when nothing was printed. Split on
     `\\n` alone: a verdict never holds another line break, and a line
@@ -80,7 +73,7 @@ class VectorsTest(unittest.TestCase):
         for row in rows():
             for tool in TOOLS:
                 with self.subTest(vector=row["name"], tool=tool):
-                    done = run_row(tool, row)
+                    done = run(TOOLS[tool], *row["args"], cwd=VECTORS)
                     said = done.stdout + done.stderr
                     self.assertNotIn("Traceback", said)
                     self.assertEqual(done.returncode, row["exit"], said)
@@ -97,8 +90,8 @@ class VectorsTest(unittest.TestCase):
     def test_the_two_files_agree_on_every_row(self):
         for row in rows():
             with self.subTest(vector=row["name"]):
-                recorder = run_row("loxodonta.py", row)
-                verifier = run_row("verifier.py", row)
+                recorder = run(TOOLS["loxodonta.py"], *row["args"], cwd=VECTORS)
+                verifier = run(TOOLS["verifier.py"], *row["args"], cwd=VECTORS)
                 self.assertEqual(
                     (recorder.returncode, recorder.stdout, recorder.stderr),
                     (verifier.returncode, verifier.stdout, verifier.stderr))
@@ -142,9 +135,7 @@ class VectorsTest(unittest.TestCase):
                 self.assertEqual(digest, entry["entry_hash"])
 
     def test_a_rebuild_gives_the_committed_vectors(self):
-        checked = subprocess.run(
-            [sys.executable, str(BUILD), "--check"], capture_output=True,
-            encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        checked = run(BUILD, "--check")
         self.assertEqual(checked.returncode, 0,
                          checked.stdout + checked.stderr)
 

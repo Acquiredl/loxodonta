@@ -25,12 +25,11 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_publish_chain import rewritten_raw
-from test_supervisor import isolated_env
+from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
+                     isolated_env, run)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
+from test_publish_chain import rewritten_raw
+
 DEMO_STORE = REPO_ROOT / "tools" / "demo_store.py"
 
 BAD_DAY_SESSION = "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907"

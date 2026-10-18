@@ -32,6 +32,8 @@ except ImportError:  # Windows has no limit on file size to set
 # when the module runs alone (`python -m unittest tests.test_package_anchor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import LOXODONTA, SUPERVISOR, run  # noqa: E402
+
 from test_anchor import (DROP, GENESIS_HASH, GENESIS_HEADER, HOSTILE,
                          HOSTILE_HEAD, MALFORMED_ROWS, SHOWN, SHOWN_HEAD_12,
                          FakeCalendar, FakeCalendarHandler,

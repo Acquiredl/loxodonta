@@ -14,58 +14,22 @@ internals, and every chain written is judged by `loxodonta verify`.
 
 import json
 import os
-import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
-sys.path.insert(0, str(REPO_ROOT))
-# This folder too, so the sibling import below also resolves when the
-# module runs alone (`python -m unittest tests.test_adapters`).
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_adapters`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
+                     isolated_env, run, temp_folder)
+
+# The repo root too, for the adapter under test.
+sys.path.insert(0, str(REPO_ROOT))
+
 from adapters.openai_agents import ReceiptRecorder  # noqa: E402
-from test_supervisor import isolated_env  # noqa: E402
-
-
-def run_loxodonta(*args, stdin=None, env=None, cwd=None):
-    """`env`, when given, is the whole environment the child starts from
-    (clean_env's), never a patch on this process's: a patch would bring
-    back the CLAUDE_PROJECT_DIR clean_env took out."""
-    result = subprocess.run(
-        [sys.executable, str(LOXODONTA), *args], cwd=cwd,
-        input=(json.dumps(stdin).encode("utf-8")
-               if isinstance(stdin, dict) else stdin),
-        capture_output=True,
-        env={**(os.environ if env is None else env),
-             "PYTHONIOENCODING": "utf-8"})
-    result.stdout = result.stdout.decode("utf-8", errors="replace")
-    result.stderr = result.stderr.decode("utf-8", errors="replace")
-    return result
-
-
-def run_supervisor(*args, stdin=None, env=None, cwd=None):
-    result = subprocess.run(
-        [sys.executable, str(SUPERVISOR), *args], cwd=cwd,
-        input=(json.dumps(stdin).encode("utf-8")
-               if isinstance(stdin, dict) else stdin),
-        capture_output=True,
-        env={**(os.environ if env is None else env),
-             "PYTHONIOENCODING": "utf-8"})
-    result.stdout = result.stdout.decode("utf-8", errors="replace")
-    result.stderr = result.stderr.decode("utf-8", errors="replace")
-    return result
-
-
-def clean_env(home, **extra):
-    """No ambient harness or store: every home inside the test's own
-    `home` (#274), and what the test sets is all there is."""
-    return isolated_env(home, **extra)
 
 
 def drawer_of(store, project_name):
@@ -98,19 +62,17 @@ def codex_payload(cwd, tool="Bash", tool_input=None, tool_response=None,
 
 class CodexHookTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.store = self.root / "storehome"
         self.project = self.root / "someproject"
         self.project.mkdir()
-        self.env = clean_env(self.root / "home",
+        self.env = isolated_env(self.root / "home",
                              LOXODONTA_HOME=str(self.store))
 
     def hook(self, payload, **env):
         # cwd of the hook process differs from the project on purpose:
         # the payload, not the process, names the project.
-        return run_loxodonta("hook", "--actor", "codex", stdin=payload,
+        return run(LOXODONTA, "hook", "--actor", "codex", stdin=json.dumps(payload),
                              env={**self.env, **env}, cwd=str(self.root))
 
     def test_payload_cwd_routes_the_chain_to_the_store_drawer(self):
@@ -142,7 +104,7 @@ class CodexHookTest(unittest.TestCase):
         start = {"session_id": "019374ab-codex-session",
                  "hook_event_name": "SessionStart", "source": "startup",
                  "transcript_path": None, "cwd": str(self.project)}
-        out = run_supervisor("digest", "--payload", stdin=start,
+        out = run(SUPERVISOR, "digest", "--payload", stdin=json.dumps(start),
                              env=self.env, cwd=str(self.root))
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("cargo build", out.stdout)
@@ -150,14 +112,14 @@ class CodexHookTest(unittest.TestCase):
         # The environment still wins when a harness sets it.
         other = self.root / "otherproject"
         other.mkdir()
-        out = run_supervisor("digest", "--payload", stdin=start,
+        out = run(SUPERVISOR, "digest", "--payload", stdin=json.dumps(start),
                              env={**self.env, "CLAUDE_PROJECT_DIR": str(other)},
                              cwd=str(self.root))
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout, "")  # no chains there: silence
         # No payload at all falls back to the working directory, and
         # a chainless one stays silent — never a crash at session start.
-        out = run_supervisor("digest", "--payload", stdin=b"",
+        out = run(SUPERVISOR, "digest", "--payload", stdin=b"",
                              env=self.env, cwd=str(other))
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout, "")
@@ -184,7 +146,7 @@ class CodexHookTest(unittest.TestCase):
         self.assertEqual(actions, [
             "apply_patch: *** Begin Patch *** Update File: a.py",
             "mcp__github__create_issue"])
-        judged = run_loxodonta("verify", "--log", str(log), env=self.env)
+        judged = run(LOXODONTA, "verify", "--log", str(log), env=self.env)
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertIn("VALID", judged.stdout)
 
@@ -199,7 +161,7 @@ class CodexHookTest(unittest.TestCase):
             / "receipts-019374ab-codex-session.jsonl"
         self.assertEqual([e["action"] for e in entries(log)[1:]],
                          ["Bash: echo " + chr(92) + "ud800", "Bash: ls"])
-        judged = run_loxodonta("verify", "--log", str(log), env=self.env)
+        judged = run(LOXODONTA, "verify", "--log", str(log), env=self.env)
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertIn("VALID", judged.stdout)
 
@@ -226,7 +188,7 @@ class CodexHookTest(unittest.TestCase):
         start = {"session_id": "019374ab-codex-session",
                  "hook_event_name": "SessionStart", "source": "startup",
                  "transcript_path": None, "cwd": str(project)}
-        out = run_supervisor("digest", "--payload", stdin=start,
+        out = run(SUPERVISOR, "digest", "--payload", stdin=json.dumps(start),
                              env=self.env, cwd=str(self.root))
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("Bash: make", out.stdout)
@@ -249,19 +211,17 @@ class CodexHookTest(unittest.TestCase):
 
 class CodexInstallTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         (self.home / ".codex").mkdir(parents=True)
         # CODEX_HOME unset: the installer's own fallback, ~/.codex, is
         # what these tests read back, inside the test's home (#274).
-        self.env = clean_env(self.home)
+        self.env = isolated_env(self.home)
         del self.env["CODEX_HOME"]
         self.hooks_path = self.home / ".codex" / "hooks.json"
 
     def install(self, *args, env=None):
-        return run_loxodonta("install-hook", "--codex", *args,
+        return run(LOXODONTA, "install-hook", "--codex", *args,
                              env={**self.env, **(env or {})})
 
     def hooks(self, path=None):
@@ -345,7 +305,7 @@ class CodexInstallTest(unittest.TestCase):
                 {"type": "command", "command": "python3 notify.py"}]}],
         }}), encoding="utf-8")
         self.install()
-        result = run_loxodonta("uninstall-hook", "--codex", env=self.env)
+        result = run(LOXODONTA, "uninstall-hook", "--codex", env=self.env)
         self.assertEqual(result.returncode, 0, result.stderr)
         hooks = self.hooks()["hooks"]
         commands = [h["command"] for b in hooks.get("PostToolUse", [])
@@ -353,7 +313,7 @@ class CodexInstallTest(unittest.TestCase):
         self.assertEqual(commands, ["python3 notify.py"])
         self.assertNotIn("SessionEnd", hooks)
         self.assertNotIn("SessionStart", hooks)
-        again = run_loxodonta("uninstall-hook", "--codex", env=self.env)
+        again = run(LOXODONTA, "uninstall-hook", "--codex", env=self.env)
         self.assertIn("nothing of ours", again.stdout)
 
     def test_refuses_to_clobber_broken_json(self):
@@ -393,7 +353,7 @@ class CodexInstallTest(unittest.TestCase):
         self.assertEqual(sum(c.endswith(" digest --payload")
                              for c in start), 1)
 
-        removed = run_loxodonta("uninstall-hook", "--codex", env=self.env)
+        removed = run(LOXODONTA, "uninstall-hook", "--codex", env=self.env)
 
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertEqual(self.hooks(), self.USERS_OWN)
@@ -425,7 +385,7 @@ class CodexInstallTest(unittest.TestCase):
                                                encoding="utf-8")
                     before = self.hooks_path.read_bytes()
 
-                    result = run_loxodonta(verb, "--codex", env=self.env)
+                    result = run(LOXODONTA, verb, "--codex", env=self.env)
 
                     self.assertEqual(result.returncode, 65, result.stdout)
                     self.assertNotIn("Traceback", result.stderr)
@@ -445,9 +405,7 @@ def span(kind, name=None, input_=None, trace="trace_" + "ab" * 16,
 
 class AgentsSdkRecorderTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.store = self.root / "storehome"
         self.project = self.root / "agentprog"
         self.project.mkdir()
@@ -459,7 +417,7 @@ class AgentsSdkRecorderTest(unittest.TestCase):
                  "LOXODONTA_MANAGED_DIR")
         previous = {k: os.environ.get(k)
                     for k in homes + ("CLAUDE_PROJECT_DIR",)}
-        own = clean_env(self.root / "home", LOXODONTA_HOME=str(self.store))
+        own = isolated_env(self.root / "home", LOXODONTA_HOME=str(self.store))
         os.environ.update({k: own[k] for k in homes})
         os.environ.pop("CLAUDE_PROJECT_DIR", None)
 
@@ -533,7 +491,7 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         self.assertEqual([e["action"] for e in entries(log)[1:]],
                          ["run_shell: echo " + escape + " hi",
                           "run_shell: pytest"])
-        judged = run_loxodonta("verify", "--log", str(log))
+        judged = run(LOXODONTA, "verify", "--log", str(log))
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
 
     def test_a_run_is_one_chain_in_span_order_and_it_verifies(self):
@@ -549,7 +507,7 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         self.assertEqual(actions, ["read_file: a.py", "edit_file: a.py",
                                    "run_shell: pytest",
                                    "handoff: coder -> reviewer"])
-        judged = run_loxodonta("verify", "--log", str(log))
+        judged = run(LOXODONTA, "verify", "--log", str(log))
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertIn("VALID", judged.stdout)
         # A second trace is a sibling chain, never a shared file.

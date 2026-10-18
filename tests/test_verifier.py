@@ -17,11 +17,8 @@ verdict the copy reached differently from the recorder fails there.
 import ast
 import builtins
 import importlib
-import os
-import subprocess
 import symtable
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,8 +26,9 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_verifier`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-VERIFIER = REPO_ROOT / "verifier.py"
+from support import (LOXODONTA, REPO_ROOT, VERIFIER, run,  # noqa: E402
+                     temp_folder)
+
 BUILD = REPO_ROOT / "tools" / "build_verifier.py"
 TWIN = REPO_ROOT / "tests" / "fixtures" / "verifier_twin.py"
 
@@ -39,12 +37,6 @@ TWIN = REPO_ROOT / "tests" / "fixtures" / "verifier_twin.py"
 # wrap commands; a file that only judges has no use for any of them.
 SENDING_MODULES = {"socket", "ssl", "http", "urllib", "threading",
                    "asyncio", "smtplib", "ftplib", "shlex", "signal"}
-
-
-def run(*args):
-    return subprocess.run(
-        [sys.executable, *map(str, args)], capture_output=True,
-        encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
 
 class TheCopyTest(unittest.TestCase):
@@ -107,9 +99,7 @@ class TheBuildTest(unittest.TestCase):
     copied with CRLF, as a Windows checkout holds it, on every platform."""
 
     def setUp(self):
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        self.root = Path(scratch.name)
+        self.root = temp_folder(self)
         (self.root / "tools").mkdir()
         (self.root / "tools" / "build_verifier.py").write_bytes(
             BUILD.read_bytes())

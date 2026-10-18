@@ -15,9 +15,7 @@ Every test drives the public CLI.
 import base64
 import hashlib
 import json
-import subprocess
 import sys
-import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -26,13 +24,13 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_sidecar_strictness`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import (FakeCalendar, FakeCalendarHandler,  # noqa: E402
-                         clean_env)
-from test_supervisor import (chains_by_session, home_outside,  # noqa: E402
-                             isolated_env, make_chain, run_scan)
+from support import (LOXODONTA, StoreCase, isolated_env, run,  # noqa: E402
+                     temp_folder)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+from test_anchor import FakeCalendar, FakeCalendarHandler  # noqa: E402
+from test_supervisor import (chains_by_session, make_chain,  # noqa: E402
+                             run_scan)
+
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 NOT_A_RECORD = ("ANCHOR-INVALID: line 1 of receipts.jsonl.anchors.jsonl is "
@@ -42,12 +40,6 @@ NOT_A_STAMP = ("STAMP-INVALID: line 1 of receipts.jsonl.stamps.jsonl is not "
 # The spellings a strict parser refuses and Python reads as numbers:
 # the three words, and numbers too large to be finite.
 WORDS = ("NaN", "Infinity", "-Infinity", "1e999", "-1e999")
-
-
-def run_receipts(*args, cwd):
-    return subprocess.run([sys.executable, str(LOXODONTA), *args], cwd=cwd,
-                          capture_output=True, encoding="utf-8",
-                          env=clean_env())
 
 
 def start_calendar(case):
@@ -112,25 +104,22 @@ def with_member(line, member):
     return line[:-1] + "," + member + "}"
 
 
-class StrictRowTest(unittest.TestCase):
+class StrictRowTest(StoreCase):
     """`verify --anchors` and `verify --stamps` on a row a strict JSON
     parser cannot read: exit 3, as any unreadable line is (SPEC 9.2)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        super().setUp()
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
         self.anchors = self.workdir / "receipts.jsonl.anchors.jsonl"
         self.stamps = self.workdir / "receipts.jsonl.stamps.jsonl"
 
     def verify(self, flag, line):
         sidecar = self.anchors if flag == "--anchors" else self.stamps
         sidecar.write_text(line + "\n", encoding="utf-8")
-        return run_receipts("verify", flag, cwd=self.workdir)
+        return run(LOXODONTA, "verify", flag, cwd=self.workdir)
 
     def test_a_key_given_twice_makes_an_anchor_row_unreadable(self):
         # A first-wins reader sees a proof of another head (a mismatch),
@@ -259,15 +248,13 @@ class StrictReadersTest(unittest.TestCase):
     head anchored or a batch sent."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.root = temp_folder(self)
+        self.env = isolated_env(temp_folder(self))
 
     def test_the_keeper_anchors_a_head_only_a_twice_keyed_row_names(self):
         calendar = start_calendar(self)
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
-        head = run_receipts("head", "--log", str(log),
+        head = run(LOXODONTA, "head", "--log", str(log),
                             cwd=self.root).stdout.strip()
         line = anchor_line(head).replace('"n":1', '"n":1,"n":2')
         Path(str(log) + ".anchors.jsonl").write_text(line + "\n",
@@ -293,24 +280,24 @@ class StrictReadersTest(unittest.TestCase):
         url = f"http://127.0.0.1:{remote.server_address[1]}/chain"
         workdir = self.root / "work"
         workdir.mkdir()
-        run_receipts("init", cwd=workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "init", cwd=workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=workdir)
-        head = run_receipts("head", cwd=workdir).stdout.strip()
+        head = run(LOXODONTA, "head", cwd=workdir).stdout.strip()
         remote_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
         memo = workdir / "receipts.jsonl.published.jsonl"
         acknowledged = row_line(kind="chain", first=0, last=1, head=head,
                                 ts="2026-09-25T10:00:00Z",
                                 event="cadence", remote_id=remote_id)
         memo.write_text(acknowledged + "\n", encoding="utf-8")
-        nothing = run_receipts("publish", "--chain", url, cwd=workdir)
+        nothing = run(LOXODONTA, "publish", "--chain", url, cwd=workdir)
         self.assertIn("nothing to send", nothing.stdout)
         for spoiled in (acknowledged.replace('"last":1', '"last":1,"last":1'),
                         with_member(acknowledged, '"x":NaN')):
             with self.subTest(line=spoiled[-12:]):
                 memo.write_text(spoiled + "\n", encoding="utf-8")
 
-                result = run_receipts("publish", "--chain", url, cwd=workdir)
+                result = run(LOXODONTA, "publish", "--chain", url, cwd=workdir)
 
                 self.assertEqual(result.returncode, 0,
                                  result.stdout + result.stderr)

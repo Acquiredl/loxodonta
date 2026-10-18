@@ -29,19 +29,17 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_publish_chain`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
+from support import (LOXODONTA, RECEIVER, SUPERVISOR, clean_env,  # noqa: E402
+                     isolated_env, temp_folder)
+
+from test_anchor import FakeCalendar, FakeCalendarHandler
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
 from test_receiver import make_chain, post, run_recorder
 from test_supervisor import (ago, chain_head, chains_by_session,
-                             home_outside, install_witness_hook,
-                             isolated_env, keeper_env,
+                             install_witness_hook,
                              make_chain as make_store_chain, run_scan,
                              write_chain_row)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-RECEIVER = REPO_ROOT / "receiver.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 NDJSON = "application/x-ndjson"
 # What a quick session-end step writes when the window has closed on
@@ -1172,7 +1170,7 @@ class PublishChainKeeperTest(unittest.TestCase):
         # Outside the scanned root, a home of its own: the keeper reads
         # the coverage marker, and at `full` would follow its remote
         # (#242).
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
 
     def scan(self, *extra, **knobs):
         return run_scan(self.root, *extra, env={**self.env, **knobs})
@@ -1739,7 +1737,7 @@ class FullProfileKeeperTest(unittest.TestCase):
         subprocess.run(
             [sys.executable, str(LOXODONTA), "install-hook", *args],
             capture_output=True, check=True,
-            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+            env=clean_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
                            CODEX_HOME=str(self.home / ".codex"),
                            LOXODONTA_MANAGED_DIR=str(self.home / "managed")))
@@ -1748,7 +1746,7 @@ class FullProfileKeeperTest(unittest.TestCase):
         """A chain through the public CLI whose entries are `age` seconds
         old (SOURCE_DATE_EPOCH, the recorder's clock override), so a
         cadence shorter than `age` finds its head ripe."""
-        env = keeper_env(SOURCE_DATE_EPOCH=str(int(time.time()) - age))
+        env = clean_env(SOURCE_DATE_EPOCH=str(int(time.time()) - age))
         log_dir = self.root / "alpha" / "receipts"
         log_dir.mkdir(parents=True, exist_ok=True)
         log = log_dir / f"receipts-{session}.jsonl"
@@ -1839,7 +1837,7 @@ class FullProfileKeeperTest(unittest.TestCase):
         subprocess.run(
             [sys.executable, str(LOXODONTA), "uninstall-hook", *args],
             capture_output=True, check=True,
-            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+            env=clean_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
                            CODEX_HOME=str(self.home / ".codex"),
                            LOXODONTA_MANAGED_DIR=str(self.home / "managed")))
@@ -1999,7 +1997,7 @@ class DrillUnderFullTest(unittest.TestCase):
             [sys.executable, str(LOXODONTA), "install-hook", "--profile",
              "full", "--remote", self.receiver.url],
             capture_output=True, check=True,
-            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+            env=clean_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
                            CODEX_HOME=str(self.home / ".codex"),
                            LOXODONTA_MANAGED_DIR=str(self.home / "managed")))

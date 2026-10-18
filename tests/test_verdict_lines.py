@@ -14,29 +14,25 @@ alike, through the command line, as a recipient runs them.
 
 import base64
 import json
-import os
 import shutil
-import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_verdict_lines`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import (LOXODONTA, REPO_ROOT, VERIFIER, run,  # noqa: E402
+                     temp_folder)
+
 VECTORS = REPO_ROOT / "tests" / "vectors"
-TOOLS = (REPO_ROOT / "loxodonta.py", REPO_ROOT / "verifier.py")
+TOOLS = (LOXODONTA, VERIFIER)
 
 TAIL = "evidence that does not verify is not evidence"
 OTHER_HEAD = "ab" * 32
 ANCHORS = "receipts.jsonl.anchors.jsonl"
 STAMPS = "receipts.jsonl.stamps.jsonl"
-
-
-def run(tool, *args, cwd):
-    return subprocess.run([sys.executable, "-I", str(tool), *args],
-                          cwd=str(cwd), capture_output=True,
-                          encoding="utf-8", errors="replace",
-                          env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
 
 def vector_row(name):
@@ -52,15 +48,13 @@ def write_lines(path, lines):
 
 class Case(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.work = Path(self._tmp.name)
+        self.work = temp_folder(self)
 
     def lines_under_both(self, *args, exit_code):
         """stdout's lines, the same under both files."""
         seen = []
         for tool in TOOLS:
-            result = run(tool, *args, cwd=self.work)
+            result = run(tool, *args, cwd=self.work, isolated=True)
             self.assertEqual(result.returncode, exit_code,
                              f"{tool.name}: {result.stdout}{result.stderr}")
             self.assertNotIn("Traceback", result.stderr)

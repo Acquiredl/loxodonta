@@ -28,15 +28,13 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_serve`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import (FIXTURE_SESSION, assert_replaced_whole,
-                             chain_copy, hold, home_outside,
-                             read_line_within, receiver_folder,
-                             unreadable_depth,
-                             isolated_env)
+from support import (LOXODONTA, SUPERVISOR, isolated_env,  # noqa: E402
+                     temp_folder)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SUPERVISOR = REPO_ROOT / "supervisor.py"
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+from test_supervisor import (FIXTURE_SESSION, assert_replaced_whole,
+                             chain_copy, hold, read_line_within,
+                             receiver_folder, unreadable_depth)
+
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 
@@ -111,7 +109,7 @@ class ServerFixture(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
 
     def serve(self, extra_env=None, extra_args=(), cwd=None):
         """Start `serve` on an ephemeral port and read the announced URL.

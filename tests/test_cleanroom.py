@@ -16,13 +16,16 @@ clean room's reading does not survive fails here first.
 
 import hashlib
 import json
-import os
-import subprocess
 import sys
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_cleanroom`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import REPO_ROOT, run  # noqa: E402
+
 VECTORS = REPO_ROOT / "tests" / "vectors"
 CLEANROOM = REPO_ROOT / "cleanroom" / "verify.py"
 
@@ -65,10 +68,8 @@ class CleanroomTest(unittest.TestCase):
         self.assertGreaterEqual(len(rows), 35)
         for row in rows:
             with self.subTest(row=row["name"]):
-                done = subprocess.run(
-                    [sys.executable, "-I", str(CLEANROOM), *row["args"]], cwd=VECTORS,
-                    capture_output=True, encoding="utf-8", timeout=60,
-                    env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                done = run(CLEANROOM, *row["args"], cwd=VECTORS, timeout=60,
+                           isolated=True)
                 self.assertEqual(done.returncode, row["exit"], done.stdout + done.stderr)
                 got = last_line(done.stdout)
                 if "last_line" in row:

@@ -28,21 +28,19 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_publish_keeper`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
+from support import (LOXODONTA, SUPERVISOR, clean_env,  # noqa: E402
+                     isolated_env, temp_folder)
+
+from test_anchor import FakeCalendar, FakeCalendarHandler
 from test_publish import (FakeReceiver, FakeReceiverHandler,
                           RedirectingHandler)
 from test_stamp import GRANTED, NO_GRANTED_REPLY, reply, start_authority
-from test_supervisor import (BASELINE_NAME, ago, chain_head,
-                             chains_by_session, home_outside,
-                             install_witness_hook, isolated_env, keeper_env,
-                             make_chain, read_line_within, run_scan,
-                             write_attempt_row,
+from test_supervisor import (BASELINE_NAME, ago, chain_head, chains_by_session,
+                             install_witness_hook, make_chain,
+                             read_line_within, run_scan, write_attempt_row,
                              write_chain_row, write_completed_anchor,
                              write_pending_anchor)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 PUBLISHED_FIELDS = {"head", "n", "session", "ts", "event", "text", "content"}
 
@@ -69,7 +67,7 @@ class ReceiverFixture(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
         self.receiver = FakeReceiver(("127.0.0.1", 0), FakeReceiverHandler)
         self.receiver.received = []
         self.receiver.delay = 0
@@ -1190,13 +1188,13 @@ class ProfileKeeperTest(unittest.TestCase):
             knobs["SOURCE_DATE_EPOCH"] = str(int(time.time()) - age)
         subprocess.run(
             [sys.executable, str(LOXODONTA), "install-hook", *args],
-            capture_output=True, check=True, env=keeper_env(**knobs))
+            capture_output=True, check=True, env=clean_env(**knobs))
 
     def aged_chain(self, session, age):
         """A chain through the public CLI whose entries are `age`
         seconds old (SOURCE_DATE_EPOCH, the recorder's clock override),
         so a keeper cadence shorter than `age` finds its head ripe."""
-        env = keeper_env(SOURCE_DATE_EPOCH=str(int(time.time()) - age))
+        env = clean_env(SOURCE_DATE_EPOCH=str(int(time.time()) - age))
         log_dir = self.root / "alpha" / "receipts"
         log_dir.mkdir(parents=True, exist_ok=True)
         log = log_dir / f"receipts-{session}.jsonl"
@@ -1343,7 +1341,7 @@ class ProfileKeeperTest(unittest.TestCase):
             [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
              "--authority", authority.url],
             capture_output=True, encoding="utf-8",
-            env=keeper_env(PYTHONIOENCODING="utf-8"))
+            env=clean_env(PYTHONIOENCODING="utf-8"))
         self.assertEqual(stamped.returncode, 0, stamped.stderr)
 
         self.serve()
@@ -1368,7 +1366,7 @@ class ProfileKeeperTest(unittest.TestCase):
                 [sys.executable, str(LOXODONTA), "stamp", f"--log={log}",
                  "--authority", authority.url],
                 capture_output=True, encoding="utf-8",
-                env=keeper_env(PYTHONIOENCODING="utf-8"))
+                env=clean_env(PYTHONIOENCODING="utf-8"))
             self.assertEqual(stamped.returncode, 0, stamped.stderr)
         sidecar = Path(str(logs[1]) + ".stamps.jsonl")
         (token,) = [json.loads(line) for line in
@@ -1404,7 +1402,7 @@ class ProfileKeeperTest(unittest.TestCase):
             [sys.executable, str(LOXODONTA), "stamp", f"--log={good}",
              "--authority", authority.url],
             capture_output=True, encoding="utf-8",
-            env=keeper_env(PYTHONIOENCODING="utf-8"))
+            env=clean_env(PYTHONIOENCODING="utf-8"))
         self.assertEqual(stamped.returncode, 0, stamped.stderr)
 
         self.serve()
@@ -1575,7 +1573,7 @@ class ProfileKeeperTest(unittest.TestCase):
         subprocess.run(
             [sys.executable, str(LOXODONTA), "uninstall-hook"],
             capture_output=True, check=True,
-            env=keeper_env(HOME=str(self.home), USERPROFILE=str(self.home),
+            env=clean_env(HOME=str(self.home), USERPROFILE=str(self.home),
                            LOXODONTA_HOME=str(self.store),
                            CODEX_HOME=str(self.home / ".codex"),
                            LOXODONTA_MANAGED_DIR=str(self.home / "managed")))

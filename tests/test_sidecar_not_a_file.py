@@ -58,19 +58,18 @@ except ImportError:
 # when the module runs alone (`python -m unittest tests.test_sidecar_not_a_file`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env  # noqa: E402
+from support import (LOXODONTA, SUPERVISOR, StoreCase,  # noqa: E402
+                     isolated_env, run, temp_folder)
+
+from test_anchor import FakeCalendar, FakeCalendarHandler  # noqa: E402
 from test_export import OTHER_SESSION, ExportBase  # noqa: E402
 from test_package_anchor import SESSION, AnchoredStoreCase  # noqa: E402
 from test_publish import PublishBase  # noqa: E402
 from test_serve import OPENER, ServerFixture  # noqa: E402
 from test_stamp import start_authority  # noqa: E402
-from test_supervisor import (chains_by_session, home_outside,  # noqa: E402
-                             install_witness_hook, isolated_env, make_chain,
-                             run_scan)
+from test_supervisor import (chains_by_session,  # noqa: E402
+                             install_witness_hook, make_chain, run_scan)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 SUFFIXES = (".anchors.jsonl", ".stamps.jsonl", ".published.jsonl")
 FOLDER = "it is a folder, not a file"
@@ -81,12 +80,6 @@ NO_FIFOS = "no named pipes here"
 # A pipe opened for reading waits for a writer that never comes, so a
 # reader that opened one would hang: every run here is bounded.
 BOUND = 60
-
-
-def run_receipts(*args, cwd):
-    return subprocess.run([sys.executable, str(LOXODONTA), *args], cwd=cwd,
-                          capture_output=True, encoding="utf-8",
-                          env=clean_env(), timeout=BOUND)
 
 
 def kind(path):
@@ -104,11 +97,9 @@ def fire_hook(case, log_dir, command):
                           "hook_event_name": "PostToolUse",
                           "tool_name": "Bash",
                           "tool_input": {"command": command}})
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), "hook", "--log-dir", str(log_dir)],
-        input=payload, capture_output=True, encoding="utf-8",
-        cwd=str(log_dir), timeout=BOUND,
-        env=isolated_env(home_outside(case), PYTHONIOENCODING="utf-8"))
+    return run(LOXODONTA, "hook", "--log-dir", str(log_dir), stdin=payload,
+               cwd=str(log_dir), timeout=BOUND,
+               env=isolated_env(temp_folder(case), PYTHONIOENCODING="utf-8"))
 
 
 def start_calendar(case):
@@ -149,24 +140,21 @@ def serve_posts(case):
     return server
 
 
-class JudgedNotAFileTest(unittest.TestCase):
+class JudgedNotAFileTest(StoreCase):
     """`verify --anchors` and `verify --stamps` with a folder, or a pipe,
     where the sidecar belongs: named by its bare name and why, the
     exit-3 tier an unreadable line has, and never NO-ANCHORS, which is
     what an absent sidecar says."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
-                     cwd=self.workdir)
+        super().setUp()
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir, timeout=BOUND)
 
     def test_a_folder_where_the_anchors_sidecar_belongs_is_anchor_invalid(self):
         (self.workdir / "receipts.jsonl.anchors.jsonl").mkdir()
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -178,7 +166,7 @@ class JudgedNotAFileTest(unittest.TestCase):
     def test_a_folder_where_the_stamps_sidecar_belongs_is_stamp_invalid(self):
         (self.workdir / "receipts.jsonl.stamps.jsonl").mkdir()
 
-        result = run_receipts("verify", "--stamps", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--stamps", cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -198,7 +186,7 @@ class JudgedNotAFileTest(unittest.TestCase):
                 os.mkfifo(pipe)
                 self.addCleanup(pipe.unlink)
 
-                result = run_receipts("verify", flag, cwd=self.workdir)
+                result = run(LOXODONTA, "verify", flag, cwd=self.workdir, timeout=BOUND)
 
                 self.assertEqual(result.returncode, 3,
                                  result.stdout + result.stderr)
@@ -214,15 +202,13 @@ class ChainNotAFileTest(unittest.TestCase):
     never waited on and a device never read."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.log = self.workdir / "receipts.jsonl"
 
     def assert_no_input(self, why):
         for verb in ("verify", "head"):
             with self.subTest(verb=verb):
-                result = run_receipts(verb, cwd=self.workdir)
+                result = run(LOXODONTA, verb, cwd=self.workdir, timeout=BOUND)
 
                 self.assertEqual(result.returncode, 66,
                                  result.stdout + result.stderr)
@@ -264,9 +250,7 @@ class WrittenChainNotAFileTest(unittest.TestCase):
     WHY = FOLDER
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.log = self.workdir / "receipts.jsonl"
 
     def put(self, path):
@@ -310,7 +294,7 @@ class WrittenChainNotAFileTest(unittest.TestCase):
         }
         for verb, args in verbs.items():
             with self.subTest(verb=verb):
-                result = run_receipts(*args, cwd=self.workdir)
+                result = run(LOXODONTA, *args, cwd=self.workdir, timeout=BOUND)
 
                 self.assertEqual(result.returncode, 66,
                                  result.stdout + result.stderr)
@@ -328,10 +312,10 @@ class WrittenChainNotAFileTest(unittest.TestCase):
         # wrapper would execute work it cannot record.
         self.put(self.log)
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "run", "--actor", "agent", "--",
             sys.executable, "-c", "open('side-effect.txt', 'w').write('ran')",
-            cwd=self.workdir)
+            cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -377,9 +361,7 @@ class UnopenableChainTest(unittest.TestCase):
     reads either as damage and keeps the receipt in a sibling (#385)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
 
     def assert_kept_in_a_sibling(self):
@@ -424,9 +406,7 @@ class UnwritableChainTest(unittest.TestCase):
     no lock beside it."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
         first = fire_hook(self, self.workdir, "echo first")
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -445,16 +425,16 @@ class UnwritableChainTest(unittest.TestCase):
         self.assertEqual(list(self.workdir.glob("*.lock")), [])
 
     def test_log_says_the_chain_could_not_be_written(self):
-        result = run_receipts("log", "--log", str(self.chain),
+        result = run(LOXODONTA, "log", "--log", str(self.chain),
                               "--actor", "agent", "--action", "x",
-                              cwd=self.workdir)
+                              cwd=self.workdir, timeout=BOUND)
 
         self.assert_not_written(result)
 
     def test_run_says_so_after_its_command_ran(self):
-        result = run_receipts("run", "--log", str(self.chain),
+        result = run(LOXODONTA, "run", "--log", str(self.chain),
                               "--actor", "agent", "--",
-                              sys.executable, "-c", "pass", cwd=self.workdir)
+                              sys.executable, "-c", "pass", cwd=self.workdir, timeout=BOUND)
 
         self.assert_not_written(result)
         self.assertIn("receipt not written for", result.stderr)
@@ -475,9 +455,7 @@ class ReadOnlyFolderTest(UnwritableChainTest):
     hook does, exit 73, never a traceback."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
         first = fire_hook(self, self.workdir, "echo first")
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -492,9 +470,9 @@ class MissingFolderTest(unittest.TestCase):
 
     def test_log_into_a_missing_folder_is_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result = run_receipts("log", "--log", "gone/receipts.jsonl",
+            result = run(LOXODONTA, "log", "--log", "gone/receipts.jsonl",
                                   "--actor", "agent", "--action", "x",
-                                  cwd=tmp)
+                                  cwd=tmp, timeout=BOUND)
 
         self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -519,21 +497,17 @@ class LockNotWrittenTest(unittest.TestCase):
     traceback, the chain as it was."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.chain = self.workdir / f"receipts-{HOOKED}.jsonl"
         first = fire_hook(self, self.workdir, "echo first")
         self.assertEqual(first.returncode, 0, first.stderr)
         self.before = self.chain.read_bytes()
 
     def limited(self, *args, payload=None):
-        env = isolated_env(home_outside(self), PYTHONIOENCODING="utf-8",
+        env = isolated_env(temp_folder(self), PYTHONIOENCODING="utf-8",
                            PYTHONDONTWRITEBYTECODE="1")
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), *args], input=payload,
-            capture_output=True, encoding="utf-8", cwd=str(self.workdir),
-            env=env, timeout=BOUND, preexec_fn=no_file_may_grow)
+        return run(LOXODONTA, *args, stdin=payload, cwd=str(self.workdir),
+                   env=env, timeout=BOUND, preexec_fn=no_file_may_grow)
 
     def test_each_writer_removes_the_lock_it_made(self):
         payload = json.dumps({"session_id": HOOKED,
@@ -659,12 +633,9 @@ class PackedNotAFileTest(AnchoredStoreCase):
     def assert_chain_refused(self, why):
         # Bounded: a package that waited on the pipe would fail here.
         out = self.work / "refused"
-        packed = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "package", SESSION,
-             "--witness", str(self.witness), "--folder", "--out", str(out)],
-            capture_output=True, encoding="utf-8", errors="replace",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"},
-            cwd=str(self.work), timeout=BOUND)
+        packed = run(SUPERVISOR, "package", SESSION, "--witness",
+                     str(self.witness), "--folder", "--out", str(out),
+                     env=self.env, cwd=str(self.work), timeout=BOUND)
 
         self.assertEqual(packed.returncode, 1, packed.stdout + packed.stderr)
         self.assertNotIn("Traceback", packed.stderr)
@@ -686,7 +657,7 @@ class PackedNotAFileTest(AnchoredStoreCase):
         self.assert_chain_refused(PIPE)
 
 
-class WrittenNotAFileTest(unittest.TestCase):
+class WrittenNotAFileTest(StoreCase):
     """The operator's verbs that append to a sidecar, with a folder in
     its place: each says what it could not write and why, with the exit
     ADR-0037 gives a file the verb must create and cannot (73), or a
@@ -696,12 +667,9 @@ class WrittenNotAFileTest(unittest.TestCase):
     WHY = FOLDER
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
-                     cwd=self.workdir)
+        super().setUp()
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir, timeout=BOUND)
 
     def folder(self, suffix):
         """What stands where the sidecar belongs: a folder here."""
@@ -716,8 +684,8 @@ class WrittenNotAFileTest(unittest.TestCase):
         calendar = start_calendar(self)
         sidecar = self.folder(".anchors.jsonl")
 
-        result = run_receipts("anchor", "--calendar", calendar.url,
-                              cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--calendar", calendar.url,
+                              cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -728,7 +696,7 @@ class WrittenNotAFileTest(unittest.TestCase):
     def test_anchor_upgrade_says_the_sidecar_cannot_be_read(self):
         self.folder(".anchors.jsonl")
 
-        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -739,8 +707,8 @@ class WrittenNotAFileTest(unittest.TestCase):
         authority = start_authority(self)
         self.folder(".stamps.jsonl")
 
-        result = run_receipts("stamp", "--authority", authority.url,
-                              cwd=self.workdir)
+        result = run(LOXODONTA, "stamp", "--authority", authority.url,
+                              cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -753,7 +721,7 @@ class WrittenNotAFileTest(unittest.TestCase):
         url = f"http://127.0.0.1:{receiver.server_address[1]}/hook"
         self.folder(".published.jsonl")
 
-        result = run_receipts("publish", url, cwd=self.workdir)
+        result = run(LOXODONTA, "publish", url, cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -767,7 +735,7 @@ class WrittenNotAFileTest(unittest.TestCase):
         url = f"http://127.0.0.1:{receiver.server_address[1]}/chain"
         self.folder(".published.jsonl")
 
-        result = run_receipts("publish", "--chain", url, cwd=self.workdir)
+        result = run(LOXODONTA, "publish", "--chain", url, cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 69, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -809,17 +777,14 @@ class WrittenPipeLinkTest(WrittenPipeTest):
 
 
 @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
-class ReferencedPipeTest(unittest.TestCase):
+class ReferencedPipeTest(StoreCase):
     """A file reference that is a pipe or a device goes through the same
     open as a sidecar (#364, the pipe and device half of #270): `log
     --file` refuses it, and `verify --files` names it and goes on to its
     verdict. Neither waits on the pipe or reads the device."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
-        run_receipts("init", cwd=self.workdir)
+        super().setUp()
 
     def pipe_and_device(self):
         os.mkfifo(self.workdir / "pipe")
@@ -829,8 +794,8 @@ class ReferencedPipeTest(unittest.TestCase):
     def test_log_refuses_a_pipe_or_a_device(self):
         for name in self.pipe_and_device():
             with self.subTest(reference=name):
-                result = run_receipts("log", "--actor", "agent", "--action",
-                                      "x", "--file", name, cwd=self.workdir)
+                result = run(LOXODONTA, "log", "--actor", "agent", "--action",
+                                      "x", "--file", name, cwd=self.workdir, timeout=BOUND)
 
                 self.assertEqual(result.returncode, 66,
                                  result.stdout + result.stderr)
@@ -842,12 +807,12 @@ class ReferencedPipeTest(unittest.TestCase):
         for make in (os.mkfifo, lambda p: os.symlink("/dev/zero", p)):
             with self.subTest(make=make):
                 later.write_text("hi", encoding="utf-8")
-                run_receipts("log", "--actor", "agent", "--action", "x",
-                             "--file", "later", cwd=self.workdir)
+                run(LOXODONTA, "log", "--actor", "agent", "--action", "x",
+                             "--file", "later", cwd=self.workdir, timeout=BOUND)
                 later.unlink()
                 make(later)
 
-                result = run_receipts("verify", "--files", cwd=self.workdir)
+                result = run(LOXODONTA, "verify", "--files", cwd=self.workdir, timeout=BOUND)
 
                 self.assertEqual(result.returncode, 0,
                                  result.stdout + result.stderr)
@@ -858,17 +823,14 @@ class ReferencedPipeTest(unittest.TestCase):
                 later.unlink()
 
 
-class ReferencedFolderTest(unittest.TestCase):
+class ReferencedFolderTest(StoreCase):
     """A file reference that is a folder, the directory half of #270:
     `log --file` and `run --file` refuse it in a folder's words, exit 66,
     on every platform, where Windows said `Permission denied`; `verify
     --files` names it and goes on to its verdict."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
-        run_receipts("init", cwd=self.workdir)
+        super().setUp()
         (self.workdir / "sub").mkdir()
 
     def assert_refused(self, result):
@@ -879,15 +841,15 @@ class ReferencedFolderTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
     def test_log_refuses_a_folder(self):
-        result = run_receipts("log", "--actor", "agent", "--action", "x",
-                              "--file", "sub", cwd=self.workdir)
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "x",
+                              "--file", "sub", cwd=self.workdir, timeout=BOUND)
 
         self.assert_refused(result)
 
     def test_run_refuses_a_folder_after_the_command_ran(self):
-        result = run_receipts("run", "--actor", "agent", "--file", "sub",
+        result = run(LOXODONTA, "run", "--actor", "agent", "--file", "sub",
                               "--", sys.executable, "-c", "pass",
-                              cwd=self.workdir)
+                              cwd=self.workdir, timeout=BOUND)
 
         self.assert_refused(result)
         self.assertIn("receipt not written for", result.stderr)
@@ -895,12 +857,12 @@ class ReferencedFolderTest(unittest.TestCase):
     def test_verify_files_names_a_reference_that_became_a_folder(self):
         later = self.workdir / "later"
         later.write_text("hi", encoding="utf-8")
-        run_receipts("log", "--actor", "agent", "--action", "x",
-                     "--file", "later", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "x",
+                     "--file", "later", cwd=self.workdir, timeout=BOUND)
         later.unlink()
         later.mkdir()
 
-        result = run_receipts("verify", "--files", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--files", cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("MISSING (not a readable file here): later",
@@ -916,13 +878,8 @@ class BoundedHook:
         env = isolated_env(self.home, CLAUDE_PROJECT_DIR=str(self.project),
                            LOXODONTA_HOME=str(self.store),
                            PYTHONIOENCODING="utf-8")
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook", *extra],
-            cwd=self.project, input=json.dumps(payload).encode("utf-8"),
-            capture_output=True, env=env, timeout=BOUND)
-        result.stdout = result.stdout.decode("utf-8", "replace")
-        result.stderr = result.stderr.decode("utf-8", "replace")
-        return result
+        return run(LOXODONTA, "hook", *extra, cwd=self.project,
+                   stdin=json.dumps(payload), env=env, timeout=BOUND)
 
 
 class SessionEndNotAFileTest(BoundedHook, PublishBase):
@@ -1017,10 +974,8 @@ class ScannedNotAFileTest(unittest.TestCase):
     (#374)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.root = temp_folder(self)
+        self.env = isolated_env(temp_folder(self))
 
     def scan(self, *extra):
         result = run_scan(self.root, *extra, env=self.env)
@@ -1057,11 +1012,8 @@ class ScannedNotAFileTest(unittest.TestCase):
         for suffix in SUFFIXES:
             os.mkfifo(str(log) + suffix)
 
-        result = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "supervisor.py"), "scan",
-             "--root", str(self.root), "--json"],
-            capture_output=True, encoding="utf-8", timeout=BOUND,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        result = run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                     timeout=BOUND, env=self.env)
 
         self.assertNotIn("Traceback", result.stderr)
         (chain,) = chains_by_session(json.loads(result.stdout))[
@@ -1075,11 +1027,8 @@ class ScannedNotAFileTest(unittest.TestCase):
         make_chain(self.root / "beta" / "receipts", "sess-bbbb")
 
         # Bounded: a scan that waited on the pipe would fail here.
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan",
-             "--root", str(self.root), "--json"],
-            capture_output=True, encoding="utf-8", timeout=BOUND,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        result = run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                     timeout=BOUND, env=self.env)
 
         self.assertNotIn("Traceback", result.stderr)
         # No verdict, verify's refusal as the evidence, and the refused
@@ -1144,12 +1093,10 @@ class ExportedPipeTest(ExportBase):
         sidecar = self.log.with_name(self.log.name + ".anchors.jsonl")
         os.mkfifo(sidecar)
 
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "export",
-             "--witness", str(self.witness), "--raw"],
-            input=b"yes\n", capture_output=True, cwd=str(self.work),
-            env={**self.env, "PYTHONIOENCODING": "utf-8"}, timeout=BOUND)
-        err = result.stderr.decode("utf-8", "replace")
+        result = run(SUPERVISOR, "export", "--witness", str(self.witness),
+                     "--raw", stdin="yes\n", cwd=str(self.work),
+                     env=self.env, timeout=BOUND)
+        err = result.stderr
 
         self.assertEqual(result.returncode, 0, err)
         self.assertNotIn("Traceback", err)
@@ -1162,29 +1109,26 @@ class ExportedPipeTest(ExportBase):
                              self.log.read_bytes())
 
 
-class TranscriptNotAFileTest(unittest.TestCase):
+class TranscriptNotAFileTest(StoreCase):
     """`verify --transcript` with a folder, a pipe or a device where the
     transcript belongs (#386): named, never waited on and never read,
     and a note like a missing transcript, so the verdict is the chain's
     (SPEC section 6)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        super().setUp()
         self.transcript = self.workdir / "transcript.jsonl"
         page = b"page one\n"
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
-                     cwd=self.workdir)
-        run_receipts("log", "--actor", "receipts", "--action",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir, timeout=BOUND)
+        run(LOXODONTA, "log", "--actor", "receipts", "--action",
                      f"transcript-commitment: bytes={len(page)} "
                      f"sha256={hashlib.sha256(page).hexdigest()}",
-                     cwd=self.workdir)
+                     cwd=self.workdir, timeout=BOUND)
 
     def assert_named(self, why):
-        result = run_receipts("verify", "--transcript", str(self.transcript),
-                              cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--transcript", str(self.transcript),
+                              cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -1219,9 +1163,7 @@ class ProjectRecordNotAFileTest(unittest.TestCase):
     cannot follow (SPEC section 3). Never waited on."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         project = self.workdir / "theproject"
         project.mkdir()
         (project / "report.md").write_bytes(b"v1\n")
@@ -1231,15 +1173,15 @@ class ProjectRecordNotAFileTest(unittest.TestCase):
         self.record.write_text(json.dumps({"path": project.as_posix()}),
                                encoding="utf-8")
         self.log = drawer / "receipts-sess-rec.jsonl"
-        run_receipts("init", "--log", str(self.log), cwd=self.workdir)
+        run(LOXODONTA, "init", "--log", str(self.log), cwd=self.workdir, timeout=BOUND)
         logged = self.log_report()
         self.assertEqual(logged.returncode, 0, logged.stderr)
         self.record.unlink()
 
     def log_report(self):
-        return run_receipts("log", "--log", str(self.log), "--actor", "agent",
+        return run(LOXODONTA, "log", "--log", str(self.log), "--actor", "agent",
                             "--action", "wrote report", "--file", "report.md",
-                            cwd=self.workdir)
+                            cwd=self.workdir, timeout=BOUND)
 
     def named(self, why):
         return f"{self.record} cannot be read as a project record: {why}"
@@ -1258,8 +1200,8 @@ class ProjectRecordNotAFileTest(unittest.TestCase):
     def assert_verify_named(self, make, why):
         make(self.record)
 
-        result = run_receipts("verify", "--log", str(self.log), "--files",
-                              cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--log", str(self.log), "--files",
+                              cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -1355,9 +1297,7 @@ class WorktreeNotAFileTest(unittest.TestCase):
     itself (SPEC section 8), the receipt is written, and neither waits."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
+        base = temp_folder(self)
         self.project = base / "worktree"
         self.project.mkdir()
         self.gitdir = base / "main" / ".git" / "worktrees" / "worktree"
@@ -1376,14 +1316,10 @@ class WorktreeNotAFileTest(unittest.TestCase):
                    "tool_name": "Bash", "tool_input": {"command": "ls"},
                    "tool_response": {}}
 
-        hooked = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook"], cwd=str(self.project),
-            input=json.dumps(payload).encode("utf-8"), capture_output=True,
-            env=self.env, timeout=BOUND)
-        digest = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "digest"], cwd=str(self.project),
-            capture_output=True, encoding="utf-8", env=self.env,
-            timeout=BOUND)
+        hooked = run(LOXODONTA, "hook", cwd=str(self.project),
+                     stdin=json.dumps(payload), env=self.env, timeout=BOUND)
+        digest = run(SUPERVISOR, "digest", cwd=str(self.project),
+                     env=self.env, timeout=BOUND)
 
         self.assertEqual(hooked.returncode, 0, hooked.stderr)
         (drawer,) = (self.store / "receipts").iterdir()
@@ -1414,9 +1350,7 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
     writer put there is left as it was. Every scan is bounded."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
+        base = temp_folder(self)
         self.home = base / "storehome"
         self.witness = base / "witness"
         install_witness_hook(self.witness)
@@ -1431,11 +1365,8 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
 
     def scan(self, repo="alpha", expect=0):
         # Bounded: a scan that waited on a pipe would fail here.
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--json",
-             "--witness", str(self.witness)],
-            capture_output=True, encoding="utf-8", timeout=BOUND,
-            env=self.env)
+        result = run(SUPERVISOR, "scan", "--json", "--witness",
+                     str(self.witness), timeout=BOUND, env=self.env)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(result.returncode, expect,
                          result.stdout + result.stderr)
@@ -1621,9 +1552,7 @@ class AdoptedMarkerNotAFileTest(unittest.TestCase):
     on."""
 
     def assert_left(self, make, why):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        base = Path(tmp.name).resolve()
+        base = temp_folder(self)
         root = base / "repos"
         receipts = root / "alpha" / "receipts"
         make_chain(receipts, "sess-aaaa")
@@ -1632,10 +1561,8 @@ class AdoptedMarkerNotAFileTest(unittest.TestCase):
         before = kind(marker)
         home = base / "home"
 
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "adopt", "--root", str(root)],
-            capture_output=True, encoding="utf-8", timeout=BOUND,
-            env={**isolated_env(home), "PYTHONIOENCODING": "utf-8"})
+        result = run(SUPERVISOR, "adopt", "--root", str(root),
+                     timeout=BOUND, env=isolated_env(home))
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -1665,9 +1592,7 @@ class InstalledNotAFileTest(unittest.TestCase):
     Every run is bounded."""
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.home = Path(tmp.name).resolve()
+        self.home = temp_folder(self)
         self.env = {**isolated_env(self.home), "PYTHONIOENCODING": "utf-8"}
         self.marker = self.home / ".loxodonta" / "coverage.json"
 
@@ -1681,9 +1606,7 @@ class InstalledNotAFileTest(unittest.TestCase):
         make(path)
         before = kind(path)
         try:
-            result = subprocess.run([sys.executable, str(LOXODONTA), *verb],
-                                    capture_output=True, encoding="utf-8",
-                                    env=self.env, timeout=BOUND)
+            result = run(LOXODONTA, *verb, env=self.env, timeout=BOUND)
 
             self.assertEqual(result.returncode, 66,
                              result.stdout + result.stderr)
@@ -1703,10 +1626,7 @@ class InstalledNotAFileTest(unittest.TestCase):
                 (("install-hook",), ".claude/settings.json"),
                 (("install-hook", "--codex"), ".codex/hooks.json")):
             with self.subTest(verb=" ".join(verb)):
-                result = subprocess.run(
-                    [sys.executable, str(LOXODONTA), *verb],
-                    capture_output=True, encoding="utf-8", env=self.env,
-                    timeout=BOUND)
+                result = run(LOXODONTA, *verb, env=self.env, timeout=BOUND)
 
                 self.assertEqual(result.returncode, 0,
                                  result.stdout + result.stderr)
@@ -1757,9 +1677,7 @@ class ServedMarkerNotAFileTest(unittest.TestCase):
     starts, finds no profile on record, and is never held (#405)."""
 
     def assert_started(self, make):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        home = Path(tmp.name).resolve()
+        home = temp_folder(self)
         (home / ".loxodonta").mkdir()
         make(home / ".loxodonta" / "coverage.json")
         proc = subprocess.Popen(
@@ -1810,13 +1728,10 @@ class ExportedNameNotAFileTest(ExportBase):
             make(path)
         before = [kind(path) for path in planted]
         try:
-            result = subprocess.run(
-                [sys.executable, str(SUPERVISOR), "export",
-                 "--witness", str(self.witness), *args],
-                input=b"yes\n", capture_output=True, cwd=str(self.work),
-                env={**self.env, "PYTHONIOENCODING": "utf-8"},
-                timeout=BOUND)
-            err = result.stderr.decode("utf-8", "replace")
+            result = run(SUPERVISOR, "export", "--witness",
+                         str(self.witness), *args, stdin="yes\n",
+                         cwd=str(self.work), env=self.env, timeout=BOUND)
+            err = result.stderr
 
             self.assertEqual(result.returncode, 73, err)
             self.assertNotIn("Traceback", err)
@@ -1850,12 +1765,9 @@ class ExportedNameNotAFileTest(ExportBase):
         recorder names one (`unwritable_log`): never a traceback."""
         os.chmod(self.work, 0o555)
         self.addCleanup(os.chmod, self.work, 0o755)
-        result = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "export",
-             "--witness", str(self.witness)],
-            capture_output=True, cwd=str(self.work),
-            env={**self.env, "PYTHONIOENCODING": "utf-8"}, timeout=BOUND)
-        err = result.stderr.decode("utf-8", "replace")
+        result = run(SUPERVISOR, "export", "--witness", str(self.witness),
+                     cwd=str(self.work), env=self.env, timeout=BOUND)
+        err = result.stderr
 
         self.assertEqual(result.returncode, 73, err)
         self.assertNotIn("Traceback", err)
@@ -1882,22 +1794,19 @@ def misdirected(sidecar, nonce, away):
     return target
 
 
-class CalendarSchemeTest(unittest.TestCase):
+class CalendarSchemeTest(StoreCase):
     """`anchor --upgrade` with a pending proof whose row names a `file:`
     calendar (#414): the row is named as one this recorder cannot ask
     and is never fetched, so a file at the path it chose is never read
     and a pipe there is never waited on. Nothing is written, exit 0."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
-                     cwd=self.workdir)
+        super().setUp()
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
+                     cwd=self.workdir, timeout=BOUND)
         calendar = start_calendar(self)
-        anchored = run_receipts("anchor", "--calendar", calendar.url,
-                                cwd=self.workdir)
+        anchored = run(LOXODONTA, "anchor", "--calendar", calendar.url,
+                                cwd=self.workdir, timeout=BOUND)
         self.assertEqual(anchored.returncode, 0, anchored.stderr)
         self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
         self.target = misdirected(self.sidecar, calendar.nonce,
@@ -1907,7 +1816,7 @@ class CalendarSchemeTest(unittest.TestCase):
         make(self.target)
         before = (kind(self.target), self.sidecar.read_bytes())
 
-        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)

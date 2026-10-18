@@ -33,12 +33,10 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_receiver`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import clean_env
+from support import LOXODONTA, REPO_ROOT, RECEIVER, clean_env  # noqa: E402
+
 from test_supervisor import unreadable_depth
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-RECEIVER = REPO_ROOT / "receiver.py"
-LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 PUBLISH_TO = re.compile(r"^publish to (https?://\S+)$", re.M)
 

@@ -23,6 +23,8 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_package_sign`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import LOXODONTA, SUPERVISOR, run  # noqa: E402
+
 from test_package import LOXODONTA, SUPERVISOR, run
 from test_package_anchor import SESSION, SIDECAR, AnchoredStoreCase
 
