@@ -111,6 +111,31 @@ def raw_request(url, request_bytes):
             answered += chunk
 
 
+def body_after_answer(url, opening, body):
+    """A request whose body is sent only once the receiver has answered
+    its headers, the order a loaded runner can deal by chance (#450):
+    the opening, then a wait until the answer's first byte is there
+    (peeked, not taken), then the body, then every byte that came back.
+    A body that reaches a socket already closed is answered with a
+    reset, and the reset takes the unread answer with it, so a receiver
+    that closes without reading a refused body raises here. The pause
+    lets such a receiver finish closing first; one that reads the body
+    before it closes answers the same whatever the pause."""
+    parts = urllib.parse.urlsplit(url)
+    with socket.create_connection((parts.hostname, parts.port),
+                                  timeout=30) as sock:
+        sock.sendall(opening)
+        sock.recv(1, socket.MSG_PEEK)
+        time.sleep(0.5)
+        sock.sendall(body)
+        answered = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return answered
+            answered += chunk
+
+
 class ReceiverFixture(unittest.TestCase):
     """A private data directory and a real `receiver.py serve` on a free
     port, narrowed to 127.0.0.1 unless a test says otherwise."""
@@ -243,6 +268,35 @@ class RefusalTest(ReceiverFixture):
              "Content-Type: application/json\r\n"
              "Content-Length: 1000000000000\r\n\r\n" % self.token).encode())
         self.assertTrue(answered.startswith(b"HTTP/1.0 413 "), answered)
+        self.assertEqual(self.stored(), ["token"])
+
+    def test_a_refusal_judged_on_the_headers_reaches_a_sender_still_sending(self):
+        # #450: each of these is answered before the body is read. The
+        # body arrives after the answer, and the answer must still be
+        # what the sender reads, not a reset that took it.
+        body = b'{"n":0,"entry_hash":"x"}\n' * 40
+        refusals = (
+            ("POST", "/elsewhere", "application/json", {}, 404),
+            ("POST", "/" + self.token, "text/plain", {}, 415),
+            ("POST", "/" + self.token, "application/json",
+             {"Content-Encoding": "gzip"}, 415),
+            ("POST", "/" + self.token, NDJSON,
+             {"X-Loxodonta-Chain": "receipts-x.txt"}, 400),
+            ("POST", f"/{self.token}/v1/logs", "application/x-protobuf", {},
+             415),
+            ("PUT", "/" + self.token, "application/json", {}, 405),
+        )
+        for verb, path, kind, extra, status in refusals:
+            with self.subTest(verb=verb, kind=kind, extra=extra):
+                headers = {"Host": "receiver", "Content-Type": kind,
+                           "Content-Length": str(len(body)), **extra}
+                opening = (f"{verb} {path} HTTP/1.0\r\n"
+                           + "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+                           + "\r\n").encode("ascii")
+                answered = body_after_answer(self.proc.url, opening, body)
+                self.assertTrue(
+                    answered.startswith(f"HTTP/1.0 {status} ".encode()),
+                    answered)
         self.assertEqual(self.stored(), ["token"])
 
     def test_no_route_returns_what_the_receiver_holds(self):
@@ -1160,12 +1214,13 @@ class TlsTest(ReceiverFixture):
             post("http" + proc.url[len("https"):], head, "application/json")
 
     def test_an_idle_connection_does_not_hold_the_door(self):
-        # A stranger that connects and sends nothing: the handshake it
-        # never starts must be bounded by the door's timeout, or one idle
-        # socket stops every honest sender behind it for as long as it
-        # likes. The timeout is shortened through the suite's handle.
-        proc = self.start("--cert", str(self.cert), "--key", str(self.key),
-                          env={"RECEIVER_TIMEOUT_SECONDS": "5"})
+        # A stranger that connects and sends nothing: an honest sender
+        # behind it is served at once, not when the stranger's handshake
+        # times out. The door's own 30-second timeout, not a shortened
+        # one: an honest sender on a loaded runner can pause longer than
+        # a shortened timeout and be dropped itself (#450), and a door
+        # that waited on the stranger would take the whole 30 seconds.
+        proc = self.start("--cert", str(self.cert), "--key", str(self.key))
         parts = urllib.parse.urlsplit(proc.url)
         idle = socket.create_connection((parts.hostname, parts.port))
         self.addCleanup(idle.close)
@@ -1175,10 +1230,36 @@ class TlsTest(ReceiverFixture):
             proc.url, data=head, method="POST",
             headers={"Content-Type": "application/json"})
         started = time.monotonic()
-        with self.trusting_opener().open(request, timeout=30) as response:
+        with self.trusting_opener().open(request, timeout=60) as response:
             self.assertEqual(response.status, 200)
-        self.assertLess(time.monotonic() - started, 15)
+        # Under the 30-second wait a door that held for the stranger
+        # would take, with room for a stall on a loaded runner.
+        self.assertLess(time.monotonic() - started, 25)
         self.assertIn("heads.jsonl", self.stored())
+
+    def test_an_idle_connection_is_dropped_at_the_timeout(self):
+        # The handshake a stranger never starts is bounded by the door's
+        # timeout, shortened here through the suite's handle; no honest
+        # sender shares this receiver, so nothing else rides on the
+        # short timer. A reset is the receiver's close too. The test's
+        # wait sits between the 5-second timeout and the 60-second
+        # deadline, so only the timeout can end it in time; and the
+        # close must not come before the timeout, or a door that drops
+        # every connection at once would pass.
+        proc = self.start("--cert", str(self.cert), "--key", str(self.key),
+                          env={"RECEIVER_TIMEOUT_SECONDS": "5"})
+        parts = urllib.parse.urlsplit(proc.url)
+        started = time.monotonic()
+        idle = socket.create_connection((parts.hostname, parts.port),
+                                        timeout=30)
+        self.addCleanup(idle.close)
+
+        try:
+            heard = idle.recv(1)
+        except (ConnectionResetError, ConnectionAbortedError):
+            heard = b""
+        self.assertEqual(heard, b"")
+        self.assertGreaterEqual(time.monotonic() - started, 4)
 
 
 if __name__ == "__main__":

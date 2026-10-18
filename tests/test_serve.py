@@ -1672,6 +1672,42 @@ class ReceiverServeTest(ServerFixture):
         self.assertTrue(os.path.isfile(shelf / "baseline.json"))
         self.assertFalse(os.path.exists(self.root / ".supervisor-daybook.json"))
 
+    def test_the_startup_line_says_no_keeper_runs_at_the_far_end(self):
+        # #487 item 12.
+        self.assertIsNotNone(self.serve_receiver())
+
+        keeper = read_line_within(self.proc.stdout)
+
+        self.assertEqual(keeper.strip(), (
+            "keeper: none over a receiver's folder; nothing is anchored, "
+            "sent or appended from the far end (ADR-0041)"))
+
+    def test_the_recall_routes_read_the_receivers_copies(self):
+        # #487 item 10: the census counts the copies, and so must the
+        # routes that read them; empty beside a census of one reads as
+        # a bug. The folder stands for the repo.
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, recall = self.get("/api/recall")
+        _, _, activity = self.get("/api/activity")
+        _, _, search = self.get("/api/search?q=git+status")
+        status, _, shape = self.get(
+            "/api/shape?" + urllib.parse.urlencode(
+                {"repo": "receiver", "session": FIXTURE_SESSION}))
+
+        (story,) = json.loads(recall)["sessions"]
+        self.assertEqual((story["repo"], story["session"], story["entries"]),
+                         ("receiver", FIXTURE_SESSION, 5))
+        self.assertEqual(story["paths"], [f"receipts-{FIXTURE_SESSION}.jsonl"])
+        activity = json.loads(activity)
+        self.assertEqual(sum(activity["activity"]["receiver"].values()), 4)
+        self.assertEqual(activity["tools"], {"Bash": 4})
+        (hit,) = json.loads(search)["hits"]
+        self.assertEqual((hit["repo"], hit["session"], hit["action"]),
+                         ("receiver", FIXTURE_SESSION, "Bash: git status"))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(shape)["receipts"], 4)
+
     def test_receiver_with_root_is_a_usage_error(self):
         self.assertIsNone(self.serve_receiver("--root", str(self.root)))
 
