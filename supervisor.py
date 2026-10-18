@@ -1114,7 +1114,7 @@ def marker_harnesses():
         # In the writer's reach: a folder or a pipe there reads as no
         # marker, never waited on, and the scan names it (#405).
         data = json.loads(read_whole(Path(store_home()) / COVERAGE_NAME))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # too deep, #463
         return {}
     declared = {}
     # Sorted is stable, so two epochs stamped the same second keep the
@@ -2329,7 +2329,7 @@ def read_settings(settings_file):
         # recorder wired there.
         settings = json.loads(read_whole(settings_file),
                               parse_constant=refuse)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # too deep, #463
         return None
     return settings if isinstance(settings, dict) else None
 
@@ -2843,7 +2843,7 @@ def coverage_epochs(harness="claude-code"):
         # In the writer's reach: a folder or a pipe there reads as no
         # marker, never waited on, and the scan names it (#405).
         data = json.loads(read_whole(Path(store_home()) / COVERAGE_NAME))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # too deep, #463
         return []
     epochs = []
     for epoch in (data.get("epochs") or []):
@@ -6109,7 +6109,8 @@ def payload_cwd():
     is the wire."""
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError,
+            RecursionError):  # too deep, #487 item 16
         return None
     cwd = payload.get("cwd") if isinstance(payload, dict) else None
     return cwd if isinstance(cwd, str) and os.path.isdir(cwd) else None
