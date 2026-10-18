@@ -4337,6 +4337,282 @@ def take_census(look, remembered):
     return census, unfiled, closed
 
 
+class ChainReading:
+    """What one chain's turn in a look found, for `scan_root` to fold.
+    What it buys (#535): a chain's turn changes nothing of the look's
+    own, so the fold in `scan_root` is the one place a chain reaches the
+    report, the memory, the exit and the day book.
+
+    `row` is the report's row for the chain; `remembered` the memory's
+    row for it, None for a chain with no head to remember; `alarm` its
+    standing alarm as the report says it, or None, and `fresh` whether
+    this look found that alarm or its change moved; `awakened` its
+    reawakening, or None; `exit` what it adds to the scan's exit, 0 when
+    stood down; `broken` whether the day book counts it as damage;
+    `facts` what it adds to its family (`fold_facts`); `moved` the
+    keepers' attempt times its turn set."""
+
+    def __init__(self, row, remembered, alarm, fresh, awakened, exit,
+                 broken, facts, moved):
+        self.row, self.remembered = row, remembered
+        self.alarm, self.fresh, self.awakened = alarm, fresh, awakened
+        self.exit, self.broken = exit, broken
+        self.facts, self.moved = facts, moved
+
+
+def read_chain(look, place, memory, now, stamp):
+    """One chain's turn in a look, as a ChainReading: the keepers' turn,
+    the verdict and the row, the tripwire and the lifecycle clock, and
+    the facts it adds to its family. `place` is a census row."""
+    repo, session, relpath, log = place
+    entries = read_entries(log)
+    moved, said = keepers_turn(look, place, entries, memory, now, stamp)
+    row, verdict, stood_down = chain_row(look, log, entries, said)
+    remembered, change, fresh, woke = baseline_row(
+        memory, relpath, entries, verdict, stood_down, now, stamp)
+    alarm = awakened = None
+    if change:
+        newest = newest_head(entries)
+        alarm = alarm_event(repo, session, relpath, remembered,
+                            {"n": newest[0], "head": newest[1]} if newest
+                            else {"n": None, "head": None})
+    if woke:
+        awakened = {"repo": repo, "session": session, "log": relpath,
+                    "still_seconds": woke,
+                    "words": (f"grew after {woke // 86400}d of observed "
+                              "stillness — several quiet days, or someone "
+                              "riding an old session; yours to tell "
+                              "apart")}
+    # verify's TRANSCRIPT-DIVERGED is exit 5 in its own contract (SPEC
+    # §6 v0.1.2); scan's 5 already means the baseline tripwire, so the
+    # fold renames it rather than letting one number tell two stories.
+    code = 0 if stood_down else 7 if row["exit"] == 5 else row["exit"]
+    grew = (remembered or {}).get("last_grew")
+    return ChainReading(
+        row=row, remembered=remembered, alarm=alarm, fresh=fresh,
+        awakened=awakened, exit=code,
+        broken=not stood_down and verdict == "BROKEN",
+        facts=family_facts(look, relpath, log, entries, grew), moved=moved)
+
+
+def keepers_turn(look, place, entries, memory, now, stamp):
+    """The anchor and publish keepers' turn on one chain, as (moved,
+    said): the attempt times this turn set, by the memory's key, and
+    what each keeper says on the chain's row, under `anchors` and
+    `left`. One throttle per keeper: an anchor attempt never delays the
+    publish keeper's turn, nor the other way round."""
+    _, _, relpath, log = place
+    moved, said = {}, {"anchors": {}, "left": {}}
+    if not look.keeping(memory["blind"]):
+        return moved, said
+    keeper = memory["keeper"]
+    attempted, note, failed = keep_anchors(
+        log, keeper.get(relpath), now, entries, look.anchor_every,
+        look.calendars, look.authority)
+    if attempted:
+        moved[relpath] = stamp
+    if note:
+        said["anchors"]["note"] = note
+    if failed:
+        said["anchors"]["failed"] = True
+    posted, note, failed = keep_published(
+        log, keeper.get("publish:" + relpath), now, entries,
+        look.publish_every, look.publish_url, look.publish_chain)
+    if posted:
+        moved["publish:" + relpath] = stamp
+    if note:
+        said["left"]["note"] = note
+    if failed:
+        said["left"]["failed"] = True
+    return moved, said
+
+
+def chain_row(look, log, entries, said):
+    """The report's row for one chain, as (row, verdict, stood_down):
+    verify's verdict, and whether the stand-down for a torn tail that
+    recording already moved past applies (ADR-0004), beside the facts
+    the sidecars hold and what the keepers said."""
+    verdict, code, printed, detail = verify(log)
+    exit_code = scan_exit(code)
+    stood_down = exit_code != 0 and superseded(log, printed)
+    anchors = assess_anchors(printed, entries)
+    row = {
+        "log": log.as_posix(),
+        # Stranded in a worktree: still this repo's history, but pruning
+        # the worktree deletes it — worth saying, not worth hiding. A
+        # legacy --root's reading (`find_chains`): a store drawer is
+        # named by its project's slug and a receiver files flat, so there
+        # only a folder planted under the name `.claude` sets it.
+        "worktree": ".claude" in log.relative_to(look.root).parts,
+        # Parsed entries, not raw lines: a torn line is damage, not an
+        # entry (GLOSSARY), and verify names the damage.
+        "entries": len(entries),
+        "verdict": verdict,
+        "exit": exit_code,
+        # VALID says the chain agrees with itself; ANCHORED says it
+        # agrees with a Bitcoin block. Different claims, kept apart,
+        # and only verify's own ANCHORED line earns this (#349).
+        "anchored": bool(anchors["anchored"]),
+        "superseded": stood_down,
+        "detail": detail,
+        "anchors": anchors,
+        # When a head last left the machine, published or anchored
+        # (ADR-0025): staleness evidence beside the anchor panel,
+        # aged by the reader, never raising the exit.
+        "left": last_departure(log),
+        # The last session-end step that failed, from the recorder's
+        # own attempt rows (#240): step, time, outcome, or None.
+        "last_failed": last_failed(log),
+        # Whether the current head has a head row in the publish memo
+        # (ADR-0031's published head): the flat reading the metrics
+        # route counts, None when the chain has no head at all.
+        # `left` above answers a different question, the newest door
+        # a head went out of, and keeps its shape.
+        "head_published": head_published(log, entries),
+    }
+    row["anchors"].update(said["anchors"])
+    row["left"].update(said["left"])
+    return row, verdict, stood_down
+
+
+def baseline_row(memory, relpath, entries, verdict, stood_down, now, stamp):
+    """What the memory keeps of one chain, as (row, change, fresh, woke):
+    the row, None for a chain with no head to remember; the change the
+    tripwire found, or None when appends explain everything; whether
+    this look found that alarm or its change moved; and the seconds of
+    dormant stillness a reawakening ends, or None. One row shape: the
+    head and number, the stillness clock when it has started, the
+    standing alarm when there is one, and this look's verdict."""
+    remembered = memory["chains"]
+    known = remembered.get(relpath) or {}
+    change = diff_baseline(remembered, relpath, entries)
+    newest = newest_head(entries)
+    fresh, woke = False, None
+    if change:
+        # The baseline keeps what it remembered (ADR-0039): the head and
+        # number stay, so every look says so until the chain holds them
+        # again or `acknowledge` accepts what is found. The stillness
+        # clock keeps its time, since a change is no growth.
+        row, fresh = standing(known, change, stamp)
+    elif newest:
+        # Bookkeeping-only growth (the cadence or the tail keeper
+        # writing commitments) is the recorder speaking, not the session
+        # acting: it neither moves the clock (#537) nor wakes anything.
+        acted = any(isinstance(e.get("n"), int)
+                    and e["n"] > (known.get("n") or 0)
+                    and e.get("actor") != "receipts"
+                    for e in entries)
+        # The lifecycle's clock (ADR-0018): the reader's own diary of
+        # when it last saw the session move. A head that did not move,
+        # or moved by bookkeeping alone, carries its stamp forward; a
+        # session that acted, or a baseline that predates the field,
+        # stamps this look, so stillness only exists once it has
+        # actually been observed. A blind look has observed nothing and
+        # stamps nothing.
+        last_grew = (known.get("last_grew")
+                     if known.get("last_grew")
+                     and (known.get("head") == newest[1] or not acted)
+                     else None if memory["blind"] else stamp)
+        row = {"n": newest[0], "head": newest[1]}
+        if last_grew:
+            row["last_grew"] = last_grew
+        # The reawakening (ADR-0018): clean growth after dormant-tier
+        # observed stillness — one-shot, spoken in the investigate
+        # voice, never the exit. Rewrites belong to the tripwire.
+        tier = lifecycle_tier(known.get("last_grew"), now)
+        if (known.get("head") and newest[1] != known.get("head")
+                and tier and tier[0] == "dormant" and acted):
+            woke = tier[1]
+    else:
+        return None, None, False, None
+    # For the digest's last-scan line (Stage E): a remembered verdict is
+    # testimony like the rest of this file, never the verdict itself; a
+    # stood-down torn tail is remembered so the digest can cite it as
+    # the quiet evidence it is, not fresh damage.
+    row.update(verdict=verdict, superseded=stood_down)
+    return row, change, fresh, woke
+
+
+def family_facts(look, relpath, log, entries, grew):
+    """What one chain adds to its family, one session's sibling chains
+    in one drawer, for `fold_facts`. `grew` is the chain's stillness
+    clock as the memory now keeps it: the remembered one under a
+    standing alarm (ADR-0039), None on a blind look or for a row from
+    before the clock."""
+    # The session's receipt tally for the completeness watch: the whole
+    # sibling family counts, minus the recorder's own voice — genesis
+    # and transcript commitments carry actor "receipts" and are owed by
+    # no tool event, so counting them would manufacture SURPLUS on every
+    # committed session (ADR-0017).
+    logged = [e for e in entries if e.get("actor") != "receipts"]
+    stamps = [e["ts"] for e in logged if isinstance(e.get("ts"), str)]
+    facts = {"receipts": len(logged),
+             "last": max(stamps) if stamps else None, "moments": []}
+    # And the same entries as (when, tool) moments for the consumption
+    # watch — a stamp without a zone is read as UTC, so one odd writer
+    # can never make two timestamps incomparable.
+    for e in logged:
+        when = parse_when(e.get("ts"))
+        if when is not None and when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        facts["moments"].append((when, tool_of(e.get("action"))))
+    # ADR-0017: a chain holding transcript commitments earns the
+    # operator's judge command once the watch pairs its transcript.
+    if any(e.get("actor") == "receipts"
+           and str(e.get("action", "")).startswith("transcript-commitment:")
+           for e in entries):
+        facts["committed_log"] = (look.root / relpath).as_posix()
+    # The lifecycle facts (ADR-0018): the chain's observed movement, and
+    # whether it ends in a commitment.
+    if entries:
+        if grew:
+            facts["last_grew"] = grew
+        facts["tail_committed"] = (
+            entries[-1].get("actor") == "receipts"
+            and str(entries[-1].get("action", "")).startswith(
+                "transcript-commitment:"))
+        facts["home"] = (look.root / relpath).parent.as_posix()
+    if look.receiver:
+        # What the reading over a receiver's folder asks of a copy
+        # (ADR-0041): when it last grew, by its own mtime, for the
+        # settle clock; its newest entry's time, bookkeeping included,
+        # for the memory edge; and the hook's note that the second
+        # record was cut, quoted on the session's row.
+        try:
+            facts["touched"] = os.stat(log).st_mtime
+        except OSError:
+            pass
+        stamped = [e["ts"] for e in entries if isinstance(e.get("ts"), str)]
+        if stamped:
+            facts["newest_ts"] = max(stamped)
+        for e in entries:
+            if e.get("actor") == "receipts" and str(
+                    e.get("action", "")).startswith("second-record-cut:"):
+                facts["cut"] = e["action"]
+                break
+    return facts
+
+
+def fold_facts(family, facts):
+    """One chain's facts into its family's: the counts and the moments
+    add up, the newest time stands, the first chain holding commitments
+    is the one the judge command names, and the tail and home are the
+    last chain's, since siblings sort after their parent and the chain
+    met last is the one still being written to (ADR-0018)."""
+    family["receipts"] += facts["receipts"]
+    family["moments"] += facts["moments"]
+    if facts["last"]:
+        family["last"] = max(family["last"] or "", facts["last"])
+    for key in ("last_grew", "touched", "newest_ts"):
+        if key in facts and (key not in family or facts[key] > family[key]):
+            family[key] = facts[key]
+    if "committed_log" in facts:
+        family.setdefault("committed_log", facts["committed_log"])
+    for key in ("tail_committed", "home", "cut"):
+        if key in facts:
+            family[key] = facts[key]
+
+
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
               publish_every=None, publish_url=None, publish_chain=None,
               store=False, tick=True, show_before_memory=False,
@@ -4373,7 +4649,6 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     calibration, sessionend = memory["calibration"], memory["sessionend"]
     judging = memory["judging"]
     note, blind = memory["note"], memory["blind"]
-    keeping = look.keeping(blind)
     identity = look.identity
     events = []
     fresh = 0  # alarms this look found, or whose change moved
@@ -4384,211 +4659,25 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     repos = {}
     worst = 0
     damaged = 0
-    for repo, session, relpath, log in census:
-        entries = read_entries(log)
-        # `tick=False` is a reading: both keepers stay quiet, so a reader
-        # that copies a chain (package) appends nothing to it and sends
-        # nothing off the machine.
-        attempted, keeper_note, anchor_failed = (
-            keep_anchors(log, keeper.get(relpath), now, entries,
-                         anchor_every, calendars, authority)
-            if keeping else (False, None, False))
-        posted, publish_note, publish_failed = (
-            keep_published(log, keeper.get("publish:" + relpath), now, entries,
-                           publish_every, publish_url, publish_chain)
-            if keeping else (False, None, False))
-        # One throttle per keeper: an anchor attempt never delays the
-        # publish keeper's turn, nor the other way round.
-        if attempted:
-            keeper[relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        if posted:
-            keeper["publish:" + relpath] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        verdict, code, printed, detail = verify(log)
-        exit_code = scan_exit(code)
-        # Both readers of verify's lines take what it printed on stdout,
-        # never the stderr `detail` adds to a refusal (#504).
-        stood_down = exit_code != 0 and superseded(log, printed)
-        anchors = assess_anchors(printed, entries)
-        chain = {
-            "log": log.as_posix(),
-            # Stranded in a worktree: still this repo's history, but pruning
-            # the worktree deletes it — worth saying, not worth hiding.
-            "worktree": ".claude" in log.relative_to(root).parts,
-            # Parsed entries, not raw lines: a torn line is damage, not an
-            # entry (GLOSSARY), and verify names the damage.
-            "entries": len(entries),
-            "verdict": verdict,
-            "exit": exit_code,
-            # VALID says the chain agrees with itself; ANCHORED says it
-            # agrees with a Bitcoin block. Different claims, kept apart,
-            # and only verify's own ANCHORED line earns this (#349).
-            "anchored": bool(anchors["anchored"]),
-            "superseded": stood_down,
-            "detail": detail,
-            "anchors": anchors,
-            # When a head last left the machine, published or anchored
-            # (ADR-0025): staleness evidence beside the anchor panel,
-            # aged by the reader, never raising the exit.
-            "left": last_departure(log),
-            # The last session-end step that failed, from the recorder's
-            # own attempt rows (#240): step, time, outcome, or None.
-            "last_failed": last_failed(log),
-            # Whether the current head has a head row in the publish memo
-            # (ADR-0031's published head): the flat reading the metrics
-            # route counts, None when the chain has no head at all.
-            # `left` above answers a different question, the newest door
-            # a head went out of, and keeps its shape.
-            "head_published": head_published(log, entries),
-        }
-        if keeper_note:
-            chain["anchors"]["note"] = keeper_note
-        if anchor_failed:
-            chain["anchors"]["failed"] = True
-        if publish_note:
-            chain["left"]["note"] = publish_note
-        if publish_failed:
-            chain["left"]["failed"] = True
-        repos.setdefault(repo, {}).setdefault(session, []).append(chain)
-        if not stood_down:
-            # verify's TRANSCRIPT-DIVERGED is exit 5 in its own contract
-            # (SPEC §6 v0.1.2); scan's 5 already means the baseline
-            # tripwire, so the fold renames it rather than letting one
-            # number tell two stories.
-            worst = max(worst, 7 if exit_code == 5 else exit_code)
-            if verdict == "BROKEN":
-                damaged += 1
-
-        change = diff_baseline(remembered, relpath, entries)
-        known = remembered.get(relpath) or {}
-        newest = newest_head(entries)
-        if change:
-            # The baseline keeps what it remembered (ADR-0039): the head
-            # and number stay, so every look says so until the chain
-            # holds them again or `acknowledge` accepts what is found.
-            # The verdict is this look's, for the digest; the stillness
-            # clock keeps its time, since a change is no growth.
-            row, new = standing(known, change, stamp)
-            heads[relpath] = {**row, "verdict": verdict,
-                              "superseded": stood_down}
-            fresh += new
-            events.append(alarm_event(
-                repo, session, relpath, row,
-                {"n": newest[0], "head": newest[1]} if newest
-                else {"n": None, "head": None}))
-        elif newest:
-            # Bookkeeping-only growth (the cadence or the tail keeper
-            # writing commitments) is the recorder speaking, not the
-            # session acting: it neither moves the clock (#537) nor
-            # wakes anything.
-            acted = any(isinstance(e.get("n"), int)
-                        and e["n"] > (known.get("n") or 0)
-                        and e.get("actor") != "receipts"
-                        for e in entries)
-            # The lifecycle's clock (ADR-0018): the reader's own diary
-            # of when it last saw the session move. A head that did not
-            # move, or moved by bookkeeping alone, carries its stamp
-            # forward; a session that acted, or a baseline that predates
-            # the field, stamps this look, so stillness only exists once
-            # it has actually been observed. A blind look has observed
-            # nothing and stamps nothing.
-            last_grew = (known.get("last_grew")
-                         if known.get("last_grew")
-                         and (known.get("head") == newest[1] or not acted)
-                         else None if blind else stamp)
-            heads[relpath] = {"n": newest[0],
-                              "head": newest[1],
-                              # For the digest's last-scan line (Stage E):
-                              # a remembered verdict is testimony like the
-                              # rest of this file, never the verdict itself.
-                              "verdict": verdict,
-                              # A torn tail that recording already moved
-                              # past (ADR-0004) stood the exit down above;
-                              # remembered so the digest can cite it as
-                              # the quiet evidence it is, not fresh damage.
-                              "superseded": stood_down,
-                              "last_grew": last_grew}
-            # The reawakening (ADR-0018): clean growth after dormant-tier
-            # observed stillness — one-shot, spoken in the investigate
-            # voice, never the exit. Rewrites belong to the tripwire.
-            woke = lifecycle_tier(known.get("last_grew"), now)
-            if (known.get("head") and newest[1] != known.get("head")
-                    and woke and woke[0] == "dormant" and acted):
-                awakened[(repo, session)] = {
-                    "repo": repo, "session": session, "log": relpath,
-                    "still_seconds": woke[1],
-                    "words": (f"grew after {woke[1] // 86400}d of "
-                              "observed stillness — several quiet days, "
-                              "or someone riding an old session; yours "
-                              "to tell apart"),
-                }
-
-        # The session's receipt tally for the completeness watch: the
-        # whole sibling family counts, minus the recorder's own voice —
-        # genesis and transcript commitments carry actor "receipts" and
-        # are owed by no tool event, so counting them would manufacture
-        # SURPLUS on every committed session (ADR-0017).
-        family = families.setdefault((repo, session),
-                                     {"receipts": 0, "last": None,
-                                      "moments": []})
-        logged = [e for e in entries if e.get("actor") != "receipts"]
-        family["receipts"] += len(logged)
-        stamps = [e["ts"] for e in logged if isinstance(e.get("ts"), str)]
-        if stamps:
-            family["last"] = max(family["last"] or "", max(stamps))
-        # And the same entries as (when, tool) moments for the
-        # consumption watch — a stamp without a zone is read as UTC, so
-        # one odd writer can never make two timestamps incomparable.
-        for e in logged:
-            when = parse_when(e.get("ts"))
-            if when is not None and when.tzinfo is None:
-                when = when.replace(tzinfo=timezone.utc)
-            family["moments"].append((when, tool_of(e.get("action"))))
-        # ADR-0017: a chain holding transcript commitments earns the
-        # operator's judge command once the watch pairs its transcript.
-        if "committed_log" not in family and any(
-                isinstance(e, dict) and e.get("actor") == "receipts"
-                and str(e.get("action", "")).startswith(
-                    "transcript-commitment:")
-                for e in entries):
-            family["committed_log"] = (root / relpath).as_posix()
-        # The lifecycle facts (ADR-0018): the family's newest observed
-        # movement, and whether the family's last chain ends in a
-        # commitment (siblings sort after their parent, so the chain
-        # seen last is the one still being written to).
-        if entries:
-            # None for a row from before the clock, under a standing
-            # alarm, or on a blind look: nothing observed, nothing told.
-            grew = (heads.get(relpath) or {}).get("last_grew")
-            if grew and grew > (family.get("last_grew") or ""):
-                family["last_grew"] = grew
-            family["tail_committed"] = (
-                entries[-1].get("actor") == "receipts"
-                and str(entries[-1].get("action", "")).startswith(
-                    "transcript-commitment:"))
-            family["home"] = (root / relpath).parent.as_posix()
-        if receiver:
-            # What the reading over a receiver's folder asks of a copy
-            # (ADR-0041): when it last grew, by its own mtime, for the
-            # settle clock; its newest entry's time, bookkeeping
-            # included, for the memory edge; and the hook's note that
-            # the second record was cut, quoted on the session's row.
-            try:
-                touched = os.stat(log).st_mtime
-            except OSError:
-                touched = None
-            if touched is not None and touched > (family.get("touched")
-                                                  or 0):
-                family["touched"] = touched
-            stamped = [e["ts"] for e in entries if isinstance(e.get("ts"),
-                                                               str)]
-            if stamped:
-                family["newest_ts"] = max(family.get("newest_ts") or "",
-                                          max(stamped))
-            for e in entries:
-                if e.get("actor") == "receipts" and str(
-                        e.get("action", "")).startswith("second-record-cut:"):
-                    family["cut"] = e["action"]
-                    break
+    for place in census:
+        repo, session, relpath, _ = place
+        reading = read_chain(look, place, memory, now, stamp)
+        repos.setdefault(repo, {}).setdefault(session, []).append(
+            reading.row)
+        worst = max(worst, reading.exit)
+        damaged += reading.broken
+        keeper.update(reading.moved)
+        if reading.remembered is not None:
+            heads[relpath] = reading.remembered
+        if reading.alarm is not None:
+            events.append(reading.alarm)
+            fresh += reading.fresh
+        if reading.awakened is not None:
+            awakened[(repo, session)] = reading.awakened
+        fold_facts(families.setdefault((repo, session),
+                                       {"receipts": 0, "last": None,
+                                        "moments": []}),
+                   reading.facts)
 
     uncounted = []
     for relpath, known in remembered.items():
