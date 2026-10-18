@@ -5736,6 +5736,10 @@ def load_settings(path):
         print(f"refusing to touch {path}: it is not valid JSON ({e}) — "
               "fix it by hand first", file=sys.stderr)
         return None, EX_DATAERR
+    except RecursionError:  # read as not JSON (#463)
+        print(f"refusing to touch {path}: it is nested too deep to read as "
+              "JSON — fix it by hand first", file=sys.stderr)
+        return None, EX_DATAERR
     problem = settings_shape_problem(settings)
     if problem:
         print(f"refusing to touch {path}: expected {SETTINGS_SHAPE}, but "
@@ -6711,7 +6715,7 @@ def record_coverage(harness, matchers, profile, remote=None,
                 return False, ("cannot be read as a coverage marker: "
                                f"{error.strerror}")
             data = {}
-        except ValueError:
+        except (ValueError, RecursionError):  # nested past the reader, #463
             data = {}
         epochs = [epoch for epoch in data.get("epochs", [])
                   if isinstance(epoch, dict)

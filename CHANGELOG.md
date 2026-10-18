@@ -29,6 +29,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The social preview carries the README's current tagline; `tools/build_social_preview.py` rebuilds it from the wordmark and the README, so the two cannot drift (#528).
 - The markdownlint rule file lives under `.github/`, where the workflow names it; the root keeps the standard files and the two git dotfiles (#529).
 
+### Fixed
+
+- Harness settings or a coverage marker nested past the JSON reader no longer end `install-hook`, `uninstall-hook`, `scan` or `serve` in a traceback: each reads it as not JSON, the installer refusing such settings by name (#463).
+- `digest --payload` reads a payload nested past the JSON reader as no payload, as one that is not JSON, instead of ending in a traceback (#487).
+
 ## [0.15.1] - 2026-10-12
 
 ### Fixed
