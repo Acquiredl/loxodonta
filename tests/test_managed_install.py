@@ -1174,6 +1174,25 @@ class TelemetryPinTest(ManagedBase):
         self.assertIn("move it away by hand", done.stderr)
         self.assertEqual(self.everything(), before)
 
+    def assert_rewritten_without_a_bom(self, own):
+        # #487: whether the harness reads a file behind a byte-order
+        # mark is not known, so the installer's own content behind one
+        # is no install, and a re-run writes it clean.
+        self.full()
+        clean = own.read_bytes()
+        own.write_bytes(b"\xef\xbb\xbf" + clean)
+
+        done = self.full()
+
+        self.assertEqual(own.read_bytes(), clean)
+        self.assertNotIn("nothing changed", done.stdout)
+
+    def test_a_bom_led_copy_of_the_installers_hooks_file_is_rewritten(self):
+        self.assert_rewritten_without_a_bom(self.managed_file)
+
+    def test_a_bom_led_copy_of_the_installers_pin_is_rewritten(self):
+        self.assert_rewritten_without_a_bom(self.pin_file)
+
     def test_another_managed_source_of_the_events_is_named_not_quoted(self):
         policy = self.managed / "managed-settings.json"
         self.plant(policy, {"cleanupPeriodDays": 30, "env": {
