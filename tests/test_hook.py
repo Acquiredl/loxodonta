@@ -723,6 +723,58 @@ class HookWorktreeTest(unittest.TestCase):
         self.assertFalse(any(n.startswith("beta-") for n in names),
                          f"a second drawer opened for the session: {names}")
 
+    def unlistable_store(self):
+        """A session's first receipt in alpha's drawer, then the store's
+        receipts folder closed to listing and left open to lookups and
+        writes, as a chmod by the writer leaves it."""
+        first = self.workdir / "alpha"
+        first.mkdir()
+        elsewhere = self.workdir / "beta"
+        elsewhere.mkdir()
+        run_hook(payload(session="sess-split"), self.workdir,
+                 extra_env=self.env_for(first))
+        receipts = self.store / "receipts"
+        os.chmod(receipts, 0o300)
+        self.addCleanup(os.chmod, receipts, 0o755)
+        return receipts, elsewhere
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_an_unlistable_store_names_the_split_it_cannot_rule_out(self):
+        # #452: the drawer lookup caught every OSError and opened a second
+        # drawer for the session in silence (ADR-0023).
+        receipts, elsewhere = self.unlistable_store()
+
+        result = run_hook(
+            payload(session="sess-split", tool="Bash",
+                    tool_input={"command": "ls"}),
+            self.workdir, extra_env=self.env_for(elsewhere))
+
+        self.assertEqual(result.returncode, 0,
+                         "the receipt is kept, never lost to the warning")
+        said = result.stderr.splitlines()
+        self.assertEqual(len(said), 1, result.stderr)
+        self.assertIn(f"{receipts} cannot be listed", said[0])
+        self.assertIn("ADR-0023", said[0])
+        os.chmod(receipts, 0o755)
+        chain = drawer_of(self.store, "beta") / "receipts-sess-split.jsonl"
+        self.assertIn("Bash: ls", chain.read_text(encoding="utf-8"))
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_an_unlistable_store_leaves_the_session_end_silent(self):
+        # An exit hook that complains is noise nobody can act on
+        # (ADR-0017): SessionEnd skips in silence, as it always has.
+        _, elsewhere = self.unlistable_store()
+        ending = {"session_id": "sess-split",
+                  "hook_event_name": "SessionEnd"}
+
+        result = run_hook(ending, self.workdir,
+                          extra_env=self.env_for(elsewhere))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+
     def test_sessions_from_two_worktrees_collect_in_one_drawer(self):
         _, first = self.make_worktree(worktree_name="feature-one")
         _, second = self.make_worktree(main_name="mainrepo",
