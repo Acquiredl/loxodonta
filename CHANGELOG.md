@@ -31,6 +31,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
+- `python tools/house_check.py --help` prints both passes and the exit codes instead of a traceback; an unknown flag or a missing path is named and refused with exit 64, as `--front-door` with paths now is too (#464).
 - After `uninstall-hook`, `scan` no longer reads every session `UNWATCHED`: sessions recorded while the hook was wired, chainless ones included, are judged by the coverage in force at their time; `UNWATCHED` is kept for a machine that never wired it (#532).
 
 ## [0.15.1] - 2026-10-12

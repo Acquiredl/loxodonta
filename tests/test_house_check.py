@@ -622,6 +622,39 @@ class CommandTest(Fixture):
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("README.md:1: overclaim:", result.stdout)
 
+    def test_help_names_the_two_passes_and_exit_zero_and_exits_zero(self):
+        # Issue #464: --help was read as a path and ended in a traceback.
+        for flag in ("--help", "-h"):
+            with self.subTest(flag=flag):
+                result = run(CHECKER, flag, cwd=self.root)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn("usage:", result.stdout)
+                self.assertIn("--front-door", result.stdout)
+                self.assertIn("Exit 0", result.stdout)
+
+    def test_an_unknown_flag_is_named_and_refused_without_a_traceback(self):
+        result = run(CHECKER, "--frontdoor", cwd=self.root)
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("--frontdoor", result.stderr)
+        self.assertIn("usage:", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_a_path_that_does_not_exist_is_named_and_refused(self):
+        # Refused before any file is judged: a typo among good paths must
+        # not pass as a clean run of the others.
+        good = self.write("README.md", "An immutable record.\n")
+
+        result = run(CHECKER, good, "docs/NOPE.md", cwd=self.root)
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("docs/NOPE.md", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_the_repo_itself_passes(self):
         # The claim CI makes, made here too: every tracked Markdown file in
         # this checkout satisfies the house rules.
@@ -721,7 +754,7 @@ class FrontDoorTest(Fixture):
     def test_front_door_takes_no_paths(self):
         result = run(CHECKER, "--front-door", "README.md", cwd=self.root)
 
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
         self.assertIn("usage:", result.stderr)
         self.assertEqual(result.stdout, "")
 
