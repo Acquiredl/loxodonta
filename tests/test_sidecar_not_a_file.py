@@ -1409,6 +1409,33 @@ class ScannedMemoryNotAFileTest(unittest.TestCase):
     def test_a_pipe_where_a_transcript_belongs_is_unwitnessed_with_why(self):
         self.assert_unwitnessed(os.mkfifo, PIPE)
 
+    def assert_chainless_unwitnessed(self, make, why):
+        # #452: a session that never recorded, its transcript a folder
+        # or a pipe, was passed in silence where a chained one is named.
+        folder = self.witness / "anyproj"
+        folder.mkdir()
+        make(folder / "sess-never.jsonl")
+
+        report = self.scan()
+
+        rows = [row for row in report["completeness"]["sessions"]
+                if row["session"] == "sess-never"]
+        self.assertEqual(len(rows), 1, report["completeness"])
+        (row,) = rows
+        self.assertEqual(row["state"], "UNWITNESSED")
+        self.assertEqual(row["receipts"], 0)
+        self.assertIn(f"sess-never.jsonl cannot be read as a transcript: "
+                      f"{why}", row["note"])
+        self.assertIn("cannot be read", row["words"])
+        self.assertNotIn("sess-never", row["words"])
+
+    def test_a_folder_where_a_chainless_transcript_belongs_is_named(self):
+        self.assert_chainless_unwitnessed(Path.mkdir, FOLDER)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), NO_FIFOS)
+    def test_a_pipe_where_a_chainless_transcript_belongs_is_named(self):
+        self.assert_chainless_unwitnessed(os.mkfifo, PIPE)
+
     def assert_filed_under_its_slug(self, make, why):
         # A drawer whose record cannot be read is filed under its own
         # slug, as one with a damaged record is.
