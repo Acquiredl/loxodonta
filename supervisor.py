@@ -806,9 +806,9 @@ DAYBOOK_PURPOSE = ("the supervisor's day-by-day memory of its own looks — "
 
 
 def daybook_rows(path):
-    """(days, skipped): the remembered days, and the days whose row the
-    book does not write, a row that is not an object or holds a counted
-    claim that is not an integer. Those are skipped, read as unwatched
+    """(days, skipped): the remembered days, and (day, why) for each row
+    the book does not write, a row that is not an object or holds a
+    counted claim that is not an integer. Those are skipped, read as unwatched
     and left out of the next write, never repaired, so one planted claim
     costs one day and never the scan (#430). A damaged book is read as
     empty and replaced on the next write; a folder or a pipe at its name
@@ -821,14 +821,20 @@ def daybook_rows(path):
         return {}, []
     kept, skipped = {}, []
     for day, row in days.items():
-        if isinstance(row, dict) and all(
-                isinstance(row.get(claim, 0), int)
-                and not isinstance(row.get(claim, 0), bool)
-                for claim in PAINTED + ("blind", "scans", "looks")):
+        if not isinstance(row, dict):
+            skipped.append((day, NO_ROW))
+        elif all(isinstance(row.get(claim, 0), int)
+                 and not isinstance(row.get(claim, 0), bool)
+                 for claim in PAINTED + ("blind", "scans", "looks")):
             kept[day] = row
         else:
-            skipped.append(day)
+            skipped.append((day, NOT_A_COUNT))
     return kept, skipped
+
+
+# Why `daybook_rows` skipped a row, in the words its note says.
+NO_ROW = "not a row of counts at all"
+NOT_A_COUNT = "a count in it not a number"
 
 
 def read_daybook(path):
@@ -837,12 +843,19 @@ def read_daybook(path):
 
 
 def rows_skipped(path, skipped):
-    """The note naming the day book's rows `daybook_rows` skipped."""
-    named = ", ".join(clip(day, 40) for day in skipped[:3])
-    more = f" and {len(skipped) - 3} more" if len(skipped) > 3 else ""
-    return (f"{Path(path).name}: the row for {named}{more} is not one the "
-            "book writes, a count in it not a number — skipped, read as a "
-            "day nobody watched, and left out of the next write")
+    """The note naming the day book's rows `daybook_rows` skipped, by
+    why: up to three days named for each."""
+    said = []
+    for why in (NO_ROW, NOT_A_COUNT):
+        days = [day for day, reason in skipped if reason == why]
+        if not days:
+            continue
+        named = ", ".join(clip(day, 40) for day in days[:3])
+        more = f" and {len(days) - 3} more" if len(days) > 3 else ""
+        said.append(f"the row for {named}{more} is not one the book "
+                    f"writes, {why}")
+    return (f"{Path(path).name}: {'; '.join(said)} — skipped, read as a day "
+            "nobody watched, and left out of the next write")
 
 
 def write_daybook(path, days, now):
@@ -1904,9 +1917,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("anchoring did not finish in time; whether a "
                              "calendar took this head is unknown, and the "
                              "keeper will try again")
-            elif finished.returncode == 73:
-                # EX_CANTCREAT: a calendar answered and the proof could
-                # not be kept, a folder where the sidecar belongs say.
+            elif finished.returncode == EX_CANTCREAT:
+                # A folder where the sidecar belongs, say.
                 failed = True
                 notes.append("anchoring failed — a calendar answered and "
                              "the proof could not be written beside the "
@@ -1925,9 +1937,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("stamping did not finish in time; whether the "
                              "authority granted a token is unknown, and the "
                              "keeper will try again")
-            elif finished.returncode == 73:
-                # EX_CANTCREAT: the token could not be kept, a folder
-                # where the stamps sidecar belongs say (#364).
+            elif finished.returncode == EX_CANTCREAT:
+                # A folder where the stamps sidecar belongs, say (#364).
                 notes.append("stamping failed — the token could not be "
                              "written beside the chain; it stays unstamped "
                              "until the sidecar can be written")
@@ -2068,9 +2079,9 @@ def publish_through_recorder(log, url, what):
         return (f"publishing the {what} refused: the recorder would not "
                 f"take {flag} as given; fix the URL (see "
                 "`loxodonta publish --help`)")
-    if finished.returncode == 73:
-        # EX_CANTCREAT: the head left, and the memo that would say so
-        # could not be written (#364), so the next turn posts it again.
+    if finished.returncode == EX_CANTCREAT:
+        # The head left, and the memo that would say so could not be
+        # written (#364), so the next turn posts it again.
         return (f"published the {what}, and the memo could not be written; "
                 "the keeper will post it again until it can be")
     if finished.returncode != 0:
@@ -2315,24 +2326,42 @@ def munge(path):
 
 def read_settings(settings_file):
     """One harness settings file as a dict, or None when it cannot be
-    read. Python's JSON reader takes three words JSON does not have,
-    `Infinity`, `-Infinity` and `NaN`; the harness cannot read a file
-    holding one, so neither does any reader here, and nothing from such
-    a file reaches a report that must itself stay JSON (#260 review)."""
+    read (`settings_reading`)."""
+    return settings_reading(settings_file)[0]
+
+
+def settings_reading(settings_file):
+    """(settings, why): one harness settings file as a dict and None, or
+    None and why it cannot be read as one, in words; why is None too
+    when no file is there. Python's JSON reader takes three words JSON
+    does not have, `Infinity`, `-Infinity` and `NaN`; the harness cannot
+    read a file holding one, so neither does any reader here, and
+    nothing from such a file reaches a report that must itself stay
+    JSON (#260 review)."""
     def refuse(word):
-        raise ValueError(f"{word} is not JSON")
+        raise ValueError(f"{word}, a word JSON does not have")
 
     try:
         # In the writer's reach: a folder or a pipe there reads as no
-        # settings, never waited on (#405). The scan names one at Claude
-        # Code's settings (settings_note); one at Codex's hooks.json,
-        # read only at `serve`'s start and by `drill`, reads as no
-        # recorder wired there.
+        # settings, never waited on (#405). The scan names what stands
+        # at Claude Code's settings (settings_note); what stands at
+        # Codex's hooks.json, read only at `serve`'s start and by
+        # `drill`, reads as no recorder wired there.
         settings = json.loads(read_whole(settings_file),
                               parse_constant=refuse)
-    except (OSError, ValueError, RecursionError):  # too deep, #463
-        return None
-    return settings if isinstance(settings, dict) else None
+    except FileNotFoundError:
+        return None, None
+    except UnicodeDecodeError:
+        return None, "it is not UTF-8 text"
+    except OSError as error:
+        return None, error.strerror or str(error)
+    except ValueError as error:
+        return None, f"it is not JSON ({error})"
+    except RecursionError:  # #463
+        return None, "it nests too deep to read"
+    if not isinstance(settings, dict):
+        return None, "it is not a JSON object"
+    return settings, None
 
 
 # --- The two homes of the hook (ADR-0040) -------------------------------------
@@ -2760,7 +2789,8 @@ def calibrate(remembered, witness, now):
     by the settings file's mtime, clamped between the last observation
     and now, since the harness does not log its own config changes. With
     two homes (ADR-0040) it is the newer mtime of the two, and where
-    there is no managed file its folder stands in for it:
+    there is no managed file and the change takes a matcher away, its
+    folder stands in for it (never for a change that only adds, #465):
     `uninstall-hook --managed` deletes the file, and the folder's mtime
     is then the only thing dating that. Without it the end of coverage
     would be dated by the operator's file, last written when the hook
@@ -2777,18 +2807,26 @@ def calibrate(remembered, witness, now):
         return remembered
     if not remembered:
         return [coverage_epoch(stamp, current, failures)]
+    last = remembered[-1]
+    floor = last["since"] or ""
+    # A deleted managed file can only take matchers away, so its folder
+    # stands in only for a change that does: other tools' files move
+    # the folder's date too, and would date a widening later (#465).
+    widened = (all(matcher in current for matcher in last["matchers"])
+               and all(matcher in failures for matcher in failures_of(last)))
     mine, managed = wired_files(witness)
     written = []
-    for places in ((mine,), (managed, managed.parent)):
+    stand_ins = (managed,) if widened else (managed, managed.parent)
+    for places in ((mine,), stand_ins):
         for place in places:
             try:
-                written.append(place.stat().st_mtime)
+                written.append(datetime.fromtimestamp(
+                    place.stat().st_mtime, timezone.utc)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"))
             except OSError:
                 continue
             break
-    changed = (datetime.fromtimestamp(max(written), timezone.utc)
-               .strftime("%Y-%m-%dT%H:%M:%SZ") if written else stamp)
-    floor = remembered[-1]["since"] or ""
+    changed = max(written) if written else stamp
     return remembered + [coverage_epoch(min(max(changed, floor), stamp),
                                         current, failures)]
 
@@ -4953,7 +4991,8 @@ def memory_notes(look, skipped):
     """The report's notes for what a look reads beside the chains and
     could not read as it should: the day book (`skipped`, the rows
     `daybook_rows` passed over), the coverage marker and the harness
-    settings, as report keys. Nothing of the agent's machine is read at
+    settings (anything there that is not a settings file, folder, pipe
+    or text alike), as report keys. Nothing of the agent's machine is read at
     the receiver: not its marker, not its settings."""
     notes = {}
     shelf = not_a_file(look.daybook)
@@ -4972,12 +5011,13 @@ def memory_notes(look, skipped):
                                 "none, as if install-hook had written "
                                 "nothing")
     # Either home of the hook (ADR-0040): a folder or a pipe at the
-    # managed file's name hides a hook as one at the operator's does.
+    # managed file's name hides a hook as one at the operator's does,
+    # and so does a file there that is not JSON (#465).
     unset = "; ".join(
         f"{settings.as_posix()} cannot be read as harness settings: {why} "
         "— read as none, as if no hook were wired"
         for settings in wired_files(look.witness)
-        for why in [not_a_file(settings)] if why)
+        for why in [settings_reading(settings)[1]] if why)
     if unset:
         notes["settings_note"] = unset
     return notes
@@ -5413,7 +5453,8 @@ def keep_memory(path, seen, data, what):
         write_whole(path, json.dumps(data, indent=2) + "\n")
     except OSError as error:
         return refused(f"{path.name} could not be written: "
-                       f"{error.strerror or error}; nothing was {what}", 73)
+                       f"{error.strerror or error}; nothing was {what}",
+                       EX_CANTCREAT)
     return None
 
 
@@ -5568,7 +5609,7 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
     except OSError as error:
         return refused(f"{path.name} could not be written: "
                        f"{error.strerror or error}; nothing was "
-                       "acknowledged", 73)
+                       "acknowledged", EX_CANTCREAT)
     lost = ("whatever calibration memory the old file held is lost"
             if change == "unreadable"
             else "there was no calibration memory left to keep")
@@ -7335,7 +7376,7 @@ def write_export(path, data, then):
     except OSError as error:
         print(f"error: {Path(path).name} could not be written: "
               f"{error.strerror or error} — {then}", file=sys.stderr)
-        return 73
+        return EX_CANTCREAT
     return None
 
 
@@ -11901,7 +11942,9 @@ class VersionAction(argparse.Action):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
-EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no package
+EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no
+                   # package, no baseline for calibrate or acknowledge, no
+                   # export; and what the keeper reads from a recorder verb
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
