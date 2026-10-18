@@ -24,6 +24,10 @@ exclude = [
   # Reserved example domains: placeholders in worked examples, not real hosts.
   '^https?://([a-z0-9-]+\.)?example\.(com|org|net)',
   '^https?://[^/]+\.invalid',
+  # The OWASP GenAI site refuses GitHub's runners with 403 while it answers
+  # 200 from an ordinary machine with the same user agent: twice now (#529,
+  # #549), each time a refusal of the runner, not a dead link.
+  '^https://genai\.owasp\.org/',
 ]
 
 # Never tracked, never checked: agent worktrees and any npm cache.

@@ -6334,7 +6334,8 @@ def managed_way_out(managed, error):
     all. An administrator's shell mends a missing right and nothing
     else, so what stands at the path is asked first: a folder where the
     file belongs, a file where a folder belongs, or on Windows a file
-    marked read-only, none of which more rights would move."""
+    marked read-only or held open by another program, none of which
+    more rights would move."""
     place = os.path.abspath(managed)
     if os.path.isdir(place) and not os.path.islink(place):
         return ("There is a folder where that file belongs: see what it "
@@ -6351,11 +6352,26 @@ def managed_way_out(managed, error):
             and not os.stat(place).st_mode & stat.S_IWRITE:
         return ("That file is marked read-only: clear the mark, then run "
                 "this again.")
+    # A sharing or lock violation (#465): Windows refuses to delete a
+    # file another program holds open, as a PermissionError. A replace
+    # onto one is refused as access denied, and cannot be told apart.
+    if getattr(error, "winerror", None) in (32, 33):
+        return ("Another program has that file open: close it, then run "
+                "this again.")
     if isinstance(error, PermissionError):
         return ("Neither managed verb raises its own rights: run this "
                 "again from an account that may write that folder (an "
                 "administrator's shell, or sudo).")
     return ""
+
+
+def nearest_standing(path):
+    """The nearest folder above `path` that exists: a drive that is not
+    there is its own parent, and the walk stops at it."""
+    folder = os.path.dirname(os.path.abspath(path))
+    while not os.path.lexists(folder) and os.path.dirname(folder) != folder:
+        folder = os.path.dirname(folder)
+    return folder
 
 
 def owned_by_another(path):
@@ -6368,15 +6384,24 @@ def owned_by_another(path):
     follows whatever the writer planted in it (ADR-0002). So the managed
     verbs write nothing under a home that is another's (ADR-0040 ruling
     3: everything else is left as it lies). POSIX only: Windows has no
-    uid to ask, and an elevated shell there is the same account."""
+    uid to ask, and an elevated shell there is the same account.
+
+    Where the folder is not made yet, this account makes it and it is
+    this account's, so a root-owned folder it would be made in counts as
+    no other's: nothing there was planted by another account (#465)."""
     if not hasattr(os, "geteuid"):
         return False
-    folder = os.path.dirname(os.path.abspath(path))
-    while not os.path.lexists(folder) and os.path.dirname(folder) != folder:
-        folder = os.path.dirname(folder)
+    unmade = not os.path.lexists(os.path.dirname(os.path.abspath(path)))
+    folder = nearest_standing(path)
     try:
-        return any(os.lstat(place).st_uid != os.geteuid()
-                   for place in (path, folder) if os.path.lexists(place))
+        for place in (path, folder):
+            if not os.path.lexists(place):
+                continue
+            owner = os.lstat(place).st_uid
+            if owner != os.geteuid() and not (place == folder and unmade
+                                              and owner == 0):
+                return True
+        return False
     except OSError:
         return True
 
@@ -7154,23 +7179,29 @@ def install_managed_hooks(args):
               f"the home of {path}. Nothing under that home was touched: "
               "no backup, no rewrite of that file, and no coverage marker "
               "was written.")
-    elif unmarkable:
+    elif unmarkable and os.path.lexists(store_home()):
         print(f"note: the store at {store_home()} belongs to another "
               "account than the one this ran as: no coverage marker was "
               "written there.")
+    elif unmarkable:
+        print(f"note: the store at {store_home()} is not made yet, and "
+              f"{nearest_standing(store_home())} belongs to another account "
+              "than the one this ran as: no store was made there, and no "
+              "coverage marker was written.")
     if both:
         print(f"the hook is wired in {managed} and still in {path}: it has "
               "two homes until `uninstall-hook`, run as the account that "
               "owns that file, takes it out of there. Restart open "
-              "sessions.")
+              "sessions and a running `supervisor serve`.")
     elif removed or existing is None:
         print("the hook has one home now. A run cannot switch it off from the")
         print("command line or from a settings file the operator owns: the")
         print("harness documents it and ADR-0040 measured it. What a managed")
         print("install claims and what it does not is in docs/HOOK.md. Restart")
-        print("open sessions.")
+        print("open sessions and a running `supervisor serve`.")
     elif changed or pinned:
-        print("Restart open sessions: managed settings load at start.")
+        print("Restart open sessions and a running `supervisor serve`: "
+              "managed settings load at start.")
     tier = profile_notice(args.profile, wired)
     if tier:
         print(tier)

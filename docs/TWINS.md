@@ -82,7 +82,7 @@ Names: `EX_CANTCREAT`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-A writer exits 73 when a file it must write cannot be, the supervisor's `drill` when its sandbox cannot be made, and `package` when it cannot create or finish `--out` (ADR-0037, #430, #422).
+A writer exits 73 when a file it must write cannot be, the supervisor's `drill` when its sandbox cannot be made, `package` when it cannot create or finish `--out`, and `calibrate`, `acknowledge` and `export` when the file they write cannot be; the keeper reads a recorder verb's 73 by the same name (ADR-0037, #430, #422, #448).
 
 ### Writing to the console
 

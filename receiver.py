@@ -112,6 +112,14 @@ CHAIN_NAME = re.compile(r"receipts-[A-Za-z0-9_-]{1,200}\.jsonl")
 # a body declared larger is refused before a byte of it is read.
 BODY_CAP = 8 * 1024 * 1024
 
+# The most of a body read and thrown away after a refusal judged on the
+# headers alone (#450). A socket closed before a body it never read has
+# arrived is reset when the body lands, and the reset destroys the
+# answer before the sender reads it, so the sender would see a dropped
+# connection where the refusal was. A body declared larger is not read:
+# past this, the reset is the price of not reading it.
+DRAIN_CAP = 64 * 1024
+
 # What the receiver may keep, so a writer holding the URL cannot fill the
 # disk under the honest sends (#300): a cap on each file and one on the
 # data directory as a whole, in MiB, which --file-cap and --total-cap
@@ -526,12 +534,30 @@ class Door(BaseHTTPRequestHandler):
         the right URL learns it is the verb that is wrong, and 404
         anywhere else. There is no verb that reads, lists or deletes."""
         if self.door():
-            self.answer(405, "the receiver takes POST only", allow="POST")
+            self.refuse_unread(405, "the receiver takes POST only",
+                               allow="POST")
         else:
-            self.answer(404, "not the receiver's path")
+            self.refuse_unread(404, "not the receiver's path")
 
     do_GET = do_HEAD = do_PUT = do_DELETE = refuse_method
     do_PATCH = do_OPTIONS = do_TRACE = do_CONNECT = refuse_method
+
+    def refuse_unread(self, status, text, allow=None):
+        """A refusal judged before the body is read, then the body read
+        and thrown away when it is declared no larger than DRAIN_CAP, so
+        the connection closes cleanly and the answer reaches the sender
+        (#450). The answer goes first, so a body that never comes delays
+        nothing but the close, under the door's timeout and deadline."""
+        self.answer(status, text, allow=allow)
+        try:
+            declared = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if 0 < declared <= DRAIN_CAP:
+            try:
+                self.rfile.read(declared)
+            except OSError:
+                pass  # a sender that stalls or goes is dropped, as anywhere
 
     def declared_length(self):
         """The body length the sender declared, judged before any of it
@@ -562,32 +588,33 @@ class Door(BaseHTTPRequestHandler):
     def do_POST(self):
         door = self.door()
         if door is None:
-            self.answer(404, "not the receiver's path")
+            self.refuse_unread(404, "not the receiver's path")
             return
         kind = self.content_type()
         if door == "events":
             if kind != EVENTS_TYPE:
-                self.answer(415, f"events are {EVENTS_TYPE}")
+                self.refuse_unread(415, f"events are {EVENTS_TYPE}")
                 return
         elif kind not in (HEAD_TYPE, CHAIN_TYPE):
-            self.answer(415, f"a head is {HEAD_TYPE}, a chain batch is "
-                             f"{CHAIN_TYPE}")
+            self.refuse_unread(415, f"a head is {HEAD_TYPE}, a chain batch "
+                                    f"is {CHAIN_TYPE}")
             return
         # A body is taken as it is, at either door: nothing here
         # decompresses, so an encoded body would be kept as garbage or
         # refused as one. Judged before the body is read, like the type.
         if self.content_encoding() != "identity":
-            self.answer(415, "the body must be sent as it is, with no "
-                             "Content-Encoding")
+            self.refuse_unread(415, "the body must be sent as it is, with "
+                                    "no Content-Encoding")
             return
         # The chain's name is judged before the body is read: a batch
-        # for a file this receiver would not write is not worth reading.
+        # for a file this receiver would not write is only drained
+        # (`refuse_unread`), never parsed or kept.
         name = None
         if kind == CHAIN_TYPE:
             name = self.headers.get(CHAIN_HEADER) or ""
             if not CHAIN_NAME.fullmatch(name):
-                self.answer(400, f"{CHAIN_HEADER} must be a receipt file "
-                                 "name, receipts-<session>.jsonl")
+                self.refuse_unread(400, f"{CHAIN_HEADER} must be a receipt "
+                                        "file name, receipts-<session>.jsonl")
                 return
         length = self.declared_length()
         if length is None:

@@ -806,9 +806,9 @@ DAYBOOK_PURPOSE = ("the supervisor's day-by-day memory of its own looks — "
 
 
 def daybook_rows(path):
-    """(days, skipped): the remembered days, and the days whose row the
-    book does not write, a row that is not an object or holds a counted
-    claim that is not an integer. Those are skipped, read as unwatched
+    """(days, skipped): the remembered days, and (day, why) for each row
+    the book does not write, a row that is not an object or holds a
+    counted claim that is not an integer. Those are skipped, read as unwatched
     and left out of the next write, never repaired, so one planted claim
     costs one day and never the scan (#430). A damaged book is read as
     empty and replaced on the next write; a folder or a pipe at its name
@@ -821,14 +821,20 @@ def daybook_rows(path):
         return {}, []
     kept, skipped = {}, []
     for day, row in days.items():
-        if isinstance(row, dict) and all(
-                isinstance(row.get(claim, 0), int)
-                and not isinstance(row.get(claim, 0), bool)
-                for claim in PAINTED + ("blind", "scans", "looks")):
+        if not isinstance(row, dict):
+            skipped.append((day, NO_ROW))
+        elif all(isinstance(row.get(claim, 0), int)
+                 and not isinstance(row.get(claim, 0), bool)
+                 for claim in PAINTED + ("blind", "scans", "looks")):
             kept[day] = row
         else:
-            skipped.append(day)
+            skipped.append((day, NOT_A_COUNT))
     return kept, skipped
+
+
+# Why `daybook_rows` skipped a row, in the words its note says.
+NO_ROW = "not a row of counts at all"
+NOT_A_COUNT = "a count in it not a number"
 
 
 def read_daybook(path):
@@ -837,12 +843,19 @@ def read_daybook(path):
 
 
 def rows_skipped(path, skipped):
-    """The note naming the day book's rows `daybook_rows` skipped."""
-    named = ", ".join(clip(day, 40) for day in skipped[:3])
-    more = f" and {len(skipped) - 3} more" if len(skipped) > 3 else ""
-    return (f"{Path(path).name}: the row for {named}{more} is not one the "
-            "book writes, a count in it not a number — skipped, read as a "
-            "day nobody watched, and left out of the next write")
+    """The note naming the day book's rows `daybook_rows` skipped, by
+    why: up to three days named for each."""
+    said = []
+    for why in (NO_ROW, NOT_A_COUNT):
+        days = [day for day, reason in skipped if reason == why]
+        if not days:
+            continue
+        named = ", ".join(clip(day, 40) for day in days[:3])
+        more = f" and {len(days) - 3} more" if len(days) > 3 else ""
+        said.append(f"the row for {named}{more} is not one the book "
+                    f"writes, {why}")
+    return (f"{Path(path).name}: {'; '.join(said)} — skipped, read as a day "
+            "nobody watched, and left out of the next write")
 
 
 def write_daybook(path, days, now):
@@ -1904,9 +1917,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("anchoring did not finish in time; whether a "
                              "calendar took this head is unknown, and the "
                              "keeper will try again")
-            elif finished.returncode == 73:
-                # EX_CANTCREAT: a calendar answered and the proof could
-                # not be kept, a folder where the sidecar belongs say.
+            elif finished.returncode == EX_CANTCREAT:
+                # A folder where the sidecar belongs, say.
                 failed = True
                 notes.append("anchoring failed — a calendar answered and "
                              "the proof could not be written beside the "
@@ -1925,9 +1937,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("stamping did not finish in time; whether the "
                              "authority granted a token is unknown, and the "
                              "keeper will try again")
-            elif finished.returncode == 73:
-                # EX_CANTCREAT: the token could not be kept, a folder
-                # where the stamps sidecar belongs say (#364).
+            elif finished.returncode == EX_CANTCREAT:
+                # A folder where the stamps sidecar belongs, say (#364).
                 notes.append("stamping failed — the token could not be "
                              "written beside the chain; it stays unstamped "
                              "until the sidecar can be written")
@@ -2068,9 +2079,9 @@ def publish_through_recorder(log, url, what):
         return (f"publishing the {what} refused: the recorder would not "
                 f"take {flag} as given; fix the URL (see "
                 "`loxodonta publish --help`)")
-    if finished.returncode == 73:
-        # EX_CANTCREAT: the head left, and the memo that would say so
-        # could not be written (#364), so the next turn posts it again.
+    if finished.returncode == EX_CANTCREAT:
+        # The head left, and the memo that would say so could not be
+        # written (#364), so the next turn posts it again.
         return (f"published the {what}, and the memo could not be written; "
                 "the keeper will post it again until it can be")
     if finished.returncode != 0:
@@ -2315,24 +2326,42 @@ def munge(path):
 
 def read_settings(settings_file):
     """One harness settings file as a dict, or None when it cannot be
-    read. Python's JSON reader takes three words JSON does not have,
-    `Infinity`, `-Infinity` and `NaN`; the harness cannot read a file
-    holding one, so neither does any reader here, and nothing from such
-    a file reaches a report that must itself stay JSON (#260 review)."""
+    read (`settings_reading`)."""
+    return settings_reading(settings_file)[0]
+
+
+def settings_reading(settings_file):
+    """(settings, why): one harness settings file as a dict and None, or
+    None and why it cannot be read as one, in words; why is None too
+    when no file is there. Python's JSON reader takes three words JSON
+    does not have, `Infinity`, `-Infinity` and `NaN`; the harness cannot
+    read a file holding one, so neither does any reader here, and
+    nothing from such a file reaches a report that must itself stay
+    JSON (#260 review)."""
     def refuse(word):
-        raise ValueError(f"{word} is not JSON")
+        raise ValueError(f"{word}, a word JSON does not have")
 
     try:
         # In the writer's reach: a folder or a pipe there reads as no
-        # settings, never waited on (#405). The scan names one at Claude
-        # Code's settings (settings_note); one at Codex's hooks.json,
-        # read only at `serve`'s start and by `drill`, reads as no
-        # recorder wired there.
+        # settings, never waited on (#405). The scan names what stands
+        # at Claude Code's settings (settings_note); what stands at
+        # Codex's hooks.json, read only at `serve`'s start and by
+        # `drill`, reads as no recorder wired there.
         settings = json.loads(read_whole(settings_file),
                               parse_constant=refuse)
-    except (OSError, ValueError, RecursionError):  # too deep, #463
-        return None
-    return settings if isinstance(settings, dict) else None
+    except FileNotFoundError:
+        return None, None
+    except UnicodeDecodeError:
+        return None, "it is not UTF-8 text"
+    except OSError as error:
+        return None, error.strerror or str(error)
+    except ValueError as error:
+        return None, f"it is not JSON ({error})"
+    except RecursionError:  # #463
+        return None, "it nests too deep to read"
+    if not isinstance(settings, dict):
+        return None, "it is not a JSON object"
+    return settings, None
 
 
 # --- The two homes of the hook (ADR-0040) -------------------------------------
@@ -2760,7 +2789,8 @@ def calibrate(remembered, witness, now):
     by the settings file's mtime, clamped between the last observation
     and now, since the harness does not log its own config changes. With
     two homes (ADR-0040) it is the newer mtime of the two, and where
-    there is no managed file its folder stands in for it:
+    there is no managed file and the change takes a matcher away, its
+    folder stands in for it (never for a change that only adds, #465):
     `uninstall-hook --managed` deletes the file, and the folder's mtime
     is then the only thing dating that. Without it the end of coverage
     would be dated by the operator's file, last written when the hook
@@ -2777,18 +2807,26 @@ def calibrate(remembered, witness, now):
         return remembered
     if not remembered:
         return [coverage_epoch(stamp, current, failures)]
+    last = remembered[-1]
+    floor = last["since"] or ""
+    # A deleted managed file can only take matchers away, so its folder
+    # stands in only for a change that does: other tools' files move
+    # the folder's date too, and would date a widening later (#465).
+    widened = (all(matcher in current for matcher in last["matchers"])
+               and all(matcher in failures for matcher in failures_of(last)))
     mine, managed = wired_files(witness)
     written = []
-    for places in ((mine,), (managed, managed.parent)):
+    stand_ins = (managed,) if widened else (managed, managed.parent)
+    for places in ((mine,), stand_ins):
         for place in places:
             try:
-                written.append(place.stat().st_mtime)
+                written.append(datetime.fromtimestamp(
+                    place.stat().st_mtime, timezone.utc)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"))
             except OSError:
                 continue
             break
-    changed = (datetime.fromtimestamp(max(written), timezone.utc)
-               .strftime("%Y-%m-%dT%H:%M:%SZ") if written else stamp)
-    floor = remembered[-1]["since"] or ""
+    changed = max(written) if written else stamp
     return remembered + [coverage_epoch(min(max(changed, floor), stamp),
                                         current, failures)]
 
@@ -3864,8 +3902,10 @@ def event_attributes(record):
 
 def log_records(logs):
     """Every log record in one posted OTLP object, in order:
-    resourceLogs[].scopeLogs[].logRecords[]. Anything not shaped so is
-    passed over, never a fault."""
+    resourceLogs[].scopeLogs[].logRecords[], each item of a records list
+    whatever it is, so a record that is not an object reaches the
+    reader's count (#487). Anything else not shaped so is passed over,
+    never a fault."""
     resources = logs.get("resourceLogs") if isinstance(logs, dict) else None
     for resource in resources if isinstance(resources, list) else []:
         scopes = (resource.get("scopeLogs")
@@ -3874,8 +3914,7 @@ def log_records(logs):
             records = (scope.get("logRecords")
                        if isinstance(scope, dict) else None)
             for record in records if isinstance(records, list) else []:
-                if isinstance(record, dict):
-                    yield record
+                yield record
 
 
 def read_events(root, closed=None):
@@ -3898,18 +3937,26 @@ def read_events(root, closed=None):
     (ruling 5's "last heard"), the days the files are named for, and
     the lines that were not one JSON object holding a `logs` object,
     skipped and counted, never fatal: the files are out of the writer's
-    reach, but a reader that ends on one line is still wrong."""
+    reach, but a reader that ends on one line is still wrong. A record
+    inside a well-shaped line that names no session, or is not an
+    object, is counted beside them as `sessionless`, a count of records,
+    not lines (#487). A file that cannot be read is named in `unread` and
+    gives nothing, its day included: a day nothing was read from is not
+    where the second record's memory begins (#487)."""
     sessions = {}
     addresses = {}
     files = events_files(root, closed)
     unparsed = 0
+    sessionless = 0
     unread = []
+    days = []  # of the files read; `listed` counts them all
     for path in files:
         try:
             lines = read_lines(path)
         except OSError as error:
             unread.append(f"{path.name} ({error.strerror or error})")
             continue
+        days.append(events_day(path))
         for line in lines:
             try:
                 arrival = json.loads(line)
@@ -3929,9 +3976,11 @@ def read_events(root, closed=None):
                 if heard is None or when > heard[0]:
                     addresses[sender] = (when, received)
             for record in log_records(arrival.get("logs")):
-                attributes = event_attributes(record)
+                attributes = (event_attributes(record)
+                              if isinstance(record, dict) else {})
                 session = attributes.get("session.id")
                 if not isinstance(session, str) or not session:
+                    sessionless += 1
                     continue
                 seen = sessions.setdefault(session, {
                     "owed": [], "may_owe": {}, "witnessed": set(),
@@ -3962,8 +4011,8 @@ def read_events(root, closed=None):
     return {"sessions": sessions,
             "addresses": {sender: received
                           for sender, (_, received) in addresses.items()},
-            "days": [events_day(path) for path in files],
-            "unparsed": unparsed, "unread": unread}
+            "days": days, "listed": len(files), "unparsed": unparsed,
+            "sessionless": sessionless, "unread": unread}
 
 
 def missing_numbers(sequences):
@@ -4021,26 +4070,44 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             "files": len(days), "oldest": oldest,
             "newest": max(days) if days else None,
             "unparsed": events["unparsed"],
+            "sessionless": events["sessionless"],
             "words": (f"the harness's events as the receiver kept them, "
                       f"identity removed: {len(days)} file(s)"
                       + (f" from {oldest} to {max(days)}" if days else "")
                       + (f"; {events['unparsed']} line(s) not in the "
                          "line shape skipped and counted"
                          if events["unparsed"] else "")
+                      + (f"; {events['sessionless']} log record(s) naming "
+                         "no session skipped and counted"
+                         if events["sessionless"] else "")
                       + ". The harness's word, like the transcript; what "
                       "differs is that nothing on the agent's machine "
                       "reaches a line once it landed (ADR-0041)")},
     }
     said = []
-    if not days:
+    # Asked of the listing, not of `days`: a folder whose every events
+    # file is unreadable holds files, and must not read as one no
+    # harness has sent to (#487).
+    if not events["listed"]:
         said.append("the receiver holds no events file: no harness has "
                     "sent its events here yet, so every session with "
                     "receipts reads SECOND-RECORD-ABSENT until one does "
                     "(ADR-0041)")
+    elif not days:
+        said.append("no events file the receiver holds could be read, so "
+                    "every session with receipts reads SECOND-RECORD-ABSENT "
+                    "until one can be (ADR-0041)")
     if events["unread"]:
         said.append(f"{len(events['unread'])} events file(s) cannot be "
                     f"read: {'; '.join(events['unread'])} — nothing of them "
-                    "is counted")
+                    "is counted, their day included"
+                    + (": the second record's memory begins at the oldest "
+                       "file that was read" if days else ""))
+    # With a file unread, a session older than the oldest file read may
+    # have its second record in that file: "never kept here" would be
+    # a claim nobody checked (#487).
+    kept = ("is in no events file that was read" if events["unread"]
+            else "was never kept here")
     unjudged = []
     named = {session: family for (_, session), family in families.items()}
     for session in sorted(set(named) | set(events["sessions"])):
@@ -4079,9 +4146,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             row["state"] = "BEFORE-MEMORY"
             row["words"] = (f"this chain copy's newest entry predates "
                             f"{oldest}, the day of the oldest events file "
-                            "the receiver holds, so its second record was "
-                            "never kept here: counted, not judged, and not "
-                            "called absent (ADR-0041).")
+                            f"read, so its second record {kept}: counted, "
+                            "not judged, and not called absent (ADR-0041).")
             unjudged.append(row)
             continue
         quiet_for = ((now - heard).total_seconds()
@@ -4125,8 +4191,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             "since": oldest,
             "words": (f"{len(unjudged)} session(s) whose chain copy "
                       f"predates {oldest}, the day of the oldest events "
-                      "file the receiver holds, so their second record was "
-                      "never kept here: counted, not judged, and none is "
+                      f"file read, so their second record {kept}: counted, "
+                      "not judged, and none is "
                       "called absent (ADR-0041; ADR-0029's rule for "
                       "sessions older than the memory). `scan "
                       "--before-memory` lists them."),
@@ -4931,7 +4997,8 @@ def memory_notes(look, skipped):
     """The report's notes for what a look reads beside the chains and
     could not read as it should: the day book (`skipped`, the rows
     `daybook_rows` passed over), the coverage marker and the harness
-    settings, as report keys. Nothing of the agent's machine is read at
+    settings (anything there that is not a settings file, folder, pipe
+    or text alike), as report keys. Nothing of the agent's machine is read at
     the receiver: not its marker, not its settings."""
     notes = {}
     shelf = not_a_file(look.daybook)
@@ -4950,12 +5017,13 @@ def memory_notes(look, skipped):
                                 "none, as if install-hook had written "
                                 "nothing")
     # Either home of the hook (ADR-0040): a folder or a pipe at the
-    # managed file's name hides a hook as one at the operator's does.
+    # managed file's name hides a hook as one at the operator's does,
+    # and so does a file there that is not JSON (#465).
     unset = "; ".join(
         f"{settings.as_posix()} cannot be read as harness settings: {why} "
         "— read as none, as if no hook were wired"
         for settings in wired_files(look.witness)
-        for why in [not_a_file(settings)] if why)
+        for why in [settings_reading(settings)[1]] if why)
     if unset:
         notes["settings_note"] = unset
     return notes
@@ -5391,7 +5459,8 @@ def keep_memory(path, seen, data, what):
         write_whole(path, json.dumps(data, indent=2) + "\n")
     except OSError as error:
         return refused(f"{path.name} could not be written: "
-                       f"{error.strerror or error}; nothing was {what}", 73)
+                       f"{error.strerror or error}; nothing was {what}",
+                       EX_CANTCREAT)
     return None
 
 
@@ -5546,7 +5615,7 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
     except OSError as error:
         return refused(f"{path.name} could not be written: "
                        f"{error.strerror or error}; nothing was "
-                       "acknowledged", 73)
+                       "acknowledged", EX_CANTCREAT)
     lost = ("whatever calibration memory the old file held is lost"
             if change == "unreadable"
             else "there was no calibration memory left to keep")
@@ -5700,24 +5769,24 @@ def mentions(entries, needle):
     return False
 
 
-def universe(root, store):
+def universe(root, store, receiver=False):
     """(repo, session, seq, log) for every chain in the serving
-    universe: the store's drawers, or a legacy folder of repos under an
-    explicit --root (ADR-0011/0013). A folder it cannot list is raised
-    (`listed`), and the page's view refuses by name."""
-    if store:
-        found = chains_listed(root, "*/receipts-*.jsonl")
-        return [(*store_identity(log), log) for log in found]
-    return [(*chain_identity(root, log), log) for log in find_chains(root)]
+    universe, the census's own: the store's drawers, a receiver's copies
+    (ADR-0041), or a legacy folder of repos under an explicit --root
+    (ADR-0011/0013), asked of the Look so the views and the census never
+    disagree on what a universe holds (#487). A folder it cannot list is
+    raised (`listed`), and the page's view refuses by name."""
+    look = Look(root, store=store, receiver=receiver)
+    return [(*look.identity(log), log) for log in look.chains()]
 
 
 def recall_root(root, repo=None, since=None, until=None, path=None,
-                store=False):
+                store=False, receiver=False):
     """The timeline: one story per session, sibling chains folded in
     (ADR-0004 — one session, one story), newest first. Dates compare as
     ISO prefixes; a session is in range when its span overlaps."""
     stories = {}
-    for repo_name, session, _, log in universe(root, store):
+    for repo_name, session, _, log in universe(root, store, receiver):
         if repo and repo_name != repo:
             continue
         entries = read_entries(log)
@@ -5802,7 +5871,7 @@ SHAPE_RUNGS = (1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200,
 SHAPE_BARS = 60
 
 
-def session_shape(root, repo, session, store=False):
+def session_shape(root, repo, session, store=False, receiver=False):
     """One session's receipts bucketed across its own span, first
     receipt to last, gaps and all: a session that went quiet for a day
     draws mostly empty, and that emptiness is the finding (ADR-0018's
@@ -5810,7 +5879,7 @@ def session_shape(root, repo, session, store=False):
     Testimony, owning no verdicts; the owed tail drawn over it is the
     completeness watch's."""
     stamps = []
-    for repo_name, name, _, log in universe(root, store):
+    for repo_name, name, _, log in universe(root, store, receiver):
         if repo_name != repo or name != session:
             continue
         for entry in read_entries(log):
@@ -5865,7 +5934,7 @@ def panel_file_key(path):
     return path
 
 
-def activity_root(root, store=False, days=ACTIVITY_DAYS):
+def activity_root(root, store=False, days=ACTIVITY_DAYS, receiver=False):
     """Receipts counted into UTC hour buckets, per repo, plus what the
     writer reached for and what it touched: one walk for the heat map,
     the sparklines, the histogram and files touched, so all four share
@@ -5878,7 +5947,7 @@ def activity_root(root, store=False, days=ACTIVITY_DAYS):
     counts = {}
     tools = {}
     files = {}
-    for repo_name, _, _, log in universe(root, store):
+    for repo_name, _, _, log in universe(root, store, receiver):
         drawer = counts.setdefault(repo_name, {})
         for entry in read_entries(log):
             # The genesis is administrative — it records that a chain
@@ -5969,7 +6038,7 @@ def walk_chain(root, asked):
 SEARCH_CAP = 500  # hits returned; `matched` still counts every one
 
 
-def search_root(root, query, store=False):
+def search_root(root, query, store=False, receiver=False):
     """Free-text search over action lines, machine-wide. Finds what was
     *written* — the writer's word, testimony like all of recall — and
     hands back the context the timeline links on. Newest first; an empty
@@ -5977,7 +6046,7 @@ def search_root(root, query, store=False):
     needle = (query or "").lower()
     hits = []
     if needle:
-        for repo_name, session, _, log in universe(root, store):
+        for repo_name, session, _, log in universe(root, store, receiver):
             for entry in read_entries(log):
                 action = str(entry.get("action", ""))
                 if needle in action.lower():
@@ -7313,7 +7382,7 @@ def write_export(path, data, then):
     except OSError as error:
         print(f"error: {Path(path).name} could not be written: "
               f"{error.strerror or error} — {then}", file=sys.stderr)
-        return 73
+        return EX_CANTCREAT
     return None
 
 
@@ -9046,12 +9115,14 @@ class Face(BaseHTTPRequestHandler):
                                  since=asked.get("from") or None,
                                  until=asked.get("to") or None,
                                  path=asked.get("path") or None,
-                                 store=self.server.store)
+                                 store=self.server.store,
+                                 receiver=self.server.receiver)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/api/activity":
             report = activity_root(self.server.root,
-                                   store=self.server.store)
+                                   store=self.server.store,
+                                   receiver=self.server.receiver)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/api/views":
@@ -9062,7 +9133,8 @@ class Face(BaseHTTPRequestHandler):
                      for key, values in parse_qs(url.query).items()}
             report = session_shape(self.server.root, asked.get("repo", ""),
                                    asked.get("session", ""),
-                                   store=self.server.store)
+                                   store=self.server.store,
+                                   receiver=self.server.receiver)
             if report is None:
                 self.send_error(404)
                 return
@@ -9081,7 +9153,8 @@ class Face(BaseHTTPRequestHandler):
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
             report = search_root(self.server.root, asked.get("q"),
-                                 store=self.server.store)
+                                 store=self.server.store,
+                                 receiver=self.server.receiver)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/checklist":
@@ -11875,7 +11948,9 @@ class VersionAction(argparse.Action):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
-EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no package
+EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no
+                   # package, no baseline for calibrate or acknowledge, no
+                   # export; and what the keeper reads from a recorder verb
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.

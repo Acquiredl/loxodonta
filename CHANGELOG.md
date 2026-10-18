@@ -44,8 +44,18 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
 - An ended session no longer reads awake for a day after the tail keeper commits its tail: growth that is bookkeeping alone carries the stillness clock forward, as it already never woke a session (#537).
 - After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
+- `install-hook --managed` writes the coverage marker into a store not made yet under a folder root owns, and a store not made yet under another account's folder is said to be that, not another account's (#465).
+- A managed file another program holds open on Windows is named as that, with the way out, instead of sending the reader for an administrator's shell that would not help (#465).
+- A harness settings file that is not JSON, nests too deep or holds no object is named in the scan's `settings_note`, in either home, instead of reading silently as no hook wired (#465).
+- `install-hook --managed` says to restart a running `supervisor serve` beside open sessions, since `serve` reads what is wired once, at its start (#465).
+- The managed folder's date stands in for a deleted managed file only when coverage narrows, so another tool's file in that folder no longer dates a widening later than the operator's change (#465).
+- The day book's note says a row that is not an object is no row of counts at all, instead of saying a count in it is not a number (#448).
 - `supervisor adopt` never moves one legacy chain over another bound for the same name in a drawer, case and Unicode form aside: every chain bound for that name is refused by name and left, in the dry run too (#447).
 - `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).
+- A refusal the receiver judges on the headers alone (404, 405, 415, a chain name's 400) reaches the sender as its status, not as a dropped connection: the door reads up to 64 KiB of the body before closing (#450).
+- Over a receiver's folder, a log record that names no session, or is not an object, is counted as `sessionless` and said in the second record's words, instead of skipped unsaid (#487).
+- An events file the receiver's reading cannot open no longer counts as a day kept: it sets neither the memory's edge nor the oldest or newest day, and the note says so (#487).
+- `serve --receiver` answers `/api/recall`, `/api/activity`, `/api/search` and `/api/shape` from the receiver's chain copies, as its census counts them, where each answered empty (#487).
 - The hook says on stderr, one line, when the store's receipts folder cannot be listed, so a session it may split across two drawers is named; the receipt is still written (#452).
 - A session that never recorded, its transcript a folder or a pipe, reads `UNWITNESSED` with why in the completeness watch, as a chained session's unreadable transcript does, instead of passing in silence (#452).
 
