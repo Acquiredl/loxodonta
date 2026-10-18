@@ -5720,7 +5720,8 @@ def load_settings(path):
     """The user-level settings as (settings, None), or (None, the exit
     code) with the complaint printed — shared by install and uninstall
     so both refuse the same ways instead of clobbering anything: broken
-    JSON, or JSON of a shape they cannot read, 65; a folder, a pipe or
+    JSON, JSON nested past the reader (#463), or JSON of a shape they
+    cannot read, 65; a folder, a pipe or
     a device at the name, or a file this user may not open, 66. The
     file is left exactly as it was."""
     if not os.path.exists(path):
