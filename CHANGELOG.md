@@ -46,6 +46,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
 - `supervisor adopt` never moves one legacy chain over another bound for the same name in a drawer, case and Unicode form aside: every chain bound for that name is refused by name and left, in the dry run too (#447).
 - `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).
+- A refusal the receiver judges on the headers alone (404, 405, 415, a chain name's 400) reaches the sender as its status, not as a dropped connection: the door reads up to 64 KiB of the body before closing (#450).
+- Over a receiver's folder, a log record that names no session, or is not an object, is counted as `sessionless` and said in the second record's words, instead of skipped unsaid (#487).
+- An events file the receiver's reading cannot open no longer counts as a day kept: it sets neither the memory's edge nor the oldest or newest day, and the note says so (#487).
+- `serve --receiver` answers `/api/recall`, `/api/activity`, `/api/search` and `/api/shape` from the receiver's chain copies, as its census counts them, where each answered empty (#487).
 - The keepers stop asking the recorder for the head of a chain the scan stood down, which it refuses on every turn, and a refused head reads as the recorder's refusal, in its words, not a calendar's or remote's (#533).
 
 ## [0.15.1] - 2026-10-12

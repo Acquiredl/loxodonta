@@ -5848,6 +5848,127 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
+    def test_a_record_naming_no_session_is_counted_beside_the_lines(self):
+        # #487 item 6: a well-shaped line can hold records out of shape,
+        # one with no session.id, one whose attributes are not a list,
+        # one that is not an object. Each is said, not passed over.
+        chain_copy(self.data, FIXTURE_SESSION)
+        records = [
+            {"attributes": [{"key": "event.name",
+                             "value": {"stringValue": "tool_result"}}]},
+            {"attributes": {"session.id": FIXTURE_SESSION}},
+            7,
+        ]
+        with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
+                  encoding="utf-8") as events:
+            events.write(json.dumps({
+                "received": "2026-10-07T02:22:00Z", "from": "x",
+                "logs": {"resourceLogs": [{"scopeLogs": [
+                    {"logRecords": records}]}]}}) + "\n")
+
+        report = self.report()
+
+        second = report["completeness"]["second_record"]
+        self.assertEqual((second["unparsed"], second["sessionless"]), (0, 3))
+        self.assertIn("3 log record(s) naming no session skipped and counted",
+                      second["words"])
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_the_clean_fixture_names_no_sessionless_record(self):
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        second = self.report()["completeness"]["second_record"]
+
+        self.assertEqual(second["sessionless"], 0)
+        self.assertNotIn("naming no session", second["words"])
+
+    def test_an_events_file_that_cannot_be_read_sets_no_day(self):
+        # #487 item 9: a folder where the oldest day's file belongs is
+        # read for nothing, so its day is not where the memory begins. A
+        # copy dated between it and the fixture's day is before memory.
+        (self.data / "events-2026-10-01.jsonl").mkdir()
+        between = int(datetime.datetime(
+            2026, 10, 3, tzinfo=datetime.timezone.utc).timestamp())
+        chain_copy(self.data, "between-session-0000", epoch=between)
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report()
+        listed = self.report("--before-memory")
+
+        watch = report["completeness"]
+        self.assertEqual((watch["second_record"]["files"],
+                          watch["second_record"]["oldest"],
+                          watch["second_record"]["newest"]),
+                         (1, FIXTURE_DAY, FIXTURE_DAY))
+        self.assertNotIn("between-session-0000", self.rows(report))
+        self.assertEqual(watch["before_memory"]["count"], 1)
+        self.assertIn("events-2026-10-01.jsonl", watch["note"])
+        self.assertIn("nothing of them is counted, their day included: the "
+                      "second record's memory begins at the oldest file "
+                      "that was read", watch["note"])
+        self.assertNotIn("holds no events file", watch["note"])
+        # The unread file may hold the older session's events, so the
+        # words claim only what was read, never "never kept here".
+        block = listed["completeness"]["before_memory"]
+        (row,) = block["sessions"]
+        for words in (row["words"], block["words"]):
+            self.assertIn(f"predates {FIXTURE_DAY}, the day of the oldest "
+                          "events file read", words)
+            self.assertIn("is in no events file that was read", words)
+            self.assertNotIn("never kept here", words)
+
+    def test_a_folder_whose_every_events_file_is_unreadable_says_so(self):
+        # Review of #549, case A: files are there, none could be read.
+        # That is not a folder no harness has sent to.
+        data = receiver_folder(self.base / "closed", events=False)
+        (data / f"events-{FIXTURE_DAY}.jsonl").mkdir()
+        chain_copy(data, FIXTURE_SESSION)
+
+        report = self.report(data=data)
+
+        watch = report["completeness"]
+        self.assertIn("no events file the receiver holds could be read",
+                      watch["note"])
+        self.assertIn(f"events-{FIXTURE_DAY}.jsonl", watch["note"])
+        self.assertNotIn("holds no events file", watch["note"])
+        self.assertNotIn("no harness has sent", watch["note"])
+        self.assertNotIn("memory begins", watch["note"])
+        self.assertEqual(watch["second_record"]["files"], 0)
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "SECOND-RECORD-ABSENT")
+
+    def test_a_folder_with_no_events_file_says_so(self):
+        # #487 item 12: no harness has sent here yet.
+        data = receiver_folder(self.base / "bare", events=False)
+        chain_copy(data, FIXTURE_SESSION)
+
+        report = self.report(data=data)
+
+        watch = report["completeness"]
+        self.assertIn("the receiver holds no events file", watch["note"])
+        self.assertIn("reads SECOND-RECORD-ABSENT until one does",
+                      watch["note"])
+        self.assertEqual(watch["second_record"]["files"], 0)
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "SECOND-RECORD-ABSENT")
+
+    def test_a_listed_before_memory_row_says_why_it_is_not_judged(self):
+        # #487 item 12: the row's own words under --before-memory.
+        old = int(datetime.datetime(2026, 10, 1,
+                                    tzinfo=datetime.timezone.utc).timestamp())
+        chain_copy(self.data, "old-session-0000", epoch=old)
+
+        listed = self.report("--before-memory")
+
+        (row,) = listed["completeness"]["before_memory"]["sessions"]
+        self.assertEqual(row["state"], "BEFORE-MEMORY")
+        self.assertEqual(row["words"], (
+            f"this chain copy's newest entry predates {FIXTURE_DAY}, the "
+            "day of the oldest events file read, so its second record was "
+            "never kept here: counted, not judged, and not called absent "
+            "(ADR-0041)."))
+
     def test_an_int_value_int_cannot_read_ends_nothing(self):
         # str.isdigit() passes a superscript two and a string past the
         # interpreter's 4300-digit limit; int() refuses both. Whoever
