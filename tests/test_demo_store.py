@@ -22,11 +22,10 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_demo_store`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import isolated_env
+from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
+                     isolated_env, run)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
+
 DEMO_STORE = REPO_ROOT / "tools" / "demo_store.py"
 
 # The session whose digest is the README's recorded-task excerpt.

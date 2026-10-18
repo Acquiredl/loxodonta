@@ -22,11 +22,11 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_publish`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import FakeCalendar, FakeCalendarHandler, clean_env
-from test_supervisor import home_outside, isolated_env
+from support import (LOXODONTA, clean_env, isolated_env,  # noqa: E402
+                     temp_folder)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+from test_anchor import FakeCalendar, FakeCalendarHandler
+
 
 # The ladder's third rung, word for word as ratified in the #244 grill
 # (#249). Shared so the two ladder tests read the same string and a
@@ -124,7 +124,7 @@ class PublishBase(unittest.TestCase):
         self.project = self.root / self.PROJECT_NAME
         self.project.mkdir()
         self.store = self.root / "store"
-        self.home = home_outside(self)  # every other home (#274)
+        self.home = temp_folder(self)  # every other home (#274)
         self.transcript = self.root / "transcript.jsonl"
         self.receiver = self.serve(FakeReceiver, FakeReceiverHandler)
         self.receiver.received = []

@@ -61,12 +61,11 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_suite_shape`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import isolated_env
+from support import (LOXODONTA, REPO_ROOT, RECEIVER, SUPERVISOR,  # noqa: E402
+                     isolated_env)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+
 TESTS_DIR = REPO_ROOT / "tests"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
-RECORDER = REPO_ROOT / "loxodonta.py"
 # Written out here rather than read from the guard, so a home dropped
 # from the guard's list fails these tests instead of passing with it.
 EVERY_HOME = {"LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME"}
@@ -161,7 +160,7 @@ class WriterHomeGuardTest(unittest.TestCase):
     a probe past a disarmed guard writes nothing."""
 
     def command(self, verb):
-        return [sys.executable, str(RECORDER), verb, "--help"]
+        return [sys.executable, str(LOXODONTA), verb, "--help"]
 
     def test_each_home_writing_verb_is_refused_with_the_inherited_home(self):
         for verb in ("hook", "install-hook", "uninstall-hook"):
@@ -261,7 +260,7 @@ class WriterHomeGuardTest(unittest.TestCase):
 
     def test_a_recorder_verb_that_stays_in_its_log_is_not_guarded(self):
         done = subprocess.run(
-            [sys.executable, str(RECORDER), "verify", "--help"],
+            [sys.executable, str(LOXODONTA), "verify", "--help"],
             capture_output=True, encoding="utf-8")
         self.assertEqual(done.returncode, 0, done.stderr)
 
@@ -1280,7 +1279,7 @@ class DocumentedVariablesAreReadTest(unittest.TestCase):
     def test_every_documented_variable_is_read(self):
         pages = sorted((REPO_ROOT / "docs").rglob("*.md"))
         pages.append(REPO_ROOT / "README.md")
-        code = [RECORDER, SUPERVISOR, REPO_ROOT / "receiver.py"]
+        code = [LOXODONTA, SUPERVISOR, REPO_ROOT / "receiver.py"]
         code += sorted((REPO_ROOT / "adapters").glob("*.py"))
         self.assertEqual(env_names_unread(pages, code, REPO_ROOT), [])
 

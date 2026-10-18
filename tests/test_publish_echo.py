@@ -15,8 +15,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_publish_echo`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import LOXODONTA, REPO_ROOT, run  # noqa: E402
+
 ECHO = REPO_ROOT / "tools" / "publish_echo.py"
 
 LISTENING = re.compile(r"http://127\.0\.0\.1:(\d+)/")

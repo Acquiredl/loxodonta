@@ -7,32 +7,25 @@ reports (ADR-0015), read from local git only, never fetched. Both files
 are tagged together and must agree.
 """
 
-import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
-RECEIVER = REPO_ROOT / "receiver.py"
-VERIFIER = REPO_ROOT / "verifier.py"
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_version`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import (LOXODONTA, REPO_ROOT, RECEIVER, SUPERVISOR,  # noqa: E402
+                     VERIFIER, clean_env, run, temp_folder)
+
 
 # `<prog> <semver> (format <format>, commit <short-hash|unknown>)`
 VERSION_LINE = re.compile(
     r"^(?P<prog>\S+) (?P<tool>\d+\.\d+\.\d+) "
     r"\(format (?P<format>\d+\.\d+), commit (?P<commit>[0-9a-f]{7,40}|unknown)\)$")
-
-
-def run_version(script, env=None):
-    return subprocess.run(
-        [sys.executable, str(script), "--version"],
-        capture_output=True, encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8", **(env or {})})
 
 
 def checkout_commit():
@@ -43,7 +36,7 @@ def checkout_commit():
 
 class VersionTest(unittest.TestCase):
     def test_recorder_prints_tool_format_and_commit_on_one_line(self):
-        result = run_version(LOXODONTA)
+        result = run(LOXODONTA, "--version")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
@@ -57,15 +50,14 @@ class VersionTest(unittest.TestCase):
     def test_a_file_outside_any_checkout_says_unknown_never_fails(self):
         # A release asset, dropped anywhere: no git history to read, so
         # the commit is "unknown" — the flag still reports, exit 0.
-        loose = Path(tempfile.mkdtemp()).resolve()
-        self.addCleanup(shutil.rmtree, loose, ignore_errors=True)
+        loose = temp_folder(self)
         script = loose / "loxodonta.py"
         shutil.copy(LOXODONTA, script)
 
-        result = run_version(
-            script,
+        result = run(
+            script, "--version",
             # Stop git from walking up into some checkout above the temp dir.
-            env={"GIT_CEILING_DIRECTORIES": str(loose.parent)})
+            env=clean_env(GIT_CEILING_DIRECTORIES=str(loose.parent)))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         said = VERSION_LINE.match(result.stdout.strip())
@@ -74,7 +66,7 @@ class VersionTest(unittest.TestCase):
         self.assertEqual(said["format"], "0.1")
 
     def test_supervisor_prints_the_same_three_identities(self):
-        result = run_version(SUPERVISOR)
+        result = run(SUPERVISOR, "--version")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
@@ -86,7 +78,7 @@ class VersionTest(unittest.TestCase):
         self.assertEqual(said["commit"], checkout_commit())
 
     def test_receiver_prints_the_same_three_identities(self):
-        result = run_version(RECEIVER)
+        result = run(RECEIVER, "--version")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
@@ -100,7 +92,7 @@ class VersionTest(unittest.TestCase):
     def test_verifier_prints_the_same_three_identities(self):
         # The copy answers for itself (ADR-0035): its own name, and the
         # commit of the checkout it sits in.
-        result = run_version(VERIFIER)
+        result = run(VERIFIER, "--version")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
@@ -115,7 +107,7 @@ class VersionTest(unittest.TestCase):
         # ADR-0022: tagged together, so a bump to one is a bump to all
         # of them (the receiver joined with ADR-0031, the verifier with
         # ADR-0035, which cuts it from the recorder at the same commit).
-        said = {script: VERSION_LINE.match(run_version(script).stdout.strip())
+        said = {script: VERSION_LINE.match(run(script, "--version").stdout.strip())
                 for script in (LOXODONTA, SUPERVISOR, RECEIVER, VERIFIER)}
         for script in (SUPERVISOR, RECEIVER, VERIFIER):
             self.assertEqual(said[script]["tool"], said[LOXODONTA]["tool"],

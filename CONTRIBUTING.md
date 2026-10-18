@@ -32,7 +32,9 @@ Reading three files first saves everyone a round trip:
    that says why beats a trick that saves a line.
 3. **Tests first, through the public CLI.** Every behavior is tested by
    running the command a user would run and reading what it printed or wrote.
-   No mocking of internals. Run the suite with:
+   No mocking of internals. What every test shares, the one way to run a
+   tool and the temporary homes the tools are pointed at, is in
+   `tests/support.py`. Run the suite with:
 
    ```
    python -m unittest discover -s tests

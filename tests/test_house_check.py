@@ -20,7 +20,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_house_check`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import REPO_ROOT, SUPERVISOR  # noqa: E402
+
 CHECKER = REPO_ROOT / "tools" / "house_check.py"
 
 

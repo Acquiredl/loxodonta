@@ -30,18 +30,10 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_supervisor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import home_guard  # noqa: E402
+from support import (LOXODONTA, RECEIVER, SUPERVISOR,  # noqa: E402
+                     isolated_env, temp_folder)
 
-# Every suite that starts scan, serve, calibrate, drill, export or
-# package takes isolated_env from this module, so arming the home guard
-# here arms it wherever those suites run, alone or under discovery
-# (#242).
-home_guard.arm()
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 BASELINE_NAME = ".supervisor-baseline.json"
-LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
 TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
@@ -661,7 +653,7 @@ class ScanCensusTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
 
     def test_scan_reports_a_chain_with_its_verdict_as_json(self):
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
@@ -773,7 +765,7 @@ class ScanVerdictTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
 
     def tamper(self, log):
         lines = log.read_text(encoding="utf-8").splitlines()
@@ -966,7 +958,7 @@ class ScanAnchorTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
 
     def test_an_anchored_chain_is_a_distinct_claim_not_just_valid(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
@@ -1144,7 +1136,7 @@ class BaselineTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
         self.baseline = self.root / ".supervisor-baseline.json"
 
     def events(self, result):
@@ -1794,7 +1786,7 @@ class DaybookTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
         self.daybook = self.root / ".supervisor-daybook.json"
 
     def rows(self, result):
@@ -3635,48 +3627,6 @@ class FakeCalendarHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def keeper_env(**knobs):
-    """Proxy-free env (urllib must reach 127.0.0.1 directly) with any
-    supervisor knobs applied."""
-    env = {k: v for k, v in os.environ.items()
-           if k.lower() not in ("http_proxy", "https_proxy", "all_proxy",
-                                "no_proxy")}
-    env.update(knobs)
-    return env
-
-
-def isolated_env(home, **knobs):
-    """`keeper_env` with every home the tools read pointed inside `home`:
-    the store, the user's settings and Codex's hooks, so a scan reads
-    neither this machine's own wiring nor its coverage marker, and the
-    folder that stands in for the harness's managed settings folder
-    (#259), which nothing creates until a test asks for a managed
-    install. Pair it with a `--witness` under a temporary folder. The
-    knobs land last, so a test that keeps its store or its project
-    somewhere of its own names it here (`LOXODONTA_HOME=...`,
-    `CLAUDE_PROJECT_DIR=...`). Every start of scan, serve, calibrate,
-    drill, export or package (#242), and of adopt, hook, install-hook or
-    uninstall-hook (#274), goes through this or sets all four homes
-    itself, and the managed folder where the verb reads it; the home
-    guard (tests/home_guard.py) refuses one that does neither."""
-    env = keeper_env(LOXODONTA_HOME=str(Path(home) / ".loxodonta"),
-                     HOME=str(home), USERPROFILE=str(home),
-                     CODEX_HOME=str(Path(home) / ".codex"),
-                     LOXODONTA_MANAGED_DIR=str(Path(home) / "managed"))
-    env.pop("CLAUDE_PROJECT_DIR", None)
-    env.update(knobs)
-    return env
-
-
-def home_outside(test):
-    """A temporary home for `test`, removed when it ends, for a test whose
-    scanned root is its whole temporary folder: a home inside the root
-    would sit in the census it is meant to stay out of."""
-    away = tempfile.TemporaryDirectory()
-    test.addCleanup(away.cleanup)
-    return Path(away.name).resolve()
-
-
 class AnchorKeeperTest(unittest.TestCase):
     """The anchor keeper (issue #19): freshness assessed every tick,
     pending proofs completed with no operator action — the ritual the
@@ -3687,7 +3637,7 @@ class AnchorKeeperTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
 
     def start_calendar(self):
         server = HTTPServer(("127.0.0.1", 0), FakeCalendarHandler)
@@ -4029,7 +3979,7 @@ class DrillTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
-        self.env = isolated_env(home_outside(self))
+        self.env = isolated_env(temp_folder(self))
 
     def drill(self, log):
         return subprocess.run(
@@ -4771,7 +4721,7 @@ class UsageExitTest(unittest.TestCase):
     ruling 7). Argparse's message stays on stderr; stdout stays empty."""
 
     def setUp(self):
-        self.home = home_outside(self)
+        self.home = temp_folder(self)
 
     def test_unknown_flag_exits_64_with_argparse_message(self):
         result = run_supervisor(self.home, "scan", "--no-such-flag")

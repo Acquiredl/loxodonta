@@ -20,10 +20,8 @@ Every test drives the public CLI, bounded, with homes of its own.
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -31,14 +29,12 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_unparseable_record`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import clean_env  # noqa: E402
-from test_supervisor import (chains_by_session, home_outside,  # noqa: E402
-                             install_witness_hook, isolated_env, make_chain)
+from support import (LOXODONTA, SUPERVISOR, VERIFIER,  # noqa: E402
+                     isolated_env, run, temp_folder)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
-VERIFIER = REPO_ROOT / "verifier.py"
+from test_supervisor import (chains_by_session,  # noqa: E402
+                             install_witness_hook, make_chain)
+
 
 BOUND = 60
 
@@ -50,21 +46,13 @@ NOT_JSON = b'{"path": \n'
 TOO_DEEP = b"[" * 100000 + b"]" * 100000
 
 
-def run_tool(script, *args, cwd):
-    return subprocess.run([sys.executable, str(script), *args], cwd=cwd,
-                          capture_output=True, encoding="utf-8",
-                          env=clean_env(), timeout=BOUND)
-
-
 class RecordUnparseableTest(unittest.TestCase):
     """A store-shaped chain whose project record is spoiled after its
     first receipt: the writers refuse by the record's name, and the
     readers name it and give the chain's verdict."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.project = self.workdir / "theproject"
         self.project.mkdir()
         (self.project / "report.md").write_bytes(b"v1\n")
@@ -74,14 +62,14 @@ class RecordUnparseableTest(unittest.TestCase):
         self.record.write_text(json.dumps({"path": self.project.as_posix()}),
                                encoding="utf-8")
         self.log = drawer / "receipts-sess-rec.jsonl"
-        run_tool(LOXODONTA, "init", "--log", str(self.log), cwd=self.workdir)
+        run(LOXODONTA, "init", "--log", str(self.log), cwd=self.workdir, timeout=BOUND)
         logged = self.log_report()
         self.assertEqual(logged.returncode, 0, logged.stderr)
 
     def log_report(self):
-        return run_tool(LOXODONTA, "log", "--log", str(self.log),
+        return run(LOXODONTA, "log", "--log", str(self.log),
                         "--actor", "agent", "--action", "wrote report",
-                        "--file", "report.md", cwd=self.workdir)
+                        "--file", "report.md", cwd=self.workdir, timeout=BOUND)
 
     def gone(self):
         """The record names a project that is no longer there."""
@@ -111,10 +99,10 @@ class RecordUnparseableTest(unittest.TestCase):
         before = self.log.read_bytes()
         marker = self.workdir / "ran.txt"
 
-        result = run_tool(
+        result = run(
             LOXODONTA, "run", "--log", str(self.log), "--actor", "agent",
             "--file", "report.md", "--", sys.executable, "-c",
-            f"open({str(marker)!r}, 'w').close()", cwd=self.workdir)
+            f"open({str(marker)!r}, 'w').close()", cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -126,8 +114,8 @@ class RecordUnparseableTest(unittest.TestCase):
     def assert_verify_named(self, script, content):
         self.spoil(content)
 
-        result = run_tool(script, "verify", "--log", str(self.log), "--files",
-                          cwd=self.workdir)
+        result = run(script, "verify", "--log", str(self.log), "--files",
+                          cwd=self.workdir, timeout=BOUND)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -187,13 +175,11 @@ class HookedRecordUnparseableTest(unittest.TestCase):
     SESSION = "sess-unparseable-0001"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        root = Path(self._tmp.name).resolve()
+        root = temp_folder(self)
         self.project = root / "theproject"
         self.project.mkdir()
         self.store = root / "store"
-        self.home = home_outside(self)
+        self.home = temp_folder(self)
 
     def hook(self, payload):
         env = isolated_env(self.home, CLAUDE_PROJECT_DIR=str(self.project),
@@ -261,9 +247,7 @@ class WorktreeNotUtf8Test(unittest.TestCase):
     section 8) and the receipt is written."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
+        base = temp_folder(self)
         self.project = base / "worktree"
         self.project.mkdir()
         self.gitdir = base / "main" / ".git" / "worktrees" / "worktree"
@@ -323,9 +307,7 @@ class ScannedRecordUnparseableTest(unittest.TestCase):
     one whose record is damaged."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        base = Path(self._tmp.name).resolve()
+        base = temp_folder(self)
         self.home = base / "storehome"
         self.witness = base / "witness"
         install_witness_hook(self.witness)

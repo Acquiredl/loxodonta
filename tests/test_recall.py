@@ -23,11 +23,10 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_recall`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import home_outside, isolated_env
+from support import (LOXODONTA, SUPERVISOR, isolated_env,  # noqa: E402
+                     temp_folder)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SUPERVISOR = REPO_ROOT / "supervisor.py"
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+
 
 
 # The home a recall verb reads when its test names none (#274): one for
@@ -95,7 +94,7 @@ class RecallBase(unittest.TestCase):
     def scan_env(self, **knobs):
         """Where a scan here runs: a home of the test's own, outside the
         root (#242), with any store or project the test names."""
-        return isolated_env(home_outside(self), **knobs)
+        return isolated_env(temp_folder(self), **knobs)
 
     def repo(self, name):
         path = self.root / name

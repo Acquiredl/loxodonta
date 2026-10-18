@@ -26,7 +26,8 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_metrics`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_anchor import clean_env
+from support import LOXODONTA, REPO_ROOT, clean_env  # noqa: E402
+
 from test_publish import FakeReceiver, FakeReceiverHandler
 from test_serve import OPENER, ServerFixture, log_entry
 from test_supervisor import (ago, chain_head, install_witness_hook,
@@ -35,8 +36,6 @@ from test_supervisor import (ago, chain_head, install_witness_hook,
                              write_completed_anchor, write_pending_anchor,
                              write_transcript)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
 
 GRADES = ("(verdict)", "(witness verdict)", "(testimony)")
 

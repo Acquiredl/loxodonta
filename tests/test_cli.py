@@ -12,13 +12,15 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+# This folder on sys.path, so the sibling import below also resolves
+# when the module runs alone (`python -m unittest tests.test_cli`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import LOXODONTA, REPO_ROOT, clean_env, run, temp_folder  # noqa: E402
 
 
 def spec_hash(entry_without_hash):
@@ -31,31 +33,15 @@ def spec_hash(entry_without_hash):
     return hashlib.sha256(canonical).hexdigest()
 
 
-def run_receipts(*args, cwd):
-    """Invoke the loxodonta CLI as an operator would — with both ends of the
-    pipe pinned to UTF-8 (PYTHONIOENCODING for the child, encoding= for this
-    parent). `text=True` alone decodes with the locale codec — cp1252 on
-    Windows — which crashes on the UTF-8 the golden fixture emits."""
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), *args],
-        cwd=cwd,
-        capture_output=True,
-        encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
-
-
 class ReceiptsCliTest(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        self.workdir = temp_folder(self)
         self.log_path = self.workdir / "receipts.jsonl"
 
 
 class InitTest(ReceiptsCliTest):
     def test_init_writes_one_line_pinned_genesis(self):
-        result = run_receipts("init", cwd=self.workdir)
+        result = run(LOXODONTA, "init", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = self.log_path.read_text(encoding="utf-8").splitlines()
@@ -77,10 +63,10 @@ class InitTest(ReceiptsCliTest):
 
 
     def test_init_refuses_to_overwrite_existing_log(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         original = self.log_path.read_text(encoding="utf-8")
 
-        result = run_receipts("init", cwd=self.workdir)
+        result = run(LOXODONTA, "init", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 73, result.stderr)  # EX_CANTCREAT
         self.assertIn("exists", result.stderr)
@@ -91,8 +77,8 @@ class LogFlagTest(ReceiptsCliTest):
     def test_all_commands_accept_log_flag(self):
         custom = self.workdir / "custom.jsonl"
 
-        init_result = run_receipts("init", "--log", "custom.jsonl", cwd=self.workdir)
-        verify_result = run_receipts("verify", "--log", "custom.jsonl", cwd=self.workdir)
+        init_result = run(LOXODONTA, "init", "--log", "custom.jsonl", cwd=self.workdir)
+        verify_result = run(LOXODONTA, "verify", "--log", "custom.jsonl", cwd=self.workdir)
 
         self.assertEqual(init_result.returncode, 0, init_result.stderr)
         self.assertTrue(custom.exists())
@@ -103,9 +89,9 @@ class LogFlagTest(ReceiptsCliTest):
 
 class LogTest(ReceiptsCliTest):
     def test_log_three_entries_then_verify_valid(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         for i in range(1, 4):
-            result = run_receipts(
+            result = run(LOXODONTA, 
                 "log", "--actor", "agent", "--action", f"step {i}", cwd=self.workdir
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -113,25 +99,25 @@ class LogTest(ReceiptsCliTest):
         lines = self.log_path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 4)
 
-        verify_result = run_receipts("verify", cwd=self.workdir)
+        verify_result = run(LOXODONTA, "verify", cwd=self.workdir)
         self.assertEqual(verify_result.returncode, 0, verify_result.stdout)
         self.assertIn("VALID", verify_result.stdout)
 
     def test_log_rejects_empty_actor_and_action(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         before = self.log_path.read_text(encoding="utf-8")
 
         for flags in (("--actor", "", "--action", "did a thing"),
                       ("--actor", "agent", "--action", "")):
-            result = run_receipts("log", *flags, cwd=self.workdir)
+            result = run(LOXODONTA, "log", *flags, cwd=self.workdir)
             self.assertEqual(result.returncode, 64, flags)
             self.assertIn("non-empty", result.stderr)
 
         self.assertEqual(self.log_path.read_text(encoding="utf-8"), before)
 
     def test_log_on_damaged_log_errors_cleanly(self):
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
         intact = self.log_path.read_text(encoding="utf-8")
 
         for damaged_tail in ('{"torn": ', "[1,2,3]"):
@@ -140,7 +126,7 @@ class LogTest(ReceiptsCliTest):
             damaged = "".join(l + "\n" for l in lines)
             self.log_path.write_text(damaged, encoding="utf-8")
 
-            result = run_receipts(
+            result = run(LOXODONTA, 
                 "log", "--actor", "agent", "--action", "step 2", cwd=self.workdir
             )
 
@@ -155,7 +141,7 @@ class LogTest(ReceiptsCliTest):
     def test_log_on_empty_log_errors_cleanly(self):
         self.log_path.write_text("", encoding="utf-8")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir
         )
 
@@ -165,7 +151,7 @@ class LogTest(ReceiptsCliTest):
         self.assertEqual(self.log_path.read_text(encoding="utf-8"), "")
 
     def test_log_without_init_errors_cleanly(self):
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir
         )
 
@@ -191,16 +177,16 @@ class TranscriptVerifyTest(ReceiptsCliTest):
                 f"sha256={hashlib.sha256(data).hexdigest()}")
 
     def build(self, *actions):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         for action in actions:
             actor = ("receipts"
                      if action.startswith("transcript-commitment") else "agent")
-            result = run_receipts("log", "--actor", actor,
+            result = run(LOXODONTA, "log", "--actor", actor,
                                   "--action", action, cwd=self.workdir)
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def judge(self, *extra):
-        return run_receipts("verify", "--transcript", str(self.transcript),
+        return run(LOXODONTA, "verify", "--transcript", str(self.transcript),
                             *extra, cwd=self.workdir)
 
     def test_the_tail_after_the_furthest_commitment_is_stated(self):
@@ -279,7 +265,7 @@ class TranscriptVerifyTest(ReceiptsCliTest):
         self.build("step 1", self.commitment(big),
                    "step 2", self.commitment(big[:9]))
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         self.assertIn("COMMITMENT-SHRANK (entry 4", result.stdout)
@@ -297,10 +283,10 @@ class TranscriptVerifyTest(ReceiptsCliTest):
 
     def test_transcript_divergence_outranks_files_divergence(self):
         (self.workdir / "report.md").write_text("v1\n", encoding="utf-8")
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "wrote report",
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "wrote report",
                      "--file", "report.md", cwd=self.workdir)
-        run_receipts("log", "--actor", "receipts", "--action",
+        run(LOXODONTA, "log", "--actor", "receipts", "--action",
                      self.commitment(b"gone\n"), cwd=self.workdir)
         (self.workdir / "report.md").write_text("v2\n", encoding="utf-8")
         self.transcript.write_bytes(b"other\n")
@@ -337,20 +323,20 @@ class TranscriptVerifyTest(ReceiptsCliTest):
 
 class VerifyTest(ReceiptsCliTest):
     def test_verify_genesis_only_chain_is_valid(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("VALID", result.stdout)
 
     def test_verify_catches_edited_entry(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         genesis = json.loads(self.log_path.read_text(encoding="utf-8"))
         genesis["entry_hash"] = "0" * 64
         self.log_path.write_text(json.dumps(genesis) + "\n", encoding="utf-8")
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("BROKEN at entry 0", result.stdout)
@@ -359,7 +345,7 @@ class VerifyTest(ReceiptsCliTest):
     def test_verify_on_empty_log_errors_cleanly(self):
         self.log_path.write_text("", encoding="utf-8")
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
         self.assertEqual(result.stdout, "")
@@ -383,7 +369,7 @@ class VerifyTest(ReceiptsCliTest):
         # is over canonical form, not file bytes (SPEC §4).
         self.log_path.write_text(json.dumps(genesis) + "\n", encoding="utf-8")
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("VALID", result.stdout)
@@ -402,7 +388,7 @@ class VerifyTest(ReceiptsCliTest):
         genesis["entry_hash"] = spec_hash(genesis)
         self.log_path.write_text(json.dumps(genesis) + "\n", encoding="utf-8")
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("BROKEN at entry 0", result.stdout)
@@ -425,7 +411,7 @@ class VerifyTest(ReceiptsCliTest):
         }
         self.log_path.write_text(json.dumps(genesis) + "\n", encoding="utf-8")
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "BROKEN at entry 0: "
@@ -436,7 +422,7 @@ class VerifyTest(ReceiptsCliTest):
 class FileReferenceTest(ReceiptsCliTest):
     def setUp(self):
         super().setUp()
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
 
     def write_file(self, relpath, content):
         path = self.workdir / relpath
@@ -454,7 +440,7 @@ class FileReferenceTest(ReceiptsCliTest):
             (self.workdir / "report.md").read_bytes()
         ).hexdigest()
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "wrote report",
             "--file", "report.md", cwd=self.workdir,
         )
@@ -464,7 +450,7 @@ class FileReferenceTest(ReceiptsCliTest):
             self.last_entry()["files"],
             [{"path": "report.md", "sha256": expected_sha}],
         )
-        verify_result = run_receipts("verify", cwd=self.workdir)
+        verify_result = run(LOXODONTA, "verify", cwd=self.workdir)
         self.assertEqual(verify_result.returncode, 0, verify_result.stdout)
 
 
@@ -481,7 +467,7 @@ class FileReferenceTest(ReceiptsCliTest):
             json.dumps(entry) + "\n" for entry in rechained(entries)),
             encoding="utf-8")
 
-        result = run_receipts("verify", "--files", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("a\\x1b[31m\\nVALID\\u202e", result.stdout)
@@ -491,7 +477,7 @@ class FileReferenceTest(ReceiptsCliTest):
 
     def test_case_only_differing_reference_warns_at_write_time(self):
         self.write_file("report.md", "content\n")
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "first spelling",
             "--file", "report.md", cwd=self.workdir,
         )
@@ -501,7 +487,7 @@ class FileReferenceTest(ReceiptsCliTest):
         # against chain history (SPEC §3), not the filesystem — everywhere.
         self.write_file("Report.md", "content\n")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "second spelling",
             "--file", "Report.md", cwd=self.workdir,
         )
@@ -517,16 +503,16 @@ class FileReferenceTest(ReceiptsCliTest):
         # the ones that do must still see every spelling ever recorded,
         # however many file-less entries sit in between.
         self.write_file("report.md", "content\n")
-        run_receipts("log", "--actor", "agent", "--action", "first spelling",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "first spelling",
                      "--file", "report.md", cwd=self.workdir)
         for action in ("ran the tests", "read the diff"):
-            bare = run_receipts("log", "--actor", "agent", "--action", action,
+            bare = run(LOXODONTA, "log", "--actor", "agent", "--action", action,
                                 cwd=self.workdir)
             self.assertEqual(bare.returncode, 0, bare.stderr)
             self.assertEqual(bare.stderr, "")
         self.write_file("Report.md", "content\n")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "second spelling",
             "--file", "Report.md", cwd=self.workdir,
         )
@@ -534,13 +520,13 @@ class FileReferenceTest(ReceiptsCliTest):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("case", result.stderr.lower())
         self.assertIn("report.md", result.stderr.lower())
-        verified = run_receipts("verify", cwd=self.workdir)
+        verified = run(LOXODONTA, "verify", cwd=self.workdir)
         self.assertEqual(verified.returncode, 0, verified.stdout)
 
     def test_log_with_nonexistent_file_errors_cleanly(self):
         before = self.log_path.read_text(encoding="utf-8")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "phantom file",
             "--file", "not-there.md", cwd=self.workdir,
         )
@@ -553,13 +539,13 @@ class FileReferenceTest(ReceiptsCliTest):
     def test_backslash_path_stores_forward_slash_spelling(self):
         self.write_file("sub/report.md", "nested\n")
 
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "backslash intake",
             "--file", "sub\\report.md", cwd=self.workdir,
         )
         backslash_files = self.last_entry()["files"]
 
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "forward-slash intake",
             "--file", "sub/report.md", cwd=self.workdir,
         )
@@ -578,7 +564,7 @@ class FileReferenceTest(ReceiptsCliTest):
         rooted = os.path.splitdrive(str(self.workdir / "report.md"))[1]
         for bad_path in (str(self.workdir / "report.md"), "../escape.md",
                          rooted):
-            result = run_receipts(
+            result = run(LOXODONTA, 
                 "log", "--actor", "agent", "--action", "bad path",
                 "--file", bad_path, cwd=self.workdir,
             )
@@ -593,9 +579,7 @@ class FileReferenceTest(ReceiptsCliTest):
         # A link inside the project that points outside it passes; the
         # reference carries the link's path and the target's bytes, and
         # `verify --files` follows the link the same way.
-        elsewhere = tempfile.TemporaryDirectory()
-        self.addCleanup(elsewhere.cleanup)
-        target = Path(elsewhere.name) / "outside.md"
+        target = temp_folder(self) / "outside.md"
         target.write_text("bytes that live outside the project\n",
                           encoding="utf-8")
         link = self.workdir / "link.md"
@@ -606,7 +590,7 @@ class FileReferenceTest(ReceiptsCliTest):
                           f"({e.strerror or type(e).__name__}); this test "
                           "runs wherever they can")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "read through a link",
             "--file", "link.md", cwd=self.workdir,
         )
@@ -617,7 +601,7 @@ class FileReferenceTest(ReceiptsCliTest):
             [{"path": "link.md",
               "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}],
         )
-        current = run_receipts("verify", "--files", cwd=self.workdir)
+        current = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
         self.assertEqual(current.returncode, 0, current.stdout)
         self.assertIn("CURRENT: link.md", current.stdout)
 
@@ -625,7 +609,7 @@ class FileReferenceTest(ReceiptsCliTest):
         # one as a plain file holding the target's path, other bytes.
         link.unlink()
         link.write_text(str(target), encoding="utf-8")
-        diverged = run_receipts("verify", "--files", cwd=self.workdir)
+        diverged = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
         self.assertEqual(diverged.returncode, 2,
                          diverged.stdout + diverged.stderr)
         self.assertIn("MODIFIED-SINCE-LOGGED: link.md", diverged.stdout)
@@ -636,7 +620,7 @@ class FileReferenceTest(ReceiptsCliTest):
         for name in ("b.md", "a.md", "sub/c.md"):
             self.write_file(name, f"{name}\n")
 
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "multi-file",
             "--file", "b.md", "--file", "sub/c.md", "--file", "a.md",
             cwd=self.workdir,
@@ -647,13 +631,13 @@ class FileReferenceTest(ReceiptsCliTest):
 
     def test_verify_files_reports_modified_file_chain_intact(self):
         self.write_file("report.md", "original\n")
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "wrote report",
             "--file", "report.md", cwd=self.workdir,
         )
         self.write_file("report.md", "sneakily changed after logging\n")
 
-        result = run_receipts("verify", "--files", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("FILES-DIVERGED", result.stdout)
@@ -664,13 +648,13 @@ class FileReferenceTest(ReceiptsCliTest):
     def test_verify_files_current_and_missing(self):
         self.write_file("kept.md", "kept\n")
         self.write_file("doomed.md", "doomed\n")
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "wrote both",
             "--file", "kept.md", "--file", "doomed.md", cwd=self.workdir,
         )
         (self.workdir / "doomed.md").unlink()
 
-        result = run_receipts("verify", "--files", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("CURRENT: kept.md", result.stdout)
@@ -680,17 +664,17 @@ class FileReferenceTest(ReceiptsCliTest):
 
     def test_latest_reference_per_path_is_authoritative(self):
         self.write_file("report.md", "draft\n")
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "draft",
             "--file", "report.md", cwd=self.workdir,
         )
         self.write_file("report.md", "final\n")
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "final",
             "--file", "report.md", cwd=self.workdir,
         )
 
-        result = run_receipts("verify", "--files", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("CURRENT: report.md", result.stdout)
@@ -715,8 +699,8 @@ class ProjectRecordFilesTest(ReceiptsCliTest):
     def test_log_and_verify_files_resolve_through_the_record(self):
         project, log = self.drawer_log()
         (project / "report.md").write_text("original\n", encoding="utf-8")
-        run_receipts("init", "--log", str(log), cwd=self.workdir)
-        result = run_receipts(
+        run(LOXODONTA, "init", "--log", str(log), cwd=self.workdir)
+        result = run(LOXODONTA, 
             "log", "--log", str(log), "--actor", "agent",
             "--action", "wrote report", "--file", "report.md",
             cwd=self.workdir)
@@ -724,7 +708,7 @@ class ProjectRecordFilesTest(ReceiptsCliTest):
 
         (project / "report.md").write_text("changed after\n",
                                            encoding="utf-8")
-        verify = run_receipts("verify", "--log", str(log), "--files",
+        verify = run(LOXODONTA, "verify", "--log", str(log), "--files",
                               cwd=self.workdir)
         self.assertEqual(verify.returncode, 2, verify.stdout + verify.stderr)
         self.assertIn("MODIFIED-SINCE-LOGGED", verify.stdout)
@@ -732,8 +716,8 @@ class ProjectRecordFilesTest(ReceiptsCliTest):
     def test_dangling_record_reports_unresolved_not_diverged(self):
         project, log = self.drawer_log()
         (project / "report.md").write_text("original\n", encoding="utf-8")
-        run_receipts("init", "--log", str(log), cwd=self.workdir)
-        run_receipts("log", "--log", str(log), "--actor", "agent",
+        run(LOXODONTA, "init", "--log", str(log), cwd=self.workdir)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "agent",
                      "--action", "wrote report", "--file", "report.md",
                      cwd=self.workdir)
         # The project moves away; the record dangles. That is honest
@@ -741,7 +725,7 @@ class ProjectRecordFilesTest(ReceiptsCliTest):
         (project / "report.md").unlink()
         project.rmdir()
 
-        verify = run_receipts("verify", "--log", str(log), "--files",
+        verify = run(LOXODONTA, "verify", "--log", str(log), "--files",
                               cwd=self.workdir)
         self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
         self.assertIn("FILES-UNRESOLVED", verify.stdout)
@@ -752,13 +736,13 @@ class ProjectRecordFilesTest(ReceiptsCliTest):
 
 class HeadTest(ReceiptsCliTest):
     def test_head_prints_last_entry_hash(self):
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 2", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 2", cwd=self.workdir)
         lines = self.log_path.read_text(encoding="utf-8").splitlines()
         last_hash = json.loads(lines[-1])["entry_hash"]
 
-        result = run_receipts("head", cwd=self.workdir)
+        result = run(LOXODONTA, "head", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), last_hash)
@@ -769,8 +753,8 @@ class HeadTest(ReceiptsCliTest):
         # that record it. A value that is not a SHA256 in lowercase hex
         # is BROKEN to the walk, so `head` refuses it, exit 1, and never
         # prints it.
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
         lines = self.log_path.read_text(encoding="utf-8").splitlines()
         good = json.loads(lines[-1])["entry_hash"]
@@ -782,8 +766,8 @@ class HeadTest(ReceiptsCliTest):
                     "\n".join(lines[:-1] + [json.dumps(last)]) + "\n",
                     encoding="utf-8")
 
-                result = run_receipts("head", cwd=self.workdir)
-                verify = run_receipts("verify", cwd=self.workdir)
+                result = run(LOXODONTA, "head", cwd=self.workdir)
+                verify = run(LOXODONTA, "verify", cwd=self.workdir)
 
                 self.assertEqual(result.returncode, 1,
                                  result.stdout + result.stderr)
@@ -794,22 +778,22 @@ class HeadTest(ReceiptsCliTest):
                 self.assertEqual(verify.returncode, 1, verify.stdout)
 
     def test_verify_expect_head_with_true_head_is_valid(self):
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
-        head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
+        head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
-        result = run_receipts("verify", "--expect-head", head, cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--expect-head", head, cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("VALID", result.stdout)
 
     def test_regenerated_chain_passes_plain_verify_but_fails_head_record(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         for action in ("step 1", "the incriminating step", "step 3"):
-            run_receipts(
+            run(LOXODONTA, 
                 "log", "--actor", "agent", "--action", action, cwd=self.workdir
             )
-        recorded_head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        recorded_head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
         # The adversary: drop entry 2, renumber, recompute every hash so the
         # chain is internally consistent again (independent canonicalization).
@@ -830,11 +814,11 @@ class HeadTest(ReceiptsCliTest):
             encoding="utf-8",
         )
 
-        plain = run_receipts("verify", cwd=self.workdir)
+        plain = run(LOXODONTA, "verify", cwd=self.workdir)
         self.assertEqual(plain.returncode, 0, plain.stdout)
         self.assertIn("VALID", plain.stdout)
 
-        against_record = run_receipts(
+        against_record = run(LOXODONTA, 
             "verify", "--expect-head", recorded_head, cwd=self.workdir
         )
         self.assertEqual(against_record.returncode, 3, against_record.stdout)
@@ -847,25 +831,25 @@ class HeadTest(ReceiptsCliTest):
         # say so in a sentence, not a traceback (found in the 2026-08-21
         # readability walk: head parsed the tail directly instead of using
         # the same damage check every other command goes through).
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
         with open(self.log_path, "a", encoding="utf-8", newline="\n") as f:
             f.write('{"n":2,"half-writ')
 
-        result = run_receipts("head", cwd=self.workdir)
+        result = run(LOXODONTA, "head", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("damaged", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_head_on_missing_or_empty_log_errors_cleanly(self):
-        missing = run_receipts("head", cwd=self.workdir)
+        missing = run(LOXODONTA, "head", cwd=self.workdir)
         self.assertEqual(missing.returncode, 66, missing.stderr)
         self.assertIn("init", missing.stderr)
         self.assertNotIn("Traceback", missing.stderr)
 
         self.log_path.write_text("", encoding="utf-8")
-        empty = run_receipts("head", cwd=self.workdir)
+        empty = run(LOXODONTA, "head", cwd=self.workdir)
         self.assertEqual(empty.returncode, 66, empty.stderr)
         self.assertIn("empty", empty.stderr)
         self.assertNotIn("Traceback", empty.stderr)
@@ -874,16 +858,16 @@ class HeadTest(ReceiptsCliTest):
         # Issue #12: when --files and --expect-head both fire, the graver
         # verdict must win — a regenerated chain must never hide behind
         # "some files changed". Both findings reported, exit is 3.
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         report = self.workdir / "report.md"
         report.write_text("original\n", encoding="utf-8")
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "wrote report",
             "--file", "report.md", cwd=self.workdir,
         )
         report.write_text("changed since logged\n", encoding="utf-8")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "verify", "--files", "--expect-head", "0" * 64, cwd=self.workdir
         )
 
@@ -894,10 +878,10 @@ class HeadTest(ReceiptsCliTest):
         self.assertNotIn("VALID", result.stdout)
 
     def test_malformed_expect_head_is_usage_error_not_verdict(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
 
         for bad in ("not-hex-at-all", "abc123"):  # garbage; wrong length
-            result = run_receipts(
+            result = run(LOXODONTA, 
                 "verify", "--expect-head", bad, cwd=self.workdir
             )
             self.assertNotEqual(result.returncode, 0, bad)
@@ -913,7 +897,7 @@ class ReportEmptyLogTest(ReceiptsCliTest):
         # The two readers keep one opinion about what a log is.
         self.log_path.write_text("", encoding="utf-8")
 
-        result = run_receipts("report", cwd=self.workdir)
+        result = run(LOXODONTA, "report", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 66, result.stderr)
         self.assertIn("empty", result.stderr)
@@ -925,9 +909,9 @@ class TamperTest(ReceiptsCliTest):
 
     def setUp(self):
         super().setUp()
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         for i in range(1, 4):
-            run_receipts(
+            run(LOXODONTA, 
                 "log", "--actor", "agent", "--action", f"step {i}", cwd=self.workdir
             )
 
@@ -938,7 +922,7 @@ class TamperTest(ReceiptsCliTest):
         self.log_path.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
 
     def assert_broken(self, at_entry):
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(f"BROKEN at entry {at_entry}", result.stdout)
         self.assertNotIn("VALID", result.stdout)
@@ -1006,7 +990,7 @@ class TamperTest(ReceiptsCliTest):
         result = self.assert_broken(at_entry=2)
         self.assertNotIn("Traceback", result.stderr)
 
-        report = run_receipts("report", cwd=self.workdir)
+        report = run(LOXODONTA, "report", cwd=self.workdir)
         self.assertEqual(report.returncode, 0, report.stdout + report.stderr)
         self.assertNotIn("Traceback", report.stderr)
 
@@ -1033,14 +1017,14 @@ class TamperTest(ReceiptsCliTest):
 class RunTest(ReceiptsCliTest):
     def setUp(self):
         super().setUp()
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
 
     def last_entry(self):
         lines = self.log_path.read_text(encoding="utf-8").splitlines()
         return json.loads(lines[-1])
 
     def test_run_appends_receipt_with_command_line_and_exit_code(self):
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "run", "--actor", "agent", "--",
             sys.executable, "-c", "print('hi')",
             cwd=self.workdir,
@@ -1056,7 +1040,7 @@ class RunTest(ReceiptsCliTest):
         )
 
     def test_run_of_failing_command_still_appends_and_propagates_exit_code(self):
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "run", "--actor", "agent", "--",
             sys.executable, "-c", "import sys; sys.exit(7)",
             cwd=self.workdir,
@@ -1071,7 +1055,7 @@ class RunTest(ReceiptsCliTest):
         (self.workdir / "data.txt").write_text("before", encoding="utf-8")
         rewrite = "open('data.txt', 'w').write('after')"
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "run", "--actor", "agent", "--file", "data.txt", "--",
             sys.executable, "-c", rewrite,
             cwd=self.workdir,
@@ -1087,8 +1071,8 @@ class RunTest(ReceiptsCliTest):
     def test_run_without_separator_or_command_is_usage_error(self):
         before = self.log_path.read_text(encoding="utf-8")
 
-        no_separator = run_receipts("run", "--actor", "agent", cwd=self.workdir)
-        empty_command = run_receipts("run", "--actor", "agent", "--", cwd=self.workdir)
+        no_separator = run(LOXODONTA, "run", "--actor", "agent", cwd=self.workdir)
+        empty_command = run(LOXODONTA, "run", "--actor", "agent", "--", cwd=self.workdir)
 
         for result in (no_separator, empty_command):
             self.assertNotEqual(result.returncode, 0)
@@ -1100,7 +1084,7 @@ class RunTest(ReceiptsCliTest):
         # otherwise the wrapper would execute work it cannot record.
         self.log_path.unlink()
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "run", "--actor", "agent", "--",
             sys.executable, "-c", "open('side-effect.txt', 'w').write('ran')",
             cwd=self.workdir,
@@ -1116,7 +1100,7 @@ class RunTest(ReceiptsCliTest):
         # report the command's success code as its own.
         (self.workdir / "doomed.txt").write_text("data", encoding="utf-8")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "run", "--actor", "agent", "--file", "doomed.txt", "--",
             sys.executable, "-c", "import os; os.remove('doomed.txt')",
             cwd=self.workdir,
@@ -1128,7 +1112,7 @@ class RunTest(ReceiptsCliTest):
         self.assertIn("receipt", result.stderr)
 
     def assert_chain_valid(self):
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("VALID", result.stdout)
 
@@ -1137,7 +1121,7 @@ class RunTest(ReceiptsCliTest):
         # no receipt. The attempt is itself the thing to record.
         missing = str(self.workdir / "no-such-command")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "run", "--actor", "agent", "--", missing, "--flag",
             cwd=self.workdir,
         )
@@ -1161,7 +1145,7 @@ class RunTest(ReceiptsCliTest):
         if os.access(script, os.X_OK):
             self.skipTest("running as a user every file is executable for")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "run", "--actor", "agent", "--", str(script),
             cwd=self.workdir,
         )
@@ -1182,7 +1166,7 @@ class RunTest(ReceiptsCliTest):
         kill_parent = ("import os, signal, time; "
                        "os.kill(os.getppid(), signal.SIGTERM); time.sleep(30)")
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "run", "--actor", "agent", "--", sys.executable, "-c", kill_parent,
             cwd=self.workdir,
         )
@@ -1264,20 +1248,20 @@ class RunTest(ReceiptsCliTest):
         )
 
     def test_chain_verifies_valid_after_several_runs(self):
-        run_receipts(
+        run(LOXODONTA, 
             "run", "--actor", "agent", "--",
             sys.executable, "-c", "print('one')", cwd=self.workdir,
         )
-        run_receipts(
+        run(LOXODONTA, 
             "run", "--actor", "agent", "--",
             sys.executable, "-c", "import sys; sys.exit(3)", cwd=self.workdir,
         )
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "human", "--action", "reviewed the runs",
             cwd=self.workdir,
         )
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("VALID", result.stdout)
@@ -1287,9 +1271,9 @@ class RunTest(ReceiptsCliTest):
 class TornTailTest(ReceiptsCliTest):
     def setUp(self):
         super().setUp()
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         for i in range(1, 4):
-            run_receipts(
+            run(LOXODONTA, 
                 "log", "--actor", "agent", "--action", f"step {i}", cwd=self.workdir
             )
 
@@ -1303,7 +1287,7 @@ class TornTailTest(ReceiptsCliTest):
     def test_torn_final_line_reports_torn_tail_and_intact_prefix(self):
         self.truncate_line(3)
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("torn tail at line 3", result.stdout)
@@ -1313,7 +1297,7 @@ class TornTailTest(ReceiptsCliTest):
     def test_torn_middle_line_is_ordinary_broken(self):
         self.truncate_line(2)
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("BROKEN at entry 2", result.stdout)
@@ -1335,7 +1319,7 @@ class TornTailTest(ReceiptsCliTest):
             "".join(l + "\n" for l in lines), encoding="utf-8"
         )
 
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("VALID", result.stdout)
@@ -1344,31 +1328,31 @@ class TornTailTest(ReceiptsCliTest):
         self.assertIn("entry 3", combined)
 
     def test_no_repair_or_trim_command_exists(self):
-        help_result = run_receipts("--help", cwd=self.workdir)
+        help_result = run(LOXODONTA, "--help", cwd=self.workdir)
         self.assertNotIn("repair", help_result.stdout.lower())
         self.assertNotIn("trim", help_result.stdout.lower())
 
         for forbidden in ("repair", "trim"):
-            result = run_receipts(forbidden, cwd=self.workdir)
+            result = run(LOXODONTA, forbidden, cwd=self.workdir)
             self.assertNotEqual(result.returncode, 0, forbidden)
 
 
 class ReportTest(ReceiptsCliTest):
     def setUp(self):
         super().setUp()
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         (self.workdir / "report.md").write_text("findings\n", encoding="utf-8")
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "agent", "--action", "wrote findings",
             "--file", "report.md", cwd=self.workdir,
         )
-        run_receipts(
+        run(LOXODONTA, 
             "log", "--actor", "human", "--action", "approved findings",
             cwd=self.workdir,
         )
 
     def test_report_shows_every_entry_in_order_with_files(self):
-        result = run_receipts("report", cwd=self.workdir)
+        result = run(LOXODONTA, "report", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout
@@ -1389,7 +1373,7 @@ class ReportTest(ReceiptsCliTest):
             "".join(l + "\n" for l in lines), encoding="utf-8"
         )
 
-        result = run_receipts("report", cwd=self.workdir)
+        result = run(LOXODONTA, "report", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         out = result.stdout
@@ -1406,7 +1390,7 @@ class ReportTest(ReceiptsCliTest):
             "".join(l + "\n" for l in lines), encoding="utf-8"
         )
 
-        result = run_receipts("report", cwd=self.workdir)
+        result = run(LOXODONTA, "report", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         out = result.stdout
@@ -1426,7 +1410,7 @@ class ReportTest(ReceiptsCliTest):
             "".join(l + "\n" for l in lines), encoding="utf-8"
         )
 
-        result = run_receipts("report", cwd=self.workdir)
+        result = run(LOXODONTA, "report", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         out = result.stdout
@@ -1501,13 +1485,13 @@ class GoldenFixtureTest(ReceiptsCliTest):
         self.log_path.write_bytes(self.GOLDEN.read_bytes())
 
     def test_golden_fixture_verifies_valid_forever(self):
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("VALID", result.stdout)
 
     def test_golden_fixture_head_is_pinned(self):
-        result = run_receipts("head", cwd=self.workdir)
+        result = run(LOXODONTA, "head", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), self.GOLDEN_HEAD)
@@ -1519,7 +1503,7 @@ class UsageExitTest(ReceiptsCliTest):
     keeps its usual message on stderr; stdout never carries a verdict."""
 
     def test_unknown_flag_exits_64_with_argparse_message(self):
-        result = run_receipts("verify", "--no-such-flag", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--no-such-flag", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
         self.assertIn("unrecognized arguments", result.stderr)
@@ -1532,7 +1516,7 @@ class UsageExitTest(ReceiptsCliTest):
         # HeadTest already says a malformed head record is no verdict; this
         # pins the number. 2 was FILES-DIVERGED's, and never usage's again.
         for bad in ("not-hex-at-all", "abc123"):  # garbage; wrong length
-            result = run_receipts(
+            result = run(LOXODONTA, 
                 "verify", "--expect-head", bad, cwd=self.workdir
             )
             self.assertEqual(result.returncode, 64,
@@ -1541,10 +1525,10 @@ class UsageExitTest(ReceiptsCliTest):
             self.assertIn("64 hex characters", result.stderr)
 
     def test_missing_required_argument_exits_64(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         before = self.log_path.read_text(encoding="utf-8")
 
-        result = run_receipts("log", "--action", "did a thing", cwd=self.workdir)
+        result = run(LOXODONTA, "log", "--action", "did a thing", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
         self.assertIn("required", result.stderr)
@@ -1554,7 +1538,7 @@ class UsageExitTest(ReceiptsCliTest):
     def test_run_without_separator_exits_64(self):
         # The one usage error main() raises itself, after argparse is done:
         # it must speak the same number as the ones argparse raises.
-        result = run_receipts("run", "--actor", "agent", cwd=self.workdir)
+        result = run(LOXODONTA, "run", "--actor", "agent", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
         self.assertIn("--", result.stderr)
@@ -1570,19 +1554,13 @@ class EnvironmentKnobTest(ReceiptsCliTest):
     not reach further than that path: every verb runs, and the knob falls
     back to its default the way LOXODONTA_LOCK_TIMEOUT already does."""
 
-    def run_with_knob(self, value, *args):
-        return subprocess.run(
-            [sys.executable, str(LOXODONTA), *args],
-            cwd=self.workdir, capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8",
-                 "LOXODONTA_CHAIN_BATCH_BYTES": value})
-
     def test_a_garbage_batch_cap_does_not_stop_the_other_verbs(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
 
         for verb in (["--version"], ["verify"],
                      ["log", "--actor", "agent", "--action", "still runs"]):
-            result = self.run_with_knob("eight-megs", *verb)
+            result = run(LOXODONTA, *verb, cwd=self.workdir,
+                         env=clean_env(LOXODONTA_CHAIN_BATCH_BYTES="eight-megs"))
             self.assertEqual(result.returncode, 0,
                              " ".join(verb) + ": " + result.stdout + result.stderr)
             self.assertNotIn("Traceback", result.stderr, " ".join(verb))
@@ -1712,7 +1690,7 @@ class ShapeTest(TamperTest):
                 self.rehashed(1, lambda e: e.__setitem__(
                     "files", [{"path": path, "sha256": digest}]))
 
-                result = run_receipts("verify", "--files", cwd=self.workdir)
+                result = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
 
                 self.assertEqual(result.returncode, 1,
                                  result.stdout + result.stderr)
@@ -1735,7 +1713,7 @@ class ShapeTest(TamperTest):
         self.rehashed(3, lambda e: e.__setitem__(
             "prev", json.loads(self.read_lines()[2])["entry_hash"]))
 
-        result = run_receipts("verify", "--files", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("CURRENT: ..hidden", result.stdout)
@@ -1753,9 +1731,9 @@ class ShapeTest(TamperTest):
         for verb in (["verify", "--files"], ["report"],
                      ["log", "--actor", "agent", "--action", "after",
                       "--file", "a.txt"]):
-            result = run_receipts(*verb, cwd=self.workdir)
+            result = run(LOXODONTA, *verb, cwd=self.workdir)
             self.assertNotIn("Traceback", result.stderr, " ".join(verb))
-        verify = run_receipts("verify", "--files", cwd=self.workdir)
+        verify = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
         self.assertEqual(verify.returncode, 1, verify.stdout + verify.stderr)
         self.assertIn("BROKEN at entry 1", verify.stdout)
         self.assertIn("BROKEN at entry 2", verify.stdout)
@@ -1780,19 +1758,19 @@ class LoneSurrogateTest(ReceiptsCliTest):
 
     def setUp(self):
         super().setUp()
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
 
     def entries(self):
         return [json.loads(line) for line in
                 self.log_path.read_text(encoding="utf-8").splitlines()]
 
     def assert_valid(self):
-        verify = run_receipts("verify", cwd=self.workdir)
+        verify = run(LOXODONTA, "verify", cwd=self.workdir)
         self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
         self.assertEqual(verify.stdout.strip(), "VALID")
 
     def test_log_records_a_lone_surrogate_as_its_escape_text(self):
-        result = run_receipts("log", "--actor", "agent" + LONE,
+        result = run(LOXODONTA, "log", "--actor", "agent" + LONE,
                               "--action", "echo " + LONE + " hi",
                               cwd=self.workdir)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1803,13 +1781,13 @@ class LoneSurrogateTest(ReceiptsCliTest):
         self.assertEqual(entry["action"],
                          "echo " + BACKSLASH + "udcff hi")
         # The chain keeps receipting after the escaped call, and walks.
-        run_receipts("log", "--actor", "agent", "--action", "after",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "after",
                      cwd=self.workdir)
         self.assertEqual([e["n"] for e in self.entries()], [0, 1, 2])
         self.assert_valid()
 
     def test_run_records_a_lone_surrogate_in_its_command_as_escape_text(self):
-        result = run_receipts("run", "--actor", "agent", "--",
+        result = run(LOXODONTA, "run", "--actor", "agent", "--",
                               sys.executable, "-c", "pass", LONE,
                               cwd=self.workdir)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1829,7 +1807,7 @@ class LoneSurrogateTest(ReceiptsCliTest):
         except (OSError, UnicodeError):
             self.skipTest("this filesystem cannot hold the name")
 
-        result = run_receipts("log", "--actor", "agent", "--action", "wrote",
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "wrote",
                               "--file", name, cwd=self.workdir)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1853,7 +1831,7 @@ class LoneSurrogateTest(ReceiptsCliTest):
                 except (OSError, UnicodeError):
                     self.skipTest("this filesystem cannot hold the name")
 
-                result = run_receipts("log", "--actor", "agent", "--action",
+                result = run(LOXODONTA, "log", "--actor", "agent", "--action",
                                       "wrote", "--file", name,
                                       cwd=self.workdir)
 
@@ -1873,8 +1851,8 @@ class UnopenableReferenceTest(ReceiptsCliTest):
     and exit code are the chain's."""
 
     def test_verify_files_names_each_unopenable_path_missing(self):
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "wrote",
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "wrote",
                      cwd=self.workdir)
         (self.workdir / "sub").mkdir()
         paths = sorted(["a" + chr(0) + "b", "sub", "a<b"])
@@ -1887,7 +1865,7 @@ class UnopenableReferenceTest(ReceiptsCliTest):
         self.log_path.write_text("".join(l + "\n" for l in lines),
                                  encoding="utf-8")
 
-        result = run_receipts("verify", "--files", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--files", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -1919,9 +1897,9 @@ class UnreadableLineTest(TamperTest):
         self.assertIn(reason, result.stdout)
         self.assertNotIn("Traceback", result.stderr)
         for verb in (["report"], ["verify", "--files"]):
-            again = run_receipts(*verb, cwd=self.workdir)
+            again = run(LOXODONTA, *verb, cwd=self.workdir)
             self.assertNotIn("Traceback", again.stderr, " ".join(verb))
-        self.assertEqual(run_receipts("report", cwd=self.workdir).returncode, 0)
+        self.assertEqual(run(LOXODONTA, "report", cwd=self.workdir).returncode, 0)
 
     def entry_line(self, index, **fields):
         entry = json.loads(self.read_lines()[index])
@@ -2021,9 +1999,9 @@ class UnknownVersionTest(ReceiptsCliTest):
 
     def setUp(self):
         super().setUp()
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         for step in ("step 1", "step 2", "step 3"):
-            run_receipts("log", "--actor", "agent", "--action", step,
+            run(LOXODONTA, "log", "--actor", "agent", "--action", step,
                          cwd=self.workdir)
 
     def entries(self):
@@ -2042,7 +2020,7 @@ class UnknownVersionTest(ReceiptsCliTest):
         return rechained(entries)
 
     def verify(self, *flags):
-        return run_receipts("verify", *flags, cwd=self.workdir)
+        return run(LOXODONTA, "verify", *flags, cwd=self.workdir)
 
     def test_hashes_that_hold_under_an_unknown_version_are_a_refusal(self):
         self.write(self.later())
@@ -2134,7 +2112,7 @@ class UnknownVersionTest(ReceiptsCliTest):
         entries = self.later()
         self.write(entries)
 
-        result = run_receipts("head", cwd=self.workdir)
+        result = run(LOXODONTA, "head", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), entries[-1]["entry_hash"])
@@ -2155,25 +2133,25 @@ class NoInputTest(ReceiptsCliTest):
     def test_verify_and_head_on_a_missing_log(self):
         for verb in ("verify", "head"):
             with self.subTest(verb=verb):
-                self.assert_no_input(run_receipts(verb, cwd=self.workdir),
+                self.assert_no_input(run(LOXODONTA, verb, cwd=self.workdir),
                                      "not found")
 
     def test_verify_and_head_on_an_empty_log(self):
         self.log_path.write_text("", encoding="utf-8")
         for verb in ("verify", "head"):
             with self.subTest(verb=verb):
-                self.assert_no_input(run_receipts(verb, cwd=self.workdir),
+                self.assert_no_input(run(LOXODONTA, verb, cwd=self.workdir),
                                      "empty")
 
     def test_verify_and_head_on_a_log_that_is_a_folder(self):
         self.log_path.mkdir()
         for verb in ("verify", "head"):
             with self.subTest(verb=verb):
-                self.assert_no_input(run_receipts(verb, cwd=self.workdir),
+                self.assert_no_input(run(LOXODONTA, verb, cwd=self.workdir),
                                      "cannot be read")
 
     def test_verify_package_on_a_path_that_is_not_there(self):
-        result = run_receipts("verify-package", "no-such-package.zip",
+        result = run(LOXODONTA, "verify-package", "no-such-package.zip",
                               cwd=self.workdir)
         self.assert_no_input(result, "not found")
 
@@ -2186,17 +2164,17 @@ class WriterExitTest(ReceiptsCliTest):
     def test_report_and_explain_on_a_missing_or_empty_log(self):
         for verb in (["report"], ["explain", "--llm", "never-run"]):
             with self.subTest(verb=verb[0], log="missing"):
-                result = run_receipts(*verb, cwd=self.workdir)
+                result = run(LOXODONTA, *verb, cwd=self.workdir)
                 self.assertEqual(result.returncode, 66, result.stderr)
         self.log_path.write_text("", encoding="utf-8")
         for verb in (["report"], ["explain", "--llm", "never-run"]):
             with self.subTest(verb=verb[0], log="empty"):
-                result = run_receipts(*verb, cwd=self.workdir)
+                result = run(LOXODONTA, *verb, cwd=self.workdir)
                 self.assertEqual(result.returncode, 66, result.stderr)
                 self.assertIn("empty", result.stderr)
 
     def test_init_where_no_file_can_be_created(self):
-        result = run_receipts("init", "--log", "no-such-folder/r.jsonl",
+        result = run(LOXODONTA, "init", "--log", "no-such-folder/r.jsonl",
                               cwd=self.workdir)
 
         self.assertEqual(result.returncode, 73, result.stderr)  # EX_CANTCREAT
@@ -2206,7 +2184,7 @@ class WriterExitTest(ReceiptsCliTest):
     def test_log_on_a_log_that_is_a_folder_is_no_input(self):
         self.log_path.mkdir()
 
-        result = run_receipts("log", "--actor", "agent", "--action", "x",
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "x",
                               cwd=self.workdir)
 
         self.assertEqual(result.returncode, 66, result.stderr)
@@ -2214,10 +2192,10 @@ class WriterExitTest(ReceiptsCliTest):
         self.assertNotIn("Traceback", result.stderr)
 
     def test_a_file_reference_that_is_a_folder_is_no_input(self):
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         (self.workdir / "sub").mkdir()
 
-        result = run_receipts("log", "--actor", "agent", "--action", "x",
+        result = run(LOXODONTA, "log", "--actor", "agent", "--action", "x",
                               "--file", "sub", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 66, result.stderr)
@@ -2231,7 +2209,7 @@ class WriterExitTest(ReceiptsCliTest):
                      ["publish", "--chain", "http://127.0.0.1:9"],
                      ["stamp", "--authority", "http://127.0.0.1:9"]):
             with self.subTest(verb=" ".join(verb[:2])):
-                result = run_receipts(*verb, cwd=self.workdir)
+                result = run(LOXODONTA, *verb, cwd=self.workdir)
                 self.assertEqual(result.returncode, 66, result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
 
@@ -2252,9 +2230,9 @@ class LineRuleTest(ReceiptsCliTest):
 
     def setUp(self):
         super().setUp()
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         for i in (1, 2):
-            run_receipts("log", "--actor", "agent", "--action", f"step {i}",
+            run(LOXODONTA, "log", "--actor", "agent", "--action", f"step {i}",
                          cwd=self.workdir)
 
     def rewrite(self, change, ending=b"\n"):
@@ -2276,7 +2254,7 @@ class LineRuleTest(ReceiptsCliTest):
         return prev
 
     def assert_valid(self):
-        result = run_receipts("verify", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", cwd=self.workdir)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "VALID")
 
@@ -2289,30 +2267,30 @@ class LineRuleTest(ReceiptsCliTest):
             self.assertIn(char.encode("utf-8"), self.log_path.read_bytes())
 
         self.assert_valid()
-        shown = run_receipts("head", cwd=self.workdir)
+        shown = run(LOXODONTA, "head", cwd=self.workdir)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertEqual(shown.stdout.strip(), head)
         # The writer counts the lines as the walk does: the next entry is 3.
-        logged = run_receipts("log", "--actor", "agent", "--action", "step 3",
+        logged = run(LOXODONTA, "log", "--actor", "agent", "--action", "step 3",
                               cwd=self.workdir)
         self.assertEqual(logged.returncode, 0, logged.stderr)
         self.assertEqual(logged.stdout.strip(), "logged entry 3")
         self.assert_valid()
-        report = run_receipts("report", cwd=self.workdir)
+        report = run(LOXODONTA, "report", cwd=self.workdir)
         self.assertEqual(report.returncode, 0, report.stderr)
         self.assertNotIn("Traceback", report.stderr)
 
     def test_windows_line_endings_read_as_the_same_chain(self):
-        head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
         self.log_path.write_bytes(
             self.log_path.read_bytes().replace(b"\n", b"\r\n"))
 
         self.assert_valid()
-        self.assertEqual(run_receipts("head", cwd=self.workdir).stdout.strip(),
+        self.assertEqual(run(LOXODONTA, "head", cwd=self.workdir).stdout.strip(),
                          head)
         # The recorder appends with a newline alone, and a chain holding
         # both endings is still one chain.
-        logged = run_receipts("log", "--actor", "agent", "--action", "step 3",
+        logged = run(LOXODONTA, "log", "--actor", "agent", "--action", "step 3",
                               cwd=self.workdir)
         self.assertEqual(logged.stdout.strip(), "logged entry 3", logged.stderr)
         self.assertTrue(self.log_path.read_bytes().endswith(b"}\n"))
@@ -2327,7 +2305,7 @@ class LineRuleTest(ReceiptsCliTest):
         self.log_path.write_bytes(b"\n".join(lines))
 
         self.assert_valid()
-        logged = run_receipts("log", "--actor", "agent", "--action", "step 3",
+        logged = run(LOXODONTA, "log", "--actor", "agent", "--action", "step 3",
                               cwd=self.workdir)
         self.assertEqual(logged.stdout.strip(), "logged entry 3", logged.stderr)
 
@@ -2344,9 +2322,9 @@ class NotUtf8LogTest(ReceiptsCliTest):
 
     def setUp(self):
         super().setUp()
-        run_receipts("init", cwd=self.workdir)
+        run(LOXODONTA, "init", cwd=self.workdir)
         for i in (1, 2):
-            run_receipts("log", "--actor", "agent", "--action", f"step {i}",
+            run(LOXODONTA, "log", "--actor", "agent", "--action", f"step {i}",
                          cwd=self.workdir)
 
     def spoil(self, index):
@@ -2359,7 +2337,7 @@ class NotUtf8LogTest(ReceiptsCliTest):
     def test_head_refuses_a_tail_that_is_not_utf8_by_name(self):
         self.spoil(2)
 
-        result = run_receipts("head", cwd=self.workdir)
+        result = run(LOXODONTA, "head", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -2378,7 +2356,7 @@ class NotUtf8LogTest(ReceiptsCliTest):
                      ["publish", nowhere],
                      ["stamp", "--authority", nowhere]):
             with self.subTest(verb=verb[0]):
-                result = run_receipts(*verb, cwd=self.workdir)
+                result = run(LOXODONTA, *verb, cwd=self.workdir)
                 self.assertEqual(result.returncode, 1,
                                  result.stdout + result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
@@ -2389,14 +2367,14 @@ class NotUtf8LogTest(ReceiptsCliTest):
         self.spoil(1)
         tail = json.loads(self.log_path.read_bytes().split(b"\n")[2])
 
-        shown = run_receipts("head", cwd=self.workdir)
+        shown = run(LOXODONTA, "head", cwd=self.workdir)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertEqual(shown.stdout.strip(), tail["entry_hash"])
-        logged = run_receipts("log", "--actor", "agent", "--action", "step 3",
+        logged = run(LOXODONTA, "log", "--actor", "agent", "--action", "step 3",
                               cwd=self.workdir)
         self.assertEqual(logged.returncode, 0, logged.stderr)
         self.assertEqual(logged.stdout.strip(), "logged entry 3")
-        judged = run_receipts("verify", cwd=self.workdir)
+        judged = run(LOXODONTA, "verify", cwd=self.workdir)
         self.assertEqual(judged.returncode, 1, judged.stdout + judged.stderr)
         self.assertIn("BROKEN at entry 1: line is not valid UTF-8",
                       judged.stdout)
@@ -2405,7 +2383,7 @@ class NotUtf8LogTest(ReceiptsCliTest):
         anchors = Path(str(self.log_path) + ".anchors.jsonl")
         anchors.write_bytes(b'{"head":"\xff"}\n')
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("line 1 of receipts.jsonl.anchors.jsonl is not a record",
