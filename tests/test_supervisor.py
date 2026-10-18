@@ -1434,8 +1434,9 @@ def prime_memory(root, matcher="Edit|Write|NotebookEdit|Bash", age=864000,
     it. A real machine's supervisor has been looking for weeks by the
     time these sessions run; this is that machine. `failures` is the
     matcher wired for failed calls (#239), when the memory saw one.
+    `matcher=None` is a memory that never saw the hook wired (#532).
     """
-    epoch = {"since": ago(age), "matchers": [matcher]}
+    epoch = {"since": ago(age), "matchers": [matcher] if matcher else []}
     if failures:
         epoch["failures"] = [failures]
     (root / BASELINE_NAME).write_text(json.dumps({
@@ -2492,8 +2493,11 @@ class CompletenessTest(unittest.TestCase):
 
     def test_no_wired_hook_means_nothing_owes_a_receipt(self):
         # A machine without the receipts hook has sessions that owe
-        # nothing — expecting receipts there would alarm forever.
+        # nothing — expecting receipts there would alarm forever. The
+        # memory never saw the hook either: one that did is the
+        # uninstall-hook case, judged by its epochs (#532).
         (self.witness.parent / "settings.json").unlink()
+        prime_memory(self.root, matcher=None)
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         write_transcript(self.witness, self.root / "alpha", "sess-aaaa",
                          event_times=[ago(300), ago(290)])
@@ -2639,6 +2643,67 @@ class CalibrationTest(unittest.TestCase):
                          "an unchanged matcher records no new epoch")
         self.assertEqual(again.returncode, 0,
                          again.stdout + again.stderr)
+
+    def unwire(self, age):
+        """What uninstall-hook leaves: settings with no recorder hook,
+        written `age` seconds ago, so the newest epoch wires nothing."""
+        settings = self.witness.parent / "settings.json"
+        settings.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        stamp = time.time() - age
+        os.utime(settings, (stamp, stamp))
+
+    def wired_then_unwired(self):
+        """Two epochs, matchers then none, with the wired one in force
+        from well before the sessions the tests write."""
+        self.rewire("Edit|Write|NotebookEdit|Bash", age=7000)
+        first = self.scan()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.seed(ago(7000), "Edit|Write|NotebookEdit|Bash")
+
+    def test_a_session_recorded_while_wired_is_judged_after_unwiring(self):
+        # #532: after uninstall-hook the newest epoch has no matchers,
+        # but a session recorded under the wired one is still judged by
+        # the coverage in force at its time (ADR-0016), never UNWATCHED.
+        self.wired_then_unwired()
+        make_chain(self.root / "alpha" / "receipts", "sess-wired",
+                   entries=3)
+        write_transcript(self.witness, self.root / "alpha", "sess-wired",
+                         event_times=[ago(6500), ago(6490), ago(6480)],
+                         idle=3600)
+        self.unwire(age=100)
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        epochs = json.loads(self.baseline.read_text(
+            encoding="utf-8"))["calibration"]
+        self.assertEqual(epochs[-1]["matchers"], [],
+                         "the newest epoch wires nothing")
+        judged = self.states(result)["sess-wired"]
+        self.assertEqual(judged["state"], "ENDED-CLEAN")
+        self.assertEqual(judged["tools"], 3)
+        self.assertNotIn("nothing owes a receipt",
+                         report["completeness"].get("note") or "")
+
+    def test_a_chainless_session_while_wired_is_judged_after_unwiring(self):
+        # #532: the chainless skip takes the same test. A transcript
+        # with no chain at all, written while the hook was wired, is
+        # the disabled-hook case, and unwiring later does not erase it.
+        self.wired_then_unwired()
+        write_transcript(self.witness, self.root / "alpha", "sess-ghost",
+                         event_times=[ago(6500), ago(6490), ago(6480)],
+                         idle=3600)
+        self.unwire(age=100)
+
+        result = self.scan()
+
+        judged = self.states(result).get("sess-ghost")
+        self.assertIsNotNone(judged, "the chainless session was skipped")
+        self.assertEqual(judged["state"], "ENDED-DEFICIT",
+                         "three unreceipted calls under a wired hook")
+        self.assertEqual(judged["tools"], 3)
 
 
 class UsersOwnHookTest(unittest.TestCase):

@@ -3444,7 +3444,11 @@ def watch_completeness(root, witness, families, everywhere=False,
         calibration = [coverage_epoch(
             None, hook_matchers(witness),
             hook_matchers(witness, "PostToolUseFailure"))]
-    matchers = calibration[-1]["matchers"]
+    # Nothing to watch only when no epoch ever wired a matcher: after
+    # uninstall-hook the newest epoch is empty, but the sessions of the
+    # wired weeks are still judged by the epoch in force at their time
+    # (ADR-0016 ruling 2, #532).
+    ever_wired = any(epoch["matchers"] for epoch in calibration)
     said = []
     # The most recent epoch whose matchers actually differ from the one
     # before it, the failed-call event's included (#239). More than one
@@ -3487,7 +3491,7 @@ def watch_completeness(root, witness, families, everywhere=False,
         watch["note"] = (f"witness absent — no transcript layout at "
                          f"{witness.as_posix()}; completeness cannot be "
                          "watched this look")
-    if os.path.isdir(witness) and not matchers:
+    if os.path.isdir(witness) and not ever_wired:
         watch["note"] = ("no recorder hook is wired into the harness "
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
@@ -3583,7 +3587,7 @@ def watch_completeness(root, witness, families, everywhere=False,
         if transcript is None:
             add(repo, session, "UNWITNESSED", 0, receipts, spans)
             continue
-        if not matchers:
+        if not ever_wired:
             add(repo, session, "UNWATCHED", 0, receipts, spans,
                 transcript=transcript)
             continue
@@ -3648,7 +3652,7 @@ def watch_completeness(root, witness, families, everywhere=False,
     elsewhere = 0
     for stem, transcript in transcripts.items():
         folder = transcript.parent.name
-        if not matchers or (not everywhere and not folder.startswith(ours)):
+        if not ever_wired or (not everywhere and not folder.startswith(ours)):
             continue
         if stem in stored:
             # Its receipts exist; they are in the store, where a plain
