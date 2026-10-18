@@ -19,7 +19,6 @@ import socket
 import ssl
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -33,7 +32,8 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_receiver`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import LOXODONTA, REPO_ROOT, RECEIVER, clean_env  # noqa: E402
+from support import (LOXODONTA, REPO_ROOT, RECEIVER, clean_env,  # noqa: E402
+                     run, temp_folder)
 
 from test_supervisor import unreadable_depth
 
@@ -50,8 +50,7 @@ def run_recorder(*args, epoch=None):
     env = clean_env()
     if epoch is not None:
         env["SOURCE_DATE_EPOCH"] = str(epoch)
-    return subprocess.run([sys.executable, str(LOXODONTA), *map(str, args)],
-                          capture_output=True, encoding="utf-8", env=env)
+    return run(LOXODONTA, *args, env=env)
 
 
 def make_chain(log, actions, epoch=None):
@@ -117,9 +116,7 @@ class ReceiverFixture(unittest.TestCase):
     port, narrowed to 127.0.0.1 unless a test says otherwise."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.data = self.root / "receiver"
 
     def start(self, *extra, port=0, bind="127.0.0.1", env=None):
@@ -873,10 +870,8 @@ class AddressTest(ReceiverFixture):
     def test_cert_without_key_is_a_usage_error(self):
         for flags in (("--cert", "x.pem"), ("--key", "x.pem")):
             with self.subTest(flags=flags):
-                done = subprocess.run(
-                    [sys.executable, str(RECEIVER), "serve", "--data",
-                     str(self.data), "--port", "0", *flags],
-                    capture_output=True, encoding="utf-8", env=clean_env())
+                done = run(RECEIVER, "serve", "--data", str(self.data),
+                           "--port", "0", *flags, env=clean_env())
                 self.assertEqual(done.returncode, 64, done.stderr)
                 self.assertIn("--cert", done.stderr)
                 self.assertIn("--key", done.stderr)
@@ -1095,10 +1090,8 @@ class CapTest(ReceiverFixture):
         for flag in ("--file-cap", "--total-cap"):
             for value in ("0", "-1", "1.5", "lots"):
                 with self.subTest(flag=flag, value=value):
-                    done = subprocess.run(
-                        [sys.executable, str(RECEIVER), "serve", "--data",
-                         str(self.data), "--port", "0", flag, value],
-                        capture_output=True, encoding="utf-8", env=clean_env())
+                    done = run(RECEIVER, "serve", "--data", str(self.data),
+                               "--port", "0", flag, value, env=clean_env())
                     self.assertEqual(done.returncode, 64, done.stderr)
                     self.assertIn(flag, done.stderr)
                     self.assertIn("MiB", done.stderr)

@@ -11,7 +11,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,7 +18,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_publish_echo`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import LOXODONTA, REPO_ROOT, run  # noqa: E402
+from support import LOXODONTA, REPO_ROOT, run, temp_folder  # noqa: E402
 
 ECHO = REPO_ROOT / "tools" / "publish_echo.py"
 
@@ -29,16 +28,10 @@ LISTENING = re.compile(r"http://127\.0\.0\.1:(\d+)/")
 PUBLISHED_FIELDS = {"head", "n", "session", "ts", "event", "text", "content"}
 
 
-def run(*argv, cwd=None):
-    return subprocess.run(
-        [sys.executable, *map(str, argv)], cwd=cwd, capture_output=True,
-        encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-
-
 class EchoTest(unittest.TestCase):
 
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.root = temp_folder(self)
         self.log = self.root / "receipts-echo-test.jsonl"
         run(LOXODONTA, "init", "--log", self.log)
         run(LOXODONTA, "log", "--log", self.log,
