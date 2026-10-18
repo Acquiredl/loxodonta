@@ -7,6 +7,10 @@ name: tests
 on:
   push:
     branches: [main, dev]
+  # No `edited` type, even gated on a base change (#453): a title edit
+  # still starts a run, which cancels the running suite and reports every
+  # required name as skipped, which counts as passed. A pull request moved
+  # from dev to main needs a new push instead (CONTRIBUTING, Branches).
   pull_request:
   workflow_dispatch:
 

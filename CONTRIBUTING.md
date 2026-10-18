@@ -139,6 +139,8 @@ different case: that path is `docs/HOOK.md`, and the README says so.
 A green pull request into `dev` means the suite passed on
 `ubuntu-latest / py3.9` only; the push to `dev` that merges it runs all five
 targets, and a pull request into `main` waits on all five.
+Changing a pull request's base starts no new run, so one moved from `dev` to
+`main` keeps its one-target result until it gets a new push.
 
 ## What helps most right now
 
