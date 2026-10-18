@@ -397,7 +397,7 @@ class JudgedPackageStampTest(StampedStoreCase):
         return subprocess.run(["openssl", *args],
                               cwd=str(where or self.authority_dir),
                               capture_output=True, encoding="utf-8",
-                              errors="replace")
+                              errors="replace", timeout=120)
 
     def openssl_authority(self, name):
         """An authority of its own, made here with openssl in a folder
@@ -550,7 +550,7 @@ class JudgedPackageStampTest(StampedStoreCase):
              "-keyout", "tsa.key", "-out", "tsa.crt", "-days", "2",
              "-config", "req.cnf", "-extensions", "tsa_cert"],
             cwd=str(stranger), capture_output=True, encoding="utf-8",
-            errors="replace")
+            errors="replace", timeout=120)
         self.assertEqual(made.returncode, 0, made.stderr)
 
         judged = self.judge(folder, stranger / "tsa.crt")
@@ -850,7 +850,7 @@ class OutlivedPackageStampTest(PackageCase):
             ["openssl", "ts", "-query", "-digest", digest, "-sha256",
              "-cert", "-out", "manifest.tsq"],
             cwd=str(self.work / "current"), capture_output=True,
-            encoding="utf-8", errors="replace")
+            encoding="utf-8", errors="replace", timeout=120)
         self.assertEqual(asked.returncode, 0, asked.stderr)
         reply = answering(self.work / "current")(
             (self.work / "current" / "manifest.tsq").read_bytes())

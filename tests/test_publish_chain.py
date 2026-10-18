@@ -1351,14 +1351,14 @@ class PublishChainKeeperTest(unittest.TestCase):
         def stop():
             if proc.poll() is None:
                 proc.kill()
-                proc.communicate()
+                proc.communicate(timeout=30)
 
         self.addCleanup(stop)
         line = proc.stdout.readline()
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             proc.kill()
-            _, err = proc.communicate()
+            _, err = proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         # The keeper line, read before anything stops the process: a
         # kill sent the instant the URL line arrives can beat the second
@@ -1653,7 +1653,7 @@ class SessionEndUnderFullTest(PublishBase):
         ended = subprocess.run(
             self.wired_session_end() + ["--calendar", calendar.url],
             cwd=self.project, input=json.dumps(payload).encode("utf-8"),
-            capture_output=True, env=env)
+            capture_output=True, env=env, timeout=120)
 
         self.assertEqual(ended.returncode, 0,
                          ended.stderr.decode("utf-8", "replace"))
@@ -1742,7 +1742,7 @@ class FullProfileKeeperTest(unittest.TestCase):
         match = re.search(r"http://127\.0\.0\.1:\d+", line)
         if match is None:
             self.proc.kill()
-            _, err = self.proc.communicate()
+            _, err = self.proc.communicate(timeout=30)
             self.fail(f"serve announced no localhost URL: {line!r}\n{err}")
         self.url = match.group()
         # The keeper line, read here rather than after the tick: `serve`
@@ -1754,7 +1754,7 @@ class FullProfileKeeperTest(unittest.TestCase):
     def _stop(self):
         if self.proc.poll() is None:
             self.proc.kill()
-            self.proc.communicate()
+            self.proc.communicate(timeout=30)
 
     def tick(self):
         """One request, which is one tick of both keepers."""

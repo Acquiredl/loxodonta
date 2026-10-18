@@ -31,7 +31,8 @@ VERSION_LINE = re.compile(
 def checkout_commit():
     return subprocess.run(
         ["git", "-C", str(REPO_ROOT), "rev-parse", "--short", "HEAD"],
-        capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        capture_output=True, encoding="utf-8", check=True,
+        timeout=120).stdout.strip()
 
 
 class VersionTest(unittest.TestCase):

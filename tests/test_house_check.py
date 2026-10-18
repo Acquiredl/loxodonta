@@ -576,12 +576,14 @@ class CodePassTest(Fixture):
         self.assertEqual(result.stdout.strip(), "")
 
     def test_no_arguments_reads_the_tool_files_and_not_the_rest(self):
-        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True,
+                       timeout=120)
         self.write("loxodonta.py", "def backup_chain(log):\n    pass\n")
         self.write("adapters/harness.py", "MIRROR_OF_THE_CHAIN = None\n")
         self.write("tools/helper.py", "def backup_chain(log):\n    pass\n")
         self.write("tests/test_x.py", 'FIXTURE = "an immutable record"\n')
-        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True,
+                       timeout=120)
 
         result = run(CHECKER, cwd=self.root)
 
@@ -597,10 +599,12 @@ class CommandTest(Fixture):
         # A checkout with one tracked and one untracked Markdown file:
         # the tracked one is judged, the stray one is not (a scratch file
         # in the working tree is nobody's front door yet).
-        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True,
+                       timeout=120)
         tracked = self.write("README.md", "Tracked — with a dash.\n")
         self.write("docs/scratch.md", "An immutable draft.\n")
-        subprocess.run(["git", "-C", str(self.root), "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "add", "README.md"],
+                       check=True, timeout=120)
 
         result = run(CHECKER, cwd=self.root)
 
@@ -616,7 +620,7 @@ class CommandTest(Fixture):
         result = subprocess.run(
             [sys.executable, str(CHECKER), str(readme)],
             capture_output=True, encoding="utf-8", errors="replace",
-            env={**os.environ, "PYTHONIOENCODING": "cp1252"})
+            env={**os.environ, "PYTHONIOENCODING": "cp1252"}, timeout=120)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -696,7 +700,8 @@ class FrontDoorTest(Fixture):
 
     def setUp(self):
         super().setUp()
-        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True,
+                       timeout=120)
         self.write("README.md", COMPLIANT_README)
         for name in ("LICENSE", ".gitignore", "loxodonta.py",
                      "docs/images/wordmark.svg", "docs/images/demo.gif",
@@ -712,7 +717,8 @@ class FrontDoorTest(Fixture):
         ]) + "\n")
 
     def track(self):
-        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True,
+                       timeout=120)
 
     def front_door(self):
         self.track()

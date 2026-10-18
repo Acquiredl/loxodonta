@@ -42,7 +42,7 @@ def public_key_of(keyfile):
 def fingerprint_of(keyfile):
     """The SHA256 fingerprint ssh-keygen prints for a key's public half."""
     listed = subprocess.run(["ssh-keygen", "-lf", str(public_key_of(keyfile))],
-                            capture_output=True, encoding="utf-8")
+                            capture_output=True, encoding="utf-8", timeout=120)
     return listed.stdout.split()[1]
 
 
@@ -64,7 +64,7 @@ class SignedPackageTest(AnchoredStoreCase):
         made = subprocess.run(
             ["ssh-keygen", "-q", "-N", "", "-t", "ed25519", "-C", comment,
              "-f", str(path)], capture_output=True, encoding="utf-8",
-            errors="replace")
+            errors="replace", timeout=120)
         self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
         return path
 
