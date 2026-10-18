@@ -2422,6 +2422,32 @@ class CompletenessTest(unittest.TestCase):
         self.assertNotIn("uncommitted_tail", after,
                          "the next look sees the tail committed")
 
+    def test_the_tail_keepers_commitment_never_restarts_the_clock(self):
+        # #537: the commitment the tail keeper writes moves the head, but
+        # it is the recorder speaking, not the session acting: the
+        # stillness clock carries forward, as the reawakening already
+        # reads that growth (ADR-0018).
+        make_chain(self.root / "alpha" / "receipts", "sess-still-kept",
+                   entries=2)
+        write_transcript(self.witness, self.root / "alpha", "sess-still-kept",
+                         event_times=[ago(7200), ago(7100)], idle=7000)
+        install_witness_hook(self.witness, sessionend=True)
+        self.scan()
+        self.seed_epoch()
+        self.edit_baseline(lambda data: [
+            known.update({"last_grew": "2026-08-25T00:00:00Z"})
+            for known in data["chains"].values()])
+
+        swept = self.states(self.scan())["sess-still-kept"]
+        self.assertTrue(swept["uncommitted_tail"])
+        self.assertEqual(self.tail_entries("sess-still-kept")[-1]["actor"],
+                         "receipts", "the tail keeper committed the tail")
+        after = self.states(self.scan())["sess-still-kept"]
+
+        self.assertEqual(after["dormancy"]["since"], "2026-08-25T00:00:00Z",
+                         "the keeper's own commitment is no growth")
+        self.assertEqual(after["dormancy"]["tier"], "dormant")
+
     def test_the_keeper_is_disableable_and_leaves_the_annotation(self):
         make_chain(self.root / "alpha" / "receipts", "sess-off",
                    entries=2)
