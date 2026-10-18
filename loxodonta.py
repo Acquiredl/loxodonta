@@ -5390,20 +5390,31 @@ def deregistered_main(gitdir):
     return spelled[:at] if at > 0 else None
 
 
-def drawer_of_session(log_dir, session):
+def drawer_of_session(log_dir, session, quiet=False):
     """One session, one drawer (ADR-0023): the session's first receipt
     decides. When the resolved drawer holds no chain for this session yet
     but another drawer in the store does, the receipt goes there, so a
     resolution that changes mid-session (a worktree cleaned up under a
     running session) can never split a session in two. The normal case
-    costs nothing: the resolved drawer already has the chain."""
+    costs nothing: the resolved drawer already has the chain. A store
+    folder that cannot be listed is said on stderr unless `quiet`, and
+    the receipt still goes to the resolved drawer, never lost (#452)."""
     name = f"receipts-{session}.jsonl"
     if os.path.exists(os.path.join(log_dir, name)):
         return log_dir
     root = os.path.join(store_home(), "receipts")
     try:
         drawers = os.listdir(root)
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
+        return log_dir
+    except OSError as error:
+        if not quiet:
+            print(f"warning: {visible(root)} cannot be listed "
+                  f"({visible(error.strerror or error)}), so a chain this "
+                  "session may already have in another drawer cannot be "
+                  f"found: this receipt goes to {visible(log_dir)}, and the "
+                  "session may be split across two drawers (ADR-0023)",
+                  file=sys.stderr)
         return log_dir
     for drawer in drawers:
         other = os.path.join(root, drawer)
@@ -5554,9 +5565,9 @@ def cmd_hook(args):
 
     # One session, one drawer (ADR-0023), for store-routed writes only:
     # an explicit --log-dir or the cwd-local default is the operator's
-    # own choice and is left alone.
+    # own choice and is left alone. SessionEnd stays silent (ADR-0017).
     if project is not None:
-        log_dir = drawer_of_session(log_dir, safe)
+        log_dir = drawer_of_session(log_dir, safe, quiet=ending)
 
     if ending:
         # The tail commitment (ADR-0017): a clean exit seals the

@@ -3671,6 +3671,23 @@ def completeness_row(repo, session, state, tools, receipts, drawers=(),
     return entry
 
 
+def unreadable_row(repo, session, receipts, transcript, error, drawers=()):
+    """The row of a session whose transcript cannot be read (vanished
+    mid-scan, or a folder or a pipe where it belongs): it costs that one
+    session its watch, never the whole scan, and reads UNWITNESSED with
+    why (#386), whether the session recorded or never did (#452):
+    completeness cannot be watched, nothing assumed."""
+    row = completeness_row(repo, session, "UNWITNESSED", 0, receipts,
+                           drawers)
+    # The words travel in a package and the note does not, so each must
+    # be true alone; the path stays local (#410).
+    row["words"] = UNREADABLE_TRANSCRIPT_WORDS
+    row["note"] = (f"{Path(error.filename or transcript).as_posix()}"
+                   " cannot be read as a transcript: "
+                   f"{error.strerror or error}")
+    return row
+
+
 def merge_families(families):
     """The census's families as one group per session, {session: group}.
     One session, one watch. A worktree session logs to the main repo's
@@ -3735,20 +3752,8 @@ def watch_chained(groups, transcripts, ever_wired, calibration, sessionend,
             reading = watch_session(transcript, group["by_tool"],
                                     group["last"], now, calibration)
         except OSError as error:
-            # A transcript that cannot be read (vanished mid-scan, or a
-            # folder or a pipe where it belongs) costs this one session
-            # its watch, never the whole scan. UNWITNESSED says it
-            # honestly, and why (#386): completeness cannot be watched,
-            # nothing assumed.
-            row = completeness_row(repo, session, "UNWITNESSED", 0,
-                                   receipts, spans)
-            # The words travel in a package and the note does not, so
-            # each must be true alone; the path stays local (#410).
-            row["words"] = UNREADABLE_TRANSCRIPT_WORDS
-            row["note"] = (f"{Path(error.filename or transcript).as_posix()}"
-                           " cannot be read as a transcript: "
-                           f"{error.strerror or error}")
-            rows.append(row)
+            rows.append(unreadable_row(repo, session, receipts, transcript,
+                                       error, spans))
             continue
         # The supervisor locates, verify judges (ADR-0017): a committed
         # session with a living transcript gets the exact ritual command.
@@ -3818,8 +3823,9 @@ def watch_chainless(root, transcripts, everywhere, closed, ever_wired,
             continue
         try:
             reading = watch_session(transcript, {}, None, now, calibration)
-        except OSError:
-            continue  # unreadable and chainless: nothing to say about it
+        except OSError as error:
+            rows.append(unreadable_row(name, stem, 0, transcript, error))
+            continue
         readings.append(reading)
         row = completeness_row(name, stem, reading["state"],
                                reading["tools"], 0, transcript=transcript,
