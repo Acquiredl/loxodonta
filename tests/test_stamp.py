@@ -1559,7 +1559,7 @@ def missing_authority_tooling():
         for step in steps:
             tried = subprocess.run(["openssl", *step], cwd=scratch,
                                    capture_output=True, encoding="utf-8",
-                                   errors="replace")
+                                   errors="replace", timeout=120)
             if tried.returncode != 0:
                 said = tried.stderr.strip().splitlines()
                 return (f"this openssl cannot run `openssl {step[0]} "
@@ -1606,7 +1606,7 @@ class JudgedStampTest(StoreCase):
     def openssl(self, *args):
         return subprocess.run(["openssl", *args], cwd=str(self.authority_dir),
                               capture_output=True, encoding="utf-8",
-                              errors="replace")
+                              errors="replace", timeout=120)
 
     def sign(self, query):
         """What a real authority does with the recorder's query: answer
@@ -1730,7 +1730,7 @@ class JudgedStampTest(StoreCase):
              "-keyout", "tsa.key", "-out", "tsa.crt", "-days", "2",
              "-config", "req.cnf", "-extensions", "tsa_cert"],
             cwd=str(stranger), capture_output=True, encoding="utf-8",
-            errors="replace")
+            errors="replace", timeout=120)
         self.assertEqual(made.returncode, 0, made.stderr)
 
         result = run(LOXODONTA, "verify", "--stamps", "--authority-chain",
@@ -1822,7 +1822,7 @@ CERTIFICATE_LIFE = 4
 def openssl_in(folder, *args):
     return subprocess.run(["openssl", *args], cwd=str(folder),
                           capture_output=True, encoding="utf-8",
-                          errors="replace")
+                          errors="replace", timeout=120)
 
 
 def openssl_date(epoch):

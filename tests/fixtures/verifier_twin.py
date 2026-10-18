@@ -16,4 +16,7 @@ VERIFIER_VERBS = {"head", "verify", "verify-package"}
 
 verb = sys.argv[1] if len(sys.argv) > 1 else None
 script = ROOT / ("verifier.py" if verb in VERIFIER_VERBS else "loxodonta.py")
-sys.exit(subprocess.run([sys.executable, str(script), *sys.argv[1:]]).returncode)
+# Bounded as the test's own start is: on Windows a parent that times
+# out goes on reading pipes this child's child still holds (#512).
+sys.exit(subprocess.run([sys.executable, str(script), *sys.argv[1:]],
+                        timeout=600).returncode)

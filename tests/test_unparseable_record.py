@@ -13,7 +13,8 @@ exit 66, and `run` refuses before its command runs. A `.git` file or a
 `commondir` holding a byte that is not UTF-8 is a layout the hook and
 the supervisor cannot follow, so the project stays itself (SPEC
 section 8). The supervisor's scan labels a drawer whose record holds no
-object by the drawer's own name, as it does a damaged one.
+object by the drawer's own name, as it does a damaged one, and recall
+passes by a drawer whose record nests too deep to read.
 
 Every test drives the public CLI, bounded, with homes of its own.
 """
@@ -166,6 +167,12 @@ class RecordUnparseableTest(unittest.TestCase):
     def test_the_verifier_names_a_record_nested_too_deep(self):
         self.assert_verify_named(VERIFIER, TOO_DEEP)
 
+    def test_the_verifier_names_a_record_that_is_not_json(self):
+        self.assert_verify_named(VERIFIER, NOT_JSON)
+
+    def test_the_verifier_names_a_record_naming_a_project_that_is_gone(self):
+        self.assert_verify_named(VERIFIER, None)
+
 
 class HookedRecordUnparseableTest(unittest.TestCase):
     """The hook with a project record it cannot take apart: the receipt
@@ -233,6 +240,9 @@ class HookedRecordUnparseableTest(unittest.TestCase):
 
     def test_a_record_that_is_not_json_is_passed_by_and_named(self):
         self.assert_receipt_written(NOT_JSON)
+
+    def test_a_record_nested_too_deep_is_passed_by_and_named(self):
+        self.assert_receipt_written(TOO_DEEP)
 
     def test_a_record_naming_a_project_that_is_gone_is_passed_by_and_named(
             self):
@@ -340,6 +350,39 @@ class ScannedRecordUnparseableTest(unittest.TestCase):
 
     def test_a_record_nested_too_deep_is_labelled_by_the_drawer(self):
         self.assert_filed_under_its_slug(TOO_DEEP)
+
+
+class RecalledRecordUnparseableTest(unittest.TestCase):
+    """`supervisor digest --repo` gathers a repository's own drawer and
+    the drawers its harness worktrees recorded into (ADR-0023), asking
+    each drawer's record where it was made. A record nested too deep to
+    read is no worktree of the repository's: the digest passes that
+    drawer by and reads the rest (#448)."""
+
+    def test_a_drawer_whose_record_is_nested_too_deep_is_passed_by(self):
+        base = temp_folder(self)
+        project = base / "theproject"
+        project.mkdir()
+        store = base / "store"
+        env = isolated_env(base / "home", CLAUDE_PROJECT_DIR=str(project),
+                           LOXODONTA_HOME=str(store))
+        hooked = run(LOXODONTA, "hook", cwd=str(project), env=env,
+                     timeout=BOUND, stdin=json.dumps({
+                         "session_id": "sess-own", "hook_event_name":
+                         "PostToolUse", "tool_name": "Bash",
+                         "tool_input": {"command": "own work"}}))
+        self.assertEqual(hooked.returncode, 0, hooked.stderr)
+        deep = store / "receipts" / "deep-00000000"
+        make_chain(deep, "sess-deep", actions=["Bash: deep work"])
+        (deep / "project.json").write_bytes(TOO_DEEP)
+
+        result = run(SUPERVISOR, "digest", "--repo", str(project), env=env,
+                     timeout=BOUND)
+
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("own work", result.stdout)
+        self.assertNotIn("deep work", result.stdout)
 
 
 if __name__ == "__main__":

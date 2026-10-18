@@ -109,7 +109,7 @@ class McpClient:
             out, err = self.proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             self.proc.kill()
-            out, err = self.proc.communicate()
+            out, err = self.proc.communicate(timeout=30)
             raise AssertionError("server did not exit on EOF")
         return self.proc.returncode, out.decode("utf-8"), err.decode("utf-8")
 
@@ -164,7 +164,7 @@ class McpBase(unittest.TestCase):
         for c in self.clients:
             if c.proc.poll() is None:
                 c.proc.kill()
-                c.proc.communicate()
+                c.proc.communicate(timeout=30)
 
 
 class HandshakeTest(McpBase):
