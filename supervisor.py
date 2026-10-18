@@ -151,11 +151,11 @@ def listed(folder, pattern, closed=None):
 UNKNOWN = "what it holds is unknown, and is never read as empty"
 
 
-def closed_words(unlisted):
+def closed_words(closed):
     """The scan's sentence for the folders its census could not list,
     each a {"folder", "why"} (#431)."""
-    named = "; ".join(f"{c['folder']} ({c['why']})" for c in unlisted)
-    return (f"{len(unlisted)} folder(s) cannot be listed: {named} — "
+    named = "; ".join(f"{c['folder']} ({c['why']})" for c in closed)
+    return (f"{len(closed)} folder(s) cannot be listed: {named} — "
             f"{UNKNOWN}. Closing a folder is in the writer's reach, so this "
             "is exit 5 on every look until it can be listed again "
             "(ADR-0039)")
@@ -861,20 +861,20 @@ def write_daybook(path, days, now):
     return kept
 
 
-def remember_day(path, now, tally):
-    """Fold one tick into today's row.
+def remember_day(path, now, claims, days):
+    """Fold one look's claims into today's row of `days`, the book as
+    the look read it (`daybook_rows`), and write the book.
 
     The day's worst is sticky: a tripwire that fired at 09:00 still
     colours the day at 17:00, because "was today clean?" is a different
     question from "is it clean right now?" — and the strip above
     already answers the second one."""
-    days = read_daybook(path)
     today = now.strftime("%Y-%m-%d")
     row = dict(days.get(today) or {})
-    for claim, seen in tally.items():
+    for claim, seen in claims.items():
         if claim != "chains":
             row[claim] = max(row.get(claim, 0), seen)
-    row["chains"] = tally["chains"]  # a count of now, not a high-water mark
+    row["chains"] = claims["chains"]  # a count of now, not a high-water mark
     row["scans"] = row.get("scans", 0) + 1
     row["looks"] = row.get("looks", 0)
     row["last"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -4719,22 +4719,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                 remember=remember, receiver=receiver)
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    baseline_path, daybook = look.baseline_path, look.daybook
     memory = open_memory(look, now)
-    remembered, keeper = memory["chains"], memory["keeper"]
-    calibration, sessionend = memory["calibration"], memory["sessionend"]
-    judging = memory["judging"]
-    note, blind = memory["note"], memory["blind"]
-    identity = look.identity
-    events = []
-    fresh = 0  # alarms this look found, or whose change moved
-    awakened = {}
-    heads = {}
-    families = {}
+    remembered, blind = memory["chains"], memory["blind"]
     census, unfiled, closed = take_census(look, remembered)
-    repos = {}
-    worst = 0
-    damaged = 0
+    repos, families, to_remember = {}, {}, {}
+    events, awakened = [], {}
+    worst = damaged = 0
+    fresh = 0  # alarms this look found, or whose change moved
     for place in census:
         repo, session, relpath, _ = place
         reading = read_chain(look, place, memory, now, stamp)
@@ -4742,9 +4733,9 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             reading.row)
         worst = max(worst, reading.exit)
         damaged += reading.broken
-        keeper.update(reading.moved)
+        memory["keeper"].update(reading.moved)
         if reading.remembered is not None:
-            heads[relpath] = reading.remembered
+            to_remember[relpath] = reading.remembered
         if reading.alarm is not None:
             events.append(reading.alarm)
             fresh += reading.fresh
@@ -4754,13 +4745,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                                        {"receipts": 0, "last": None,
                                         "moments": []}),
                    reading.facts)
-
-    rows, uncounted, gone, also_fresh = absent_rows(look, remembered, heads,
-                                                    closed, stamp)
-    heads.update(rows)
+    rows, uncounted, gone, gone_fresh = absent_rows(
+        look, remembered, to_remember, closed, stamp)
+    to_remember.update(rows)
     events += gone
-    fresh += also_fresh
-    note, unkept = write_memory(look, memory, heads, stamp)
+    fresh += gone_fresh
+    note, unkept = write_memory(look, memory, to_remember, stamp)
     if events or blind or unkept:
         worst = max(worst, 5)
 
@@ -4770,13 +4760,13 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                                       show_before_memory=show_before_memory)
     else:
         completeness = watch_completeness(
-            root, witness, families, everywhere=store, calibration=judging,
-            sessionend=sessionend, show_before_memory=show_before_memory,
-            closed=closed)
+            root, witness, families, everywhere=store,
+            calibration=memory["judging"], sessionend=memory["sessionend"],
+            show_before_memory=show_before_memory, closed=closed)
     # One folder can be met by more than one pattern; it is named once.
-    unlisted = [{"folder": folder, "why": why} for folder, why in
-                sorted({(Path(f).as_posix(), why) for f, why in closed})]
-    if unlisted:
+    closed_rows = [{"folder": folder, "why": why} for folder, why in
+                   sorted({(Path(f).as_posix(), why) for f, why in closed})]
+    if closed_rows:
         worst = max(worst, 5)
     # The keeper closes what the annotation reports — after the rows
     # are judged, so this scan says the truth it saw and the next scan
@@ -4790,38 +4780,23 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # Only a live alarm raises the exit: an ended deficit is evidence,
     # and a siren that never stops sounding trains the operator to
     # ignore the band (the dogfood's lesson).
-    if any(s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")
-           for s in completeness["sessions"]):
+    alarms = sum(s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")
+                 for s in completeness["sessions"])
+    if alarms:
         worst = max(worst, 6)
 
-    # The day book last, so the row this tick writes is the finished one
+    # The day book last, so the row this look writes is the finished one
     # — worst already raised by the tripwire and the completeness watch.
-    alarms = len([s for s in completeness["sessions"]
-                  if s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")])
-    tally = {
+    days, skipped = fold_day(look, now, {
         "worst": worst, "chains": len(census), "broken": damaged,
         "events": len(events), "alarms": alarms,
         "reawakenings": len(awakened),
         # Kept on the row, never painted (PAINTED): what tells a keeper
         # turn that the book already shows a blind memory.
         "blind": 1 if blind else 0,
-    }
-    # An unasked turn stays out of the book while it has nothing new to
-    # report (ADR-0014): a machine asking itself every minute is not
-    # somebody looking. It goes in when it finds what no row records yet,
-    # an alarm this look found or whose change moved, a reawakening, a
-    # blind memory the book's newest row does not show, or the finding
-    # would be recorded nowhere and the day would paint quiet. An alarm
-    # already standing does not mark every later day as watched
-    # (ADR-0039); the day's worst is sticky, so a morning reader still
-    # sees the day it was found, and every day somebody looks.
-    days, skipped = daybook_rows(daybook)
-    latest = days.get(max(days)) if days else None
-    shown = isinstance(latest, dict) and latest.get("blind") == 1
-    if remember or fresh or awakened or (blind and not shown):
-        days = remember_day(daybook, now, tally)
+    }, fresh, awakened, blind)
 
-    baseline = {"file": baseline_path.as_posix(), "events": events,
+    baseline = {"file": look.baseline_path.as_posix(), "events": events,
                 # Testimony: never raises the exit, never moves an event.
                 "acknowledged": memory["acknowledged"]}
     if uncounted:
@@ -4833,81 +4808,17 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if note or memory["skipped"]:
         baseline["note"] = "; ".join(
             words for words in (note, memory["skipped"]) if words)
-    shelf = not_a_file(daybook)
-    marker = Path(store_home()) / COVERAGE_NAME
-    # Nothing of the agent's machine is read at the receiver: not its
-    # marker, not its settings, not which recorder runs there, not what
-    # its session end is wired to send. Those are the on-machine
-    # reading's, and this one says so in their places.
-    unmarked = None if receiver else not_a_file(marker)
-    # Either home of the hook (ADR-0040): a folder or a pipe at the
-    # managed file's name hides a hook as one at the operator's does.
-    unset = "" if receiver else "; ".join(
-        f"{settings.as_posix()} cannot be read as harness settings: {why} "
-        "— read as none, as if no hook were wired"
-        for settings in wired_files(witness)
-        for why in [not_a_file(settings)] if why)
-    if receiver:
-        recorder = {"state": "elsewhere", "path": None, "branch": None,
-                    "note": "the recorder runs on the agent's machine, "
-                            "and which one is the on-machine reading's "
-                            "to say; nothing of that machine is read here"}
-        published = {"wired": None, "sent": bool(census),
-                     "note": "what landed here is the census above; what "
-                             "is wired to send it is read on the agent's "
-                             "machine"}
-    else:
-        recorder = recorder_notice(witness)
-        published = published_reading(witness, [place[3] for place in census])
-    report_note = None
-    if unlisted:
-        pass  # an empty census beside a closed folder is no empty store
-    elif receiver and not repos:
-        report_note = (f"no chain copy in {root.as_posix()} — the receiver "
-                       "has kept no published chain yet. The chain leaves "
-                       "the agent's machine at session end under the "
-                       "`full` profile, and on the keeper's cadence "
-                       "(docs/RECEIVER.md)")
-    elif store and not repos:
-        # An empty store has two unlike causes and this note named only
-        # one of them, so a reader who had just finished step 2 of
-        # docs/START.md and scanned out of curiosity was told to run
-        # install-hook again (found walking the five steps as a
-        # stranger, 2026-09-11). The wired matchers tell them apart.
-        if hook_matchers(witness):
-            report_note = (f"store empty at {root.as_posix()} — the hook "
-                           "is wired and nothing has recorded yet. That "
-                           "is what a fresh install looks like until a "
-                           "NEW session runs: restart anything already "
-                           "open, then work normally.")
-        else:
-            report_note = (f"store empty at {root.as_posix()} — run "
-                           "`loxodonta install-hook` to wire recording, or "
-                           "scan a legacy layout with --root")
-    elif not store and not repos:
-        # The other empty universe (#117): --root found no legacy
-        # receipts/ folder. Said once, above the report, so an operator
-        # following older notes sees the invocation and not a census.
-        report_note = (f"no chains under {root.as_posix()} — --root "
-                       "scans a legacy folder of repos for receipts/ "
-                       "folders (ADR-0011) and found none. The store is "
-                       "the default universe: run `scan` with no --root.")
+    recorder, published = machine_readings(look, census)
+    report_note = empty_note(look, repos, closed_rows)
     return {
         **({"note": report_note} if report_note else {}),
         "root": root.as_posix(),
-        "scanned": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "scanned": stamp,
         "exit": worst,
         "history": fortnight(days, now),
-        **({"history_note": memory_unread(daybook, "a day book", shelf)}
-           if shelf else {"history_note": rows_skipped(daybook, skipped)}
-           if skipped else {}),
-        **({"marker_note": f"{marker.as_posix()} cannot be read as a "
-                           f"coverage marker: {unmarked} — read as none, as "
-                           "if install-hook had written nothing"}
-           if unmarked else {}),
-        **({"settings_note": unset} if unset else {}),
-        **({"closed": unlisted, "closed_note": closed_words(unlisted)}
-           if unlisted else {}),
+        **memory_notes(look, skipped),
+        **({"closed": closed_rows, "closed_note": closed_words(closed_rows)}
+           if closed_rows else {}),
         "baseline": baseline,
         "completeness": completeness,
         "consumption": consumption,
@@ -4931,6 +4842,109 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
             for repo, sessions in repos.items()
         ],
     }
+
+
+def fold_day(look, now, claims, fresh, awakened, blind):
+    """This look's claims folded into today's row of the day book, or
+    the book only read, as (days, skipped) (`daybook_rows`).
+
+    An unasked turn (`remember=False`) stays out of the book while it
+    has nothing new to report (ADR-0014): a machine asking itself every
+    minute is not somebody looking. It goes in when it finds what no row
+    records yet, an alarm this look found or whose change moved, a
+    reawakening, a blind memory the book's newest row does not show, or
+    the finding would be recorded nowhere and the day would paint quiet.
+    An alarm already standing does not mark every later day as watched
+    (ADR-0039); the day's worst is sticky, so a morning reader still
+    sees the day it was found, and every day somebody looks."""
+    days, skipped = daybook_rows(look.daybook)
+    shown = bool(days) and days[max(days)].get("blind") == 1
+    if look.remember or fresh or awakened or (blind and not shown):
+        days = remember_day(look.daybook, now, claims, days)
+    return days, skipped
+
+
+def memory_notes(look, skipped):
+    """The report's notes for what a look reads beside the chains and
+    could not read as it should: the day book (`skipped`, the rows
+    `daybook_rows` passed over), the coverage marker and the harness
+    settings, as report keys. Nothing of the agent's machine is read at
+    the receiver: not its marker, not its settings."""
+    notes = {}
+    shelf = not_a_file(look.daybook)
+    if shelf:
+        notes["history_note"] = memory_unread(look.daybook, "a day book",
+                                              shelf)
+    elif skipped:
+        notes["history_note"] = rows_skipped(look.daybook, skipped)
+    if look.receiver:
+        return notes
+    marker = Path(store_home()) / COVERAGE_NAME
+    unmarked = not_a_file(marker)
+    if unmarked:
+        notes["marker_note"] = (f"{marker.as_posix()} cannot be read as a "
+                                f"coverage marker: {unmarked} — read as "
+                                "none, as if install-hook had written "
+                                "nothing")
+    # Either home of the hook (ADR-0040): a folder or a pipe at the
+    # managed file's name hides a hook as one at the operator's does.
+    unset = "; ".join(
+        f"{settings.as_posix()} cannot be read as harness settings: {why} "
+        "— read as none, as if no hook were wired"
+        for settings in wired_files(look.witness)
+        for why in [not_a_file(settings)] if why)
+    if unset:
+        notes["settings_note"] = unset
+    return notes
+
+
+def machine_readings(look, census):
+    """(recorder, published): which recorder runs, and whether
+    publishing is wired and any head left by that door. Those are the
+    on-machine reading's; at the receiver, where nothing of the agent's
+    machine is read, this one says so in their places."""
+    if look.receiver:
+        return ({"state": "elsewhere", "path": None, "branch": None,
+                 "note": "the recorder runs on the agent's machine, and "
+                         "which one is the on-machine reading's to say; "
+                         "nothing of that machine is read here"},
+                {"wired": None, "sent": bool(census),
+                 "note": "what landed here is the census above; what is "
+                         "wired to send it is read on the agent's machine"})
+    return (recorder_notice(look.witness),
+            published_reading(look.witness, [place[3] for place in census]))
+
+
+def empty_note(look, repos, closed_rows):
+    """The note above a report whose census found no chain, by universe,
+    or None. An empty census beside a closed folder is no empty store."""
+    if repos or closed_rows:
+        return None
+    where = look.root.as_posix()
+    if look.receiver:
+        return (f"no chain copy in {where} — the receiver has kept no "
+                "published chain yet. The chain leaves the agent's machine "
+                "at session end under the `full` profile, and on the "
+                "keeper's cadence (docs/RECEIVER.md)")
+    if look.store:
+        # An empty store has two unlike causes and this note named only
+        # one of them, so a reader who had just finished step 2 of
+        # docs/START.md and scanned out of curiosity was told to run
+        # install-hook again (found walking the five steps as a
+        # stranger, 2026-09-11). The wired matchers tell them apart.
+        if hook_matchers(look.witness):
+            return (f"store empty at {where} — the hook is wired and "
+                    "nothing has recorded yet. That is what a fresh "
+                    "install looks like until a NEW session runs: restart "
+                    "anything already open, then work normally.")
+        return (f"store empty at {where} — run `loxodonta install-hook` to "
+                "wire recording, or scan a legacy layout with --root")
+    # The other empty universe (#117): --root found no legacy receipts/
+    # folder. Said once, above the report, so an operator following
+    # older notes sees the invocation and not a census.
+    return (f"no chains under {where} — --root scans a legacy folder of "
+            "repos for receipts/ folders (ADR-0011) and found none. The "
+            "store is the default universe: run `scan` with no --root.")
 
 
 def adoption_project(root, log):
