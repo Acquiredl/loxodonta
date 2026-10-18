@@ -5018,13 +5018,13 @@ class ClosedFolderTest(unittest.TestCase):
                              command=f'python "{script.as_posix()}" hook')
         return folder
 
-    def serve(self):
+    def serve(self, *extra, **knobs):
         """`serve` over the store on an ephemeral port; its address."""
         server = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "serve", "--port", "0",
-             "--witness", str(self.witness)],
+             "--witness", str(self.witness), *extra],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            encoding="utf-8", env=self.env())
+            encoding="utf-8", env={**self.env(), **knobs})
         # Bounded: a server that never announces fails, never hangs.
         timer = threading.Timer(120, server.kill)
         timer.start()
@@ -5117,7 +5117,8 @@ class ClosedFolderTest(unittest.TestCase):
         result = self.supervisor("package", "sess-aaaa", "--witness",
                                  str(self.witness), "--out", str(out))
 
-        self.refused_by_name(result, self.store / "receipts")
+        # The home is what is closed, and is named (#448 item 8).
+        self.refused_by_name(result, self.store)
         self.assertFalse(os.path.lexists(out))
 
     def test_a_store_scan_names_a_closed_drawer_never_a_fresh_install(self):
@@ -5158,7 +5159,7 @@ class ClosedFolderTest(unittest.TestCase):
 
             self.answered(result, 5)
             report = json.loads(result.stdout)
-            self.closed_named(report, self.store / "receipts")
+            self.closed_named(report, self.store)
             self.assertEqual(report["baseline"]["blind"], "unreadable")
 
     def test_a_legacy_scan_names_a_closed_repo_folder(self):
@@ -5227,11 +5228,71 @@ class ClosedFolderTest(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as refused:
                     OPENER.open(url + route, timeout=30)
                 said = refused.exception.read().decode("utf-8")
+                kind = refused.exception.headers["Content-Type"]
                 refused.exception.close()
                 self.assertEqual(refused.exception.code, 503)
-                self.assertIn("cannot be listed", said)
+                # Words the page shows as they stand, never an HTML page
+                # it would parse as a report (#448 item 6).
+                self.assertTrue(kind.startswith("text/plain"), kind)
+                self.assertIn(f"{self.drawer.as_posix()} cannot be listed",
+                              said)
         with OPENER.open(f"{url}/api/status", timeout=30) as status:
             self.assertEqual(status.status, 200)
+
+    def test_a_turn_nobody_asked_for_books_a_folder_closed_at_first_look(self):
+        # #448 item 7: a drawer the baseline never knew, closed, is exit
+        # 5 and no alarm a turn finds new, so a keeper-only `serve` wrote
+        # no row and the day kept the clean row of the look before. Once,
+        # not on every turn: a closure the book already shows stands as
+        # an alarm already standing does (ADR-0039).
+        later = self.store / "receipts" / "later-00000000"
+        later.mkdir()
+        self.recorder("init", "--log", str(later / "receipts-sess-dddd.jsonl"))
+        self.close(later)
+        book = self.store / "daybook.json"
+        baseline = self.store / "baseline.json"
+        today = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%d")
+
+        def row():
+            try:
+                return json.loads(book.read_text(encoding="utf-8"))[
+                    "days"][today]
+            except (OSError, ValueError, KeyError):
+                return {}
+
+        def seconds_since(stamp):
+            try:
+                memory = json.loads(baseline.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return 0
+            then, now = (datetime.datetime.strptime(when, "%Y-%m-%dT%H:%M:%SZ")
+                         for when in (stamp, memory["scanned"]))
+            return (now - then).total_seconds()
+
+        self.assertEqual(row().get("worst"), 0, "setUp's look was clean")
+        before = row()["scans"]
+        # A day's cadence: the clock turns and no head is ever ripe, so
+        # nothing is sent to the address, which nothing answers.
+        self.serve("--publish-every", "1d", "--publish-url",
+                   "http://127.0.0.1:9", SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        deadline = time.monotonic() + 60
+        while row().get("worst") != 5 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        caught = row()
+        self.assertEqual(caught.get("worst"), 5,
+                         "no turn booked the closed folder")
+        # Several turns at half a second each past the one that booked it.
+        deadline = time.monotonic() + 60
+        while (seconds_since(caught["last"]) < 2
+               and time.monotonic() < deadline):
+            time.sleep(0.1)
+
+        self.assertGreaterEqual(seconds_since(caught["last"]), 2,
+                                "the clock stopped turning")
+        self.assertEqual(row()["scans"], before + 1,
+                         "a turn booked a closure the book already shows")
 
     def test_adopt_refuses_by_name_under_a_closed_legacy_repo_folder(self):
         beta = self.legacy / "beta"
