@@ -5524,6 +5524,17 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertRegex(row["last_heard"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertGreater(row["last_heard"], "2026-10-07T02:21:37Z")
 
+    def test_a_copy_with_no_mtime_past_the_epoch_is_not_heard_from(self):
+        # #535 review: a copy's mtime is an arrival only when it is past
+        # 0, as the fold took it before the refactor; a copy dated at the
+        # epoch says nothing of when it arrived.
+        copy = chain_copy(self.data, "epoch-session-0000")
+        os.utime(copy, (0, 0))
+
+        row = self.rows(self.report())["epoch-session-0000"]
+
+        self.assertNotIn("last_heard", row)
+
     def test_a_line_the_reader_cannot_parse_is_skipped_and_counted(self):
         chain_copy(self.data, FIXTURE_SESSION)
         with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
