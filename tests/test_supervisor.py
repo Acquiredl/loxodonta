@@ -3960,6 +3960,83 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertIn("anchoring failed", chain["anchors"]["note"])
         self.assertFalse(chain["anchors"]["head"]["anchored"])
 
+    # Both keepers due on every look, and nothing listening at either end.
+    UNREACHABLE_KEEPERS = ("--anchor-every", "0s",
+                           "--calendar", "http://127.0.0.1:1",
+                           "--publish-every", "0s",
+                           "--publish-url", "http://127.0.0.1:1")
+
+    def torn_chain(self, session):
+        log = make_chain(self.root / "alpha" / "receipts", session)
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        return log
+
+    def test_a_head_the_recorder_refuses_is_said_to_be_its_refusal(self):
+        # #533: the recorder will not anchor, stamp or publish a damaged
+        # tail (exit 1, ADR-0037), so no calendar and no remote was asked,
+        # and the note names neither and promises no retry.
+        self.torn_chain("sess-tore")
+
+        result = run_scan(self.root, *self.UNREACHABLE_KEEPERS, env=self.env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-tore")
+        self.assertFalse(chain["superseded"])
+        for said in (chain["anchors"], chain["left"]):
+            self.assertIn("the recorder refused", said["note"])
+            self.assertIn("damaged tail", said["note"],
+                          "the recorder's own words are shown")
+            self.assertNotIn("try again", said["note"])
+            self.assertNotIn("calendar", said["note"].lower())
+            self.assertNotIn("remote", said["note"].lower())
+            self.assertTrue(said["failed"], "the head did not leave")
+
+    def test_a_stood_down_chain_is_handed_to_neither_keeper_again(self):
+        # #533: a torn tail with a sibling is stood down (ADR-0004), and
+        # the recorder refuses its head on every turn, so once a look has
+        # said so neither keeper asks again. Its sibling is kept as
+        # before, and the calendar and the remote that did not answer are
+        # still blamed for it.
+        self.torn_chain("sess-tore")
+        make_chain(self.root / "alpha" / "receipts", "sess-tore-002")
+        env = {**self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"}
+        first = run_scan(self.root, *self.UNREACHABLE_KEEPERS, env=env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        tore, _ = chains_by_session(json.loads(first.stdout))[
+            ("alpha", "sess-tore")]
+        for said in (tore["anchors"], tore["left"]):
+            self.assertNotIn("calendar", said["note"].lower())
+            self.assertNotIn("remote", said["note"].lower())
+        # Every attempt time set long ago, so a turn on either chain shows.
+        baseline = self.root / BASELINE_NAME
+        memory = json.loads(baseline.read_text(encoding="utf-8"))
+        long_ago = "2026-01-01T00:00:00Z"
+        self.assertEqual(len(memory["keeper"]), 4, memory["keeper"])
+        memory["keeper"] = {key: long_ago for key in memory["keeper"]}
+        baseline.write_text(json.dumps(memory), encoding="utf-8")
+
+        second = run_scan(self.root, *self.UNREACHABLE_KEEPERS, env=env)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        tore, sibling = chains_by_session(json.loads(second.stdout))[
+            ("alpha", "sess-tore")]
+        self.assertTrue(tore["superseded"])
+        for said in (tore["anchors"], tore["left"]):
+            self.assertNotIn("note", said)
+            self.assertNotIn("failed", said)
+        kept = json.loads(baseline.read_text(encoding="utf-8"))["keeper"]
+        for key, when in kept.items():
+            if "sess-tore-002" in key:
+                self.assertNotEqual(when, long_ago, key)
+            else:
+                self.assertEqual(when, long_ago,
+                                 f"a keeper turned on the stood-down {key}")
+        self.assertIn("no calendar accepted", sibling["anchors"]["note"])
+        self.assertIn("the remote did not take", sibling["left"]["note"])
+        self.assertTrue(sibling["anchors"]["failed"])
+        self.assertTrue(sibling["left"]["failed"])
+
     def test_one_turn_failing_twice_keeps_both_notes(self):
         # A single turn can fail twice — a refused upgrade AND a refused
         # fresh-head anchor. Both failures belong in the note: evidence
