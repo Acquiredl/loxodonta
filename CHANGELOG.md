@@ -36,6 +36,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `digest --payload` reads a payload nested past the JSON reader as no payload, as one that is not JSON, instead of ending in a traceback (#487).
 - After `uninstall-hook`, `scan` no longer reads every session `UNWATCHED`: sessions recorded while the hook was wired, chainless ones included, are judged by the coverage in force at their time; `UNWATCHED` is kept for a machine that never wired it (#532).
 - An ended session no longer reads awake for a day after the tail keeper commits its tail: growth that is bookkeeping alone carries the stillness clock forward, as it already never woke a session (#537).
+- After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
 
 ## [0.15.1] - 2026-10-12
 

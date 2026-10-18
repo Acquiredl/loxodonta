@@ -3495,6 +3495,14 @@ def watch_completeness(root, witness, families, everywhere=False,
         watch["note"] = ("no recorder hook is wired into the harness "
                          "settings beside this witness — nothing owes a "
                          "receipt, so completeness has nothing to watch")
+    elif os.path.isdir(witness) and not calibration[-1]["matchers"]:
+        # After uninstall-hook no row says the present wires nothing:
+        # the wired weeks' rows are judged, and later sessions owe none.
+        watch["note"] = ("no recorder hook is wired into the harness "
+                         "settings beside this witness today — sessions "
+                         f"since {calibration[-1]['since']} owe nothing, "
+                         "and earlier ones are judged by the coverage in "
+                         "force at their time (ADR-0016)")
     if unlisted:
         watch["note"] = "; ".join(filter(None, (
             watch.get("note"),
