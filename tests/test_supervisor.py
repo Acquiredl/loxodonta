@@ -612,6 +612,172 @@ class AdoptTest(unittest.TestCase):
         self.assertEqual(len(left), 2, result.stdout)
         self.assertEqual(would, left)
 
+    def assert_one_name_given_once(self, first, second):
+        # Two legacy chains bound for one name in one drawer (#447): the
+        # first in path order moves, the second is refused by name in
+        # the dry run and the real run alike, and neither is lost.
+        before = {first: first.read_bytes(), second: second.read_bytes()}
+        said = {"first": first.relative_to(self.root).as_posix(),
+                "second": second.relative_to(self.root).as_posix()}
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        result = run_adopt(self.home, self.root)
+
+        (name,) = self.drawers()
+        refusal = (f"refused {said['second']}: {name}/{second.name} is "
+                   f"taken by {said['first']} in this run — evidence is "
+                   "never overwritten; reconcile by hand")
+        for ran in (planned, result):
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertIn(refusal, ran.stdout)
+        self.assertEqual(planned.stdout.count("would adopt "), 1,
+                         planned.stdout)
+        self.assertIn(f"would adopt {said['first']} -> {name}/",
+                      planned.stdout)
+        self.assertIn(f"adopted {said['first']} -> {name}/", result.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertEqual(before[second], second.read_bytes(),
+                         "the refused chain stays put")
+        landed = [p for p in (self.home / "receipts" / name).iterdir()
+                  if p.name.endswith(".jsonl")]
+        self.assertEqual([p.read_bytes() for p in landed], [before[first]],
+                         "the adopted chain is the first, whole")
+
+    def test_two_legacy_chains_of_one_name_never_overwrite_each_other(self):
+        stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
+                              / "w" / "receipts", "s1", entries=2)
+        legacy = make_chain(self.root / "alpha" / "receipts", "s1",
+                            entries=1)
+
+        self.assert_one_name_given_once(stranded, legacy)
+
+    def test_two_legacy_chains_whose_names_differ_in_case_are_one_name(self):
+        # A disk that ignores case lands both on one file, so the plan
+        # gives the name once on every system (#447).
+        stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
+                              / "w" / "receipts", "S1", entries=2)
+        legacy = make_chain(self.root / "alpha" / "receipts", "s1",
+                            entries=1)
+
+        self.assert_one_name_given_once(stranded, legacy)
+
+    def test_a_chain_bound_for_a_sidecar_name_leaves_the_sidecar(self):
+        # A sidecar travels with its chain only where the run has not
+        # given its name already (#447): here to a stranded chain whose
+        # name is the sidecar's, but for its case.
+        stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
+                              / "w" / "receipts", "s1.jsonl.ANCHORS")
+        legacy = make_chain(self.root / "alpha" / "receipts", "s1")
+        write_completed_anchor(legacy, chain_head(legacy))
+        sidecar = legacy.with_name(legacy.name + ".anchors.jsonl")
+        before = {stranded: stranded.read_bytes(),
+                  sidecar: sidecar.read_bytes()}
+        taker = stranded.relative_to(self.root).as_posix()
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        result = run_adopt(self.home, self.root)
+
+        (name,) = self.drawers()
+        words = (f"sidecar alpha/receipts/{sidecar.name}: {name}/"
+                 f"{sidecar.name} is taken by {taker} in this run — evidence "
+                 "is never overwritten; reconcile by hand")
+        self.assertIn(f"would leave {words}", planned.stdout)
+        self.assertEqual(planned.stdout.count("would adopt "), 2,
+                         planned.stdout)
+        self.assertIn(f"left {words}", result.stdout)
+        self.assertIn("2 chain(s) adopted", result.stdout)
+        self.assertEqual(sidecar.read_bytes(), before[sidecar],
+                         "the refused sidecar stays put")
+        drawer = self.home / "receipts" / name
+        self.assertEqual((drawer / stranded.name).read_bytes(),
+                         before[stranded])
+
+    def test_dry_run_says_the_unlisted_marker_the_move_copies(self):
+        # The real run copies a legacy folder's .unlisted into the drawer
+        # once (#448 item 16); the dry run says so, and the real run's
+        # drawer is what it said.
+        receipts = self.root / "alpha" / "receipts"
+        make_chain(receipts, "sess-aaaa")
+        make_chain(receipts, "sess-bbbb")
+        (receipts / ".unlisted").write_text("", encoding="utf-8")
+        make_chain(self.root / "beta" / "receipts", "sess-cccc")
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        self.assertEqual(self.drawers(), [], "dry-run moves nothing")
+        result = run_adopt(self.home, self.root)
+
+        self.assertEqual(planned.returncode, 0,
+                         planned.stdout + planned.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        alpha = next(n for n in self.drawers() if n.startswith("alpha-"))
+        copies = [line for line in planned.stdout.splitlines()
+                  if "marker" in line]
+        self.assertEqual(copies, [
+            f"would copy marker alpha/receipts/.unlisted -> {alpha}/"])
+        unlisted = [n for n in self.drawers()
+                    if (self.home / "receipts" / n / ".unlisted").exists()]
+        self.assertEqual(unlisted, [alpha])
+
+    def test_dry_run_names_a_marker_the_move_would_leave(self):
+        # A folder where the marker belongs is left by the real run
+        # (#386); the dry run says so in the real run's words.
+        receipts = self.root / "alpha" / "receipts"
+        make_chain(receipts, "sess-aaaa")
+        (receipts / ".unlisted").mkdir()
+
+        planned = run_adopt(self.home, self.root, "--dry-run")
+        result = run_adopt(self.home, self.root)
+
+        left = [line for line in result.stdout.splitlines()
+                if line.startswith("left marker ")]
+        self.assertEqual(len(left), 1, result.stdout)
+        self.assertIn(f"would {left[0].replace('left', 'leave', 1)}",
+                      planned.stdout.splitlines())
+
+    @unittest.skipUnless(os.name == "nt",
+                         "only Windows refuses to move a file held open")
+    def test_a_chain_held_open_is_said_to_have_moved_part_way(self):
+        # A move that renames cannot copies, then removes (#448 item 13):
+        # here the removal fails, so a copy stands in the drawer and the
+        # chain is still where it lay. Said, never "left as it lies".
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        before = log.read_bytes()
+
+        with open(log, "rb"):
+            result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (name,) = self.drawers()
+        self.assertIn(f"refused alpha/receipts/{log.name}: the move failed "
+                      "part way: ", result.stdout)
+        self.assertIn(f"{name}/{log.name} may be a partial copy; reconcile "
+                      "by hand", result.stdout)
+        self.assertNotIn("chain(s) adopted", result.stdout)
+        self.assertEqual(log.read_bytes(), before)
+
+    @unittest.skipUnless(os.name == "nt",
+                         "only Windows refuses to move a file held open")
+    def test_a_sidecar_held_open_is_said_to_have_moved_part_way(self):
+        # The sidecar's twin of the case above (#448 item 13): the chain
+        # moves, and the sidecar's failed move is named with the copy it
+        # may have left in the drawer.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        write_completed_anchor(log, chain_head(log))
+        sidecar = log.with_name(log.name + ".anchors.jsonl")
+        before = sidecar.read_bytes()
+
+        with open(sidecar, "rb"):
+            result = run_adopt(self.home, self.root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (name,) = self.drawers()
+        self.assertIn(f"left sidecar alpha/receipts/{sidecar.name}: the move "
+                      "failed part way: ", result.stdout)
+        self.assertIn(f"{name}/{sidecar.name} may be a partial copy; "
+                      "reconcile by hand", result.stdout)
+        self.assertIn("1 chain(s) adopted", result.stdout)
+        self.assertEqual(sidecar.read_bytes(), before)
+
     def test_adopted_chains_are_scanned_and_recalled(self):
         # The move is an end-to-end success only if the store's readers
         # pick the history up where it landed.
