@@ -25,7 +25,6 @@ the repository's files it names, so the drill's sandbox lands in the copy
 and the repo is never touched (#297).
 """
 
-import json
 import re
 import shutil
 import subprocess
@@ -38,12 +37,11 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_readme_pins`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import isolated_env
+from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
+                     isolated_env, run)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+
 README = REPO_ROOT / "README.md"
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 # A verify verdict on stdout implies an exit code (README "Exit codes").
 VERDICT_EXIT = [

@@ -38,6 +38,8 @@ from types import SimpleNamespace
 # when the module runs alone (`python -m unittest tests.test_package_stamp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import LOXODONTA, SUPERVISOR, run  # noqa: E402
+
 from test_anchor import start_calendar
 from test_package_anchor import released_verifier
 from test_package import LOXODONTA, SUPERVISOR, PackageCase, neutral_env, run

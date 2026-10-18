@@ -27,12 +27,12 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_mcp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import SUPERVISOR, isolated_env  # noqa: E402
+
 from test_recall import (HOSTILE_ACTION, HOSTILE_ACTOR, HOSTILE_SHOWN,
                          forge_chain, recall_home, run_py, steering)
-from test_supervisor import isolated_env, unreadable_depth
+from test_supervisor import unreadable_depth
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SUPERVISOR = REPO_ROOT / "supervisor.py"
 
 LEGACY = "2025-11-25"
 MODERN = "2026-07-28"

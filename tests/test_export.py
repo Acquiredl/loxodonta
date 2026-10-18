@@ -11,7 +11,6 @@ an exact key set, so a new scan field cannot slip in unnamed.
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,11 +22,9 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_export`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import isolated_env
+from support import LOXODONTA, SUPERVISOR, isolated_env, run  # noqa: E402
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
-SUPERVISOR = REPO_ROOT / "supervisor.py"
+
 
 HOME_SECRET = "HOMESECRET-q7x"
 PROJECT_SECRET = "PROJSECRET-m4k"

@@ -9,11 +9,8 @@ documented format rather than matching itself.
 import base64
 import hashlib
 import json
-import os
 import struct
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -26,36 +23,13 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_anchor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_supervisor import home_outside, isolated_env  # noqa: E402
+from support import (LOXODONTA, StoreCase, isolated_env, run,  # noqa: E402
+                     temp_folder)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LOXODONTA = REPO_ROOT / "loxodonta.py"
+
 
 TAG_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
-
-
-def clean_env():
-    """Subprocess env with proxy variables stripped, so urllib in the CLI
-    talks straight to the fake calendar on 127.0.0.1 — and with the child
-    pinned to UTF-8 output, so it agrees with the encoding= below no matter
-    what the invoking shell's locale is (cp1252 on Windows)."""
-    env = dict(os.environ)
-    for key in list(env):
-        if key.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
-            del env[key]
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
-
-
-def run_receipts(*args, cwd):
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), *args],
-        cwd=cwd,
-        capture_output=True,
-        encoding="utf-8",
-        env=clean_env(),
-    )
 
 
 # --- Independent OTS wire subset (docs/ANCHORING.md §4) -----------------------
@@ -266,9 +240,7 @@ class SessionEndAnchorTest(unittest.TestCase):
     SESSION = "sess-end-0001"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name).resolve()
+        self.workdir = temp_folder(self)
         self.server = FakeCalendar(("127.0.0.1", 0), FakeCalendarHandler)
         self.server.nonce = b"fake-nonce"
         self.server.prefix = b"left-branch"
@@ -284,19 +256,14 @@ class SessionEndAnchorTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.chain = self.workdir / f"receipts-{self.SESSION}.jsonl"
         self.sidecar = self.workdir / f"receipts-{self.SESSION}.jsonl.anchors.jsonl"
-        self.home = home_outside(self)
+        self.home = temp_folder(self)
 
     def hook(self, payload, *extra):
         # No CLAUDE_PROJECT_DIR, so the chain lands in the working
         # directory; every home one of the test's own (#274).
         env = isolated_env(self.home, PYTHONIOENCODING="utf-8")
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook", *extra],
-            cwd=self.workdir, input=json.dumps(payload).encode("utf-8"),
-            capture_output=True, env=env)
-        result.stdout = result.stdout.decode("utf-8", "replace")
-        result.stderr = result.stderr.decode("utf-8", "replace")
-        return result
+        return run(LOXODONTA, "hook", *extra, cwd=self.workdir,
+                   stdin=json.dumps(payload), env=env)
 
     def tool_call(self):
         return self.hook({"session_id": self.SESSION,
@@ -324,7 +291,7 @@ class SessionEndAnchorTest(unittest.TestCase):
 
     def test_session_end_with_anchor_writes_a_sidecar_for_the_head(self):
         self.tool_call()
-        head = run_receipts("head", "--log", str(self.chain),
+        head = run(LOXODONTA, "head", "--log", str(self.chain),
                             cwd=self.workdir).stdout.strip()
         result = self.session_end("--anchor", "--calendar", self.server.url)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -467,7 +434,7 @@ class SessionEndAnchorTest(unittest.TestCase):
         # the session end still submits the head, and the new row says
         # it is an anchor.
         self.tool_call()
-        head = run_receipts("head", "--log", str(self.chain),
+        head = run(LOXODONTA, "head", "--log", str(self.chain),
                             cwd=self.workdir).stdout.strip()
         self.sidecar.write_text(json.dumps({"kind": "witness-note",
                                             "head": head}) + "\n",
@@ -486,7 +453,7 @@ class SessionEndAnchorTest(unittest.TestCase):
         # not its anchor, so the head is still submitted, and the step
         # still writes down how it went.
         self.tool_call()
-        head = run_receipts("head", "--log", str(self.chain),
+        head = run(LOXODONTA, "head", "--log", str(self.chain),
                             cwd=self.workdir).stdout.strip()
         self.sidecar.write_text(
             json.dumps({"head": [1]}) + "\n"
@@ -508,7 +475,7 @@ class SessionEndAnchorTest(unittest.TestCase):
         # it ANCHOR-INVALID, so it anchors nothing, and the session end
         # still submits the head and writes down how it went.
         self.tool_call()
-        head = run_receipts("head", "--log", str(self.chain),
+        head = run(LOXODONTA, "head", "--log", str(self.chain),
                             cwd=self.workdir).stdout.strip()
         for proof in ("", "AAAA"):
             with self.subTest(proof=proof):
@@ -562,18 +529,16 @@ class SessionEndAnchorTest(unittest.TestCase):
         result = self.session_end("--anchor", "--calendar", self.server.url)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertGreaterEqual(len(self.server.polled), 1, "no upgrade tried")
-        verify = run_receipts("verify", "--anchors", "--log",
+        verify = run(LOXODONTA, "verify", "--anchors", "--log",
                               str(self.chain), cwd=self.workdir)
         self.assertIn("ANCHORED", verify.stdout)
 
 
-class AnchorTest(unittest.TestCase):
+class AnchorTest(StoreCase):
     HEIGHT = 850000
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        super().setUp()
         self.log_path = self.workdir / "receipts.jsonl"
         self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
 
@@ -591,13 +556,12 @@ class AnchorTest(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
 
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
     def anchor(self, *extra):
-        return run_receipts(
+        return run(LOXODONTA, 
             "anchor", "--calendar", self.server.url, *extra, cwd=self.workdir
         )
 
@@ -624,7 +588,7 @@ class AnchorTest(unittest.TestCase):
         )
 
     def test_anchor_with_unreachable_calendar_fails_cleanly(self):
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "anchor", "--calendar", "http://127.0.0.1:1", cwd=self.workdir
         )
 
@@ -635,7 +599,7 @@ class AnchorTest(unittest.TestCase):
     def test_a_calendar_that_answers_no_http_is_one_that_failed(self):
         garbage = start_not_http(self)
 
-        alone = run_receipts("anchor", "--calendar", garbage,
+        alone = run(LOXODONTA, "anchor", "--calendar", garbage,
                              cwd=self.workdir)
 
         self.assertEqual(alone.returncode, 69, alone.stderr)
@@ -643,7 +607,7 @@ class AnchorTest(unittest.TestCase):
         self.assertIn(f"warning: calendar {garbage}: ", alone.stderr)
         self.assertFalse(self.sidecar.exists())
 
-        beside = run_receipts("anchor", "--calendar", garbage,
+        beside = run(LOXODONTA, "anchor", "--calendar", garbage,
                               "--calendar", self.server.url,
                               cwd=self.workdir)
 
@@ -654,7 +618,7 @@ class AnchorTest(unittest.TestCase):
     def test_a_calendar_address_http_cannot_send_is_one_that_failed(self):
         crooked = self.server.url + "/a b"
 
-        result = run_receipts("anchor", "--calendar", crooked,
+        result = run(LOXODONTA, "anchor", "--calendar", crooked,
                               cwd=self.workdir)
 
         self.assertEqual(result.returncode, 69, result.stderr)
@@ -667,7 +631,7 @@ class AnchorTest(unittest.TestCase):
         # The reason phrase is the calendar's own text, printed here.
         loud = start_not_http(self, b"HTTP/1.0 500 \x1b[31mred\r\n\r\n")
 
-        result = run_receipts("anchor", "--calendar", loud, cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--calendar", loud, cwd=self.workdir)
 
         self.assertEqual(result.returncode, 69, result.stderr)
         self.assertIn("warning: calendar ", result.stderr)
@@ -718,7 +682,7 @@ class AnchorTest(unittest.TestCase):
                 self.server.mode = "pending"
                 astray = start_not_http(self, redirect_to(location))
 
-                alone = run_receipts("anchor", "--calendar", astray,
+                alone = run(LOXODONTA, "anchor", "--calendar", astray,
                                      cwd=self.workdir)
 
                 self.assertEqual(alone.returncode, 69, alone.stderr)
@@ -748,7 +712,7 @@ class AnchorTest(unittest.TestCase):
         empty = self.workdir / "elsewhere"
         empty.mkdir()
 
-        result = run_receipts(
+        result = run(LOXODONTA, 
             "anchor", "--calendar", self.server.url, cwd=empty
         )
 
@@ -759,7 +723,7 @@ class AnchorTest(unittest.TestCase):
     def test_verify_anchors_reports_pending(self):
         self.anchor()
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ANCHOR-PENDING", result.stdout)
@@ -779,7 +743,7 @@ class AnchorTest(unittest.TestCase):
         self.assertEqual(self.server.polled, [commitment])
         self.assertEqual(len(self.sidecar_records()), 2)
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         # With no block header given, the attestation's height is its own
@@ -814,11 +778,11 @@ class AnchorTest(unittest.TestCase):
         # The adversary rewrites history wholesale: a fresh, internally
         # valid chain. The anchored head no longer appears anywhere.
         self.log_path.unlink()
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "innocent step",
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "innocent step",
                      cwd=self.workdir)
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn("ANCHOR-MISMATCH", result.stdout)
@@ -837,7 +801,7 @@ class AnchorTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn("ANCHOR-INVALID", result.stdout)
@@ -862,7 +826,7 @@ class AnchorTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn("ANCHOR-INVALID", result.stdout)
@@ -877,7 +841,7 @@ class AnchorTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn("ANCHOR-INVALID", result.stdout)
@@ -893,14 +857,14 @@ class AnchorTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn("ANCHOR-INVALID", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_verify_anchors_with_no_sidecar_says_so(self):
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("NO-ANCHORS", result.stdout)
@@ -912,14 +876,14 @@ class AnchorTest(unittest.TestCase):
         # reads a sidecar holding only notes exactly as it reads one
         # holding nothing: same words, same exit code.
         self.sidecar.write_text("", encoding="utf-8")
-        empty = run_receipts("verify", "--anchors", cwd=self.workdir)
+        empty = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
         self.sidecar.write_text(json.dumps({
             "kind": "attempt", "step": "anchor", "ts": "2026-09-16T05:35:42Z",
             "budget": 12.0,
             "outcome": "no calendar answered within 12 seconds"}) + "\n",
             encoding="utf-8")
 
-        noted = run_receipts("verify", "--anchors", cwd=self.workdir)
+        noted = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(empty.returncode, 0, empty.stdout + empty.stderr)
         self.assertEqual((noted.returncode, noted.stdout, noted.stderr),
@@ -928,9 +892,9 @@ class AnchorTest(unittest.TestCase):
 
     def test_anchor_grows_sidecar_as_chain_grows(self):
         self.anchor()
-        run_receipts("log", "--actor", "agent", "--action", "step 2",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 2",
                      cwd=self.workdir)
-        new_head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        new_head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
         self.anchor()
 
@@ -939,12 +903,12 @@ class AnchorTest(unittest.TestCase):
         self.assertEqual(records[1]["head"], new_head)
         self.assertEqual(records[1]["n"], 2)
         # Both anchored heads appear in the chain: both verify cleanly.
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count("ANCHOR-PENDING"), 2)
 
 
-class BlockHeaderTest(unittest.TestCase):
+class BlockHeaderTest(StoreCase):
     """Ruling 3 on #299: `verify --anchors` grades an anchor honestly. A
     Bitcoin attestation names a height, and replaying the proof gives a
     merkle root, and neither says a block with that root exists: a
@@ -960,19 +924,16 @@ class BlockHeaderTest(unittest.TestCase):
     HEIGHT = 850000
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        super().setUp()
         self.server = start_calendar(self, b"fake-nonce", self.HEIGHT)
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
-        submitted = run_receipts("anchor", "--calendar", self.server.url,
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
+        submitted = run(LOXODONTA, "anchor", "--calendar", self.server.url,
                                  cwd=self.workdir)
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
         self.server.mode = "complete"
-        upgraded = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        upgraded = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
         self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
         self.root = replayed_root(self.head, self.server.nonce,
                                   self.server.prefix, self.server.suffix)
@@ -980,7 +941,7 @@ class BlockHeaderTest(unittest.TestCase):
     def verify(self, *headers, anchors=True):
         flags = [arg for header in headers
                  for arg in ("--block-header", header)]
-        return run_receipts("verify", *(["--anchors"] if anchors else []),
+        return run(LOXODONTA, "verify", *(["--anchors"] if anchors else []),
                             *flags, cwd=self.workdir)
 
     def test_a_header_holding_the_replayed_root_says_existed_by_that_block(self):
@@ -1057,8 +1018,8 @@ class BlockHeaderTest(unittest.TestCase):
         # changes nothing about a proof for a head this log does not hold.
         header = block_header(self.root)
         (self.workdir / "receipts.jsonl").unlink()
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "innocent step",
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "innocent step",
                      cwd=self.workdir)
 
         result = self.verify(header.hex())
@@ -1105,7 +1066,7 @@ def start_calendar(case, nonce, height=850000):
     return server
 
 
-class CalendarsDisagreeTest(unittest.TestCase):
+class CalendarsDisagreeTest(StoreCase):
     """#199: four calendars is the default and calendars disagree, so a
     head settled by one while another never answers is the ordinary case,
     not the exotic one. The anchor's claim is about the head, so once any
@@ -1116,28 +1077,25 @@ class CalendarsDisagreeTest(unittest.TestCase):
     HEIGHT = 962604
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        super().setUp()
         self.settles = start_calendar(self, b"nonce-settles", self.HEIGHT)
         self.lags = start_calendar(self, b"nonce-lags")
 
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
-        submitted = run_receipts("anchor", "--calendar", self.settles.url,
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
+        submitted = run(LOXODONTA, "anchor", "--calendar", self.settles.url,
                                  "--calendar", self.lags.url,
                                  cwd=self.workdir)
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
         # One of the two gets its Bitcoin attestation; the other keeps
         # answering 404, as the opentimestamps.org pools did for 27 days.
         self.settles.mode = "complete"
-        upgraded = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        upgraded = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
         self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
 
     def verify(self):
-        return run_receipts("verify", "--anchors", cwd=self.workdir)
+        return run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
     def test_a_settled_head_stops_advising_an_upgrade_that_cannot_help(self):
         result = self.verify()
@@ -1160,7 +1118,7 @@ class CalendarsDisagreeTest(unittest.TestCase):
     def test_upgrade_stops_re_asking_for_a_head_another_calendar_settled(self):
         self.lags.polled.clear()
 
-        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.lags.polled, [],
@@ -1174,17 +1132,15 @@ class CalendarsDisagreeTest(unittest.TestCase):
         # what is left of its budget, so it asks what --upgrade asks: a
         # head another calendar settled owes nothing, and a dead pool
         # asked on every session end spends the budget a new head needs.
-        home = home_outside(self)
+        home = temp_folder(self)
 
         def hook(event, **fields):
-            return subprocess.run(
-                [sys.executable, str(LOXODONTA), "hook", "--anchor",
-                 "--calendar", self.settles.url],
-                cwd=self.workdir, capture_output=True,
-                env=isolated_env(home, PYTHONIOENCODING="utf-8"),
-                input=json.dumps({"session_id": "sess-settled",
-                                  "hook_event_name": event,
-                                  **fields}).encode("utf-8"))
+            return run(LOXODONTA, "hook", "--anchor", "--calendar",
+                       self.settles.url, cwd=self.workdir,
+                       env=isolated_env(home, PYTHONIOENCODING="utf-8"),
+                       stdin=json.dumps({"session_id": "sess-settled",
+                                         "hook_event_name": event,
+                                         **fields}))
 
         hook("PostToolUse", tool_name="Bash", tool_input={"command": "ls"},
              tool_response={})
@@ -1194,7 +1150,7 @@ class CalendarsDisagreeTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.settles.submitted[-1:],
-                         [bytes.fromhex(run_receipts(
+                         [bytes.fromhex(run(LOXODONTA, 
                              "head", "--log",
                              "receipts-sess-settled.jsonl",
                              cwd=self.workdir).stdout.strip())],
@@ -1203,9 +1159,9 @@ class CalendarsDisagreeTest(unittest.TestCase):
                          "the dead pool was asked again at session end")
 
     def test_a_head_no_calendar_settled_still_advises_the_upgrade(self):
-        run_receipts("log", "--actor", "agent", "--action", "step 2",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 2",
                      cwd=self.workdir)
-        run_receipts("anchor", "--calendar", self.lags.url, cwd=self.workdir)
+        run(LOXODONTA, "anchor", "--calendar", self.lags.url, cwd=self.workdir)
 
         result = self.verify()
 
@@ -1215,7 +1171,7 @@ class CalendarsDisagreeTest(unittest.TestCase):
         self.assertIn("ANCHOR-UNANSWERED", result.stdout)
 
 
-class AnchorRowKindTest(unittest.TestCase):
+class AnchorRowKindTest(StoreCase):
     """ADR-0038: every row of the anchors sidecar names its kind. A new
     proof is written `"kind": "anchor"`; a row with no kind reads as a
     proof, whenever it was written, so every sidecar already shipped
@@ -1227,15 +1183,13 @@ class AnchorRowKindTest(unittest.TestCase):
     UNKNOWN = "ANCHOR-UNKNOWN-KIND"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        # By name, not super(): AnchorFieldEscapeTest borrows this setUp.
+        StoreCase.setUp(self)
         self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
         self.server = start_calendar(self, b"fake-nonce")
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
     def pending_row(self, **extra):
         """A pending proof of the head, as the recorder writes one, keys
@@ -1252,18 +1206,18 @@ class AnchorRowKindTest(unittest.TestCase):
                                 encoding="utf-8")
 
     def verify(self):
-        return run_receipts("verify", "--anchors", cwd=self.workdir)
+        return run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
     def without_notes(self, stdout):
         return [line for line in stdout.splitlines()
                 if not line.startswith(self.UNKNOWN)]
 
     def test_a_new_anchor_row_names_its_kind_and_nothing_else_changes(self):
-        submitted = run_receipts("anchor", "--calendar", self.server.url,
+        submitted = run(LOXODONTA, "anchor", "--calendar", self.server.url,
                                  cwd=self.workdir)
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
         self.server.mode = "complete"
-        upgraded = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        upgraded = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
         self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
 
         lines = self.sidecar.read_text("utf-8").splitlines()
@@ -1415,7 +1369,7 @@ class AnchorRowKindTest(unittest.TestCase):
         foreign = self.pending_row(kind="witness-note", calendar=other.url)
         self.write_sidecar(foreign)
 
-        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(other.polled, [])
@@ -1451,7 +1405,7 @@ MALFORMED_ROWS = (
 )
 
 
-class MalformedAnchorRowTest(unittest.TestCase):
+class MalformedAnchorRowTest(StoreCase):
     """#348: the anchors sidecar is writer-reachable, so a row that is a
     JSON object but not the shape of an anchor row is judged, never
     trusted: `ANCHOR-INVALID`, exit 3, with a reason naming the field and
@@ -1459,15 +1413,12 @@ class MalformedAnchorRowTest(unittest.TestCase):
     row, since it is not a proof they can act on, and never crash."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        super().setUp()
         self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
         self.server = start_calendar(self, b"fake-nonce")
-        run_receipts("init", cwd=self.workdir)
-        run_receipts("log", "--actor", "agent", "--action", "step 1",
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
     def row(self, change=None):
         """A pending proof of the head, as the recorder writes one, with
@@ -1492,7 +1443,7 @@ class MalformedAnchorRowTest(unittest.TestCase):
             with self.subTest(change=change):
                 self.write_sidecar(self.row(), self.row(change))
 
-                result = run_receipts("verify", "--anchors", cwd=self.workdir)
+                result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
                 self.assertEqual(result.returncode, 3,
                                  result.stdout + result.stderr)
@@ -1510,7 +1461,7 @@ class MalformedAnchorRowTest(unittest.TestCase):
         # row without one still replays, so it is no evidence against.
         self.write_sidecar(self.row({"calendar": DROP}))
 
-        result = run_receipts("verify", "--anchors", cwd=self.workdir)
+        result = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ANCHOR-PENDING", result.stdout)
@@ -1522,7 +1473,7 @@ class MalformedAnchorRowTest(unittest.TestCase):
         malformed.append(self.row({"calendar": DROP}))
         self.write_sidecar(*malformed, self.row())
 
-        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -1552,7 +1503,7 @@ class MalformedAnchorRowTest(unittest.TestCase):
                 bad = self.row({"calendar": calendar})
                 self.write_sidecar(bad, good)
 
-                result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+                result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
 
                 self.assertEqual(result.returncode, 0,
                                  result.stdout + result.stderr)
@@ -1572,7 +1523,7 @@ class MalformedAnchorRowTest(unittest.TestCase):
 FORGED_PENDING = "AIPf4w0u+QyOCQhodHRwOi8veA=="
 
 
-class AnchorDedupeTest(unittest.TestCase):
+class AnchorDedupeTest(StoreCase):
     """#366: `anchor` asks the session end's question before it asks a
     calendar. A head the sidecar holds a proof for that replays is
     `already anchored`, exit 0, and no calendar is asked, unless `--force`
@@ -1584,21 +1535,18 @@ class AnchorDedupeTest(unittest.TestCase):
     so pin the limit SPEC 9.4 names, and what verify says of such a row."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.workdir = Path(self._tmp.name)
+        super().setUp()
         self.sidecar = self.workdir / "receipts.jsonl.anchors.jsonl"
         self.server = start_calendar(self, b"fake-nonce")
-        run_receipts("init", cwd=self.workdir)
         self.log_step("step 1")
 
     def log_step(self, action):
-        run_receipts("log", "--actor", "agent", "--action", action,
+        run(LOXODONTA, "log", "--actor", "agent", "--action", action,
                      cwd=self.workdir)
-        self.head = run_receipts("head", cwd=self.workdir).stdout.strip()
+        self.head = run(LOXODONTA, "head", cwd=self.workdir).stdout.strip()
 
     def anchor(self, *extra):
-        return run_receipts("anchor", "--calendar", self.server.url, *extra,
+        return run(LOXODONTA, "anchor", "--calendar", self.server.url, *extra,
                             cwd=self.workdir)
 
     def anchor_rows(self):
@@ -1622,7 +1570,7 @@ class AnchorDedupeTest(unittest.TestCase):
     def test_a_completed_proof_is_already_anchored_too(self):
         self.anchor()
         self.server.mode = "complete"
-        upgraded = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        upgraded = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
         self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
         self.sidecar.write_text(json.dumps(self.anchor_rows()[-1]) + "\n",
                                 encoding="utf-8")
@@ -1684,7 +1632,7 @@ class AnchorDedupeTest(unittest.TestCase):
     def test_force_beside_upgrade_is_a_usage_error(self):
         self.anchor()
 
-        result = run_receipts("anchor", "--upgrade", "--force",
+        result = run(LOXODONTA, "anchor", "--upgrade", "--force",
                               cwd=self.workdir)
 
         self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
@@ -1729,7 +1677,7 @@ class AnchorDedupeTest(unittest.TestCase):
              "proof": FORGED_PENDING}) + "\n", encoding="utf-8")
 
         result = self.anchor()
-        judged = run_receipts("verify", "--anchors", cwd=self.workdir)
+        judged = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("already anchored", result.stdout)
@@ -1750,7 +1698,7 @@ class AnchorDedupeTest(unittest.TestCase):
                                 + "\n", encoding="utf-8")
 
         result = self.anchor()
-        judged = run_receipts("verify", "--anchors", cwd=self.workdir)
+        judged = run(LOXODONTA, "verify", "--anchors", cwd=self.workdir)
 
         self.assertIn("already anchored", result.stdout)
         self.assertEqual(len(self.server.submitted), 1)
@@ -1766,7 +1714,7 @@ class AnchorDedupeTest(unittest.TestCase):
         # from and never the copy, which alone is HEADER-UNMATCHED.
         self.anchor()
         self.server.mode = "complete"
-        run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
         completed = self.anchor_rows()[-1]
         header = block_header(replayed_root(
             completed["head"], self.server.nonce, self.server.prefix,
@@ -1776,7 +1724,7 @@ class AnchorDedupeTest(unittest.TestCase):
         self.sidecar.write_text(json.dumps(copied) + "\n", encoding="utf-8")
 
         result = self.anchor()
-        judged = run_receipts("verify", "--anchors", "--block-header",
+        judged = run(LOXODONTA, "verify", "--anchors", "--block-header",
                               header.hex(), cwd=self.workdir)
 
         self.assertIn("already anchored", result.stdout)
@@ -1826,7 +1774,7 @@ def completed_row(head, calendar="https://calendar.example.test"):
                       sort_keys=True, separators=(",", ":"))
 
 
-class AnchorFieldEscapeTest(unittest.TestCase):
+class AnchorFieldEscapeTest(StoreCase):
     """#349: every field of an anchor row that `verify --anchors` prints
     is the writer's text, and is printed escaped (#295), so no row can
     paint a verdict of its own. The fixture is AnchorRowKindTest's."""
@@ -1885,7 +1833,7 @@ class AnchorFieldEscapeTest(unittest.TestCase):
     def test_no_sidecar_is_named_by_its_bare_name(self):
         log = self.workdir / "receipts.jsonl"
 
-        result = run_receipts("verify", "--anchors", "--log", str(log),
+        result = run(LOXODONTA, "verify", "--anchors", "--log", str(log),
                               cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1899,7 +1847,7 @@ class AnchorFieldEscapeTest(unittest.TestCase):
         self.write_sidecar(completed_row(self.head),
                            self.pending_row(calendar=HOSTILE))
 
-        result = run_receipts("anchor", "--upgrade", cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         assert_printed_escaped(self, result.stdout + result.stderr, SHOWN)
