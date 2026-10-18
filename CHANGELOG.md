@@ -46,6 +46,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
 - `supervisor adopt` never moves one legacy chain over another bound for the same name in a drawer, case and Unicode form aside: every chain bound for that name is refused by name and left, in the dry run too (#447).
 - `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).
+- The hook says on stderr, one line, when the store's receipts folder cannot be listed, so a session it may split across two drawers is named; the receipt is still written (#452).
+- A session that never recorded, its transcript a folder or a pipe, reads `UNWITNESSED` with why in the completeness watch, as a chained session's unreadable transcript does, instead of passing in silence (#452).
 
 ## [0.15.1] - 2026-10-12
 
