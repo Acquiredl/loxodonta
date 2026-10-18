@@ -4627,9 +4627,13 @@ def family_facts(look, relpath, log, entries, grew):
         # for the memory edge; and the hook's note that the second
         # record was cut, quoted on the session's row.
         try:
-            facts["touched"] = os.stat(log).st_mtime
+            touched = os.stat(log).st_mtime
         except OSError:
-            pass
+            touched = 0
+        # An mtime at or before the epoch says nothing of an arrival, and
+        # one before it is no time Windows can turn into a date.
+        if touched > 0:
+            facts["touched"] = touched
         stamped = [e["ts"] for e in entries if isinstance(e.get("ts"), str)]
         if stamped:
             facts["newest_ts"] = max(stamped)
