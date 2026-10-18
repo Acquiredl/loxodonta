@@ -756,6 +756,14 @@ class HookWorktreeTest(unittest.TestCase):
         self.assertEqual(len(said), 1, result.stderr)
         self.assertIn(f"{receipts} cannot be listed", said[0])
         self.assertIn("ADR-0023", said[0])
+        # Once per session: the drawer it chose now holds the chain, so
+        # the next call never looks for another.
+        again = run_hook(
+            payload(session="sess-split", tool="Bash",
+                    tool_input={"command": "pwd"}),
+            self.workdir, extra_env=self.env_for(elsewhere))
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(again.stderr, "")
         os.chmod(receipts, 0o755)
         chain = drawer_of(self.store, "beta") / "receipts-sess-split.jsonl"
         self.assertIn("Bash: ls", chain.read_text(encoding="utf-8"))
