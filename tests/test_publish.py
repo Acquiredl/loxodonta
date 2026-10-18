@@ -9,9 +9,7 @@ where the order matters: no network, ever, and never internals.
 """
 
 import json
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -22,7 +20,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_publish`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import (LOXODONTA, clean_env, isolated_env,  # noqa: E402
+from support import (LOXODONTA, clean_env, isolated_env, run,  # noqa: E402
                      temp_folder)
 
 from test_anchor import FakeCalendar, FakeCalendarHandler
@@ -35,13 +33,6 @@ FULL_LADDER_ROW = (
     "  full         --profile full --remote URL   head and receipts go "
     "to a remote you name; a wiped log survives there as of the last "
     "send.")
-
-
-def run_receipts(*args, cwd, env=None):
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), *args],
-        cwd=cwd, capture_output=True, encoding="utf-8",
-        env={**clean_env(), **(env or {})})
 
 
 # --- Fake receiver ------------------------------------------------------------
@@ -118,9 +109,7 @@ class PublishBase(unittest.TestCase):
     PROJECT_NAME = "nightingale-project"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.project = self.root / self.PROJECT_NAME
         self.project.mkdir()
         self.store = self.root / "store"
@@ -158,12 +147,8 @@ class PublishBase(unittest.TestCase):
         env = isolated_env(self.home, CLAUDE_PROJECT_DIR=str(self.project),
                            LOXODONTA_HOME=str(self.store),
                            PYTHONIOENCODING="utf-8")
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook", *extra],
-            cwd=self.project, input=json.dumps(payload).encode("utf-8"),
-            capture_output=True, env=env)
-        result.stdout = result.stdout.decode("utf-8", "replace")
-        result.stderr = result.stderr.decode("utf-8", "replace")
+        result = run(LOXODONTA, "hook", *extra, cwd=self.project,
+                     stdin=json.dumps(payload), env=env)
         return result
 
     def tool_call(self, command="ls"):
@@ -190,7 +175,7 @@ class PublishBase(unittest.TestCase):
         return found[0]
 
     def head(self):
-        result = run_receipts("head", "--log", str(self.chain()),
+        result = run(LOXODONTA, "head", "--log", str(self.chain()),
                               cwd=self.project)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
@@ -321,7 +306,7 @@ class PublishAtSessionEndTest(PublishBase):
         self.assertEqual(self.memo_heads(), [])
         self.assertEqual(len(self.memo_attempts()), 1)
 
-        verify = run_receipts("verify", "--anchors", "--log",
+        verify = run(LOXODONTA, "verify", "--anchors", "--log",
                               str(self.chain()), cwd=self.project)
 
         self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
@@ -546,9 +531,7 @@ class InstallPublishHeadTest(unittest.TestCase):
     URL = "https://hooks.example.test/services/T000/B000/XXXX"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         (self.home / ".claude").mkdir(parents=True)
         # A private store, so the coverage marker the installer writes
@@ -562,8 +545,8 @@ class InstallPublishHeadTest(unittest.TestCase):
                     "LOXODONTA_MANAGED_DIR": str(self.home / "managed")}
 
     def install(self, *args):
-        return run_receipts("install-hook", *args, cwd=self.root,
-                            env=self.env)
+        return run(LOXODONTA, "install-hook", *args, cwd=self.root,
+                   env=clean_env(**self.env))
 
     def settings(self):
         return json.loads((self.home / ".claude" / "settings.json")
@@ -757,7 +740,8 @@ class InstallPublishHeadTest(unittest.TestCase):
 
     def test_uninstall_removes_the_publishing_session_end_hook(self):
         self.install("--publish-head", self.URL)
-        result = run_receipts("uninstall-hook", cwd=self.root, env=self.env)
+        result = run(LOXODONTA, "uninstall-hook", cwd=self.root,
+                     env=clean_env(**self.env))
         self.assertEqual(result.returncode, 0, result.stderr)
         path = self.home / ".claude" / "settings.json"
         left = path.read_text(encoding="utf-8") if path.exists() else "{}"

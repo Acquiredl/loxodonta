@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
-                     isolated_env, run)
+                     isolated_env, run, temp_folder)
 
 from test_publish_chain import rewritten_raw
 
@@ -35,16 +34,6 @@ DEMO_STORE = REPO_ROOT / "tools" / "demo_store.py"
 BAD_DAY_SESSION = "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907"
 PACKAGE_FILES = {"project.json", "witness.json", "README.md",
                  "manifest.json"}
-
-
-def run(script, *args, env=None, cwd=None):
-    """`env`, when given, is the whole environment (see neutral_env), so
-    what it leaves out stays out."""
-    return subprocess.run(
-        [sys.executable, str(script), *args], cwd=cwd,
-        capture_output=True, encoding="utf-8", errors="replace",
-        env={**(os.environ if env is None else env),
-             "PYTHONIOENCODING": "utf-8"})
 
 
 def neutral_env(home):
@@ -97,8 +86,8 @@ class DemoStorePackageTest(PackageCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-        cls.home = Path(cls._tmp.name).resolve() / "home"
+        base = temp_folder(cls)
+        cls.home = base / "home"
         cls.home.mkdir()
         built = run(DEMO_STORE, "--home", str(cls.home))
         assert built.returncode == 0, built.stderr
@@ -109,14 +98,8 @@ class DemoStorePackageTest(PackageCase):
         cls.witness = cls.home / "no-witness"
         cls.witness.mkdir()
 
-    @classmethod
-    def tearDownClass(cls):
-        cls._tmp.cleanup()
-
     def setUp(self):
-        self._work = tempfile.TemporaryDirectory()
-        self.addCleanup(self._work.cleanup)
-        self.work = Path(self._work.name).resolve()
+        self.work = temp_folder(self)
 
     def bad_day_chain(self):
         found = (self.home / ".loxodonta" / "receipts").glob(
@@ -822,9 +805,7 @@ class HookStorePackageTest(PackageCase):
     one kind of artifact to carry."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         self.home.mkdir()
         self.project = self.root / "project"
@@ -852,11 +833,9 @@ class HookStorePackageTest(PackageCase):
                               "hook_event_name": "PostToolUse",
                               "tool_name": tool, "tool_input": tool_input,
                               "tool_response": {}})
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook"],
-            input=payload.encode("utf-8"), capture_output=True,
-            env={**self.env, "PYTHONIOENCODING": "utf-8",
-                 "CLAUDE_PROJECT_DIR": str(project or self.project)})
+        result = run(LOXODONTA, "hook", stdin=payload,
+                     env={**self.env,
+                          "CLAUDE_PROJECT_DIR": str(project or self.project)})
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def worktree_drawer(self, name="feature"):
@@ -1241,9 +1220,7 @@ class TranscriptPackageTest(PackageCase):
     (ADR-0017), so every session here has a commitment to judge."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.home = self.root / "home"
         self.home.mkdir()
         self.project = self.root / "project"
@@ -1257,11 +1234,8 @@ class TranscriptPackageTest(PackageCase):
                                               "pytest -q", "git status")
 
     def hook(self, payload):
-        result = subprocess.run(
-            [sys.executable, str(LOXODONTA), "hook"],
-            input=json.dumps(payload).encode("utf-8"), capture_output=True,
-            env={**self.env, "PYTHONIOENCODING": "utf-8",
-                 "CLAUDE_PROJECT_DIR": str(self.project)})
+        result = run(LOXODONTA, "hook", stdin=json.dumps(payload),
+                     env={**self.env, "CLAUDE_PROJECT_DIR": str(self.project)})
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def write_transcript(self, session, *lines):
@@ -1462,11 +1436,8 @@ class ManifestNotAFileTest(unittest.TestCase):
             make(os.path.join(folder, "manifest.json"))
             for script in (LOXODONTA, REPO_ROOT / "verifier.py"):
                 with self.subTest(script=script.name):
-                    result = subprocess.run(
-                        [sys.executable, "-I", str(script), "verify-package",
-                         folder],
-                        capture_output=True, encoding="utf-8",
-                        errors="replace", timeout=60)
+                    result = run(script, "verify-package", folder,
+                                 timeout=60, isolated=True)
                     self.assertEqual(result.returncode, 4,
                                      result.stdout + result.stderr)
                     self.assertIn("UNSUPPORTED-FORMAT: no readable "
