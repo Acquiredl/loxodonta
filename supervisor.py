@@ -4613,6 +4613,82 @@ def fold_facts(family, facts):
             family[key] = facts[key]
 
 
+def absent_rows(look, remembered, met, closed, stamp):
+    """The remembered rows the census did not meet (`met`), as (rows,
+    uncounted, alarms, fresh): the memory's row for each, the ones named
+    as uncounted, the vanished chains' standing alarms as the report
+    says them, and how many of those this look found or saw move."""
+    rows, uncounted, alarms, fresh = {}, [], [], 0
+    for relpath, known in remembered.items():
+        if relpath in met:
+            continue
+        # os.path.exists, which answers False for a folder this user
+        # may not look into: Path.exists raises there before Python
+        # 3.14, and one chmod would cost every chain its scan.
+        if os.path.exists(look.root / relpath):
+            # Something the census does not count stands at the name:
+            # its memory is kept as it was, never dropped unseen. In a
+            # folder the census could not list, the closed note names it
+            # and the exit is 5 (#431). Anywhere else it is a planted
+            # row, or the chain renamed to a spelling the disk answers
+            # and `remembered_names` does not fold (a change of case it
+            # does fold, #445): named, with no exit (#432).
+            rows[relpath] = known
+            if any(Path(folder) in (look.root / relpath).parents
+                   for folder, _ in closed):
+                continue
+            uncounted.append({"log": relpath,
+                              "remembered": {"n": known["n"],
+                                             "head": known["head"]},
+                              "words": UNCOUNTED})
+            continue
+        repo, session, _ = look.identity(look.root / relpath)
+        # Kept, not forgotten (ADR-0039): what is put back at the name
+        # later is diffed against the remembered head.
+        row, new = standing(known, "vanished", stamp)
+        rows[relpath] = row
+        fresh += new
+        alarms.append(alarm_event(repo, session, relpath, row, None))
+    return rows, uncounted, alarms, fresh
+
+
+def write_memory(look, memory, to_remember, stamp):
+    """The baseline written with what this look remembers, or left
+    standing, as (note, unkept): the baseline's note for the report, and
+    the system's refusal in words when the write failed. The checks are
+    `keep_memory`'s, whose outcome is an exit where this one's is a
+    note."""
+    path = look.baseline_path
+    if memory["blind"]:
+        # Nothing remembered, nothing written: the file is evidence.
+        return memory["note"], None
+    if not unchanged_since(path, memory["seen"]):
+        return (f"{path.name} changed while this look ran (a scan, a "
+                "calibration or an acknowledgement wrote it): it was left "
+                "standing, and the next look reads it"), None
+    try:
+        write_whole(path, json.dumps({
+            "purpose": "the supervisor's memory between looks — "
+                       "writer-reachable, trusted for nothing",
+            "scanned": stamp,
+            "chains": to_remember,
+            "keeper": memory["keeper"],
+            "calibration": memory["calibration"],
+            "sessionend": memory["sessionend"],
+            # Kept whole: rare acts by a person, testimony every report
+            # carries (ADR-0039).
+            "acknowledged": memory["acknowledged"],
+        }, indent=2) + "\n")
+    except OSError as error:
+        # Any refusal, a folder swapped in or one this user may not
+        # write in, is an alarm and never a traceback (ADR-0039).
+        unkept = error.strerror or str(error)
+        return (f"{path.name} could not be written: {unkept} — what this "
+                "look remembered is lost, and the next look reads whatever "
+                "stands there"), unkept
+    return memory["note"], None
+
+
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
               publish_every=None, publish_url=None, publish_chain=None,
               store=False, tick=True, show_before_memory=False,
@@ -4679,66 +4755,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                                         "moments": []}),
                    reading.facts)
 
-    uncounted = []
-    for relpath, known in remembered.items():
-        if relpath in heads:
-            continue
-        # os.path.exists, which answers False for a folder this user
-        # may not look into: Path.exists raises there before Python
-        # 3.14, and one chmod would cost every chain its scan.
-        if os.path.exists(root / relpath):
-            # Something the census does not count stands at the name:
-            # its memory is kept as it was, never dropped unseen. In a
-            # folder the census could not list, the closed note names it
-            # and the exit is 5 (#431). Anywhere else it is a planted
-            # row, or the chain renamed to a spelling the disk answers
-            # and `remembered_names` does not fold (a change of case it
-            # does fold, #445): named, with no exit (#432).
-            heads[relpath] = known
-            if any(Path(folder) in (root / relpath).parents
-                   for folder, _ in closed):
-                continue
-            uncounted.append({"log": relpath,
-                              "remembered": {"n": known["n"],
-                                             "head": known["head"]},
-                              "words": UNCOUNTED})
-            continue
-        repo_name, session, _ = identity(root / relpath)
-        # Kept, not forgotten (ADR-0039): what is put back at the name
-        # later is diffed against the remembered head.
-        row, new = standing(known, "vanished", stamp)
-        heads[relpath] = row
-        fresh += new
-        events.append(alarm_event(repo_name, session, relpath, row, None))
-
-    unkept = None
-    if blind:
-        pass  # nothing remembered, nothing written: the file is evidence
-    elif not unchanged_since(baseline_path, memory["seen"]):
-        note = (f"{baseline_path.name} changed while this look ran (a "
-                "scan, a calibration or an acknowledgement wrote it): it "
-                "was left standing, and the next look reads it")
-    else:
-        try:
-            write_whole(baseline_path, json.dumps({
-                "purpose": "the supervisor's memory between looks — "
-                           "writer-reachable, trusted for nothing",
-                "scanned": stamp,
-                "chains": heads,
-                "keeper": keeper,
-                "calibration": calibration,
-                "sessionend": sessionend,
-                # Kept whole: rare acts by a person, testimony every
-                # report carries (ADR-0039).
-                "acknowledged": memory["acknowledged"],
-            }, indent=2) + "\n")
-        except OSError as error:
-            # Any refusal, a folder swapped in or one this user may not
-            # write in, is an alarm and never a traceback (ADR-0039).
-            unkept = error.strerror or str(error)
-            note = (f"{baseline_path.name} could not be written: {unkept} "
-                    "— what this look remembered is lost, and the next "
-                    "look reads whatever stands there")
+    rows, uncounted, gone, also_fresh = absent_rows(look, remembered, heads,
+                                                    closed, stamp)
+    heads.update(rows)
+    events += gone
+    fresh += also_fresh
+    note, unkept = write_memory(look, memory, heads, stamp)
     if events or blind or unkept:
         worst = max(worst, 5)
 
