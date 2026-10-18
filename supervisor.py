@@ -3437,9 +3437,6 @@ def watch_completeness(root, witness, families, everywhere=False,
     A store folder it cannot list goes on `closed` (`listed`)."""
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
-    unjudged = []
-    canary = []  # every judged session's reading, for the wording canary
-    ours = munge(root)
     if calibration is None:
         calibration = [coverage_epoch(
             None, hook_matchers(witness),
@@ -3449,44 +3446,14 @@ def watch_completeness(root, witness, families, everywhere=False,
     # wired weeks are still judged by the epoch in force at their time
     # (ADR-0016 ruling 2, #532).
     ever_wired = any(epoch["matchers"] for epoch in calibration)
-    said = []
-    # The most recent epoch whose matchers actually differ from the one
-    # before it, the failed-call event's included (#239). More than one
-    # epoch is not a change: a recorder marker and this supervisor's
-    # first look describe the same wiring from two sides (ADR-0030), and
-    # calling that a change would report a widening nobody performed.
-    changed = None
-    for older, newer in zip(calibration, calibration[1:]):
-        if newer["matchers"] != older["matchers"] \
-                or failures_of(newer) != failures_of(older):
-            changed = newer["since"]
-    if changed:
-        said.append(f"the wired matchers changed on {changed} — each "
-                    "session is judged by the coverage in force at its "
-                    "time (ADR-0016)")
-    # ADR-0029 ruling 6: a seeded epoch is the operator's word for a
-    # time the supervisor never watched, and any surface that judged by
-    # one says so. Observation and testimony do not get to look alike.
-    told = {"operator": [], "recorder": []}
-    for epoch in calibration:
-        if epoch.get("source") in told and epoch.get("since"):
-            told[epoch["source"]].append(epoch["since"])
-    for source, whose in (("recorder", "written down by install-hook when "
-                                       "it wired them (ADR-0030)"),
-                          ("operator", "stated by the operator, not "
-                                       "observed (ADR-0029)")):
-        if told[source]:
-            said.append(f"{len(told[source])} coverage epoch(s) here were "
-                        f"{whose}, from {min(told[source])} — sessions "
-                        "judged by one are judged on that word, not on "
-                        "anything this supervisor watched")
+    said = calibration_words(calibration)
     transcripts = {}
     # A folder of the witness it cannot list is named, never read as
     # empty: closed, it would hide more quietly than a deleted witness.
-    unlisted = []
+    witness_closed = []
     if os.path.isdir(witness):
         transcripts = {t.stem: t
-                       for t in listed(witness, "*/*.jsonl", unlisted)}
+                       for t in listed(witness, "*/*.jsonl", witness_closed)}
     else:
         watch["note"] = (f"witness absent — no transcript layout at "
                          f"{witness.as_posix()}; completeness cannot be "
@@ -3503,185 +3470,36 @@ def watch_completeness(root, witness, families, everywhere=False,
                          f"since {calibration[-1]['since']} owe nothing, "
                          "and earlier ones are judged by the coverage in "
                          "force at their time (ADR-0016)")
-    if unlisted:
+    if witness_closed:
         watch["note"] = "; ".join(filter(None, (
             watch.get("note"),
-            f"{len(unlisted)} folder(s) of the witness cannot be listed: "
-            f"{unlisted_words(unlisted)} — {UNKNOWN}, and the sessions "
-            "whose transcripts they hold read UNWITNESSED")))
+            f"{len(witness_closed)} folder(s) of the witness cannot be "
+            f"listed: {unlisted_words(witness_closed)} — {UNKNOWN}, and the "
+            "sessions whose transcripts they hold read UNWITNESSED")))
     # How long the harness keeps what this watch reads (#260): a fact
     # beside the watch, never a judgment in it, and never the exit.
     retention = transcript_retention(witness)
     if retention:
         watch["transcript_retention"] = retention
 
-    def add(repo, session, state, tools, receipts, drawers=(), judge=None,
-            transcript=None, deficit=0, may_owe=0):
-        entry = {"repo": repo, "session": session, "state": state,
-                 "tools": tools, "receipts": receipts}
-        if state != "BEFORE-MEMORY":
-            # A session older than the memory has no deficit to name:
-            # the word is the claim ADR-0029 refuses to make about it.
-            # Reconciled tool by tool (ADR-0034), so it can differ from
-            # tools minus receipts.
-            entry["deficit"] = deficit
-        if may_owe:
-            # Failed calls that may or may not owe (ADR-0034): why a
-            # tool's receipts can outnumber its owed calls without the
-            # row reading surplus.
-            entry["may_owe"] = may_owe
-        if len(drawers) > 1:
-            entry["drawers"] = list(drawers)
-        if state in WATCH_WORDS:
-            entry["words"] = WATCH_WORDS[state]
-        if judge:
-            entry["judge"] = judge
-        if transcript is not None:
-            # The pairing itself, on the row: the tail keeper and
-            # `package --transcript` read it here rather than pairing
-            # again. Local by nature; WITNESS_FIELDS keeps it out of a
-            # package.
-            entry["transcript"] = transcript.as_posix()
-        # ADR-0029 ruling 4: a session from before the memory never
-        # takes a row. On a store older than its supervisor there are
-        # scores of them, and a listing they fill is one where the
-        # sessions that do mean something cannot be found — the false
-        # scar ADR-0014 says teaches an operator to stop looking. One
-        # counted block speaks for all of them instead.
-        (unjudged if state == "BEFORE-MEMORY"
-         else watch["sessions"]).append(entry)
-        return entry
-
-    # One session, one watch. A worktree session logs to the main repo's
-    # drawer (ADR-0011) while its transcript is named for the worktree,
-    # so one session's receipts can span drawers. Pairing each drawer
-    # separately charged the whole witness count to the first and left
-    # the rest UNWITNESSED, a deficit nobody owed: the witness counts
-    # sessions, so sum the family across drawers and judge it once.
-    sessions = {}
-    for (repo, session), family in sorted(families.items()):
-        group = sessions.setdefault(session, {"drawers": [], "last": None,
-                                              "by_tool": {}})
-        group["drawers"].append((family["receipts"], repo))
-        # The same receipts counted by the tool each action line names,
-        # for the reconciliation tool by tool (ADR-0034).
-        for _, tool in family.get("moments", ()):
-            group["by_tool"][tool] = group["by_tool"].get(tool, 0) + 1
-        if family["last"]:
-            was_newest = group["last"] is None or family["last"] > group["last"]
-            group["last"] = max(group["last"] or "", family["last"])
-            # The tail that matters is the one still being written to —
-            # the family whose receipts are newest (ADR-0018).
-            if was_newest and "tail_committed" in family:
-                group["tail_committed"] = family["tail_committed"]
-                group["home"] = family.get("home")
-        if family.get("last_grew", "") > (group.get("last_grew") or ""):
-            group["last_grew"] = family["last_grew"]
-        if "committed_log" in family and "judge_log" not in group:
-            group["judge_log"] = family["committed_log"]
-    for group in sessions.values():
-        group["receipts"] = sum(n for n, _ in group["drawers"])
-        # The session's home is the drawer holding most of it: the
-        # worktree is pruned, the repo's drawer is what survives. Ties
-        # go to the first name, so the label never wobbles between looks.
-        group["repo"] = min(group["drawers"], key=lambda d: (-d[0], d[1]))[1]
-        group["spans"] = sorted(name for _, name in group["drawers"])
-
-    for session, group in sorted(sessions.items(),
-                                 key=lambda kv: (kv[1]["repo"], kv[0])):
-        repo, receipts = group["repo"], group["receipts"]
-        spans = group["spans"]
-        transcript = transcripts.pop(session, None)
-        if transcript is None:
-            add(repo, session, "UNWITNESSED", 0, receipts, spans)
-            continue
-        if not ever_wired:
-            add(repo, session, "UNWATCHED", 0, receipts, spans,
-                transcript=transcript)
-            continue
-        try:
-            reading = watch_session(transcript, group["by_tool"],
-                                    group["last"], now, calibration)
-        except OSError as error:
-            # A transcript that cannot be read (vanished mid-scan, or a
-            # folder or a pipe where it belongs) costs this one session
-            # its watch, never the whole scan. UNWITNESSED says it
-            # honestly, and why (#386): completeness cannot be watched,
-            # nothing assumed.
-            row = add(repo, session, "UNWITNESSED", 0, receipts, spans)
-            # The words travel in a package and the note does not, so
-            # each must be true alone; the path stays local (#410).
-            row["words"] = UNREADABLE_TRANSCRIPT_WORDS
-            row["note"] = (f"{Path(error.filename or transcript).as_posix()}"
-                           " cannot be read as a transcript: "
-                           f"{error.strerror or error}")
-            continue
-        # The supervisor locates, verify judges (ADR-0017): a committed
-        # session with a living transcript gets the exact ritual command.
-        judge = None
-        if group.get("judge_log"):
-            judge = (f'python "{LOXODONTA.as_posix()}" verify '
-                     f'--log "{group["judge_log"]}" '
-                     f'--transcript "{transcript.as_posix()}"')
-        state = reading["state"]
-        canary.append(reading)
-        row = add(repo, session, state, reading["tools"], receipts, spans,
-                  judge=judge, transcript=transcript,
-                  deficit=reading["deficit"], may_owe=reading["may_owe"])
-        if reading["closed"]:
-            row["note"] = sidechains_unlisted(reading["closed"])
-        # The lifecycle facts (ADR-0018), quiet fields on the row.
-        tier = lifecycle_tier(group.get("last_grew"), now)
-        if tier:
-            row["dormancy"] = {"tier": tier[0], "still_seconds": tier[1],
-                               "since": group["last_grew"]}
-        # The uncommitted tail: annotated only where the exit commitment
-        # was possible (effective-dated on the wiring epoch) and the
-        # session has ended with a tool receipt as its final word.
-        # Neutral fact, never alarm-shaped: on clients with no clean
-        # exit this is the common case, and the tail keeper closes it.
-        if (sessionend and sessionend.get("wired") and sessionend.get("since")
-                and state.startswith("ENDED")
-                and group.get("tail_committed") is False
-                and (group.get("last") or "") > sessionend["since"]):
-            row["uncommitted_tail"] = True
-            row["tail_note"] = ("tail uncommitted — no exit commitment "
-                                "recorded")
-            if group.get("home"):
-                row["home"] = group["home"]
-
-    # Chainless sessions: only transcript folders under this root are
-    # this scan's business; a folder's name past the root prefix is the
-    # best name the witness has for the project.
-    # #117: in legacy mode a transcript with no chain under this root
-    # is one of two different things, and charging both the same way
-    # fakes the flagship alarm out of a wrong invocation.
-    stored = set() if everywhere else store_session_ids(closed)
-    elsewhere = 0
-    for stem, transcript in transcripts.items():
-        folder = transcript.parent.name
-        if not ever_wired or (not everywhere and not folder.startswith(ours)):
-            continue
-        if stem in stored:
-            # Its receipts exist; they are in the store, where a plain
-            # `scan` judges them. Named here, judged nowhere twice.
-            add(folder if everywhere
-                else folder[len(ours):].strip("-") or root.name,
-                stem, "ELSEWHERE", 0, 0, transcript=transcript)
-            elsewhere += 1
-            continue
-        try:
-            reading = watch_session(transcript, {}, None, now, calibration)
-        except OSError:
-            continue  # unreadable and chainless: nothing to say about it
-        canary.append(reading)
-        name = (folder if everywhere
-                else folder[len(ours):].strip("-") or root.name)
-        row = add(name, stem, reading["state"], reading["tools"], 0,
-                  transcript=transcript, deficit=reading["deficit"],
-                  may_owe=reading["may_owe"])
-        if reading["closed"]:
-            row["note"] = sidechains_unlisted(reading["closed"])
+    groups = merge_families(families)
+    rows, canary = watch_chained(groups, transcripts, ever_wired,
+                                 calibration, sessionend, now)
+    chainless, readings, elsewhere = watch_chainless(
+        root, {stem: transcript for stem, transcript in transcripts.items()
+               if stem not in groups},
+        everywhere, closed, ever_wired, calibration, now)
+    rows += chainless
+    canary += readings
+    # ADR-0029 ruling 4: a session from before the memory never takes a
+    # row. On a store older than its supervisor there are scores of
+    # them, and a listing they fill is one where the sessions that do
+    # mean something cannot be found — the false scar ADR-0014 says
+    # teaches an operator to stop looking. One counted block speaks for
+    # all of them instead.
+    unjudged = [row for row in rows if row["state"] == "BEFORE-MEMORY"]
+    watch["sessions"] = [row for row in rows
+                         if row["state"] != "BEFORE-MEMORY"]
 
     # The canary for the one wording the witness leans on (ADR-0034): a
     # harness that stopped opening a failed command with `Exit code N`
@@ -3740,6 +3558,235 @@ def watch_completeness(root, witness, families, everywhere=False,
         watch["before_memory"] = block
 
     return watch
+
+
+def calibration_words(calibration):
+    """What the watch says about the coverage memory it judged by, as a
+    list of sentences: the last change of the wired matchers, and the
+    epochs that are someone's word rather than this supervisor's
+    observation."""
+    said = []
+    # The most recent epoch whose matchers actually differ from the one
+    # before it, the failed-call event's included (#239). More than one
+    # epoch is not a change: a recorder marker and this supervisor's
+    # first look describe the same wiring from two sides (ADR-0030), and
+    # calling that a change would report a widening nobody performed.
+    changed = None
+    for older, newer in zip(calibration, calibration[1:]):
+        if newer["matchers"] != older["matchers"] \
+                or failures_of(newer) != failures_of(older):
+            changed = newer["since"]
+    if changed:
+        said.append(f"the wired matchers changed on {changed} — each "
+                    "session is judged by the coverage in force at its "
+                    "time (ADR-0016)")
+    # ADR-0029 ruling 6: a seeded epoch is the operator's word for a
+    # time the supervisor never watched, and any surface that judged by
+    # one says so. Observation and testimony do not get to look alike.
+    told = {"operator": [], "recorder": []}
+    for epoch in calibration:
+        if epoch.get("source") in told and epoch.get("since"):
+            told[epoch["source"]].append(epoch["since"])
+    for source, whose in (("recorder", "written down by install-hook when "
+                                       "it wired them (ADR-0030)"),
+                          ("operator", "stated by the operator, not "
+                                       "observed (ADR-0029)")):
+        if told[source]:
+            said.append(f"{len(told[source])} coverage epoch(s) here were "
+                        f"{whose}, from {min(told[source])} — sessions "
+                        "judged by one are judged on that word, not on "
+                        "anything this supervisor watched")
+    return said
+
+
+def completeness_row(repo, session, state, tools, receipts, drawers=(),
+                     judge=None, transcript=None, deficit=0, may_owe=0):
+    """One session's row in the completeness watch."""
+    entry = {"repo": repo, "session": session, "state": state,
+             "tools": tools, "receipts": receipts}
+    if state != "BEFORE-MEMORY":
+        # A session older than the memory has no deficit to name: the
+        # word is the claim ADR-0029 refuses to make about it.
+        # Reconciled tool by tool (ADR-0034), so it can differ from
+        # tools minus receipts.
+        entry["deficit"] = deficit
+    if may_owe:
+        # Failed calls that may or may not owe (ADR-0034): why a tool's
+        # receipts can outnumber its owed calls without the row reading
+        # surplus.
+        entry["may_owe"] = may_owe
+    if len(drawers) > 1:
+        entry["drawers"] = list(drawers)
+    if state in WATCH_WORDS:
+        entry["words"] = WATCH_WORDS[state]
+    if judge:
+        entry["judge"] = judge
+    if transcript is not None:
+        # The pairing itself, on the row: the tail keeper and `package
+        # --transcript` read it here rather than pairing again. Local by
+        # nature; WITNESS_FIELDS keeps it out of a package.
+        entry["transcript"] = transcript.as_posix()
+    return entry
+
+
+def merge_families(families):
+    """The census's families as one group per session, {session: group}.
+    One session, one watch. A worktree session logs to the main repo's
+    drawer (ADR-0011) while its transcript is named for the worktree,
+    so one session's receipts can span drawers. Pairing each drawer
+    separately charged the whole witness count to the first and left
+    the rest UNWITNESSED, a deficit nobody owed: the witness counts
+    sessions, so sum the family across drawers and judge it once."""
+    sessions = {}
+    for (repo, session), family in sorted(families.items()):
+        group = sessions.setdefault(session, {"drawers": [], "last": None,
+                                              "by_tool": {}})
+        group["drawers"].append((family["receipts"], repo))
+        # The same receipts counted by the tool each action line names,
+        # for the reconciliation tool by tool (ADR-0034).
+        for _, tool in family.get("moments", ()):
+            group["by_tool"][tool] = group["by_tool"].get(tool, 0) + 1
+        if family["last"]:
+            was_newest = group["last"] is None or family["last"] > group["last"]
+            group["last"] = max(group["last"] or "", family["last"])
+            # The tail that matters is the one still being written to —
+            # the family whose receipts are newest (ADR-0018).
+            if was_newest and "tail_committed" in family:
+                group["tail_committed"] = family["tail_committed"]
+                group["home"] = family.get("home")
+        if family.get("last_grew", "") > (group.get("last_grew") or ""):
+            group["last_grew"] = family["last_grew"]
+        if "committed_log" in family and "judge_log" not in group:
+            group["judge_log"] = family["committed_log"]
+    for group in sessions.values():
+        group["receipts"] = sum(n for n, _ in group["drawers"])
+        # The session's home is the drawer holding most of it: the
+        # worktree is pruned, the repo's drawer is what survives. Ties
+        # go to the first name, so the label never wobbles between looks.
+        group["repo"] = min(group["drawers"], key=lambda d: (-d[0], d[1]))[1]
+        group["spans"] = sorted(name for _, name in group["drawers"])
+    return sessions
+
+
+def watch_chained(groups, transcripts, ever_wired, calibration, sessionend,
+                  now):
+    """Every session the census holds a chain for, paired with its
+    transcript and judged, as (rows, readings): its completeness rows,
+    in repo then session order, and the witness's readings of the
+    sessions judged, for the wording canary."""
+    rows, readings = [], []
+    for session, group in sorted(groups.items(),
+                                 key=lambda kv: (kv[1]["repo"], kv[0])):
+        repo, receipts = group["repo"], group["receipts"]
+        spans = group["spans"]
+        transcript = transcripts.get(session)
+        if transcript is None:
+            rows.append(completeness_row(repo, session, "UNWITNESSED", 0,
+                                         receipts, spans))
+            continue
+        if not ever_wired:
+            rows.append(completeness_row(repo, session, "UNWATCHED", 0,
+                                         receipts, spans,
+                                         transcript=transcript))
+            continue
+        try:
+            reading = watch_session(transcript, group["by_tool"],
+                                    group["last"], now, calibration)
+        except OSError as error:
+            # A transcript that cannot be read (vanished mid-scan, or a
+            # folder or a pipe where it belongs) costs this one session
+            # its watch, never the whole scan. UNWITNESSED says it
+            # honestly, and why (#386): completeness cannot be watched,
+            # nothing assumed.
+            row = completeness_row(repo, session, "UNWITNESSED", 0,
+                                   receipts, spans)
+            # The words travel in a package and the note does not, so
+            # each must be true alone; the path stays local (#410).
+            row["words"] = UNREADABLE_TRANSCRIPT_WORDS
+            row["note"] = (f"{Path(error.filename or transcript).as_posix()}"
+                           " cannot be read as a transcript: "
+                           f"{error.strerror or error}")
+            rows.append(row)
+            continue
+        # The supervisor locates, verify judges (ADR-0017): a committed
+        # session with a living transcript gets the exact ritual command.
+        judge = None
+        if group.get("judge_log"):
+            judge = (f'python "{LOXODONTA.as_posix()}" verify '
+                     f'--log "{group["judge_log"]}" '
+                     f'--transcript "{transcript.as_posix()}"')
+        state = reading["state"]
+        readings.append(reading)
+        row = completeness_row(repo, session, state, reading["tools"],
+                               receipts, spans, judge=judge,
+                               transcript=transcript,
+                               deficit=reading["deficit"],
+                               may_owe=reading["may_owe"])
+        if reading["closed"]:
+            row["note"] = sidechains_unlisted(reading["closed"])
+        # The lifecycle facts (ADR-0018), quiet fields on the row.
+        tier = lifecycle_tier(group.get("last_grew"), now)
+        if tier:
+            row["dormancy"] = {"tier": tier[0], "still_seconds": tier[1],
+                               "since": group["last_grew"]}
+        # The uncommitted tail: annotated only where the exit commitment
+        # was possible (effective-dated on the wiring epoch) and the
+        # session has ended with a tool receipt as its final word.
+        # Neutral fact, never alarm-shaped: on clients with no clean
+        # exit this is the common case, and the tail keeper closes it.
+        if (sessionend and sessionend.get("wired") and sessionend.get("since")
+                and state.startswith("ENDED")
+                and group.get("tail_committed") is False
+                and (group.get("last") or "") > sessionend["since"]):
+            row["uncommitted_tail"] = True
+            row["tail_note"] = ("tail uncommitted — no exit commitment "
+                                "recorded")
+            if group.get("home"):
+                row["home"] = group["home"]
+        rows.append(row)
+    return rows, readings
+
+
+def watch_chainless(root, transcripts, everywhere, closed, ever_wired,
+                    calibration, now):
+    """Every witnessed session with no chain in the census, as (rows,
+    readings, elsewhere): its completeness rows, the witness's readings
+    of the sessions judged, and how many keep their receipts in the
+    store while this scan reads a --root. Only transcript folders under
+    this root are this scan's business; a folder's name past the root
+    prefix is the best name the witness has for the project."""
+    ours = munge(root)
+    # #117: in legacy mode a transcript with no chain under this root
+    # is one of two different things, and charging both the same way
+    # fakes the flagship alarm out of a wrong invocation.
+    stored = set() if everywhere else store_session_ids(closed)
+    rows, readings, elsewhere = [], [], 0
+    for stem, transcript in transcripts.items():
+        folder = transcript.parent.name
+        if not ever_wired or (not everywhere and not folder.startswith(ours)):
+            continue
+        name = (folder if everywhere
+                else folder[len(ours):].strip("-") or root.name)
+        if stem in stored:
+            # Its receipts exist; they are in the store, where a plain
+            # `scan` judges them. Named here, judged nowhere twice.
+            rows.append(completeness_row(name, stem, "ELSEWHERE", 0, 0,
+                                         transcript=transcript))
+            elsewhere += 1
+            continue
+        try:
+            reading = watch_session(transcript, {}, None, now, calibration)
+        except OSError:
+            continue  # unreadable and chainless: nothing to say about it
+        readings.append(reading)
+        row = completeness_row(name, stem, reading["state"],
+                               reading["tools"], 0, transcript=transcript,
+                               deficit=reading["deficit"],
+                               may_owe=reading["may_owe"])
+        if reading["closed"]:
+            row["note"] = sidechains_unlisted(reading["closed"])
+        rows.append(row)
+    return rows, readings, elsewhere
 
 
 # --- The second record, at the receiver ---------------------------------------
