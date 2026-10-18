@@ -1434,8 +1434,9 @@ def prime_memory(root, matcher="Edit|Write|NotebookEdit|Bash", age=864000,
     it. A real machine's supervisor has been looking for weeks by the
     time these sessions run; this is that machine. `failures` is the
     matcher wired for failed calls (#239), when the memory saw one.
+    `matcher=None` is a memory that never saw the hook wired (#532).
     """
-    epoch = {"since": ago(age), "matchers": [matcher]}
+    epoch = {"since": ago(age), "matchers": [matcher] if matcher else []}
     if failures:
         epoch["failures"] = [failures]
     (root / BASELINE_NAME).write_text(json.dumps({
@@ -2492,8 +2493,11 @@ class CompletenessTest(unittest.TestCase):
 
     def test_no_wired_hook_means_nothing_owes_a_receipt(self):
         # A machine without the receipts hook has sessions that owe
-        # nothing — expecting receipts there would alarm forever.
+        # nothing — expecting receipts there would alarm forever. The
+        # memory never saw the hook either: one that did is the
+        # uninstall-hook case, judged by its epochs (#532).
         (self.witness.parent / "settings.json").unlink()
+        prime_memory(self.root, matcher=None)
         make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         write_transcript(self.witness, self.root / "alpha", "sess-aaaa",
                          event_times=[ago(300), ago(290)])
