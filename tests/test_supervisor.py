@@ -259,8 +259,9 @@ class StoreScanTest(unittest.TestCase):
         return path
 
     def test_a_planted_anchored_line_in_a_chains_path_earns_nothing(self):
-        # #504: verify's refusal of an empty chain quotes the path raw on
-        # stderr, and a name in it can hold a newline on Linux and macOS,
+        # #504: verify's refusal of an empty chain quoted the path raw on
+        # stderr until #511, and a name in it can hold a newline on Linux
+        # and macOS,
         # so a writer (ADR-0002) can put a line spelled like verify's own
         # ANCHORED line into the scan's evidence with nothing but an
         # empty file at a path it chose. Only a line verify printed on
@@ -286,10 +287,13 @@ class StoreScanTest(unittest.TestCase):
         self.assertEqual(chain["exit"], 4)
         self.assertFalse(chain["anchored"], chain["detail"])
         self.assertEqual(chain["anchors"]["anchored"], [])
-        self.assertIn(line, chain["detail"],
+        # #511: the refusal names the path escaped, so the planted line
+        # stays inside the one refusal and is no line of its own.
+        self.assertNotIn(line, chain["detail"])
+        refusals = [said for said in chain["detail"] if "is empty" in said]
+        self.assertEqual(len(refusals), 1, chain["detail"])
+        self.assertIn(f"p\\n{line}\\n", refusals[0],
                       "verify's stderr stays in the row as evidence")
-        self.assertTrue(any("is empty" in said for said in chain["detail"]),
-                        chain["detail"])
 
     def test_a_planted_torn_tail_line_in_a_chains_name_stands_nothing_down(
             self):

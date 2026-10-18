@@ -120,7 +120,7 @@ def read_log(path):
 
 
 def missing_log(path):
-    print(f"error: {path} not found — run `loxodonta init` first", file=sys.stderr)
+    print(f"error: {visible(path)} not found — run `loxodonta init` first", file=sys.stderr)
     return EX_NOINPUT
 
 
@@ -129,7 +129,7 @@ def unreadable_log(path, error):
     pipe or a device, or a file this user may not open. No input, like a
     missing one (ADR-0037); a line that cannot be read is another
     matter, and the walk names it."""
-    print(f"error: {path} cannot be read as a receipt log: "
+    print(f"error: {visible(path)} cannot be read as a receipt log: "
           f"{error.strerror or error}", file=sys.stderr)
     return EX_NOINPUT
 
@@ -1580,7 +1580,7 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
     except OSError as e:
         return unreadable_log(log, e)
     if not lines:
-        print(f"error: {log} is empty — not a receipt log", file=sys.stderr)
+        print(f"error: {visible(log)} is empty — not a receipt log", file=sys.stderr)
         return EX_NOINPUT
 
     # SPEC §2.1: read the genesis version first, to know which field rules
@@ -1752,11 +1752,11 @@ def cmd_head(args):
     except OSError as e:
         return unreadable_log(args.log, e)
     if not lines:
-        print(f"error: {args.log} is empty — no chain head to print", file=sys.stderr)
+        print(f"error: {visible(args.log)} is empty — no chain head to print", file=sys.stderr)
         return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged tail — run "
+        print(f"error: {visible(args.log)} has a damaged tail — run "
               "`loxodonta verify` (a torn tail has no head to record)",
               file=sys.stderr)
         return 1
@@ -1766,7 +1766,7 @@ def cmd_head(args):
     # walk calls it BROKEN, since no such value matches a canonical form.
     if not (isinstance(head, str) and len(head) == 64
             and all(c in "0123456789abcdef" for c in head)):
-        print(f"error: {args.log} ends in an entry whose entry_hash is not "
+        print(f"error: {visible(args.log)} ends in an entry whose entry_hash is not "
               "a chain head — run `loxodonta verify`", file=sys.stderr)
         return 1
     print(head)
@@ -3234,17 +3234,17 @@ def locked_out(log):
     problem and deserves a different sentence."""
     lock = str(log) + ".lock"
     if not os.path.exists(lock):
-        print(f"error: cannot create {lock} — no entry was written. "
+        print(f"error: cannot create {visible(lock)} — no entry was written. "
               "Check write permissions on the directory.", file=sys.stderr)
         return EX_CANTCREAT
     # A folder at the lock's name is no writer's lock, and the stale break
     # cannot remove one: waiting would never end. A pipe or a file this
     # user may not open is removed by the stale break, so it stays 75.
     if file_problem(lock) == IS_A_FOLDER:
-        print(f"error: {lock} cannot be a lock: {IS_A_FOLDER} — no entry "
+        print(f"error: {visible(lock)} cannot be a lock: {IS_A_FOLDER} — no entry "
               "was written; nothing removes it but you", file=sys.stderr)
         return EX_CANTCREAT
-    print(f"error: {log} is locked by another writer — no entry was written. "
+    print(f"error: {visible(log)} is locked by another writer — no entry was written. "
           "Retry; if nothing is running, delete the .lock file beside it.",
           file=sys.stderr)
     return EX_TEMPFAIL
@@ -3255,7 +3255,7 @@ def unwritable_log(log, error):
     and cannot: a folder, a pipe or a device put at its name after the
     read that would have refused it (#385), never waited on, or a write
     the system refused."""
-    print(f"error: {log} could not be written: "
+    print(f"error: {visible(log)} could not be written: "
           f"{unwritable_why(log, error)} — no entry was written",
           file=sys.stderr)
     return EX_CANTCREAT
@@ -3282,10 +3282,10 @@ def cmd_init(args):
     try:
         write_line_to_disk(args.log, "x", entry_line(genesis_entry()))
     except FileExistsError:
-        print(f"error: {args.log} already exists; refusing to overwrite", file=sys.stderr)
+        print(f"error: {visible(args.log)} already exists; refusing to overwrite", file=sys.stderr)
         return EX_CANTCREAT
     except OSError as e:
-        print(f"error: cannot create {args.log}: {e.strerror or e}",
+        print(f"error: cannot create {visible(args.log)}: {e.strerror or e}",
               file=sys.stderr)
         return EX_CANTCREAT
     print(f"initialized {args.log}")
@@ -3413,12 +3413,12 @@ def append_locked(log, actor, action, files):
     except OSError as e:
         return unreadable_log(log, e)
     if not lines:
-        print(f"error: {log} is empty — run `loxodonta init` first", file=sys.stderr)
+        print(f"error: {visible(log)} is empty — run `loxodonta init` first", file=sys.stderr)
         return EX_NOINPUT
     # A new entry chains to the tail; a damaged tail cannot anchor one.
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {log} has a damaged tail — run `loxodonta verify` "
+        print(f"error: {visible(log)} has a damaged tail — run `loxodonta verify` "
               "(appending would bury the damage)", file=sys.stderr)
         return 1
 
@@ -4496,7 +4496,7 @@ def publish_chain_command(args):
     except OSError as e:
         return unreadable_log(args.log, e)
     if not entries:
-        print(f"error: {args.log} holds no entry — run `loxodonta init` "
+        print(f"error: {visible(args.log)} holds no entry — run `loxodonta init` "
               "first", file=sys.stderr)
         return EX_NOINPUT
     torn = damaged_tail_after(args.log, entries)
@@ -4535,12 +4535,12 @@ def cmd_publish(args):
     except OSError as e:
         return unreadable_log(args.log, e)
     if not lines:
-        print(f"error: {args.log} is empty — run `loxodonta init` first",
+        print(f"error: {visible(args.log)} is empty — run `loxodonta init` first",
               file=sys.stderr)
         return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged tail — run "
+        print(f"error: {visible(args.log)} has a damaged tail — run "
               "`loxodonta verify` before publishing", file=sys.stderr)
         return 1
     head, n = last["entry_hash"], last["n"]
@@ -4776,12 +4776,12 @@ def cmd_stamp(args):
     except OSError as e:
         return unreadable_log(args.log, e)
     if not lines:
-        print(f"error: {args.log} is empty — run `loxodonta init` first",
+        print(f"error: {visible(args.log)} is empty — run `loxodonta init` first",
               file=sys.stderr)
         return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged tail — run "
+        print(f"error: {visible(args.log)} has a damaged tail — run "
               "`loxodonta verify` before stamping", file=sys.stderr)
         return 1
     return stamp_digest(args.log, last["entry_hash"], last["n"],
@@ -4859,12 +4859,12 @@ def cmd_anchor(args):
     except OSError as e:
         return unreadable_log(args.log, e)
     if not lines:
-        print(f"error: {args.log} is empty — run `loxodonta init` first",
+        print(f"error: {visible(args.log)} is empty — run `loxodonta init` first",
               file=sys.stderr)
         return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
-        print(f"error: {args.log} has a damaged tail — run "
+        print(f"error: {visible(args.log)} has a damaged tail — run "
               "`loxodonta verify` before anchoring", file=sys.stderr)
         return 1
     return submit_digest(args.log, last["entry_hash"], last["n"],
@@ -4923,12 +4923,12 @@ def upgrade_anchors(args):
     target = args.manifest or args.log
     problem = file_problem(anchors_path(target))
     if problem is not None:
-        print(f"error: {anchors_path(target)} cannot be read as a sidecar: "
+        print(f"error: {visible(anchors_path(target))} cannot be read as a sidecar: "
               f"{problem}", file=sys.stderr)
         return EX_NOINPUT
     records = read_anchor_records(target)
     if not records:
-        print(f"error: no anchors found at {anchors_path(target)} — "
+        print(f"error: no anchors found at {visible(anchors_path(target))} — "
               "run `loxodonta anchor` first", file=sys.stderr)
         return EX_NOINPUT
     # verify --anchors reports the rows this leaves out; upgrade skips them.
@@ -4983,7 +4983,7 @@ def upgrade_anchors(args):
                                  url, upgraded)
         except OSError as e:
             print(f"error: the completion from {shown} could not be written "
-                  f"to {anchors_path(target)}: "
+                  f"to {visible(anchors_path(target))}: "
                   f"{unwritable_why(anchors_path(target), e)}",
                   file=sys.stderr)
             return EX_CANTCREAT
@@ -5041,7 +5041,7 @@ def cmd_report(args):
     if not lines:
         # One opinion between the two readers: verify calls this "not a
         # receipt log", so report must not narrate it as a quiet night.
-        print(f"error: {args.log} is empty — not a receipt log", file=sys.stderr)
+        print(f"error: {visible(args.log)} is empty — not a receipt log", file=sys.stderr)
         return EX_NOINPUT
 
     entries, breaks, warns = walk(lines)
@@ -5105,7 +5105,7 @@ def cmd_explain(args):
     except OSError as e:
         return unreadable_log(args.log, e)
     if not lines:
-        print(f"error: {args.log} is empty — run `loxodonta init` first",
+        print(f"error: {visible(args.log)} is empty — run `loxodonta init` first",
               file=sys.stderr)
         return EX_NOINPUT
 

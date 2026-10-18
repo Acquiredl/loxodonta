@@ -32,6 +32,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Fixed
 
 - `python tools/house_check.py --help` prints both passes and the exit codes instead of a traceback; an unknown flag or a missing path is named and refused with exit 64, as `--front-door` with paths now is too (#464).
+- A recorder refusal names the chain, its lock or its sidecar with steering characters escaped, as the verdict lines do, so a newline in a chain's name no longer splits one refusal into lines of the scan's evidence (#511).
 
 ## [0.15.1] - 2026-10-12
 
