@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- At the receiver, the second record's memory begins at the oldest events file held, readable or not: a session dated after an unreadable file with no events read is `SECOND-RECORD-ABSENT`, listed, where it read `BEFORE-MEMORY`, only counted (#559).
+
 ## [0.16.0] - 2026-10-18
 
 ### Added
