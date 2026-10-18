@@ -61,6 +61,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `serve --receiver` answers `/api/recall`, `/api/activity`, `/api/search` and `/api/shape` from the receiver's chain copies, as its census counts them, where each answered empty (#487).
 - The hook says on stderr, one line, when the store's receipts folder cannot be listed, so a session it may split across two drawers is named; the receipt is still written (#452).
 - A session that never recorded, its transcript a folder or a pipe, reads `UNWITNESSED` with why in the completeness watch, as a chained session's unreadable transcript does, instead of passing in silence (#452).
+- The keepers stop asking the recorder for the head of a chain the scan stood down, which it refuses on every turn, and a refused head reads as the recorder's refusal, in its words, not a calendar's or remote's (#533).
 
 ## [0.15.1] - 2026-10-12
 
