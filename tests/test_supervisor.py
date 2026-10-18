@@ -2536,6 +2536,19 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(self.states(result)["sess-aaaa"]["state"],
                          "UNWATCHED")
 
+    def test_a_chainless_session_on_a_never_wired_machine_is_skipped(self):
+        # The third reader of the never-wired test (#532): a transcript
+        # with no chain owed nothing, so it takes no row at all.
+        (self.witness.parent / "settings.json").unlink()
+        prime_memory(self.root, matcher=None)
+        write_transcript(self.witness, self.root / "alpha", "sess-none",
+                         event_times=[ago(300), ago(290)])
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("sess-none", self.states(result))
+
     def test_alarm_language_claims_detection_never_more(self):
         write_transcript(self.witness, self.root / "alpha", "sess-ghost",
                          event_times=[ago(120), ago(110)])
@@ -2730,6 +2743,23 @@ class CalibrationTest(unittest.TestCase):
         self.assertEqual(judged["state"], "ENDED-DEFICIT",
                          "three unreceipted calls under a wired hook")
         self.assertEqual(judged["tools"], 3)
+
+    def test_the_watch_says_todays_settings_wire_nothing_after_unwiring(self):
+        # After uninstall-hook the wired weeks are still judged (#532),
+        # and the watch says that today's settings wire nothing: the
+        # sessions since owe nothing, which no row says alone.
+        self.wired_then_unwired()
+        self.unwire(age=100)
+
+        result = self.scan()
+
+        report = json.loads(result.stdout)
+        since = json.loads(self.baseline.read_text(
+            encoding="utf-8"))["calibration"][-1]["since"]
+        note = report["completeness"].get("note") or ""
+        self.assertIn("no recorder hook is wired", note)
+        self.assertIn(f"sessions since {since} owe nothing", note)
+        self.assertIn("in force at their time", note)
 
 
 class UsersOwnHookTest(unittest.TestCase):
