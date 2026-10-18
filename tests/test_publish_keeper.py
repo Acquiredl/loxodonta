@@ -957,6 +957,31 @@ class HeadlessKeeperTest(ReceiverFixture):
                          [(True, 1)])
         self.assertTrue(book.is_file())
 
+    def test_a_page_opened_on_the_heels_of_a_turn_paints_its_day(self):
+        # #538: the clock's turn fills the held scan and writes no row.
+        # A page opened while that scan is still the answer counted a
+        # look and wrote no claim, and the day painted unread beside its
+        # own look. A long hold makes the window the whole test.
+        make_chain(self.root / "alpha" / "receipts", "sess-heels")
+        book = self.root / ".supervisor-daybook.json"
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        self.serve("--publish-every", "1d", "--publish-url",
+                   self.receiver.url, SUPERVISOR_SCAN_TTL_SECONDS="600")
+        self.wait_for(lambda: (self.root / BASELINE_NAME).exists(),
+                      missing="no turn ever walked the store")
+        self.assertFalse(book.exists(), "the turn wrote the day book")
+        self.get("/")
+        report = json.loads(self.get("/api/status"))
+        self._stop()
+
+        row = json.loads(book.read_text(encoding="utf-8"))["days"][today]
+        self.assertEqual(row["looks"], 1)
+        self.assertEqual(row.get("worst"), 0,
+                         "the looked-at day carries no claim")
+        (painted,) = [day for day in report["history"] if day["day"] == today]
+        self.assertTrue(painted["watched"], "the page painted its day unread")
+
     def test_a_tripwire_the_clock_catches_still_colours_the_day(self):
         # The other half of the rule above, and the one that matters on
         # the bad day: the baseline diff is read once. A turn that

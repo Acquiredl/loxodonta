@@ -979,6 +979,15 @@ class ServeTest(ServerFixture):
         self.assertIn("CHANGED SINCE LAST LOOK", page)
         self.assertIn('id="tripwire"', page)
 
+    def test_the_strip_gives_a_closed_folder_its_own_words(self):
+        # #448 item 9: a folder the census cannot list is exit 5 with no
+        # change behind it, and the strip called it a change.
+        self.serve()
+
+        _, _, page = self.get("/")
+
+        self.assertIn("FOLDER CANNOT BE LISTED", page)
+
     def test_the_tripwire_draws_what_stands_and_what_was_accepted(self):
         # ADR-0039: an alarm stands until it clears or is acknowledged,
         # a memory the scan cannot read is its own alarm, and what an

@@ -141,11 +141,31 @@ def listed(folder, pattern, closed=None):
                 continue
             except OSError as error:
                 why = error.strerror or str(error)
+                shut = closed_at(here)
                 if closed is None:
-                    raise ClosedFolder(error.errno, why, str(here)) from None
-                closed.append((here, why))
+                    raise ClosedFolder(error.errno, why, str(shut)) from None
+                closed.append((shut, why))
         found = deeper
     return sorted(found)
+
+
+def closed_at(here):
+    """The folder a refused listing of `here` names: `here` when it can
+    be looked at, else the nearest folder above it that can, which is
+    the one refusing the lookup; so a closed store home is named, never
+    the receipts folder inside it (#448). Only a refused permission
+    climbs: any other failure, a link looping on itself, a name too
+    long, is `here`'s own and names `here`."""
+    folder = Path(here)
+    while folder.parent != folder:
+        try:
+            os.stat(folder)
+            return folder
+        except PermissionError:
+            folder = folder.parent
+        except OSError:
+            return Path(here)
+    return folder
 
 
 UNKNOWN = "what it holds is unknown, and is never read as empty"
@@ -825,7 +845,7 @@ def daybook_rows(path):
             skipped.append((day, NO_ROW))
         elif all(isinstance(row.get(claim, 0), int)
                  and not isinstance(row.get(claim, 0), bool)
-                 for claim in PAINTED + ("blind", "scans", "looks")):
+                 for claim in PAINTED + ("blind", "closed", "scans", "looks")):
             kept[day] = row
         else:
             skipped.append((day, NOT_A_COUNT))
@@ -4955,9 +4975,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "events": len(events), "alarms": alarms,
         "reawakenings": len(awakened),
         # Kept on the row, never painted (PAINTED): what tells a keeper
-        # turn that the book already shows a blind memory.
+        # turn that the book already shows a blind memory, or folders
+        # the census could not list (#448).
         "blind": 1 if blind else 0,
-    }, fresh, awakened, blind)
+        "closed": len(closed_rows),
+    }, fresh, awakened)
 
     baseline = {"file": look.baseline_path.as_posix(), "events": events,
                 # Testimony: never raises the exit, never moves an event.
@@ -5007,7 +5029,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     }
 
 
-def fold_day(look, now, claims, fresh, awakened, blind):
+def fold_day(look, now, claims, fresh, awakened):
     """This look's claims folded into today's row of the day book, or
     the book only read, as (days, skipped) (`daybook_rows`).
 
@@ -5015,14 +5037,17 @@ def fold_day(look, now, claims, fresh, awakened, blind):
     has nothing new to report (ADR-0014): a machine asking itself every
     minute is not somebody looking. It goes in when it finds what no row
     records yet, an alarm this look found or whose change moved, a
-    reawakening, a blind memory the book's newest row does not show, or
-    the finding would be recorded nowhere and the day would paint quiet.
-    An alarm already standing does not mark every later day as watched
-    (ADR-0039); the day's worst is sticky, so a morning reader still
-    sees the day it was found, and every day somebody looks."""
+    reawakening, a blind memory or more closed folders than the book's
+    newest row shows (#448), or the finding would be recorded nowhere
+    and the day would paint quiet. An alarm already standing does not
+    mark every later day as watched (ADR-0039); the day's worst is
+    sticky, so a morning reader still sees the day it was found, and
+    every day somebody looks."""
     days, skipped = daybook_rows(look.daybook)
-    shown = bool(days) and days[max(days)].get("blind") == 1
-    if look.remember or fresh or awakened or (blind and not shown):
+    newest = days[max(days)] if days else {}
+    unshown = any(claims[kept] > newest.get(kept, 0)
+                  for kept in ("blind", "closed"))
+    if look.remember or fresh or awakened or unshown:
         days = remember_day(look.daybook, now, claims, days)
     return days, skipped
 
@@ -9068,10 +9093,15 @@ class Watchtower(ThreadingHTTPServer):
         """The newest scan no older than the tick, and its age in
         seconds, read under one hold of the lock so the age belongs to
         the body it comes with. `remember=False` is the keeper clock's
-        turn (#271), kept out of the day book (ADR-0014)."""
+        turn (#271), kept out of the day book (ADR-0014). A turn's scan
+        never answers a request: its claims stayed out of the book, and
+        a page served it would count a look on a day painted unread, so
+        the request scans again and its row is `fold_day`'s to write
+        (#538). That is at most one more walk per turn."""
         with self.scan_lock:
             if (self.scan_body is None
-                    or time.monotonic() - self.scan_at >= SCAN_TTL_SECONDS):
+                    or time.monotonic() - self.scan_at >= SCAN_TTL_SECONDS
+                    or (remember and not self.scan_asked)):
                 report = scan_root(self.root, witness=self.witness,
                                    anchor_every=self.anchor_every,
                                    calendars=self.calendars,
@@ -9083,6 +9113,7 @@ class Watchtower(ThreadingHTTPServer):
                                    receiver=self.receiver)
                 self.scan_body = json.dumps(report).encode("utf-8")
                 self.scan_at = time.monotonic()
+                self.scan_asked = remember
             return self.scan_body, time.monotonic() - self.scan_at
 
     def fresh_status(self):
@@ -9090,8 +9121,9 @@ class Watchtower(ThreadingHTTPServer):
 
     def fresh_metrics(self):
         """The metrics route (ADR-0033): the same held scan the status
-        endpoint serves, rendered by one pure function — never a walk
-        of the store on the scrape's own account."""
+        endpoint serves, rendered by one pure function. A scrape walks
+        the store only when a request would: the hold has lapsed, or
+        the scan held is a keeper turn's (`fresh_scan`)."""
         body, age = self.fresh_scan()
         return metrics_text(json.loads(body.decode("utf-8")), age)
 
@@ -9126,9 +9158,10 @@ class Face(BaseHTTPRequestHandler):
         except ClosedFolder as error:
             # A view over a store folder this user may not list refuses
             # by name; the status the page leads with names it too (#431).
-            self.send_error(503, "a store folder cannot be listed",
-                            f"{Path(error.filename).as_posix()} cannot be "
-                            f"listed: {error.strerror} — {UNKNOWN}")
+            # Plain words, which the page shows as they stand (#448).
+            self.reply(f"{Path(error.filename).as_posix()} cannot be "
+                       f"listed: {error.strerror} — {UNKNOWN}".encode("utf-8"),
+                       "text/plain; charset=utf-8", status=503)
 
     def answer_get(self):
         if self.refused_off_machine():
@@ -9277,8 +9310,8 @@ class Face(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         super().end_headers()
 
-    def reply(self, body, content_type):
-        self.send_response(200)
+    def reply(self, body, content_type, status=200):
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -9336,6 +9369,7 @@ def cmd_serve(args):
     server.views_lock = threading.Lock()
     server.scan_body = None
     server.scan_at = 0.0
+    server.scan_asked = False
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
@@ -10312,6 +10346,8 @@ function renderStrip(report) {
   const changes = report.baseline.events.length;
   // A memory the scan could not read or keep is exit 5 too (ADR-0039).
   const blind = report.baseline.blind || report.baseline.unkept;
+  // And so is a folder the census could not list, no change behind it.
+  const shut = (report.closed || []).length;
   const quietEvidence = chains.filter(c => c.superseded).length;
   let colour;
   if (regenerated.length) {
@@ -10327,14 +10363,19 @@ function renderStrip(report) {
   } else if (broken.length || changes || report.exit !== 0) {
     colour = "damage";
     state.textContent = broken.length ? "HISTORY WAS ALTERED"
-                      : changes || !blind ? "CHANGED SINCE LAST LOOK"
-                      : "TRIPWIRE BLIND";
+                      : changes ? "CHANGED SINCE LAST LOOK"
+                      : blind ? "TRIPWIRE BLIND"
+                      : shut ? "FOLDER CANNOT BE LISTED"
+                      : "CHANGED SINCE LAST LOOK";
     why.textContent = (broken.length
       ? broken.length + " chain(s) fail verification — "
       : "") + (changes
       ? changes + " change(s) the baseline cannot explain as appends"
       : blind
       ? "the baseline could not be read or kept, so nothing was compared"
+      : shut
+      ? shut + " folder(s) the scan cannot list, so what they hold is " +
+        "unknown, never read as empty"
       : "details in the band below") +
       " (scan exit " + report.exit + ")";
   } else {
@@ -10513,10 +10554,10 @@ function renderFortnight(report) {
     cell.appendChild(el("span", "mark", MARK[rung]));
     cell.appendChild(el("span", "num", row.day.slice(8)));
     // A day can carry opens and still no claim: the page was opened
-    // inside the few seconds a keeper's reading is held for, so the
-    // poll behind it was answered from that reading and no row was
-    // written (#271). Say that, rather than "nobody looked" beside a
-    // count of the times somebody did.
+    // and closed before its first scan finished, or the row is older
+    // than the fix for a page answered from a keeper's reading (#538).
+    // Say that, rather than "nobody looked" beside a count of the
+    // times somebody did.
     cell.title = row.day + " — " + (rung === "unwatched" && row.looks
       ? "opened " + row.looks + " time(s), no reading of the store recorded"
       : DAY_WORDS[rung] +
@@ -11812,10 +11853,19 @@ function asked() {
   return text ? "?" + text : "";
 }
 
+// A refusal is read as the words it carries, never parsed as a report:
+// serve's 503 for a store folder it cannot list names the folder in
+// plain text (#448).
+async function reportOf(response) {
+  if (response.ok) return response.json();
+  const said = (await response.text()).trim();
+  throw new Error(said || "HTTP " + response.status);
+}
+
 async function loadRecall() {
   try {
     const response = await fetch("/api/recall" + asked());
-    const report = await response.json();
+    const report = await reportOf(response);
     // The tiles want the unfiltered picture; only a filter-free answer
     // updates their memory of it.
     if (!asked()) lastRecall = report;
@@ -11868,7 +11918,7 @@ async function runSearch() {
   try {
     const response =
       await fetch("/api/search?q=" + encodeURIComponent(query));
-    const report = await response.json();
+    const report = await reportOf(response);
     found.replaceChildren();
     found.appendChild(el("p", "tally", report.matched
       ? "found in " + report.matched + " action line(s)" +
@@ -11892,7 +11942,7 @@ document.getElementById("ask-search").addEventListener("input", () => {
 async function loadActivity() {
   try {
     const response = await fetch("/api/activity");
-    lastActivity = await response.json();
+    lastActivity = await reportOf(response);
     renderClock();
     renderTiles();
     renderHistogram();
@@ -11906,7 +11956,7 @@ async function loadActivity() {
 async function loadStatus() {
   try {
     const response = await fetch("/api/status");
-    render(await response.json());
+    render(await reportOf(response));
   } catch (error) {
     const strip = document.getElementById("strip");
     strip.className = "grave";
