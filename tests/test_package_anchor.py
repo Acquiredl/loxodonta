@@ -902,7 +902,7 @@ def released_verifier(case, folder):
     try:
         shown = subprocess.run(
             ["git", "-C", str(LOXODONTA.parent), "show",
-             f"{RELEASE}:verifier.py"], capture_output=True)
+             f"{RELEASE}:verifier.py"], capture_output=True, timeout=120)
     except OSError:
         case.skipTest("git is not on PATH, so the released verifier's "
                       "bytes cannot be read")

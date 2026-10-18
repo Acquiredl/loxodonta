@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (LOXODONTA, RECEIVER, SUPERVISOR,  # noqa: E402
-                     isolated_env, run, temp_folder)
+                     clean_env, isolated_env, run, temp_folder)
 
 BASELINE_NAME = ".supervisor-baseline.json"
 
@@ -280,8 +280,7 @@ class StoreScanTest(unittest.TestCase):
         result = run_store_scan(self.home, self.witness)
 
         self.assertNotIn("Traceback", result.stderr)
-        self.assertNotEqual(result.returncode, 0,
-                            result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
         (chain,) = [c for chains in sessions.values() for c in chains]
         self.assertEqual(chain["verdict"], "NO-VERDICT")
@@ -305,7 +304,10 @@ class StoreScanTest(unittest.TestCase):
         # not: the refusal keeps its exit, and the scan counts it. Since
         # #511 the recorder escapes the path too, so this guard is a
         # second layer the CLI can no longer reach.
-        name = "sess-aaaa\nBROKEN at entry 3: torn tail\n"
+        # Spelled as the recorder prints a torn tail, so the line holds if
+        # `superseded` is ever matched to that exact line (#512).
+        name = ("sess-aaaa\nBROKEN: torn tail at line 3 (crash-truncated "
+                "append; entries 0..2 intact)\n")
         drawer = self.drawer("alpha-11111111", "C:/work/alpha")
         self.plant(drawer / f"receipts-{name}.jsonl")
         # The sibling is a chain in good standing, so the scan's exit is
@@ -315,8 +317,7 @@ class StoreScanTest(unittest.TestCase):
         result = run_store_scan(self.home, self.witness)
 
         self.assertNotIn("Traceback", result.stderr)
-        self.assertNotEqual(result.returncode, 0,
-                            result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
         planted, sibling = sessions[("alpha", name)]
         self.assertEqual(planted["verdict"], "NO-VERDICT")
@@ -4439,7 +4440,8 @@ class RecorderDriftTest(unittest.TestCase):
 
     def git(self, *args, cwd):
         return subprocess.run(["git", *args], cwd=str(cwd),
-                              capture_output=True, encoding="utf-8")
+                              capture_output=True, encoding="utf-8",
+                              timeout=120)
 
     def make_checkout(self, branch="main"):
         """A git checkout holding a stand-in recorder, wired as the hook."""
@@ -4959,7 +4961,7 @@ class ClosedFolderTest(unittest.TestCase):
         timer = threading.Timer(120, server.kill)
         timer.start()
         self.addCleanup(timer.cancel)
-        self.addCleanup(server.communicate)
+        self.addCleanup(server.communicate, timeout=30)
         self.addCleanup(server.kill)
         line = server.stdout.readline()
         found = re.search(r"http://127\.0\.0\.1:\d+", line)
@@ -5429,7 +5431,7 @@ def chain_copy(data, session, actions=FIXTURE_RECEIPTS, epoch=None,
     log = store / f"receipts-{session}.jsonl"
     if log.exists():
         log.unlink()
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    env = clean_env()
     if epoch is not None:
         env["SOURCE_DATE_EPOCH"] = str(epoch)
     run(LOXODONTA, "init", "--log", str(log), check=True, timeout=60, env=env)
