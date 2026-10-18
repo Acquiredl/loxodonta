@@ -620,54 +620,66 @@ class AdoptTest(unittest.TestCase):
         self.assertEqual(len(left), 2, result.stdout)
         self.assertEqual(would, left)
 
-    def assert_one_name_given_once(self, first, second):
+    def assert_one_name_refused(self, first, second):
         # Two legacy chains bound for one name in one drawer (#447): the
-        # first in path order moves, the second is refused by name in
-        # the dry run and the real run alike, and neither is lost.
+        # writer picks path order (ADR-0002), so neither takes the name.
+        # Both are refused by name, in the dry run and the real run
+        # alike, and both stay where they lie; the rest still moves.
+        bystander = make_chain(self.root / "beta" / "receipts", "sess-bbbb")
         before = {first: first.read_bytes(), second: second.read_bytes()}
-        said = {"first": first.relative_to(self.root).as_posix(),
-                "second": second.relative_to(self.root).as_posix()}
+
+        def said(log):
+            return log.relative_to(self.root).as_posix()
 
         planned = run_adopt(self.home, self.root, "--dry-run")
         result = run_adopt(self.home, self.root)
 
-        (name,) = self.drawers()
-        refusal = (f"refused {said['second']}: {name}/{second.name} is "
-                   f"taken by {said['first']} in this run — evidence is "
-                   "never overwritten; reconcile by hand")
         for ran in (planned, result):
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
-            self.assertIn(refusal, ran.stdout)
+            for me, other in ((first, second), (second, first)):
+                (line,) = [line for line in ran.stdout.splitlines()
+                           if line.startswith(f"refused {said(me)}: ")]
+                self.assertTrue(line.endswith(
+                    f"/{me.name} is where {said(other)} would land too — "
+                    "none of them is moved; evidence is never overwritten; "
+                    "reconcile by hand"), line)
         self.assertEqual(planned.stdout.count("would adopt "), 1,
                          planned.stdout)
-        self.assertIn(f"would adopt {said['first']} -> {name}/",
-                      planned.stdout)
-        self.assertIn(f"adopted {said['first']} -> {name}/", result.stdout)
+        self.assertIn(f"would adopt {said(bystander)} -> ", planned.stdout)
         self.assertIn("1 chain(s) adopted", result.stdout)
-        self.assertEqual(before[second], second.read_bytes(),
-                         "the refused chain stays put")
-        landed = [p for p in (self.home / "receipts" / name).iterdir()
-                  if p.name.endswith(".jsonl")]
-        self.assertEqual([p.read_bytes() for p in landed], [before[first]],
-                         "the adopted chain is the first, whole")
+        for log, held in before.items():
+            self.assertEqual(log.read_bytes(), held,
+                             "a refused chain stays put")
+        (name,) = self.drawers()
+        self.assertTrue(name.startswith("beta-"), name)
 
-    def test_two_legacy_chains_of_one_name_never_overwrite_each_other(self):
+    def test_two_legacy_chains_of_one_name_are_both_refused(self):
         stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
                               / "w" / "receipts", "s1", entries=2)
         legacy = make_chain(self.root / "alpha" / "receipts", "s1",
                             entries=1)
 
-        self.assert_one_name_given_once(stranded, legacy)
+        self.assert_one_name_refused(stranded, legacy)
 
     def test_two_legacy_chains_whose_names_differ_in_case_are_one_name(self):
         # A disk that ignores case lands both on one file, so the plan
-        # gives the name once on every system (#447).
+        # reads them as one name on every system (#447).
         stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
                               / "w" / "receipts", "S1", entries=2)
         legacy = make_chain(self.root / "alpha" / "receipts", "s1",
                             entries=1)
 
-        self.assert_one_name_given_once(stranded, legacy)
+        self.assert_one_name_refused(stranded, legacy)
+
+    def test_two_legacy_chains_in_two_unicode_forms_are_one_name(self):
+        # macOS lands both forms of one name on one file, so the plan
+        # folds them as a package's names are folded (#299, #447).
+        stranded = make_chain(self.root / "alpha" / ".claude" / "worktrees"
+                              / "w" / "receipts", "café", entries=2)
+        legacy = make_chain(self.root / "alpha" / "receipts", "café",
+                            entries=1)
+
+        self.assert_one_name_refused(stranded, legacy)
 
     def test_a_chain_bound_for_a_sidecar_name_leaves_the_sidecar(self):
         # A sidecar travels with its chain only where the run has not
@@ -745,7 +757,7 @@ class AdoptTest(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt",
                          "only Windows refuses to move a file held open")
     def test_a_chain_held_open_is_said_to_have_moved_part_way(self):
-        # A move that renames cannot copies, then removes (#448 item 13):
+        # A move that cannot rename copies, then removes (#448 item 13):
         # here the removal fails, so a copy stands in the drawer and the
         # chain is still where it lay. Said, never "left as it lies".
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
