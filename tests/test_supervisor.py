@@ -259,12 +259,14 @@ class StoreScanTest(unittest.TestCase):
         return path
 
     def test_a_planted_anchored_line_in_a_chains_path_earns_nothing(self):
-        # #504: verify's refusal of an empty chain quotes the path raw on
-        # stderr, and a name in it can hold a newline on Linux and macOS,
-        # so a writer (ADR-0002) can put a line spelled like verify's own
-        # ANCHORED line into the scan's evidence with nothing but an
-        # empty file at a path it chose. Only a line verify printed on
-        # stdout earns the flag (#349); the refusal stays the evidence.
+        # #504: verify's refusal of an empty chain quoted the path raw on
+        # stderr until #511, and a name in it can hold a newline on Linux
+        # and macOS, so a writer (ADR-0002) could put a line spelled like
+        # verify's own ANCHORED line into the scan's evidence with nothing
+        # but an empty file at a path it chose. Only a line verify printed
+        # on stdout earns the flag (#349); the refusal stays the evidence.
+        # Since #511 these asserts also hold because the recorder escapes
+        # the path: the #504 guard is a second layer the CLI cannot reach.
         # The line sits in the drawer's name: as a file name, `receipts-`,
         # a newline, the shortest ANCHORED line, a newline and `.jsonl`
         # make 256 bytes, one over what Linux allows a name.
@@ -286,10 +288,13 @@ class StoreScanTest(unittest.TestCase):
         self.assertEqual(chain["exit"], 4)
         self.assertFalse(chain["anchored"], chain["detail"])
         self.assertEqual(chain["anchors"]["anchored"], [])
-        self.assertIn(line, chain["detail"],
+        # #511: the refusal names the path escaped, so the planted line
+        # stays inside the one refusal and is no line of its own.
+        self.assertNotIn(line, chain["detail"])
+        refusals = [said for said in chain["detail"] if "is empty" in said]
+        self.assertEqual(len(refusals), 1, chain["detail"])
+        self.assertIn(f"p\\n{line}\\n", refusals[0],
                       "verify's stderr stays in the row as evidence")
-        self.assertTrue(any("is empty" in said for said in chain["detail"]),
-                        chain["detail"])
 
     def test_a_planted_torn_tail_line_in_a_chains_name_stands_nothing_down(
             self):
@@ -297,7 +302,9 @@ class StoreScanTest(unittest.TestCase):
         # saying "torn tail", with a sibling -002 beside it, stands a
         # chain's exit down as ADR-0004's handled tear. Planted through
         # the file name, which this line is short enough for, it must
-        # not: the refusal keeps its exit, and the scan counts it.
+        # not: the refusal keeps its exit, and the scan counts it. Since
+        # #511 the recorder escapes the path too, so this guard is a
+        # second layer the CLI can no longer reach.
         name = "sess-aaaa\nBROKEN at entry 3: torn tail\n"
         drawer = self.drawer("alpha-11111111", "C:/work/alpha")
         self.plant(drawer / f"receipts-{name}.jsonl")

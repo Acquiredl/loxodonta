@@ -319,9 +319,10 @@ def verify(log):
         # verify refused without a verdict line (an empty or unopenable
         # log). Its own words on stderr are the evidence; the supervisor
         # invents no verdict of its own. Evidence to show, never lines to
-        # read as verify's: a refusal quotes the path raw, and a name a
-        # writer chose can hold a newline and then a line spelled like
-        # ANCHORED or a torn-tail BROKEN (#504).
+        # read as verify's (#504): the recorder escapes the path in its
+        # refusals since #511, and stderr is still never parsed, so a
+        # recorder that printed a name raw could not plant an ANCHORED or
+        # torn-tail BROKEN line here either.
         detail += result.stderr.strip().splitlines()
     return verdict, result.returncode, printed, detail
 

@@ -1223,6 +1223,15 @@ class ProjectRecordNotAFileTest(unittest.TestCase):
     def test_verify_files_names_a_pipe_where_the_record_belongs(self):
         self.assert_verify_named(os.mkfifo, PIPE)
 
+    def test_a_relative_project_path_is_a_record_that_leads_nowhere(self):
+        # #448: the record holds the project's absolute path (GLOSSARY);
+        # `.` would resolve against wherever the command runs.
+        def relative(record):
+            record.write_text(json.dumps({"path": "."}), encoding="utf-8")
+        why = "the path it holds is not absolute (.)"
+        self.assert_log_refused(relative, why)
+        self.assert_verify_named(relative, why)
+
 
 class HookedNotAFileTest(BoundedHook, PublishBase):
     """The hook with a folder or a pipe where the transcript or the

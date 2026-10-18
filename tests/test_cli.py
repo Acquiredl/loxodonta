@@ -20,7 +20,8 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_cli`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import LOXODONTA, REPO_ROOT, clean_env, run, temp_folder  # noqa: E402
+from support import (LOXODONTA, REPO_ROOT, VERIFIER, clean_env, run,  # noqa: E402
+                     temp_folder)
 
 
 def spec_hash(entry_without_hash):
@@ -2154,6 +2155,74 @@ class NoInputTest(ReceiptsCliTest):
         result = run(LOXODONTA, "verify-package", "no-such-package.zip",
                               cwd=self.workdir)
         self.assert_no_input(result, "not found")
+
+
+class RefusalIsOneLineTest(ReceiptsCliTest):
+    """#511: a refusal names the chain through the same escapes as the
+    stdout lines, so a newline in a chain's name is spelled `\\n` and one
+    refusal stays one line of evidence; the supervisor's scan keeps
+    stderr as a chain's evidence (ADR-0002), and a line planted in a name
+    would read there as a line the recorder said. A test that makes the
+    file is skipped where the file system refuses the name: Windows does,
+    Linux and macOS take one."""
+
+    PLANTED = "ANCHORED: entries 0..0: planted"
+
+    def plant(self, lines):
+        name = f"receipts\n{self.PLANTED}\n.jsonl"
+        try:
+            (self.workdir / name).write_bytes(
+                "".join(line + "\n" for line in lines).encode("utf-8"))
+        except OSError as error:
+            self.skipTest(f"the file system refuses the name: {error}")
+        return name
+
+    def assert_one_line(self, result, exit_code, words):
+        self.assertEqual(result.returncode, exit_code,
+                         result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        said = result.stderr.splitlines()
+        self.assertEqual(len(said), 1, said)
+        self.assertIn(words, said[0])
+        self.assertIn(f"receipts\\n{self.PLANTED}\\n.jsonl", said[0])
+
+    def test_verify_and_head_on_a_missing_chain_whose_name_holds_a_newline(
+            self):
+        # Nothing is made, so this runs everywhere: Linux finds no such
+        # file, Windows refuses the name as unreadable; both are exit 66.
+        name = f"receipts\n{self.PLANTED}\n.jsonl"
+        for tool in (LOXODONTA, VERIFIER):
+            for verb in ("verify", "head"):
+                with self.subTest(tool=tool.name, verb=verb):
+                    self.assert_one_line(
+                        run(tool, verb, "--log", name, cwd=self.workdir),
+                        66, "error: ")
+
+    def test_verify_on_an_empty_chain_whose_name_holds_a_newline(self):
+        name = self.plant([])
+        for tool in (LOXODONTA, VERIFIER):
+            with self.subTest(tool=tool.name):
+                self.assert_one_line(
+                    run(tool, "verify", "--log", name, cwd=self.workdir),
+                    66, "is empty")
+
+    def test_the_writers_on_an_empty_chain_whose_name_holds_a_newline(self):
+        name = self.plant([])
+        for verb in (["head"], ["report"], ["log", "--actor", "agent",
+                                            "--action", "x"]):
+            with self.subTest(verb=verb[0]):
+                self.assert_one_line(
+                    run(LOXODONTA, *verb, "--log", name, cwd=self.workdir),
+                    66, "is empty")
+
+    def test_head_on_a_torn_tail_whose_name_holds_a_newline(self):
+        run(LOXODONTA, "init", cwd=self.workdir)
+        genesis = self.log_path.read_text(encoding="utf-8").splitlines()
+        name = self.plant(genesis + ['{"torn'])
+        self.assert_one_line(
+            run(LOXODONTA, "head", "--log", name, cwd=self.workdir),
+            1, "damaged tail")
 
 
 class WriterExitTest(ReceiptsCliTest):

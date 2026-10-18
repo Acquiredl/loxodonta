@@ -28,6 +28,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - Five docs pages checked line by line against the tree and brought current, facts only: START, FIRE-DRILL, MCP, ANCHORING and EXPERIMENTS, with the first field run's findings marked resolved where the tool has since moved (#521).
 - The social preview carries the README's current tagline; `tools/build_social_preview.py` rebuilds it from the wordmark and the README, so the two cannot drift (#528).
 - The markdownlint rule file lives under `.github/`, where the workflow names it; the root keeps the standard files and the two git dotfiles (#529).
+- CONTRIBUTING says a pull request moved from `dev` to `main` needs a new push to run all five targets, and `tests.yml` no longer says a run waiting on `main` or `dev` is never cancelled (#453).
 
 ### Fixed
 
@@ -35,6 +36,12 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - Harness settings or a coverage marker nested past the JSON reader no longer end `install-hook`, `uninstall-hook`, `scan`, `serve` or `drill` in a traceback: each reads it as not JSON, the installer refusing such settings by name (#463).
 - `digest --payload` reads a payload nested past the JSON reader as no payload, as one that is not JSON, instead of ending in a traceback (#487).
 - After `uninstall-hook`, `scan` no longer reads every session `UNWATCHED`: sessions recorded while the hook was wired, chainless ones included, are judged by the coverage in force at their time; `UNWATCHED` is kept for a machine that never wired it (#532).
+- A recorder refusal names the chain, its lock or its sidecar with steering characters escaped, as the verdict lines do, so a newline in a chain's name no longer splits one refusal into lines of the scan's evidence (#511).
+- A `full` managed install refuses somebody else's telemetry pin saved with a byte-order mark, as it refuses any foreign pin, instead of writing over it as a file that is not JSON (#487).
+- A pin put back after a refused hooks write keeps the permission bits it had, not the installer's 0o644 (#487).
+- A folder at the managed hooks file's name refuses `install-hook --managed` before anything is said or written, as a folder at the pin's name does, instead of after the notices and the pin (#487).
+- The hook reads the project record only for a tool call that names files, so a large record left by the writer is not read whole on every call (#448).
+- A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
 - An ended session no longer reads awake for a day after the tail keeper commits its tail: growth that is bookkeeping alone carries the stillness clock forward, as it already never woke a session (#537).
 - After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
 
