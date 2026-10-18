@@ -3435,7 +3435,10 @@ def watch_completeness(root, witness, families, everywhere=False,
     are taken to have always been in force. `show_before_memory` lists
     the sessions ADR-0029 leaves unjudged instead of only counting
     them — the "be upfront" half made operable rather than promised.
-    A store folder it cannot list goes on `closed` (`listed`)."""
+    A store folder it cannot list goes on `closed` (`listed`). What its
+    five helpers buy (#535): the coverage words, the row, the session
+    groups and the chained and chainless readings each sit in one
+    function, and judged rows part from the unjudged once, here."""
     now = datetime.now(timezone.utc)
     watch = {"witness": witness.as_posix(), "sessions": []}
     if calibration is None:
@@ -4263,10 +4266,11 @@ def watch_consumption(families, now):
 
 
 # --- Scan ---------------------------------------------------------------------
-# One look runs in phases, each a function below in the order the look
-# runs them, and `scan_root` folds what they find into the report (#535):
+# One look runs in phases, and `scan_root` folds what each finds into the
+# report (#535). The functions above it come in the order it calls them:
 # the memory, the census, each chain's reading, the rows the census did
-# not meet, the memory written, the specialists, the day book, the notes.
+# not meet, the memory written. The specialists run inline in it, and the
+# day book and the notes are the functions after it.
 
 
 class Look:
@@ -4530,7 +4534,8 @@ def baseline_row(memory, relpath, entries, verdict, stood_down, now, stamp):
     this look found that alarm or its change moved; and the seconds of
     dormant stillness a reawakening ends, or None. One row shape: the
     head and number, the stillness clock when it has started, the
-    standing alarm when there is one, and this look's verdict."""
+    standing alarm when there is one, this look's verdict, and
+    `superseded`, whether the verdict's exit stood down."""
     remembered = memory["chains"]
     known = remembered.get(relpath) or {}
     change = diff_baseline(remembered, relpath, entries)
@@ -4806,15 +4811,15 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if events or blind or unkept:
         worst = max(worst, 5)
 
-    if receiver:
-        completeness = watch_receiver(root, families,
-                                      read_events(root, closed), now,
-                                      show_before_memory=show_before_memory)
+    if look.receiver:
+        completeness = watch_receiver(
+            look.root, families, read_events(look.root, closed), now,
+            show_before_memory=look.show_before_memory)
     else:
         completeness = watch_completeness(
-            root, witness, families, everywhere=store,
+            look.root, look.witness, families, everywhere=look.store,
             calibration=memory["judging"], sessionend=memory["sessionend"],
-            show_before_memory=show_before_memory, closed=closed)
+            show_before_memory=look.show_before_memory, closed=closed)
     # One folder can be met by more than one pattern; it is named once.
     closed_rows = [{"folder": folder, "why": why} for folder, why in
                    sorted({(Path(f).as_posix(), why) for f, why in closed})]
@@ -4825,7 +4830,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # sees the tails committed. Not at the receiver: no transcript is
     # there to commit, and a copy is never appended to.
     kept = (keep_tails(completeness["sessions"])
-            if tick and TAIL_KEEPER and not receiver else 0)
+            if look.tick and TAIL_KEEPER and not look.receiver else 0)
     # The consumption watch never touches `worst`: a hot session is a
     # reason to look, and the brake is the operator's (issue #67).
     consumption = watch_consumption(families, now)
@@ -4864,7 +4869,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     report_note = empty_note(look, repos, closed_rows)
     return {
         **({"note": report_note} if report_note else {}),
-        "root": root.as_posix(),
+        "root": look.root.as_posix(),
         "scanned": stamp,
         "exit": worst,
         "history": fortnight(days, now),
