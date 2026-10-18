@@ -62,7 +62,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (LOXODONTA, REPO_ROOT, RECEIVER, SUPERVISOR,  # noqa: E402
-                     isolated_env)
+                     isolated_env, run, temp_folder)
 
 
 TESTS_DIR = REPO_ROOT / "tests"
@@ -183,15 +183,13 @@ class WriterHomeGuardTest(unittest.TestCase):
 
     def test_adopt_is_refused_with_the_inherited_home(self):
         with self.assertRaises(AssertionError) as refused:
-            subprocess.run([sys.executable, str(SUPERVISOR), "adopt",
-                            "--help"], capture_output=True)
+            run(SUPERVISOR, "adopt", "--help")
         self.assertIn("supervisor.py adopt started", str(refused.exception))
 
     def test_acknowledge_is_refused_with_the_inherited_home(self):
         # It writes the store's baseline when given no --root (ADR-0039).
         with self.assertRaises(AssertionError) as refused:
-            subprocess.run([sys.executable, str(SUPERVISOR), "acknowledge",
-                            "--help"], capture_output=True)
+            run(SUPERVISOR, "acknowledge", "--help")
         self.assertIn("supervisor.py acknowledge started",
                       str(refused.exception))
 
@@ -259,9 +257,7 @@ class WriterHomeGuardTest(unittest.TestCase):
         self.assertIn("usage", done.stdout)
 
     def test_a_recorder_verb_that_stays_in_its_log_is_not_guarded(self):
-        done = subprocess.run(
-            [sys.executable, str(LOXODONTA), "verify", "--help"],
-            capture_output=True, encoding="utf-8")
+        done = run(LOXODONTA, "verify", "--help")
         self.assertEqual(done.returncode, 0, done.stderr)
 
 
@@ -272,9 +268,7 @@ POINTER = ("# Copy of loxodonta.py's; edit there, then run "
 
 
 def twin_check(*args):
-    return subprocess.run([sys.executable, str(TWIN_CHECK), *args],
-                          capture_output=True, encoding="utf-8", timeout=300,
-                          env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    return run(TWIN_CHECK, *args, timeout=300)
 
 
 class TwinCheckTest(unittest.TestCase):
@@ -283,9 +277,7 @@ class TwinCheckTest(unittest.TestCase):
     copy of the three scripts and the page that each test spoils."""
 
     def setUp(self):
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        self.root = Path(scratch.name)
+        self.root = temp_folder(self)
         (self.root / "docs").mkdir()
         # Bytes, with LF endings: write_text takes no newline before 3.10.
         for name in SCRIPTS + ("docs/TWINS.md",):
@@ -942,9 +934,8 @@ class SpoiledScript:
         `new`."""
         text = (REPO_ROOT / name).read_text(encoding="utf-8")
         self.assertEqual(text.count(old), 1, f"{old!r} in {name}")
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        copy = Path(scratch.name) / name
+        base = temp_folder(self)
+        copy = base / name
         copy.write_bytes(text.replace(old, new).encode())
         return copy
 

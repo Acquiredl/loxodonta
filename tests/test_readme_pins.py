@@ -114,9 +114,8 @@ class Runner:
             # through the copies placed in cwd, or the repo's own files.
             import shlex
             parts = shlex.split(command, posix=True)
-            return subprocess.run(
-                [sys.executable, *parts[1:]], cwd=str(self.cwd),
-                capture_output=True, text=True, env=self.env)
+            return run(parts[1], *parts[2:], cwd=str(self.cwd),
+                       env=self.env)
         self.fail(f"don't know how to run {command!r}")
 
     def _sed(self, command):

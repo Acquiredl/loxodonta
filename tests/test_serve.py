@@ -16,7 +16,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 import urllib.error
@@ -28,7 +27,7 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_serve`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import (LOXODONTA, SUPERVISOR, isolated_env,  # noqa: E402
+from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
                      temp_folder)
 
 from test_supervisor import (FIXTURE_SESSION, assert_replaced_whole,
@@ -47,13 +46,10 @@ def make_chain(log_dir, session, entries=2):
     fixture — so the face is tested against what the tool writes."""
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"receipts-{session}.jsonl"
-    subprocess.run([sys.executable, str(LOXODONTA), "init", "--log", str(log)],
-                   capture_output=True, check=True)
+    run(LOXODONTA, "init", "--log", str(log), check=True)
     for i in range(entries):
-        subprocess.run(
-            [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-             "--actor", "claude-code", "--action", f"step {i}"],
-            capture_output=True, check=True)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", f"step {i}", check=True)
     return log
 
 
@@ -75,10 +71,7 @@ def write_completed_anchor(log, height=850000):
     # for the child, encoding= for the parent) — `text=True` alone decodes
     # with the locale codec, cp1252 on Windows, and disagrees with a
     # UTF-8-emitting child.
-    head = subprocess.run(
-        [sys.executable, str(LOXODONTA), "head", "--log", str(log)],
-        capture_output=True, encoding="utf-8", check=True,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"}).stdout.strip()
+    head = run(LOXODONTA, "head", "--log", str(log), check=True).stdout.strip()
     payload = ots_varint(height)
     proof = (b"\x08"
              + b"\x00" + TAG_BITCOIN + ots_varint(len(payload)) + payload)
@@ -93,10 +86,8 @@ def log_entry(log, action, actor="claude-code", files=()):
     """One more receipt through the public CLI, optionally fingerprinting
     files (which must exist — receipts hashes them at log time)."""
     file_args = [arg for f in files for arg in ("--file", str(f))]
-    subprocess.run(
-        [sys.executable, str(LOXODONTA), "log", "--log", str(log),
-         "--actor", actor, "--action", action, *file_args],
-        capture_output=True, check=True)
+    run(LOXODONTA, "log", "--log", str(log), "--actor", actor, "--action",
+        action, *file_args, check=True)
 
 
 class ServerFixture(unittest.TestCase):
@@ -106,9 +97,7 @@ class ServerFixture(unittest.TestCase):
     remote (#242)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        self.root = temp_folder(self)
         self.env = isolated_env(temp_folder(self))
 
     def serve(self, extra_env=None, extra_args=(), cwd=None):
@@ -937,11 +926,8 @@ class ServeTest(ServerFixture):
 
         self.assertEqual(status, 200)
         self.assertIn("application/json", ctype)
-        cli = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--root",
-             str(self.root), "--json"],
-            capture_output=True, encoding="utf-8",
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        cli = run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                  env=self.env)
         served, printed = json.loads(body), json.loads(cli.stdout)
         # Two ticks, two clocks: the freshness stamp is the one field
         # allowed to differ between them.
@@ -1464,7 +1450,7 @@ class PageScriptTest(ServerFixture):
         page = self.get("/")[2]
 
         script = page.split("<script>")[1].split("</script>")[0]
-        probe = Path(self._tmp.name) / "page.js"
+        probe = self.root / "page.js"
         probe.write_text(script, encoding="utf-8")
         result = subprocess.run([node, "--check", str(probe)],
                                 capture_output=True, encoding="utf-8")
@@ -1663,11 +1649,8 @@ class ReceiverServeTest(ServerFixture):
         self.assertEqual(served["completeness"]["last_heard"]["addresses"],
                          [{"from": "127.0.0.1",
                            "received": "2026-10-07T02:21:37.488585+00:00"}])
-        cli = subprocess.run(
-            [sys.executable, str(SUPERVISOR), "scan", "--receiver",
-             str(self.data), "--json"],
-            capture_output=True, encoding="utf-8", timeout=180,
-            env={**self.env, "PYTHONIOENCODING": "utf-8"})
+        cli = run(SUPERVISOR, "scan", "--receiver", str(self.data), "--json",
+                  timeout=180, env=self.env)
         printed = json.loads(cli.stdout)
         # Two ticks, two clocks: the freshness stamp is the one field
         # allowed to differ between them.
