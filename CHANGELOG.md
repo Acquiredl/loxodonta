@@ -44,6 +44,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A project record whose path is relative is refused by name as a record that leads nowhere, instead of resolving against wherever `verify --files` or `log --file` runs (#448).
 - An ended session no longer reads awake for a day after the tail keeper commits its tail: growth that is bookkeeping alone carries the stillness clock forward, as it already never woke a session (#537).
 - After `uninstall-hook`, the completeness watch says no recorder hook is wired today and the sessions since owe nothing, where it said nothing once the wired weeks were judged (#532).
+- A refusal the receiver judges on the headers alone (404, 405, 415, a chain name's 400) reaches the sender as its status, not as a dropped connection: the door reads up to 64 KiB of the body before closing (#450).
+- Over a receiver's folder, a log record that names no session, or is not an object, is counted as `sessionless` and said in the second record's words, instead of skipped unsaid (#487).
+- An events file the receiver's reading cannot open no longer counts as a day kept: it sets neither the memory's edge nor the oldest or newest day, and the note says so (#487).
+- `serve --receiver` answers `/api/recall`, `/api/activity`, `/api/search` and `/api/shape` from the receiver's chain copies, as its census counts them, where each answered empty (#487).
 
 ## [0.15.1] - 2026-10-12
 

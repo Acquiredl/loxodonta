@@ -3858,8 +3858,10 @@ def event_attributes(record):
 
 def log_records(logs):
     """Every log record in one posted OTLP object, in order:
-    resourceLogs[].scopeLogs[].logRecords[]. Anything not shaped so is
-    passed over, never a fault."""
+    resourceLogs[].scopeLogs[].logRecords[], each item of a records list
+    whatever it is, so a record that is not an object reaches the
+    reader's count (#487). Anything else not shaped so is passed over,
+    never a fault."""
     resources = logs.get("resourceLogs") if isinstance(logs, dict) else None
     for resource in resources if isinstance(resources, list) else []:
         scopes = (resource.get("scopeLogs")
@@ -3868,8 +3870,7 @@ def log_records(logs):
             records = (scope.get("logRecords")
                        if isinstance(scope, dict) else None)
             for record in records if isinstance(records, list) else []:
-                if isinstance(record, dict):
-                    yield record
+                yield record
 
 
 def read_events(root, closed=None):
@@ -3892,18 +3893,26 @@ def read_events(root, closed=None):
     (ruling 5's "last heard"), the days the files are named for, and
     the lines that were not one JSON object holding a `logs` object,
     skipped and counted, never fatal: the files are out of the writer's
-    reach, but a reader that ends on one line is still wrong."""
+    reach, but a reader that ends on one line is still wrong. A record
+    inside a well-shaped line that names no session, or is not an
+    object, is counted beside them as `sessionless`, a count of records,
+    not lines (#487). A file that cannot be read is named in `unread` and
+    gives nothing, its day included: a day nothing was read from is not
+    where the second record's memory begins (#487)."""
     sessions = {}
     addresses = {}
     files = events_files(root, closed)
     unparsed = 0
+    sessionless = 0
     unread = []
+    days = []
     for path in files:
         try:
             lines = read_lines(path)
         except OSError as error:
             unread.append(f"{path.name} ({error.strerror or error})")
             continue
+        days.append(events_day(path))
         for line in lines:
             try:
                 arrival = json.loads(line)
@@ -3923,9 +3932,11 @@ def read_events(root, closed=None):
                 if heard is None or when > heard[0]:
                     addresses[sender] = (when, received)
             for record in log_records(arrival.get("logs")):
-                attributes = event_attributes(record)
+                attributes = (event_attributes(record)
+                              if isinstance(record, dict) else {})
                 session = attributes.get("session.id")
                 if not isinstance(session, str) or not session:
+                    sessionless += 1
                     continue
                 seen = sessions.setdefault(session, {
                     "owed": [], "may_owe": {}, "witnessed": set(),
@@ -3956,8 +3967,8 @@ def read_events(root, closed=None):
     return {"sessions": sessions,
             "addresses": {sender: received
                           for sender, (_, received) in addresses.items()},
-            "days": [events_day(path) for path in files],
-            "unparsed": unparsed, "unread": unread}
+            "days": days, "unparsed": unparsed,
+            "sessionless": sessionless, "unread": unread}
 
 
 def missing_numbers(sequences):
@@ -4015,12 +4026,16 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             "files": len(days), "oldest": oldest,
             "newest": max(days) if days else None,
             "unparsed": events["unparsed"],
+            "sessionless": events["sessionless"],
             "words": (f"the harness's events as the receiver kept them, "
                       f"identity removed: {len(days)} file(s)"
                       + (f" from {oldest} to {max(days)}" if days else "")
                       + (f"; {events['unparsed']} line(s) not in the "
                          "line shape skipped and counted"
                          if events["unparsed"] else "")
+                      + (f"; {events['sessionless']} log record(s) naming "
+                         "no session skipped and counted"
+                         if events["sessionless"] else "")
                       + ". The harness's word, like the transcript; what "
                       "differs is that nothing on the agent's machine "
                       "reaches a line once it landed (ADR-0041)")},
@@ -4034,7 +4049,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
     if events["unread"]:
         said.append(f"{len(events['unread'])} events file(s) cannot be "
                     f"read: {'; '.join(events['unread'])} — nothing of them "
-                    "is counted")
+                    "is counted, their day included: the second record's "
+                    "memory begins at the oldest file that was read")
     unjudged = []
     named = {session: family for (_, session), family in families.items()}
     for session in sorted(set(named) | set(events["sessions"])):
@@ -5595,24 +5611,24 @@ def mentions(entries, needle):
     return False
 
 
-def universe(root, store):
+def universe(root, store, receiver=False):
     """(repo, session, seq, log) for every chain in the serving
-    universe: the store's drawers, or a legacy folder of repos under an
-    explicit --root (ADR-0011/0013). A folder it cannot list is raised
-    (`listed`), and the page's view refuses by name."""
-    if store:
-        found = chains_listed(root, "*/receipts-*.jsonl")
-        return [(*store_identity(log), log) for log in found]
-    return [(*chain_identity(root, log), log) for log in find_chains(root)]
+    universe, the census's own: the store's drawers, a receiver's copies
+    (ADR-0041), or a legacy folder of repos under an explicit --root
+    (ADR-0011/0013), asked of the Look so the views and the census never
+    disagree on what a universe holds (#487). A folder it cannot list is
+    raised (`listed`), and the page's view refuses by name."""
+    look = Look(root, store=store, receiver=receiver)
+    return [(*look.identity(log), log) for log in look.chains()]
 
 
 def recall_root(root, repo=None, since=None, until=None, path=None,
-                store=False):
+                store=False, receiver=False):
     """The timeline: one story per session, sibling chains folded in
     (ADR-0004 — one session, one story), newest first. Dates compare as
     ISO prefixes; a session is in range when its span overlaps."""
     stories = {}
-    for repo_name, session, _, log in universe(root, store):
+    for repo_name, session, _, log in universe(root, store, receiver):
         if repo and repo_name != repo:
             continue
         entries = read_entries(log)
@@ -5697,7 +5713,7 @@ SHAPE_RUNGS = (1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200,
 SHAPE_BARS = 60
 
 
-def session_shape(root, repo, session, store=False):
+def session_shape(root, repo, session, store=False, receiver=False):
     """One session's receipts bucketed across its own span, first
     receipt to last, gaps and all: a session that went quiet for a day
     draws mostly empty, and that emptiness is the finding (ADR-0018's
@@ -5705,7 +5721,7 @@ def session_shape(root, repo, session, store=False):
     Testimony, owning no verdicts; the owed tail drawn over it is the
     completeness watch's."""
     stamps = []
-    for repo_name, name, _, log in universe(root, store):
+    for repo_name, name, _, log in universe(root, store, receiver):
         if repo_name != repo or name != session:
             continue
         for entry in read_entries(log):
@@ -5760,7 +5776,7 @@ def panel_file_key(path):
     return path
 
 
-def activity_root(root, store=False, days=ACTIVITY_DAYS):
+def activity_root(root, store=False, days=ACTIVITY_DAYS, receiver=False):
     """Receipts counted into UTC hour buckets, per repo, plus what the
     writer reached for and what it touched: one walk for the heat map,
     the sparklines, the histogram and files touched, so all four share
@@ -5773,7 +5789,7 @@ def activity_root(root, store=False, days=ACTIVITY_DAYS):
     counts = {}
     tools = {}
     files = {}
-    for repo_name, _, _, log in universe(root, store):
+    for repo_name, _, _, log in universe(root, store, receiver):
         drawer = counts.setdefault(repo_name, {})
         for entry in read_entries(log):
             # The genesis is administrative — it records that a chain
@@ -5864,7 +5880,7 @@ def walk_chain(root, asked):
 SEARCH_CAP = 500  # hits returned; `matched` still counts every one
 
 
-def search_root(root, query, store=False):
+def search_root(root, query, store=False, receiver=False):
     """Free-text search over action lines, machine-wide. Finds what was
     *written* — the writer's word, testimony like all of recall — and
     hands back the context the timeline links on. Newest first; an empty
@@ -5872,7 +5888,7 @@ def search_root(root, query, store=False):
     needle = (query or "").lower()
     hits = []
     if needle:
-        for repo_name, session, _, log in universe(root, store):
+        for repo_name, session, _, log in universe(root, store, receiver):
             for entry in read_entries(log):
                 action = str(entry.get("action", ""))
                 if needle in action.lower():
@@ -8941,12 +8957,14 @@ class Face(BaseHTTPRequestHandler):
                                  since=asked.get("from") or None,
                                  until=asked.get("to") or None,
                                  path=asked.get("path") or None,
-                                 store=self.server.store)
+                                 store=self.server.store,
+                                 receiver=self.server.receiver)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/api/activity":
             report = activity_root(self.server.root,
-                                   store=self.server.store)
+                                   store=self.server.store,
+                                   receiver=self.server.receiver)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/api/views":
@@ -8957,7 +8975,8 @@ class Face(BaseHTTPRequestHandler):
                      for key, values in parse_qs(url.query).items()}
             report = session_shape(self.server.root, asked.get("repo", ""),
                                    asked.get("session", ""),
-                                   store=self.server.store)
+                                   store=self.server.store,
+                                   receiver=self.server.receiver)
             if report is None:
                 self.send_error(404)
                 return
@@ -8976,7 +8995,8 @@ class Face(BaseHTTPRequestHandler):
             asked = {key: values[0]
                      for key, values in parse_qs(url.query).items()}
             report = search_root(self.server.root, asked.get("q"),
-                                 store=self.server.store)
+                                 store=self.server.store,
+                                 receiver=self.server.receiver)
             self.reply(json.dumps(report).encode("utf-8"),
                        "application/json")
         elif url.path == "/checklist":
