@@ -3905,7 +3905,7 @@ def read_events(root, closed=None):
     unparsed = 0
     sessionless = 0
     unread = []
-    days = []
+    days = []  # of the files read; `listed` counts them all
     for path in files:
         try:
             lines = read_lines(path)
@@ -3967,7 +3967,7 @@ def read_events(root, closed=None):
     return {"sessions": sessions,
             "addresses": {sender: received
                           for sender, (_, received) in addresses.items()},
-            "days": days, "unparsed": unparsed,
+            "days": days, "listed": len(files), "unparsed": unparsed,
             "sessionless": sessionless, "unread": unread}
 
 
@@ -4041,16 +4041,29 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
                       "reaches a line once it landed (ADR-0041)")},
     }
     said = []
-    if not days:
+    # Asked of the listing, not of `days`: a folder whose every events
+    # file is unreadable holds files, and must not read as one no
+    # harness has sent to (#487).
+    if not events["listed"]:
         said.append("the receiver holds no events file: no harness has "
                     "sent its events here yet, so every session with "
                     "receipts reads SECOND-RECORD-ABSENT until one does "
                     "(ADR-0041)")
+    elif not days:
+        said.append("no events file the receiver holds could be read, so "
+                    "every session with receipts reads SECOND-RECORD-ABSENT "
+                    "until one can be (ADR-0041)")
     if events["unread"]:
         said.append(f"{len(events['unread'])} events file(s) cannot be "
                     f"read: {'; '.join(events['unread'])} — nothing of them "
-                    "is counted, their day included: the second record's "
-                    "memory begins at the oldest file that was read")
+                    "is counted, their day included"
+                    + (": the second record's memory begins at the oldest "
+                       "file that was read" if days else ""))
+    # With a file unread, a session older than the oldest file read may
+    # have its second record in that file: "never kept here" would be
+    # a claim nobody checked (#487).
+    kept = ("is in no events file that was read" if events["unread"]
+            else "was never kept here")
     unjudged = []
     named = {session: family for (_, session), family in families.items()}
     for session in sorted(set(named) | set(events["sessions"])):
@@ -4089,9 +4102,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             row["state"] = "BEFORE-MEMORY"
             row["words"] = (f"this chain copy's newest entry predates "
                             f"{oldest}, the day of the oldest events file "
-                            "the receiver holds, so its second record was "
-                            "never kept here: counted, not judged, and not "
-                            "called absent (ADR-0041).")
+                            f"read, so its second record {kept}: counted, "
+                            "not judged, and not called absent (ADR-0041).")
             unjudged.append(row)
             continue
         quiet_for = ((now - heard).total_seconds()
@@ -4135,8 +4147,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             "since": oldest,
             "words": (f"{len(unjudged)} session(s) whose chain copy "
                       f"predates {oldest}, the day of the oldest events "
-                      "file the receiver holds, so their second record was "
-                      "never kept here: counted, not judged, and none is "
+                      f"file read, so their second record {kept}: counted, "
+                      "not judged, and none is "
                       "called absent (ADR-0041; ADR-0029's rule for "
                       "sessions older than the memory). `scan "
                       "--before-memory` lists them."),

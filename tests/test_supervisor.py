@@ -5788,6 +5788,7 @@ class ReceiverReadingTest(unittest.TestCase):
         chain_copy(self.data, FIXTURE_SESSION)
 
         report = self.report()
+        listed = self.report("--before-memory")
 
         watch = report["completeness"]
         self.assertEqual((watch["second_record"]["files"],
@@ -5797,8 +5798,39 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertNotIn("between-session-0000", self.rows(report))
         self.assertEqual(watch["before_memory"]["count"], 1)
         self.assertIn("events-2026-10-01.jsonl", watch["note"])
-        self.assertIn("nothing of them is counted, their day included",
+        self.assertIn("nothing of them is counted, their day included: the "
+                      "second record's memory begins at the oldest file "
+                      "that was read", watch["note"])
+        self.assertNotIn("holds no events file", watch["note"])
+        # The unread file may hold the older session's events, so the
+        # words claim only what was read, never "never kept here".
+        block = listed["completeness"]["before_memory"]
+        (row,) = block["sessions"]
+        for words in (row["words"], block["words"]):
+            self.assertIn(f"predates {FIXTURE_DAY}, the day of the oldest "
+                          "events file read", words)
+            self.assertIn("is in no events file that was read", words)
+            self.assertNotIn("never kept here", words)
+
+    def test_a_folder_whose_every_events_file_is_unreadable_says_so(self):
+        # Review of #549, case A: files are there, none could be read.
+        # That is not a folder no harness has sent to.
+        data = receiver_folder(self.base / "closed", events=False)
+        (data / f"events-{FIXTURE_DAY}.jsonl").mkdir()
+        chain_copy(data, FIXTURE_SESSION)
+
+        report = self.report(data=data)
+
+        watch = report["completeness"]
+        self.assertIn("no events file the receiver holds could be read",
                       watch["note"])
+        self.assertIn(f"events-{FIXTURE_DAY}.jsonl", watch["note"])
+        self.assertNotIn("holds no events file", watch["note"])
+        self.assertNotIn("no harness has sent", watch["note"])
+        self.assertNotIn("memory begins", watch["note"])
+        self.assertEqual(watch["second_record"]["files"], 0)
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "SECOND-RECORD-ABSENT")
 
     def test_a_folder_with_no_events_file_says_so(self):
         # #487 item 12: no harness has sent here yet.
@@ -5827,9 +5859,9 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(row["state"], "BEFORE-MEMORY")
         self.assertEqual(row["words"], (
             f"this chain copy's newest entry predates {FIXTURE_DAY}, the "
-            "day of the oldest events file the receiver holds, so its "
-            "second record was never kept here: counted, not judged, and "
-            "not called absent (ADR-0041)."))
+            "day of the oldest events file read, so its second record was "
+            "never kept here: counted, not judged, and not called absent "
+            "(ADR-0041)."))
 
     def test_an_int_value_int_cannot_read_ends_nothing(self):
         # str.isdigit() passes a superscript two and a string past the

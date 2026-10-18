@@ -607,7 +607,8 @@ class Door(BaseHTTPRequestHandler):
                                     "no Content-Encoding")
             return
         # The chain's name is judged before the body is read: a batch
-        # for a file this receiver would not write is not worth reading.
+        # for a file this receiver would not write is only drained
+        # (`refuse_unread`), never parsed or kept.
         name = None
         if kind == CHAIN_TYPE:
             name = self.headers.get(CHAIN_HEADER) or ""

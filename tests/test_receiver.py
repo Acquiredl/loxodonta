@@ -1232,7 +1232,9 @@ class TlsTest(ReceiverFixture):
         started = time.monotonic()
         with self.trusting_opener().open(request, timeout=60) as response:
             self.assertEqual(response.status, 200)
-        self.assertLess(time.monotonic() - started, 15)
+        # Under the 30-second wait a door that held for the stranger
+        # would take, with room for a stall on a loaded runner.
+        self.assertLess(time.monotonic() - started, 25)
         self.assertIn("heads.jsonl", self.stored())
 
     def test_an_idle_connection_is_dropped_at_the_timeout(self):
@@ -1241,10 +1243,13 @@ class TlsTest(ReceiverFixture):
         # sender shares this receiver, so nothing else rides on the
         # short timer. A reset is the receiver's close too. The test's
         # wait sits between the 5-second timeout and the 60-second
-        # deadline, so only the timeout can end it in time.
+        # deadline, so only the timeout can end it in time; and the
+        # close must not come before the timeout, or a door that drops
+        # every connection at once would pass.
         proc = self.start("--cert", str(self.cert), "--key", str(self.key),
                           env={"RECEIVER_TIMEOUT_SECONDS": "5"})
         parts = urllib.parse.urlsplit(proc.url)
+        started = time.monotonic()
         idle = socket.create_connection((parts.hostname, parts.port),
                                         timeout=30)
         self.addCleanup(idle.close)
@@ -1254,6 +1259,7 @@ class TlsTest(ReceiverFixture):
         except (ConnectionResetError, ConnectionAbortedError):
             heard = b""
         self.assertEqual(heard, b"")
+        self.assertGreaterEqual(time.monotonic() - started, 4)
 
 
 if __name__ == "__main__":
