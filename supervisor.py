@@ -180,8 +180,8 @@ def find_chains(root, closed=None):
     pre-store history has three shapes: the root itself being a repo,
     each sibling repo's receipts/, and chains stranded in worktrees by
     sessions that ran before the hook learned to log to the main repo.
-    The default census is not this one: it lists the store's drawers,
-    inline in scan_root (ADR-0011). Sidecars are files about a chain,
+    The default census is not this one: it lists the store's drawers
+    (`Look.chains`, ADR-0011). Sidecars are files about a chain,
     not chains. A folder it cannot list goes on `closed`, or is raised
     (`listed`)."""
     patterns = ("receipts/*.jsonl",
@@ -4215,6 +4215,97 @@ def watch_consumption(families, now):
 
 
 # --- Scan ---------------------------------------------------------------------
+# One look runs in phases, each a function below in the order the look
+# runs them, and `scan_root` folds what they find into the report (#535):
+# the memory, the census, each chain's reading, the rows the census did
+# not meet, the memory written, the specialists, the day book, the notes.
+
+
+class Look:
+    """One look at one universe: the settings `scan_root` takes, and the
+    answers that differ by universe, the store (ADR-0011), a receiver's
+    data directory (ADR-0041) or a legacy folder of repos. What it buys
+    (#535): the universe is asked about here, once, not at every phase."""
+
+    def __init__(self, root, witness=WITNESS_ROOT, anchor_every=None,
+                 calendars=(), publish_every=None, publish_url=None,
+                 publish_chain=None, store=False, tick=True,
+                 show_before_memory=False, authority=None, remember=True,
+                 receiver=False):
+        self.root, self.witness = root, witness
+        self.anchor_every, self.calendars = anchor_every, calendars
+        self.publish_every, self.publish_url = publish_every, publish_url
+        self.publish_chain, self.authority = publish_chain, authority
+        self.store, self.receiver = store, receiver
+        self.tick, self.remember = tick, remember
+        self.show_before_memory = show_before_memory
+        self.baseline_path, self.daybook = memory_paths(root, store, receiver)
+
+    def chains(self, closed=None):
+        """Every chain the census counts: the store's drawers, a
+        receiver's copies flat in its folder, or a legacy root's three
+        shapes (`find_chains`). The receiver files every copy flat, named
+        by the sender under the rule of docs/RECEIVER.md section 4;
+        `token` and `heads.jsonl` are not chains, and the memory's own
+        subfolder holds none. A folder it cannot list goes on `closed`,
+        or with no list given is raised (`listed`): a memory started
+        without it would forget it."""
+        if self.store:
+            return chains_listed(self.root, "*/receipts-*.jsonl", closed)
+        if self.receiver:
+            return chains_listed(self.root, "receipts-*.jsonl", closed)
+        return find_chains(self.root, closed)
+
+    def identity(self, log):
+        """(repo, session, seq) for a chain under this universe's root."""
+        if self.store:
+            return store_identity(log)
+        if self.receiver:
+            return receiver_identity(self.root, log)
+        return chain_identity(self.root, log)
+
+    def keeping(self, blind):
+        """Whether the anchor and publish keepers take their turn. Not
+        on a reading (`tick=False`): a reader that copies a chain
+        (package) appends nothing to it and sends nothing off the
+        machine. Not on a blind look: their throttle is in the file it
+        could not read, and without it they would ask on every tick. Not
+        over a receiver's folder: its copies are the record, and nothing
+        is sent anywhere from the far end. The tail keeper keeps no
+        throttle in the memory, so a blind look does not stop it."""
+        return self.tick and not blind and not self.receiver
+
+
+def open_memory(look, now):
+    """The memory a look starts from, `read_baseline`'s dict, with the
+    calibration and session-end epochs as this look observes them and
+    `judging`, the coverage sessions are judged by."""
+    if look.store:
+        os.makedirs(look.root.parent, exist_ok=True)
+    if look.receiver:
+        try:
+            os.makedirs(look.baseline_path.parent, exist_ok=True)
+        except OSError:
+            pass  # the baseline write names the refusal, exit 5
+    memory = read_baseline(look.baseline_path, look.daybook)
+    if look.receiver:
+        # Coverage at the receiver is every tool (ADR-0041): no witness
+        # settings, no marker, nothing to calibrate or observe.
+        memory["judging"] = memory["calibration"]
+        return memory
+    # Observe the wired matchers before anything is judged, so this
+    # look's own judgments use a memory that includes this look.
+    memory["calibration"] = calibrate(memory["calibration"], look.witness,
+                                      now)
+    # ADR-0030: the recorder's markers date coverage from when it was
+    # wired rather than from this look. Merged for judging, never
+    # remembered: `calibration` alone goes back to the baseline.
+    memory["judging"] = merge_coverage(memory["calibration"],
+                                       coverage_epochs())
+    memory["sessionend"] = sessionend_epoch(memory["sessionend"],
+                                            look.witness, now)
+    return memory
+
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
               publish_every=None, publish_url=None, publish_chain=None,
@@ -4238,38 +4329,21 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     clock (#271): a machine talking to itself is not somebody looking
     (ADR-0014), and its rows would silence the lapse line; the exception
     for what a turn finds new is at the call below."""
+    look = Look(root, witness=witness, anchor_every=anchor_every,
+                calendars=calendars, publish_every=publish_every,
+                publish_url=publish_url, publish_chain=publish_chain,
+                store=store, tick=tick,
+                show_before_memory=show_before_memory, authority=authority,
+                remember=remember, receiver=receiver)
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    if store:
-        os.makedirs(root.parent, exist_ok=True)
-    baseline_path, daybook = memory_paths(root, store, receiver)
-    if receiver:
-        try:
-            os.makedirs(baseline_path.parent, exist_ok=True)
-        except OSError:
-            pass  # the baseline write below names the refusal, exit 5
-    memory = read_baseline(baseline_path, daybook)
+    baseline_path, daybook = look.baseline_path, look.daybook
+    memory = open_memory(look, now)
     remembered, keeper = memory["chains"], memory["keeper"]
     calibration, sessionend = memory["calibration"], memory["sessionend"]
+    judging = memory["judging"]
     note, blind = memory["note"], memory["blind"]
-    # A blind look runs neither keeper: their throttle is in the file it
-    # could not read, and without it they would ask on every tick. A
-    # look over a receiver's folder runs none either: its copies are the
-    # record, and nothing is sent anywhere from the far end.
-    keeping = tick and not blind and not receiver
-    if receiver:
-        # Coverage at the receiver is every tool (ADR-0041): no witness
-        # settings, no marker, nothing to calibrate or observe.
-        judging = calibration
-    else:
-        # Observe the wired matchers before anything is judged, so this
-        # tick's own judgments use a memory that includes this tick's look.
-        calibration = calibrate(calibration, witness, now)
-        # ADR-0030: the recorder's markers date coverage from when it was
-        # wired rather than from this tick's look. Merged for judging,
-        # never remembered — `calibration` alone goes back to the baseline.
-        judging = merge_coverage(calibration, coverage_epochs())
-        sessionend = sessionend_epoch(sessionend, witness, now)
+    keeping = look.keeping(blind)
     events = []
     fresh = 0  # alarms this look found, or whose change moved
     awakened = {}
@@ -4282,8 +4356,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # exit 5, never read as empty (#431). Closing a drawer is the writer's
     # lever to hide chains.
     closed = []
+    found = look.chains(closed)
     if store:
-        found = chains_listed(root, "*/receipts-*.jsonl", closed)
         # A drawer whose project record is not a file is labelled by its
         # own slug and claimed by no repository's worktrees: named, like
         # every other non-file the scan reads past (#410).
@@ -4294,23 +4368,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                     f"{drawer.name}/project.json cannot be read as a "
                     f"project record: {problem} — filed under the "
                     "drawer's own name, as no repository's history")
-    elif receiver:
-        # The receiver files every chain copy flat, named by the sender
-        # under the rule of docs/RECEIVER.md section 4; `token` and
-        # `heads.jsonl` are not chains, and the memory's own subfolder
-        # holds none.
-        found = chains_listed(root, "receipts-*.jsonl", closed)
-    else:
-        found = find_chains(root, closed)
     keys = remembered_names(root, found, remembered)
-
-    def identity(log):
-        if store:
-            return store_identity(log)
-        if receiver:
-            return receiver_identity(root, log)
-        return chain_identity(root, log)
-
+    identity = look.identity
     census = sorted((identity(root / keys[log]), log) for log in found)
     repos = {}
     worst = 0
@@ -5040,19 +5099,6 @@ def keep_memory(path, seen, data, what):
     return None
 
 
-def census_logs(root, store, receiver=False):
-    """Every chain the scan's census counts: the store's drawers, a
-    receiver's copies flat in its folder, or a legacy root's three
-    shapes (`find_chains`). The twin of the census inline in scan_root;
-    the two must agree. A folder it cannot list is raised (`listed`): a
-    memory started without it would forget it."""
-    if store:
-        return chains_listed(root, "*/receipts-*.jsonl")
-    if receiver:
-        return chains_listed(root, "receipts-*.jsonl")
-    return find_chains(root)
-
-
 def cmd_acknowledge(args):
     root, store, receiver = chosen_universe(args)
     if receiver and receiver_missing(root) is not None:
@@ -5184,7 +5230,7 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
                        f"{problem}; remove it by hand, then run this "
                        "again — nothing is ever written over it")
     heads = {}
-    for log in census_logs(root, store, receiver):
+    for log in Look(root, store=store, receiver=receiver).chains():
         newest = newest_head(read_entries(log))
         if newest:
             heads[log.relative_to(root).as_posix()] = {"n": newest[0],
