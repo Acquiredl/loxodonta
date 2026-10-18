@@ -4757,7 +4757,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     reads the day book instead of writing it, for `serve`'s keeper
     clock (#271): a machine talking to itself is not somebody looking
     (ADR-0014), and its rows would silence the lapse line; the exception
-    for what a turn finds new is at the call below."""
+    for what a turn finds new is `fold_day`'s."""
     look = Look(root, witness=witness, anchor_every=anchor_every,
                 calendars=calendars, publish_every=publish_every,
                 publish_url=publish_url, publish_chain=publish_chain,
