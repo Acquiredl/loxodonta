@@ -853,17 +853,41 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         self.assertEqual(last["matchers"], [])
         self.assertGreater(last["since"], ago(3600))
 
+    def wire(self, settings, *matchers, written=None):
+        """A hooks file at `settings` wiring the recorder on `matchers`,
+        dated `written` when given."""
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": matcher, "hooks": [
+                {"type": "command", "command": "python loxodonta.py hook"}]}
+            for matcher in matchers]}}), encoding="utf-8")
+        if written is not None:
+            os.utime(settings, (written, written))
+
+    def test_a_session_judged_clean_stays_clean_after_a_later_widening(self):
+        # #548 review: the last epoch is not the last look, so a widening
+        # dated by the operator's older write re-judged a session a look
+        # had already found clean (ADR-0016 ruling 2).
+        prime_memory(self.root, matcher="Bash")
+        self.wire(self.operator_file, "Bash", written=time.time() - 5 * 86400)
+        write_transcript(self.witness, self.root / "beta", "sess-read",
+                         event_times=[ago(3 * 86400), ago(3 * 86400 - 60)],
+                         tool="Read")
+        (first,) = json.loads(self.scan().stdout)["completeness"]["sessions"]
+        self.assertEqual(first["state"], "ENDED-CLEAN")
+
+        self.wire(self.managed_file, "*")
+        result = self.scan()
+
+        (second,) = json.loads(result.stdout)["completeness"]["sessions"]
+        self.assertEqual(second["state"], "ENDED-CLEAN", result.stdout)
+
     def operators_change_then_another_tools_file(self, *matchers):
         """The operator's file wiring `matchers`, written two hours ago,
         and another tool's file written in the managed folder now, with
         no managed file of the recorder's: the folder's date then
         stands in for that file's and is later than the change."""
-        self.operator_file.write_text(json.dumps({"hooks": {"PostToolUse": [
-            {"matcher": matcher, "hooks": [
-                {"type": "command", "command": "python loxodonta.py hook"}]}
-            for matcher in matchers]}}), encoding="utf-8")
-        changed = time.time() - 2 * 3600
-        os.utime(self.operator_file, (changed, changed))
+        self.wire(self.operator_file, *matchers, written=time.time() - 7200)
         self.managed_file.parent.mkdir(parents=True)
         (self.managed_file.parent / "another-tool.json").write_text(
             '{"env": {}}', encoding="utf-8")
@@ -872,7 +896,7 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         self.assertEqual(last["matchers"], list(matchers))
         return last["since"]
 
-    def test_a_widening_is_dated_by_the_first_write_since(self):
+    def test_a_widening_is_dated_by_the_files_never_the_folder(self):
         # #465: the newly wired tools are owed from the operator's
         # write, not from whenever another tool touched the folder.
         prime_memory(self.root, matcher="Bash")
@@ -881,9 +905,9 @@ class SupervisorReadsBothHomesTest(ManagedBase):
 
         self.assertLess(since, ago(3600))
 
-    def test_a_narrowing_is_dated_by_the_last_write_since(self):
-        # The louder reading either way (#465): the old, wider matchers
-        # stay owed for as long as the dates allow.
+    def test_a_narrowing_is_still_dated_by_the_folder(self):
+        # A deleted managed file can only take matchers away, so the
+        # folder's date still stands in for one (#465).
         since = self.operators_change_then_another_tools_file("Bash")
 
         self.assertGreater(since, ago(3600))

@@ -48,7 +48,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A managed file another program holds open on Windows is named as that, with the way out, instead of sending the reader for an administrator's shell that would not help (#465).
 - A harness settings file that is not JSON, nests too deep or holds no object is named in the scan's `settings_note`, in either home, instead of reading silently as no hook wired (#465).
 - `install-hook --managed` says to restart a running `supervisor serve` beside open sessions, since `serve` reads what is wired once, at its start (#465).
-- A coverage change is dated where more calls are owed: one that only adds matchers by the first write since the last observation, so another tool's file in the managed folder no longer dates it later (#465).
+- The managed folder's date stands in for a deleted managed file only when coverage narrows, so another tool's file in that folder no longer dates a widening later than the operator's change (#465).
 - The day book's note says a row that is not an object is no row of counts at all, instead of saying a count in it is not a number (#448).
 - `supervisor adopt` never moves one legacy chain over another bound for the same name in a drawer, case and Unicode form aside: every chain bound for that name is refused by name and left, in the dry run too (#447).
 - `supervisor adopt --dry-run` names the `.unlisted` marker it would copy into a drawer, or leave behind, and the real run says when a sidecar's move failed part way and left a copy (#448).

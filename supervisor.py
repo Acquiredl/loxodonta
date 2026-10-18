@@ -2788,10 +2788,9 @@ def calibrate(remembered, witness, now):
     claims nothing earlier (BEFORE-MEMORY, ADR-0029); a change is dated
     by the settings file's mtime, clamped between the last observation
     and now, since the harness does not log its own config changes. With
-    two homes (ADR-0040) it is the newer mtime of the two, or for a
-    change that only adds matchers the older one written since the last
-    observation (#465), and where there is no managed file its folder
-    stands in for it:
+    two homes (ADR-0040) it is the newer mtime of the two, and where
+    there is no managed file and the change takes a matcher away, its
+    folder stands in for it (never for a change that only adds, #465):
     `uninstall-hook --managed` deletes the file, and the folder's mtime
     is then the only thing dating that. Without it the end of coverage
     would be dated by the operator's file, last written when the hook
@@ -2808,10 +2807,17 @@ def calibrate(remembered, witness, now):
         return remembered
     if not remembered:
         return [coverage_epoch(stamp, current, failures)]
-    floor = remembered[-1]["since"] or ""
+    last = remembered[-1]
+    floor = last["since"] or ""
+    # A deleted managed file can only take matchers away, so its folder
+    # stands in only for a change that does: other tools' files move
+    # the folder's date too, and would date a widening later (#465).
+    widened = (all(matcher in current for matcher in last["matchers"])
+               and all(matcher in failures for matcher in failures_of(last)))
     mine, managed = wired_files(witness)
     written = []
-    for places in ((mine,), (managed, managed.parent)):
+    stand_ins = (managed,) if widened else (managed, managed.parent)
+    for places in ((mine,), stand_ins):
         for place in places:
             try:
                 written.append(datetime.fromtimestamp(
@@ -2820,16 +2826,7 @@ def calibrate(remembered, witness, now):
             except OSError:
                 continue
             break
-    # Which write made the change is not known, and other tools' files
-    # move the folder's date (#465), so the change is dated where more
-    # calls are owed: a widening by the first write since the last
-    # observation, anything that takes a matcher away by the last.
-    last = remembered[-1]
-    widened = (all(matcher in current for matcher in last["matchers"])
-               and all(matcher in failures for matcher in failures_of(last)))
-    since = [when for when in written if when > floor]
-    changed = (min(since) if widened and since
-               else max(written) if written else stamp)
+    changed = max(written) if written else stamp
     return remembered + [coverage_epoch(min(max(changed, floor), stamp),
                                         current, failures)]
 
@@ -11913,7 +11910,9 @@ class VersionAction(argparse.Action):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
 EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
-EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no package
+EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no
+                   # package, no baseline for calibrate or acknowledge, no
+                   # export; and what the keeper reads from a recorder verb
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
