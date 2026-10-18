@@ -5161,6 +5161,17 @@ class ClosedFolderTest(unittest.TestCase):
         self.assertEqual([c["folder"] for c in report["closed"]],
                          [later.as_posix()])
 
+    def test_a_drawer_looping_on_itself_is_named_itself(self):
+        # Only a refused permission names the folder above (#448 item
+        # 8's review): a link that loops is the drawer's own failure.
+        loop = self.store / "receipts" / "loop-00000000"
+        os.symlink(loop.name, loop)
+
+        result = self.scan()
+
+        self.answered(result, 5)
+        self.closed_named(json.loads(result.stdout), loop)
+
     def test_a_store_scan_names_a_closed_receipts_folder(self):
         self.close(self.store / "receipts")
 

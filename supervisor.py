@@ -153,16 +153,18 @@ def closed_at(here):
     """The folder a refused listing of `here` names: `here` when it can
     be looked at, else the nearest folder above it that can, which is
     the one refusing the lookup; so a closed store home is named, never
-    the receipts folder inside it (#448)."""
+    the receipts folder inside it (#448). Only a refused permission
+    climbs: any other failure, a link looping on itself, a name too
+    long, is `here`'s own and names `here`."""
     folder = Path(here)
     while folder.parent != folder:
         try:
             os.stat(folder)
             return folder
-        except FileNotFoundError:
-            return Path(here)
-        except OSError:
+        except PermissionError:
             folder = folder.parent
+        except OSError:
+            return Path(here)
     return folder
 
 
@@ -9079,8 +9081,9 @@ class Watchtower(ThreadingHTTPServer):
 
     def fresh_metrics(self):
         """The metrics route (ADR-0033): the same held scan the status
-        endpoint serves, rendered by one pure function — never a walk
-        of the store on the scrape's own account."""
+        endpoint serves, rendered by one pure function. A scrape walks
+        the store only when a request would: the hold has lapsed, or
+        the scan held is a keeper turn's (`fresh_scan`)."""
         body, age = self.fresh_scan()
         return metrics_text(json.loads(body.decode("utf-8")), age)
 
@@ -10511,10 +10514,10 @@ function renderFortnight(report) {
     cell.appendChild(el("span", "mark", MARK[rung]));
     cell.appendChild(el("span", "num", row.day.slice(8)));
     // A day can carry opens and still no claim: the page was opened
-    // inside the few seconds a keeper's reading is held for, so the
-    // poll behind it was answered from that reading and no row was
-    // written (#271). Say that, rather than "nobody looked" beside a
-    // count of the times somebody did.
+    // and closed before its first scan finished, or the row is older
+    // than the fix for a page answered from a keeper's reading (#538).
+    // Say that, rather than "nobody looked" beside a count of the
+    // times somebody did.
     cell.title = row.day + " — " + (rung === "unwatched" && row.looks
       ? "opened " + row.looks + " time(s), no reading of the store recorded"
       : DAY_WORDS[rung] +
