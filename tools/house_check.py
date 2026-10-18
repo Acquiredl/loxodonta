@@ -26,7 +26,11 @@ is a failure, 0 otherwise. CI runs the same command.
 `--front-door` runs a separate set of rules instead, about the shape a
 stranger meets rather than the words (issue #298, the section of that
 name below). It takes no paths, judges the whole checkout, and exits 1 on
-any finding. CI does not run it yet.
+any finding. CI runs it too.
+
+`--help` prints both passes and the exit codes. A command line the checker
+does not take, an unknown flag or a path that is not a file, exits 64, the
+number every tool file uses for a usage error (#464).
 """
 
 import io
@@ -780,20 +784,56 @@ def tracked_files():
 
 USAGE = ("usage: house_check.py [PATH ...]\n"
          "       house_check.py --front-door   (takes no paths: it judges "
-         "the whole checkout)")
+         "the whole checkout)\n"
+         "       house_check.py --help")
+
+HELP = USAGE + """
+
+The house checker: the GLOSSARY's vocabulary and the front-door rules,
+enforced. It runs one of two passes.
+
+  house_check.py [PATH ...]   the words: anti-terms, overclaims, em dashes,
+                              the old name and the synonym table. With no
+                              paths, every Markdown file git tracks in the
+                              checkout it is run from, and the tool files;
+                              a path ending in .py is read as code.
+  house_check.py --front-door the shape a stranger meets: the README's
+                              first screen, orphan images, the doc and ADR
+                              indexes, the root files, CHANGELOG bullets.
+
+Each finding prints as file:line: rule: excerpt. Exit 0 means no finding
+failed (warnings may still print), 1 that at least one did, 64 that the
+command line was not one the checker takes."""
+
+# The usage error's number in every tool file (ADR-0026 ruling 7), so no
+# command line the checker refuses reads as a finding (1) or a pass (0).
+EX_USAGE = 64
+
+
+def refuse(why):
+    print(f"house_check.py: {why}\n{USAGE}", file=sys.stderr)
+    return EX_USAGE
 
 
 def main(argv):
     # Findings quote the documents, which carry arrows and curly quotes; a
     # console that cannot show them must still show the finding.
     sys.stdout.reconfigure(errors="backslashreplace")
+    if "--help" in argv or "-h" in argv:
+        print(HELP)
+        return 0
     if "--front-door" in argv:
         if len(argv) != 1:
-            # Exit 2, as argparse does in the three tools, for a command
-            # line that asks for something the checker does not do.
-            print(USAGE, file=sys.stderr)
-            return 2
+            return refuse("--front-door takes no paths")
         return front_door_main()
+    # Every argument is checked before any file is judged, so a typo among
+    # good paths is refused rather than passing as a clean run (#464).
+    for arg in argv:
+        if not Path(arg).is_file():
+            kind = ("not a file" if Path(arg).exists()
+                    else "unknown flag" if arg.startswith("-")
+                    else "no such file")
+            return refuse(f"{kind}: {arg}")
     paths = [Path(p) for p in argv] or tracked_files()
     failures = 0
     for path in paths:
