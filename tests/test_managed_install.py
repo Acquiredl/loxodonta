@@ -439,6 +439,16 @@ class ManagedInstallTest(ManagedBase):
         self.assertEqual(self.ours_in(self.operator_file), [])
         self.assertIn(str(self.operator_file), again.stdout)
 
+    def test_it_says_to_restart_serve_as_well(self):
+        # #465: `serve` reads what is wired once, at its start, so one
+        # started before the hook moved reads it where it was.
+        for flags in ((), ("--profile", "timestamped")):
+            with self.subTest(flags=flags):
+                done = self.install("--managed", *flags)
+
+                self.assertIn("`supervisor serve`",
+                              " ".join(done.stdout.split()))
+
     def test_an_operators_file_it_cannot_read_stops_it_before_it_writes(self):
         self.operator_file.write_text("{not json", encoding="utf-8")
         before = self.everything()
@@ -511,6 +521,23 @@ class ManagedUninstallTest(ManagedBase):
         self.assertNotIn("Traceback", done.stderr)
         self.assertIn(str(self.managed_file), done.stderr)
         self.assertIn("sudo", done.stderr)
+        self.assertEqual(self.everything(), before)
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "a file held open refuses a delete on Windows")
+    def test_a_file_another_program_holds_open_is_named_as_that(self):
+        # #465: Windows answers a file held open with a PermissionError
+        # too, and no administrator's shell lets go of another's hold.
+        self.install("--managed")
+        before = self.everything()
+
+        with open(self.managed_file, "rb"):
+            done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
+
+        self.assertEqual(done.returncode, 73, done.stdout + done.stderr)
+        self.assertIn(str(self.managed_file), done.stderr)
+        self.assertIn("close it, then run this again", done.stderr)
+        self.assertNotIn("administrator", done.stderr)
         self.assertEqual(self.everything(), before)
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
@@ -683,6 +710,44 @@ class AnotherAccountTest(ManagedBase):
         self.assertEqual(self.under_the_home(), before)
         self.assertIn(f"still wired in {self.operator_file}", done.stdout)
 
+    def shared_folder(self, owner):
+        """A folder the account `owner` owns and every account may write
+        into, made through sudo: where the store is not made yet."""
+        shared = self.work / "shared"
+        for command in (["mkdir", str(shared)], ["chmod", "0777", str(shared)],
+                        ["chown", str(owner), str(shared)]):
+            done = subprocess.run(["sudo", "-n", *command],
+                                  capture_output=True, encoding="utf-8",
+                                  timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+        return shared
+
+    def test_a_store_not_made_yet_in_a_folder_root_owns_is_marked(self):
+        # #465: the store this account makes there is its own, and a
+        # folder root owns holds nothing another account planted.
+        shared = self.shared_folder(0)
+        env = {**self.env, "LOXODONTA_HOME": str(shared / "store")}
+
+        done = self.install("--managed", env=env)
+
+        self.assertTrue((shared / "store" / "coverage.json").is_file(),
+                        done.stdout)
+        self.assertNotIn("another account", done.stdout)
+
+    def test_a_store_not_made_yet_in_another_accounts_folder_is_said_so(self):
+        # #465: the store-only branch, which named a store that was not
+        # there as another account's.
+        shared = self.shared_folder(65534)
+        env = {**self.env, "LOXODONTA_HOME": str(shared / "store")}
+
+        done = self.install("--managed", env=env)
+
+        self.assertFalse(os.path.lexists(shared / "store"))
+        said = " ".join(done.stdout.split())
+        self.assertIn(f"the store at {shared / 'store'} is not made yet", said)
+        self.assertIn(f"{shared} belongs to another account", said)
+        self.assertIn("no coverage marker was written", said)
+
 
 class SupervisorReadsBothHomesTest(ManagedBase):
     """Ruling 7: whatever reads what is wired reads the operator's file
@@ -787,6 +852,46 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         last = report["completeness"]["calibration"]["epochs"][-1]
         self.assertEqual(last["matchers"], [])
         self.assertGreater(last["since"], ago(3600))
+
+    def test_another_tools_file_never_dates_the_operators_change_later(self):
+        # #465: with no managed file its folder's date stands in for it,
+        # and another tool's file written there moves that date.
+        self.operator_file.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "python loxodonta.py hook"}]}]}}),
+            encoding="utf-8")
+        changed = time.time() - 2 * 3600
+        os.utime(self.operator_file, (changed, changed))
+        self.managed_file.parent.mkdir(parents=True)
+        (self.managed_file.parent / "another-tool.json").write_text(
+            '{"env": {}}', encoding="utf-8")
+
+        report = json.loads(self.scan().stdout)
+
+        last = report["completeness"]["calibration"]["epochs"][-1]
+        self.assertEqual(last["matchers"], ["Bash"])
+        self.assertLess(last["since"], ago(3600))
+
+    def test_a_hooks_file_that_is_no_settings_is_named(self):
+        # #465: it reads as no hook wired, and that was all the scan
+        # said, in either home.
+        for content, why in (("{not json", "it is not JSON"),
+                             ("[" * 100000 + "]" * 100000,
+                              "it nests too deep to read"),
+                             ('["hooks"]', "it is not a JSON object")):
+            for settings in (self.operator_file, self.managed_file):
+                with self.subTest(file=settings.name, why=why):
+                    settings.parent.mkdir(parents=True, exist_ok=True)
+                    settings.write_text(content, encoding="utf-8")
+
+                    result = self.scan()
+
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    note = json.loads(result.stdout)["settings_note"]
+                    self.assertIn(f"{settings.as_posix()} cannot be read as "
+                                  f"harness settings: {why}", note)
+                    settings.unlink()
 
     def test_a_folder_where_the_managed_file_belongs_is_named(self):
         # #405's rule for the operator's file, held for the second home.

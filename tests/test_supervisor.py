@@ -1863,6 +1863,24 @@ class DaybookTest(unittest.TestCase):
         kept = json.loads(self.daybook.read_text(encoding="utf-8"))["days"]
         self.assertEqual(kept[self.today()]["worst"], 0)
 
+    def test_a_row_that_is_not_an_object_is_named_as_that(self):
+        # #448: a row that holds no counts at all was said to hold one
+        # that is not a number.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        first = run_scan(self.root, env=self.env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        book = json.loads(self.daybook.read_text(encoding="utf-8"))
+        book["days"][self.today()] = "x"
+        self.daybook.write_text(json.dumps(book), encoding="utf-8")
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        note = json.loads(result.stdout)["history_note"]
+        self.assertIn(f"the row for {self.today()} is not one the book "
+                      "writes, not a row of counts at all", note)
+        self.assertNotIn("not a number", note)
+
 
 class CompletenessTest(unittest.TestCase):
     """The flagship (issue #22): the ratified alarm state machine over
