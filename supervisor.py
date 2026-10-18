@@ -4307,6 +4307,36 @@ def open_memory(look, now):
     return memory
 
 
+def take_census(look, remembered):
+    """The roll call, as (census, unfiled, closed). `census` is every
+    chain counted, as (repo, session, the name the scan keys it by, its
+    path), in display order, repo then session then sibling sequence, so
+    grouping it is plain insertion. `unfiled` is a note for each drawer
+    whose project record is not a file, and `closed` each folder the
+    census could not list, as (folder, why): named, and exit 5, never
+    read as empty (#431), since closing a drawer is the writer's lever
+    to hide chains."""
+    closed = []
+    found = look.chains(closed)
+    unfiled = {}
+    if look.store:
+        # A drawer whose project record is not a file is labelled by its
+        # own slug and claimed by no repository's worktrees: named, like
+        # every other non-file the scan reads past (#410).
+        for drawer in sorted({log.parent for log in found}):
+            problem = file_problem(drawer / "project.json")
+            if problem is not None:
+                unfiled[drawer.name] = (
+                    f"{drawer.name}/project.json cannot be read as a "
+                    f"project record: {problem} — filed under the "
+                    "drawer's own name, as no repository's history")
+    keys = remembered_names(look.root, found, remembered)
+    census = [(repo, session, keys[log], log) for (repo, session, _), log
+              in sorted((look.identity(look.root / keys[log]), log)
+                        for log in found)]
+    return census, unfiled, closed
+
+
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
               publish_every=None, publish_url=None, publish_chain=None,
               store=False, tick=True, show_before_memory=False,
@@ -4344,38 +4374,17 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     judging = memory["judging"]
     note, blind = memory["note"], memory["blind"]
     keeping = look.keeping(blind)
+    identity = look.identity
     events = []
     fresh = 0  # alarms this look found, or whose change moved
     awakened = {}
     heads = {}
     families = {}
-    # Walk in display order — repo, then session, then sibling sequence —
-    # so the grouping below is plain insertion, no re-sorting.
-    unfiled = {}
-    # Each folder the census could not list, as (folder, why): named, and
-    # exit 5, never read as empty (#431). Closing a drawer is the writer's
-    # lever to hide chains.
-    closed = []
-    found = look.chains(closed)
-    if store:
-        # A drawer whose project record is not a file is labelled by its
-        # own slug and claimed by no repository's worktrees: named, like
-        # every other non-file the scan reads past (#410).
-        for drawer in sorted({log.parent for log in found}):
-            problem = file_problem(drawer / "project.json")
-            if problem is not None:
-                unfiled[drawer.name] = (
-                    f"{drawer.name}/project.json cannot be read as a "
-                    f"project record: {problem} — filed under the "
-                    "drawer's own name, as no repository's history")
-    keys = remembered_names(root, found, remembered)
-    identity = look.identity
-    census = sorted((identity(root / keys[log]), log) for log in found)
+    census, unfiled, closed = take_census(look, remembered)
     repos = {}
     worst = 0
     damaged = 0
-    for (repo, session, _), log in census:
-        relpath = keys[log]
+    for repo, session, relpath, log in census:
         entries = read_entries(log)
         # `tick=False` is a reading: both keepers stay quiet, so a reader
         # that copies a chain (package) appends nothing to it and sends
@@ -4738,7 +4747,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
                              "machine"}
     else:
         recorder = recorder_notice(witness)
-        published = published_reading(witness, [log for _, log in census])
+        published = published_reading(witness, [place[3] for place in census])
     report_note = None
     if unlisted:
         pass  # an empty census beside a closed folder is no empty store
