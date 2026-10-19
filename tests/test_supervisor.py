@@ -5973,10 +5973,14 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(second["sessionless"], 0)
         self.assertNotIn("naming no session", second["words"])
 
-    def test_an_events_file_that_cannot_be_read_sets_no_day(self):
-        # #487 item 9: a folder where the oldest day's file belongs is
-        # read for nothing, so its day is not where the memory begins. A
-        # copy dated between it and the fixture's day is before memory.
+    def test_an_unreadable_oldest_file_is_where_the_memory_begins(self):
+        # #559 ruling 3, overruling #487 item 9: the second record's
+        # memory begins at the oldest events file the receiver holds,
+        # readable or not. The oldest day's file cannot be read and
+        # counts for nothing, so a copy dated between it and the
+        # fixture's day has no events read and is SECOND-RECORD-ABSENT,
+        # a listed row with the unread file named beside it, never a
+        # session from before the memory.
         (self.data / "events-2026-10-01.jsonl").mkdir()
         between = int(datetime.datetime(
             2026, 10, 3, tzinfo=datetime.timezone.utc).timestamp())
@@ -5984,49 +5988,116 @@ class ReceiverReadingTest(unittest.TestCase):
         chain_copy(self.data, FIXTURE_SESSION)
 
         report = self.report()
-        listed = self.report("--before-memory")
 
         watch = report["completeness"]
-        self.assertEqual((watch["second_record"]["files"],
-                          watch["second_record"]["oldest"],
-                          watch["second_record"]["newest"]),
-                         (1, FIXTURE_DAY, FIXTURE_DAY))
-        self.assertNotIn("between-session-0000", self.rows(report))
-        self.assertEqual(watch["before_memory"]["count"], 1)
+        second = watch["second_record"]
+        self.assertEqual((second["files"], second["oldest"], second["newest"]),
+                         (2, "2026-10-01", FIXTURE_DAY))
+        self.assertIn(f"2 file(s) from 2026-10-01 to {FIXTURE_DAY}",
+                      second["words"])
+        self.assertNotIn("before_memory", watch)
+        row = self.rows(report)["between-session-0000"]
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertIn("never", row["words"])
+        self.assertIn("events-2026-10-01.jsonl", row["note"])
+        self.assertIn("nothing of them is counted", row["note"])
         self.assertIn("events-2026-10-01.jsonl", watch["note"])
-        self.assertIn("nothing of them is counted, their day included: the "
-                      "second record's memory begins at the oldest file "
-                      "that was read", watch["note"])
+        self.assertIn("nothing of them is counted: a session from their day "
+                      "on with no events read reads SECOND-RECORD-ABSENT",
+                      watch["note"])
+        self.assertNotIn("memory begins", watch["note"])
         self.assertNotIn("holds no events file", watch["note"])
-        # The unread file may hold the older session's events, so the
-        # words claim only what was read, never "never kept here".
-        block = listed["completeness"]["before_memory"]
-        (row,) = block["sessions"]
+        # The note stands beside the row the unread file could have
+        # judged; a row with its events read carries none.
+        fixture = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(fixture["state"], "ENDED-SURPLUS")
+        self.assertNotIn("note", fixture)
+
+    def test_a_copy_dated_on_an_unreadable_middle_day_reads_the_same(self):
+        # #558 item 9, closed by #559 ruling 3: an unreadable file in the
+        # middle of the range reads as the oldest one does. The oldest
+        # file is readable and empty, the middle day's cannot be read,
+        # and a copy dated that day is SECOND-RECORD-ABSENT with the
+        # unread file named beside it.
+        (self.data / "events-2026-10-01.jsonl").write_text(
+            "", encoding="utf-8")
+        (self.data / "events-2026-10-03.jsonl").mkdir()
+        middle = int(datetime.datetime(
+            2026, 10, 3, tzinfo=datetime.timezone.utc).timestamp())
+        chain_copy(self.data, "middle-session-0000", epoch=middle)
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report()
+
+        watch = report["completeness"]
+        second = watch["second_record"]
+        self.assertEqual((second["files"], second["oldest"], second["newest"]),
+                         (3, "2026-10-01", FIXTURE_DAY))
+        self.assertNotIn("before_memory", watch)
+        row = self.rows(report)["middle-session-0000"]
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertIn("events-2026-10-03.jsonl", row["note"])
+        self.assertIn("events-2026-10-03.jsonl", watch["note"])
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_a_copy_older_than_an_unreadable_oldest_file_is_before_memory(self):
+        # #559 ruling 3: the edge is the unread file's day, from its
+        # name. A copy older than it is from before the memory, counted
+        # in the block and not listed, and the block is dated by the
+        # unread file.
+        (self.data / "events-2026-10-01.jsonl").mkdir()
+        old = int(datetime.datetime(2026, 9, 28,
+                                    tzinfo=datetime.timezone.utc).timestamp())
+        chain_copy(self.data, "old-session-0000", epoch=old)
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report()
+        listed = self.report("--before-memory")
+
+        self.assertNotIn("old-session-0000", self.rows(report))
+        block = report["completeness"]["before_memory"]
+        self.assertEqual((block["count"], block["since"]), (1, "2026-10-01"))
+        (row,) = listed["completeness"]["before_memory"]["sessions"]
+        self.assertEqual(row["session"], "old-session-0000")
         for words in (row["words"], block["words"]):
-            self.assertIn(f"predates {FIXTURE_DAY}, the day of the oldest "
-                          "events file read", words)
-            self.assertIn("is in no events file that was read", words)
-            self.assertNotIn("never kept here", words)
+            self.assertIn("predates 2026-10-01, the day of the oldest events "
+                          "file the receiver holds, readable or not", words)
+            self.assertIn("never kept here", words)
 
     def test_a_folder_whose_every_events_file_is_unreadable_says_so(self):
         # Review of #549, case A: files are there, none could be read.
-        # That is not a folder no harness has sent to.
+        # That is not a folder no harness has sent to. Under #559 ruling
+        # 3 the unread file is still the edge: a copy from its day on is
+        # SECOND-RECORD-ABSENT with the file named beside it, and one
+        # older than it is from before the memory.
         data = receiver_folder(self.base / "closed", events=False)
         (data / f"events-{FIXTURE_DAY}.jsonl").mkdir()
         chain_copy(data, FIXTURE_SESSION)
+        old = int(datetime.datetime(2026, 10, 1,
+                                    tzinfo=datetime.timezone.utc).timestamp())
+        chain_copy(data, "old-session-0000", epoch=old)
 
         report = self.report(data=data)
 
         watch = report["completeness"]
-        self.assertIn("no events file the receiver holds could be read",
+        self.assertIn("no events file the receiver holds could be read, so "
+                      f"every session with receipts from {FIXTURE_DAY} on "
+                      "reads SECOND-RECORD-ABSENT until one can be",
                       watch["note"])
         self.assertIn(f"events-{FIXTURE_DAY}.jsonl", watch["note"])
         self.assertNotIn("holds no events file", watch["note"])
         self.assertNotIn("no harness has sent", watch["note"])
         self.assertNotIn("memory begins", watch["note"])
-        self.assertEqual(watch["second_record"]["files"], 0)
-        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
-                         "SECOND-RECORD-ABSENT")
+        second = watch["second_record"]
+        self.assertEqual((second["files"], second["oldest"], second["newest"]),
+                         (1, FIXTURE_DAY, FIXTURE_DAY))
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertIn(f"events-{FIXTURE_DAY}.jsonl", row["note"])
+        self.assertNotIn("old-session-0000", self.rows(report))
+        self.assertEqual((watch["before_memory"]["count"],
+                          watch["before_memory"]["since"]), (1, FIXTURE_DAY))
 
     def test_a_folder_with_no_events_file_says_so(self):
         # #487 item 12: no harness has sent here yet.
@@ -6044,7 +6115,8 @@ class ReceiverReadingTest(unittest.TestCase):
                          "SECOND-RECORD-ABSENT")
 
     def test_a_listed_before_memory_row_says_why_it_is_not_judged(self):
-        # #487 item 12: the row's own words under --before-memory.
+        # #487 item 12: the row's own words under --before-memory, in
+        # #559 ruling 3's phrasing of the edge.
         old = int(datetime.datetime(2026, 10, 1,
                                     tzinfo=datetime.timezone.utc).timestamp())
         chain_copy(self.data, "old-session-0000", epoch=old)
@@ -6055,9 +6127,9 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(row["state"], "BEFORE-MEMORY")
         self.assertEqual(row["words"], (
             f"this chain copy's newest entry predates {FIXTURE_DAY}, the "
-            "day of the oldest events file read, so its second record was "
-            "never kept here: counted, not judged, and not called absent "
-            "(ADR-0041)."))
+            "day of the oldest events file the receiver holds, readable or "
+            "not, so its second record was never kept here: counted, not "
+            "judged, and not called absent (ADR-0041)."))
 
     def test_an_int_value_int_cannot_read_ends_nothing(self):
         # str.isdigit() passes a superscript two and a string past the

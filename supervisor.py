@@ -79,7 +79,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.16.0"
+TOOL_VERSION = "0.17.0"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -3987,22 +3987,22 @@ def read_events(root, closed=None):
     inside a well-shaped line that names no session, or is not an
     object, is counted beside them as `sessionless`, a count of records,
     not lines (#487). A file that cannot be read is named in `unread` and
-    gives nothing, its day included: a day nothing was read from is not
-    where the second record's memory begins (#487)."""
+    gives nothing, but its day, from its name, stands in `days` with
+    every file listed: the second record's memory begins at the oldest
+    file held, readable or not (#559 ruling 3, over #487 item 9)."""
     sessions = {}
     addresses = {}
     files = events_files(root, closed)
     unparsed = 0
     sessionless = 0
     unread = []
-    days = []  # of the files read; `listed` counts them all
+    days = [events_day(path) for path in files]  # held, readable or not
     for path in files:
         try:
             lines = read_lines(path)
         except OSError as error:
             unread.append(f"{path.name} ({error.strerror or error})")
             continue
-        days.append(events_day(path))
         for line in lines:
             try:
                 arrival = json.loads(line)
@@ -4057,7 +4057,7 @@ def read_events(root, closed=None):
     return {"sessions": sessions,
             "addresses": {sender: received
                           for sender, (_, received) in addresses.items()},
-            "days": days, "listed": len(files), "unparsed": unparsed,
+            "days": days, "unparsed": unparsed,
             "sessionless": sessionless, "unread": unread}
 
 
@@ -4094,14 +4094,16 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
     SECOND-RECORD-GAP when its counter has holes and no deficit, else
     ENDED-SURPLUS or ENDED-CLEAN. A surplus is expected while #476
     stands and is no alarm. A session whose chain copy's newest entry
-    predates the day of the oldest events file is from before the second
-    record's memory: counted in one block, never a row, as ADR-0029
-    counts sessions older than the calibration memory. The hook's note
+    predates the day of the oldest events file held, readable or not,
+    is from before the second record's memory: counted in one block,
+    never a row, as ADR-0029 counts sessions older than the calibration
+    memory (#559 ruling 3). The hook's note
     that the second record was cut is quoted on the row when the copy
     carries one. None of these states is live, so none raises the exit:
     an ended deficit is evidence here as on the agent's machine."""
     days = events["days"]
     oldest = min(days) if days else None
+    newest = max(days) if days else None
     watch = {
         "witness": root.as_posix(),
         # GLOSSARY *Second record*: the reach is stated wherever the
@@ -4113,13 +4115,12 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             "read as owing a receipt: the receiver keeps no coverage "
             "marker, and the vantage setup wires every tool (ADR-0041)")},
         "second_record": {
-            "files": len(days), "oldest": oldest,
-            "newest": max(days) if days else None,
+            "files": len(days), "oldest": oldest, "newest": newest,
             "unparsed": events["unparsed"],
             "sessionless": events["sessionless"],
             "words": (f"the harness's events as the receiver kept them, "
                       f"identity removed: {len(days)} file(s)"
-                      + (f" from {oldest} to {max(days)}" if days else "")
+                      + (f" from {oldest} to {newest}" if days else "")
                       + (f"; {events['unparsed']} line(s) not in the "
                          "line shape skipped and counted"
                          if events["unparsed"] else "")
@@ -4131,29 +4132,30 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
                       "reaches a line once it landed (ADR-0041)")},
     }
     said = []
-    # Asked of the listing, not of `days`: a folder whose every events
+    # `days` holds every file listed, so a folder whose every events
     # file is unreadable holds files, and must not read as one no
-    # harness has sent to (#487).
-    if not events["listed"]:
+    # harness has sent to (#487). An unread file is still the edge: the
+    # memory begins at the oldest file held, readable or not, and a
+    # session from its day on with no events read is absent, never
+    # before the memory (#559 ruling 3, over #487 item 9).
+    readable = len(days) - len(events["unread"])
+    if not days:
         said.append("the receiver holds no events file: no harness has "
                     "sent its events here yet, so every session with "
                     "receipts reads SECOND-RECORD-ABSENT until one does "
                     "(ADR-0041)")
-    elif not days:
+    elif not readable:
         said.append("no events file the receiver holds could be read, so "
-                    "every session with receipts reads SECOND-RECORD-ABSENT "
-                    "until one can be (ADR-0041)")
+                    f"every session with receipts from {oldest} on reads "
+                    "SECOND-RECORD-ABSENT until one can be (ADR-0041)")
+    unread = None
     if events["unread"]:
-        said.append(f"{len(events['unread'])} events file(s) cannot be "
-                    f"read: {'; '.join(events['unread'])} — nothing of them "
-                    "is counted, their day included"
-                    + (": the second record's memory begins at the oldest "
-                       "file that was read" if days else ""))
-    # With a file unread, a session older than the oldest file read may
-    # have its second record in that file: "never kept here" would be
-    # a claim nobody checked (#487).
-    kept = ("is in no events file that was read" if events["unread"]
-            else "was never kept here")
+        unread = (f"{len(events['unread'])} events file(s) cannot be "
+                  f"read: {'; '.join(events['unread'])} — nothing of them "
+                  "is counted")
+        said.append(unread + (": a session from their day on with no "
+                              "events read reads SECOND-RECORD-ABSENT "
+                              "(ADR-0041)" if readable else ""))
     unjudged = []
     named = {session: family for (_, session), family in families.items()}
     for session in sorted(set(named) | set(events["sessions"])):
@@ -4192,7 +4194,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             row["state"] = "BEFORE-MEMORY"
             row["words"] = (f"this chain copy's newest entry predates "
                             f"{oldest}, the day of the oldest events file "
-                            f"read, so its second record {kept}: counted, "
+                            "the receiver holds, readable or not, so its "
+                            "second record was never kept here: counted, "
                             "not judged, and not called absent (ADR-0041).")
             unjudged.append(row)
             continue
@@ -4202,6 +4205,11 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             state = "PENDING"
         elif seen is None:
             state = "SECOND-RECORD-ABSENT"
+            if unread:
+                # The ruling's "with that note beside it": the words say
+                # its events never arrived, and the note beside them says
+                # a file went unread (#559 ruling 3).
+                row["note"] = unread
         else:
             deficit, surplus, _ = reconcile(owed, seen["may_owe"], by_tool,
                                             seen["witnessed"])
@@ -4237,11 +4245,11 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             "since": oldest,
             "words": (f"{len(unjudged)} session(s) whose chain copy "
                       f"predates {oldest}, the day of the oldest events "
-                      f"file read, so their second record {kept}: counted, "
-                      "not judged, and none is "
-                      "called absent (ADR-0041; ADR-0029's rule for "
-                      "sessions older than the memory). `scan "
-                      "--before-memory` lists them."),
+                      "file the receiver holds, readable or not, so their "
+                      "second record was never kept here: counted, not "
+                      "judged, and none is called absent (ADR-0041; "
+                      "ADR-0029's rule for sessions older than the "
+                      "memory). `scan --before-memory` lists them."),
         }
         if show_before_memory:
             block["sessions"] = unjudged
