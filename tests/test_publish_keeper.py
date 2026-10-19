@@ -316,6 +316,45 @@ class PublishKeeperTest(ReceiverFixture):
         self.assertEqual(self.receiver.received, [])
         self.assertEqual(memo_of(log), [])
 
+    def test_a_stood_down_chain_still_has_its_intact_entries_sent(self):
+        # #533, the narrow reading: once a look has stood a torn chain
+        # down, neither keeper hands its head to the recorder again, but
+        # `publish --chain` reads nothing of the tail, so the send of the
+        # intact entries still runs, and a remote that can only add holds
+        # exactly the prefix it should. Pinned green by the walk of
+        # 2026-10-19: the chain send was the one path #550 left untested.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-tore")
+        intact = log.read_text(encoding="utf-8").splitlines()
+        with open(log, "a", encoding="utf-8", newline="\n") as f:
+            f.write('{"n":3,"half-written')
+        sibling = make_chain(self.root / "alpha" / "receipts",
+                             "sess-tore-002", entries=3)
+        first = self.scan()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(self.receiver.received, [], "no keeper was on")
+
+        result = self.publishing("--publish-chain", self.receiver.url)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        tore, _ = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-tore")]
+        self.assertTrue(tore["superseded"])
+        self.assertNotIn("failed", tore["left"])
+        self.assertNotIn("note", tore["left"])
+        heads = [json.loads(r["raw"])["head"] for r in self.receiver.received
+                 if r["content_type"] == "application/json"]
+        self.assertEqual(heads, [chain_head(sibling)],
+                         "the sibling's head left; the torn chain's never")
+        batches = [[json.loads(line)["entry_hash"] for line in
+                    r["raw"].decode("utf-8").splitlines()]
+                   for r in self.receiver.received
+                   if r["content_type"] == "application/x-ndjson"]
+        self.assertIn([json.loads(line)["entry_hash"] for line in intact],
+                      batches, "the intact prefix landed, whole")
+        self.assertEqual([row.get("kind") for row in memo_of(log)],
+                         ["chain"], "a chain row and no head row")
+
 
 class LeftReadingTest(ReceiverFixture):
     """The scan report says, per chain, when something last left the
