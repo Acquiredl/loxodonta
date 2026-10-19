@@ -4185,9 +4185,9 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             row["last_heard"] = heard.strftime("%Y-%m-%dT%H:%M:%SZ")
         if family.get("cut"):
             row["second_record_cut"] = family["cut"]
-        newest = family.get("newest_ts")
-        if seen is None and oldest and isinstance(newest, str) \
-                and newest[:10] < oldest:
+        copy_newest = family.get("newest_ts")
+        if seen is None and oldest and isinstance(copy_newest, str) \
+                and copy_newest[:10] < oldest:
             # Not WATCH_WORDS' entry: that one offers `calibrate
             # --since`, which seeds a coverage memory this reading does
             # not keep.
@@ -5044,13 +5044,13 @@ def fold_day(look, now, claims, fresh, awakened):
     An unasked turn (`remember=False`) stays out of the book while it
     has nothing new to report (ADR-0014): a machine asking itself every
     minute is not somebody looking. It goes in when it finds what no row
-    records yet, an alarm this look found or whose change moved, a
-    reawakening, a blind memory or more closed folders than the book's
-    newest row shows (#448), or the finding would be recorded nowhere
-    and the day would paint quiet. An alarm already standing does not
-    mark every later day as watched (ADR-0039); the day's worst is
-    sticky, so a morning reader still sees the day it was found, and
-    every day somebody looks."""
+    records yet: an alarm this look found or whose change moved, a
+    reawakening, or a blind memory or more closed folders than the
+    book's newest row shows (#448). Left out, such a finding would be
+    recorded nowhere and the day would paint quiet. An alarm already
+    standing does not mark every later day as watched (ADR-0039); the
+    day's worst is sticky, so a morning reader still sees the day it was
+    found, and every day somebody looks."""
     days, skipped = daybook_rows(look.daybook)
     newest = days[max(days)] if days else {}
     unshown = any(claims[kept] > newest.get(kept, 0)
