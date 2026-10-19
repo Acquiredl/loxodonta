@@ -4185,9 +4185,9 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             row["last_heard"] = heard.strftime("%Y-%m-%dT%H:%M:%SZ")
         if family.get("cut"):
             row["second_record_cut"] = family["cut"]
-        newest = family.get("newest_ts")
-        if seen is None and oldest and isinstance(newest, str) \
-                and newest[:10] < oldest:
+        copy_newest = family.get("newest_ts")
+        if seen is None and oldest and isinstance(copy_newest, str) \
+                and copy_newest[:10] < oldest:
             # Not WATCH_WORDS' entry: that one offers `calibrate
             # --since`, which seeds a coverage memory this reading does
             # not keep.
