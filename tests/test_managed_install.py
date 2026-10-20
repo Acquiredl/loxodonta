@@ -832,7 +832,19 @@ class ManagedCopyTest(ManagedBase):
         system = "/usr/bin/python3"
         if sys.platform == "win32" or not os.path.isfile(system):
             self.skipTest("needs POSIX and a system Python")
-        place = os.path.realpath(system)
+        (self.work / "bin").symlink_to(os.path.dirname(system),
+                                       target_is_directory=True)
+        link = self.work / "bin" / "python3"
+        # The command names what the interpreter says it is. On macOS
+        # /usr/bin/python3 is a shim that runs another Python, which
+        # names itself, so the link never reaches the command there.
+        said = subprocess.run(
+            [str(link), "-I", "-c", "import sys; print(sys.executable)"],
+            capture_output=True, encoding="utf-8", timeout=60)
+        if said.returncode != 0 or said.stdout.strip() != str(link):
+            self.skipTest(f"{system} does not name itself as run through "
+                          f"a link here: {said.stdout.strip()!r}")
+        place = os.path.realpath(link)
         while True:
             status = os.lstat(place)
             if status.st_uid != 0 or status.st_mode & 0o022:
@@ -840,9 +852,6 @@ class ManagedCopyTest(ManagedBase):
             if os.path.dirname(place) == place:
                 break
             place = os.path.dirname(place)
-        (self.work / "bin").symlink_to(os.path.dirname(system),
-                                       target_is_directory=True)
-        link = self.work / "bin" / "python3"
 
         done = subprocess.run(
             [str(link), str(LOXODONTA), "install-hook", "--managed"],
