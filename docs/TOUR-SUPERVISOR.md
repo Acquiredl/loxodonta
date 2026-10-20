@@ -259,12 +259,13 @@ while the transcript is named after the worktree): the witness counts
 sessions, not drawers.
 
 **The recorder notice.** The harness executes a *path*, not a version —
-the recorder running on this machine is whatever is checked out there
-when a tool fires. The notice reports that state (branch, head, dirty,
-ahead/behind as of the last fetch) and corrects none of it, reading
-local git only: a recorder that updated itself from a remote would hand
-the writer a second road to the one file that has to stay honest
-(ADR-0002). Behind-counts name their fetch date, because a stale count
+the recorder running on this machine is whatever is checked out, or
+copied, there when a tool fires. The notice reports that state (branch,
+head, dirty, ahead/behind as of the last fetch; for a copy outside a
+checkout, its `TOOL_VERSION` line and SHA-256) and corrects none of it,
+reading local files and git only: a recorder that updated itself from a
+remote would hand the writer a second road to the one file that has to
+stay honest (ADR-0002). Behind-counts name their fetch date, because a stale count
 that reads as reassurance is worse than no count.
 
 The notice's commit is also the third field of `--version`, on either

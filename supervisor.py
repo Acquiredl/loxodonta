@@ -3002,12 +3002,22 @@ def matchers_at(calibration, ts):
 
 # --- The recorder notice ------------------------------------------------------
 # The harness executes a *path*, not a version, so the recorder running
-# on this machine is whatever is checked out there at the moment a tool
-# fires. Nothing pins it and nothing copies it. This reports that state
-# and corrects none of it: reading local git only, never the network,
-# because a recorder that updated itself from a remote would hand the
-# writer a second road to the one file that has to stay honest
-# (ADR-0002). Drift is the operator's to resolve, deliberately.
+# on this machine is whatever is checked out or copied there at the
+# moment a tool fires. Nothing pins it; a managed install copies it, and
+# the copy is read by its version line and hash (ADR-0042). This reports
+# that state and corrects none of it: reading local files and git only,
+# never the network, because a recorder that updated itself from a
+# remote would hand the writer a second road to the one file that has to
+# stay honest (ADR-0002). Drift is the operator's to resolve, deliberately.
+
+# A copy's version, as the release writes it. Anything else on that line
+# is the writer's text, and is read as no version at all.
+RECORDER_VERSION_LINE = re.compile(
+    rb'^TOOL_VERSION = "([0-9][0-9A-Za-z.+-]{0,31})"[ \t]*\r?$', re.M)
+# Bounded, since the wired path is the writer's to point at a huge file;
+# the recorder is well under a megabyte.
+RECORDER_READ_LIMIT = 8 << 20
+
 
 def recorder_path(witness):
     """The file the harness actually runs for PostToolUse, read out of
@@ -3051,7 +3061,8 @@ def recorder_drift(witness):
                         "recorder to drift"}
     notice = {"state": "unknown", "path": script.as_posix(), "branch": None,
               "head": None, "dirty": False, "upstream": None,
-              "ahead": None, "behind": None, "fetched": None, "note": None}
+              "ahead": None, "behind": None, "fetched": None,
+              "version": None, "sha256": None, "note": None}
     if not os.path.exists(script):
         notice["note"] = ("the wired recorder is not on disk — the hook "
                           "runs nothing, and a session that records "
@@ -3060,10 +3071,7 @@ def recorder_drift(witness):
     home = script.parent
     branch = git_say(home, "rev-parse", "--abbrev-ref", "HEAD")
     if branch is None:
-        notice["note"] = ("the recorder is not in a git checkout, or git "
-                          "is unavailable — only its path can be read "
-                          "from here, not its version")
-        return notice
+        return recorder_versioned(script, notice)
     notice.update({
         "state": "tracked",
         "branch": branch,
@@ -3091,6 +3099,52 @@ def recorder_drift(witness):
             except OSError:
                 pass  # never fetched here; the counts say so themselves
     notice["note"] = recorder_words(notice)
+    return notice
+
+
+def recorder_versioned(script, notice):
+    """The notice for a recorder git has nothing to say about: a managed
+    install's copy under the system program area (ADR-0042), or a
+    checkout read where git is not on the PATH, which this cannot tell
+    apart. Its `TOOL_VERSION` line and the SHA-256 of its bytes, read
+    from the bytes and never imported or run, and whether this
+    supervisor is the same version. State `versioned` when the version
+    line reads; `unknown`, with whatever could be read, when it does
+    not."""
+    outside = "the recorder is not in a git checkout, or git is unavailable"
+    try:
+        with open_regular(script) as f:
+            body = f.read(RECORDER_READ_LIMIT + 1)
+    except OSError as error:
+        notice["note"] = (f"{outside}, and it cannot be read: "
+                          f"{error.strerror or error} — neither its version "
+                          "nor its hash can be read from here")
+        return notice
+    if len(body) > RECORDER_READ_LIMIT:
+        notice["note"] = (f"{outside}, and at more than "
+                          f"{RECORDER_READ_LIMIT} bytes it is larger than "
+                          "any recorder, so it was not read — neither its "
+                          "version nor its hash is known here")
+        return notice
+    notice["sha256"] = hashlib.sha256(body).hexdigest()
+    found = RECORDER_VERSION_LINE.search(body)
+    if found is None:
+        notice["note"] = (f"{outside}, and it carries no readable "
+                          "TOOL_VERSION line, so its version cannot be read "
+                          f"from here; its SHA-256 is {notice['sha256']}")
+        return notice
+    notice.update({"state": "versioned",
+                   "version": found.group(1).decode("ascii"),
+                   "supervisor_version": TOOL_VERSION})
+    notice["note"] = (f"{outside}, so it is read by its own lines: version "
+                      f"{notice['version']}, SHA-256 {notice['sha256']}")
+    if notice["version"] != TOOL_VERSION:
+        notice["note"] += (f"; this supervisor is {TOOL_VERSION}, another "
+                           "version — a managed install's copy moves only "
+                           "when an "
+                           "administrator runs `install-hook --managed` "
+                           "again from newer files; nothing updates it "
+                           "for you")
     return notice
 
 
@@ -7226,7 +7280,8 @@ EXPORT_KEPT = [
     "timestamps: when sessions started and ended, the day book, and when "
     "this supervisor's calibration memory begins",
     "how many sessions are older than that memory and so went unjudged",
-    "the recorder's commit, your Python version, and your OS family",
+    "the recorder's commit, or a copy's version and SHA-256, your Python "
+    "version, and your OS family",
     "which harnesses recorded (claude-code, codex, openai-agents), by actor",
 ]
 EXPORT_WORDS = (
@@ -7382,6 +7437,10 @@ def build_export(report):
                    "tool": "loxodonta supervisor export"},
         "machine": {
             "recorder_commit": recorder.get("head"),
+            # A copy outside a checkout has no commit (ADR-0042): its
+            # version line, held to a version's shape, and its hash.
+            "recorder_version": recorder.get("version"),
+            "recorder_sha256": recorder.get("sha256"),
             "python": "%d.%d" % sys.version_info[:2],
             "os": platform.system(),
             "matchers": matchers,
@@ -7470,6 +7529,17 @@ def archive_regular(archive, path, name):
         archive.writestr(info, f.read(), zipfile.ZIP_DEFLATED)
 
 
+def export_recorder(machine):
+    """The recorder on the machine line: a checkout's commit, a copy's
+    version and SHA-256, or `unknown` beside whatever hash was read."""
+    if machine["recorder_commit"]:
+        return machine["recorder_commit"]
+    said = machine["recorder_version"] or "unknown"
+    if machine["recorder_sha256"]:
+        said += f" (SHA-256 {machine['recorder_sha256']})"
+    return said
+
+
 def issue_body(data, gist_url, raw):
     """The field-data issue, from the template's shape: the gist link,
     the redaction block verbatim, the consent lines."""
@@ -7486,7 +7556,7 @@ def issue_body(data, gist_url, raw):
         "```",
         "",
         f"**Machine:** {machine['os']}, Python {machine['python']}, "
-        f"recorder {machine['recorder_commit'] or 'unknown'}, "
+        f"recorder {export_recorder(machine)}, "
         f"{machine['store']['chains']} chains, "
         f"{machine['store']['entries']} entries, "
         f"{len(data['sessions'])} sessions.",
@@ -10346,7 +10416,9 @@ function renderStrip(report) {
       (rec.path ? " · " + rec.path : "");
     recLine.classList.toggle("drifted",
       !!(rec.dirty || rec.behind || rec.state === "unwired" ||
-         rec.state === "unknown"));
+         rec.state === "unknown" ||
+         (rec.state === "versioned" &&
+          rec.version !== rec.supervisor_version)));
   }
   const chains = report.repos.flatMap(r =>
     r.sessions.flatMap(s => s.chains));

@@ -12,6 +12,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Added
 
+- The recorder notice reads a recorder outside a git checkout, as a managed install's copy, by its `TOOL_VERSION` line and SHA-256, and says when the supervisor reading it is another version; the export's machine line names both (#460).
 - `install-hook --managed` copies `loxodonta.py` and `supervisor.py` to `C:\Program Files\loxodonta` or `/opt/loxodonta`, and the managed commands name the copy; `uninstall-hook --managed` deletes it (#460).
 - A managed install first checks that its Python and the copy's folder are out of an ordinary account's reach, and otherwise refuses with exit 64, naming the path and the fix (#460).
 - Run again from other files, `install-hook --managed` replaces each copy whose bytes differ and says both versions, backwards included; the same files change nothing (#460).
