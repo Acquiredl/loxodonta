@@ -41,9 +41,9 @@ Since #460 a managed install copies the recorder into a folder of its
 own under the system program area (ADR-0042), and the managed uninstall
 deletes the copy, so a start of `install-hook --managed` or
 `uninstall-hook --managed` names LOXODONTA_PROGRAM_DIR in the temp root
-too. One start may leave LOXODONTA_MANAGED_DIR unset, inside
-`managed_folder_left_unset()`: the test of the installer's refusal,
-which only refuses with that variable unset.
+too. Inside `left_to_the_machine(...)` a start may leave either of those
+two unset or naming the machine's own folder: the tests of the managed
+installer's refusals, which only refuse when they are.
 
 The recall verbs (`digest`, `show`, `search`, `timeline`, `mcp`) read
 the home and write nothing to it, so their tests are isolated but not
@@ -183,10 +183,11 @@ def refuse_this_machines_home(event, args):
                    project_too=tool == "supervisor.py"
                    or verb.group(1) == "hook",
                    managed_too=verb.group(1) in MANAGED_VERBS
-                   and not _managed_left_unset,
+                   and MANAGED not in _left,
                    program_too=tool == "loxodonta.py"
                    and verb.group(1) in PROGRAM_VERBS
-                   and MANAGED_FLAG.search(command) is not None)
+                   and MANAGED_FLAG.search(command) is not None
+                   and PROGRAM not in _left)
     if names:
         raise AssertionError(
             "%s %s started with this machine's %s (#242, the "
@@ -200,25 +201,26 @@ def refuse_this_machines_home(event, args):
 _armed = False
 # The machine's homes, as this process was started with them.
 _started_with = {}
-_managed_left_unset = False
+_left = set()
 
 
 @contextlib.contextmanager
-def managed_folder_left_unset():
-    """Within it a start may leave LOXODONTA_MANAGED_DIR unset, and every
-    other home is still held to the test's own. For the test of the
-    managed installer's refusal alone (ADR-0042 ruling 3): with that
-    variable set, a check that fails is a warning and the install goes
-    on. The test enters it only once it has seen for itself that the
-    check fails for the interpreter it starts, and the installer asks
-    that before it reads or writes anything, the managed folder
-    included."""
-    global _managed_left_unset
-    _managed_left_unset = True
+def left_to_the_machine(*names):
+    """Within it a start may leave the variables `names`, of
+    LOXODONTA_MANAGED_DIR and LOXODONTA_PROGRAM_DIR, unset or naming the
+    machine's own folder, and every other home is still held to the
+    test's own. For the tests of the managed installer's refusals alone
+    (ADR-0042 ruling 3): with both stand-ins set, a check that fails is
+    a warning and the install goes on. A test enters it only where the
+    installer refuses before it reads or writes anything: with the
+    managed stand-in set and the copy's unset, always; with the managed
+    folder the machine's own, once the test has seen for itself that the
+    check fails for the interpreter it starts."""
+    _left.update(names)
     try:
         yield
     finally:
-        _managed_left_unset = False
+        _left.clear()
 
 
 def arm():

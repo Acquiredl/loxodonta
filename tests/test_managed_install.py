@@ -40,6 +40,11 @@ from test_supervisor import (ago, chain_head, make_chain,  # noqa: E402
                              prime_memory, run_scan, write_transcript)
 
 OURS = ("loxodonta.py", "supervisor.py")
+# The harness's own managed settings folder, as its documentation names
+# it: what a variable naming it in any spelling stands in for nothing.
+HARNESS_FOLDER = {"win32": "C:\\Program Files\\ClaudeCode",
+                  "darwin": "/Library/Application Support/ClaudeCode",
+                  }.get(sys.platform, "/etc/claude-code")
 REMOTE = "http://127.0.0.1:9/hook"
 
 
@@ -724,29 +729,139 @@ class ManagedCopyTest(ManagedBase):
                    if "ordinary account's reach" in line
                    and str(self.program) in line]
         self.assertTrue(line.startswith("warning:"), line)
-        self.assertIn("LOXODONTA_MANAGED_DIR is set", line)
+        self.assertIn("LOXODONTA_MANAGED_DIR names a folder the harness does "
+                      "not read", line)
         self.assertTrue(self.copy.is_file())
 
     def test_a_reachable_interpreter_is_refused_before_anything_is_written(self):
-        # Ruling 3, without the stand-in for the managed folder: only
-        # where this test sees for itself that its interpreter fails the
-        # check, so the start can never reach the machine's own folder.
+        # Ruling 3, without a stand-in for the managed folder: unset, or
+        # naming the harness's own folder in any spelling, which an
+        # account can set without rights for an elevated shell to
+        # inherit. Only where this test sees for itself that its
+        # interpreter fails the check, so the start can never reach the
+        # machine's own folder.
         why = interpreter_in_reach()
         if why is None:
             self.skipTest("this interpreter may pass the check")
+        real = HARNESS_FOLDER
+        for managed in (None, real, real.upper(), real + os.sep):
+            with self.subTest(managed=managed):
+                env = {name: value for name, value in self.env.items()
+                       if name != "LOXODONTA_MANAGED_DIR"}
+                if managed is not None:
+                    env["LOXODONTA_MANAGED_DIR"] = managed
+                before = self.everything()
+
+                with home_guard.left_to_the_machine("LOXODONTA_MANAGED_DIR"):
+                    done = run(LOXODONTA, "install-hook", "--managed",
+                               env=env)
+
+                self.assertEqual(done.returncode, 64,
+                                 done.stdout + done.stderr)
+                self.assertNotIn("Traceback", done.stderr)
+                self.assertIn(sys.executable, done.stderr)
+                self.assertIn("a Python installed for all users",
+                              done.stderr)
+                self.assertNotIn("warning: the interpreter", done.stderr)
+                self.assertEqual(self.everything(), before, why)
+
+    def test_a_stand_in_for_the_managed_folder_needs_one_for_the_copy(self):
+        # A check waived for the stand-in never writes or deletes the
+        # copy in the system program area.
         env = {name: value for name, value in self.env.items()
-               if name != "LOXODONTA_MANAGED_DIR"}
+               if name != "LOXODONTA_PROGRAM_DIR"}
         before = self.everything()
+        for verb in ("install-hook", "uninstall-hook"):
+            with self.subTest(verb=verb):
+                with home_guard.left_to_the_machine("LOXODONTA_PROGRAM_DIR"):
+                    done = run(LOXODONTA, verb, "--managed", env=env)
 
-        with home_guard.managed_folder_left_unset():
-            done = run(LOXODONTA, "install-hook", "--managed", env=env)
+                self.assertEqual(done.returncode, 64,
+                                 done.stdout + done.stderr)
+                self.assertIn("LOXODONTA_PROGRAM_DIR must name", done.stderr)
+                self.assertEqual(self.everything(), before)
 
-        self.assertEqual(done.returncode, 64, done.stdout + done.stderr)
-        self.assertNotIn("Traceback", done.stderr)
-        self.assertIn(sys.executable, done.stderr)
-        self.assertIn("a Python installed for all users", done.stderr)
-        self.assertNotIn("warning: the interpreter", done.stderr)
-        self.assertEqual(self.everything(), before, why)
+    def test_the_check_reads_the_interpreter_as_the_command_names_it(self):
+        # A link to the folder of a Python only root writes, in a folder
+        # an ordinary account writes: what the command names goes
+        # through the link, which that account retargets later.
+        system = "/usr/bin/python3"
+        if sys.platform == "win32" or not os.path.isfile(system):
+            self.skipTest("needs POSIX and a system Python")
+        place = os.path.realpath(system)
+        while True:
+            status = os.lstat(place)
+            if status.st_uid != 0 or status.st_mode & 0o022:
+                self.skipTest(f"{place} is not root's alone here")
+            if os.path.dirname(place) == place:
+                break
+            place = os.path.dirname(place)
+        (self.work / "bin").symlink_to(os.path.dirname(system),
+                                       target_is_directory=True)
+        link = self.work / "bin" / "python3"
+
+        done = subprocess.run(
+            [str(link), str(LOXODONTA), "install-hook", "--managed"],
+            capture_output=True, encoding="utf-8", env=self.env, timeout=120)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"warning: the interpreter the hook command would "
+                      f"name, {link}", done.stderr)
+
+    @unittest.skipIf(sys.platform == "win32",
+                     "a symbolic link needs a right of its own on Windows")
+    def test_a_link_at_the_copys_name_is_checked_and_never_written_through(self):
+        self.install("--managed")
+        elsewhere = self.work / "writers" / "loxodonta.py"
+        elsewhere.parent.mkdir()
+        elsewhere.write_bytes(LOXODONTA.read_bytes())
+        self.copy.unlink()
+        self.copy.symlink_to(elsewhere)
+
+        done = self.install("--managed")
+
+        self.assertIn(f"warning: the file at the copy's name, {self.copy}",
+                      done.stderr)
+        self.assertFalse(self.copy.is_symlink(), "the name itself replaced")
+        self.assertEqual(self.copy.read_bytes(), LOXODONTA.read_bytes())
+        self.assertEqual(elsewhere.read_bytes(), LOXODONTA.read_bytes())
+
+    def test_a_copy_without_a_supervisor_wires_no_digest(self):
+        # A command never names a file the copy does not hold.
+        alone = self.work / "alone"
+        alone.mkdir()
+        (alone / "loxodonta.py").write_bytes(LOXODONTA.read_bytes())
+        self.install("--managed")
+        self.assertTrue(self.commands(self.read(self.managed_file),
+                                      "SessionStart"))
+        self.copy_supervisor.unlink()
+
+        done = run(alone / "loxodonta.py", "install-hook", "--managed",
+                   env=self.env)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.commands(self.read(self.managed_file),
+                                       "SessionStart"), [])
+        for command in self.every_command(self.managed_file):
+            self.assertTrue(Path(words(command)[2]).is_file(), command)
+
+    def test_the_heal_never_drops_a_session_end_step_quietly(self):
+        # An entry of the old shape whose flags differ is not the heal's:
+        # the session-end loop rewrites it and says what it stopped.
+        python = Path(sys.executable).as_posix()
+        old = f'"{python}" "{LOXODONTA.as_posix()}" hook'
+        self.operator_file.write_text(json.dumps({"hooks": {
+            "SessionEnd": [{"hooks": [
+                {"type": "command", "command": old + " --anchor",
+                 "timeout": 20}]}],
+        }}), encoding="utf-8")
+
+        done = self.install()
+
+        (end,) = self.commands(self.read(self.operator_file), "SessionEnd")
+        self.assertEqual(words(end)[1], "-I", end)
+        self.assertNotIn("--anchor", end)
+        self.assertIn("no longer anchors at session end", done.stdout)
 
 
 class ManagedUninstallTest(ManagedBase):
@@ -1165,6 +1280,21 @@ class SupervisorReadsBothHomesTest(ManagedBase):
                     self.assertEqual(Path(report["recorder"]["path"]),
                                      LOXODONTA)
                     settings.unlink()
+
+    def test_the_copy_a_managed_install_wires_reads_as_versioned(self):
+        # The copy sits outside any checkout and its command carries -I:
+        # the notice reads it by its version line and its hash (#570).
+        self.install("--managed")
+        (post,) = self.commands(self.read(self.managed_file), "PostToolUse")
+        self.assertEqual(words(post)[1], "-I", post)
+
+        recorder = json.loads(self.scan().stdout)["recorder"]
+
+        self.assertEqual(recorder["state"], "versioned", recorder)
+        self.assertEqual(Path(recorder["path"]), self.copy)
+        self.assertEqual(recorder["version"], version_of(LOXODONTA))
+        self.assertEqual(recorder["sha256"],
+                         hashlib.sha256(LOXODONTA.read_bytes()).hexdigest())
 
     def an_entry_of_the_writers_own(self):
         """A recorder entry added to the operator's file after a managed
