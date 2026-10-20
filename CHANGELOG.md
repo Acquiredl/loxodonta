@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- The recorder notice reads a recorder outside a git checkout, as a managed install's copy, by its `TOOL_VERSION` line and SHA-256, and says when the supervisor reading it is another version; the export's machine line names both (#460).
+
 ### Changed
 
 - `docs/CLAIMS.md` says what the recorder's path and the harness's own program open, and ADR-0042 rules where a managed install puts the recorder and how it moves; ADR-0015 and ADR-0040 gain addenda (#460).
