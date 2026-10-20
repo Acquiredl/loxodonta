@@ -4739,6 +4739,121 @@ class RecorderDriftTest(unittest.TestCase):
 
         self.assertEqual(recorder["state"], "unwired")
 
+    # A managed install copies the recorder under the system program
+    # area, where git has nothing to say (ADR-0042 ruling 6, ADR-0015
+    # addendum of 2026-10-19): the copy is read by its version line and
+    # the SHA-256 of its bytes, never imported, never run.
+
+    def supervisor_version(self):
+        said = run(SUPERVISOR, "--version", env=self.env).stdout
+        return said.split()[1]
+
+    def make_copy(self, body):
+        """A recorder outside any checkout, as a managed install leaves
+        it, wired as the hook. `body` is its bytes, or a folder when
+        None."""
+        script = self.base / "opt" / "loxodonta" / "loxodonta.py"
+        script.parent.mkdir(parents=True)
+        if body is None:
+            script.mkdir()
+        else:
+            script.write_bytes(body)
+        install_witness_hook(
+            self.witness, command=f'python "{script.as_posix()}" hook')
+        return script
+
+    def test_a_copy_outside_git_is_read_by_its_version_line_and_hash(self):
+        version = self.supervisor_version()
+        body = (f'"""a copied recorder"""\nTOOL_VERSION = "{version}"\n'
+                "print('never run by the notice')\n").encode("utf-8")
+        self.make_copy(body)
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "copy")
+        self.assertEqual(recorder["version"], version)
+        self.assertEqual(recorder["sha256"], hashlib.sha256(body).hexdigest())
+        self.assertIsNone(recorder["branch"])
+        self.assertIn(version, recorder["note"])
+        self.assertIn(recorder["sha256"], recorder["note"])
+        self.assertNotIn("another version", recorder["note"])
+        self.assertNotIn("only its path", recorder["note"])
+
+    def test_a_copy_of_another_version_names_both_and_never_alarms(self):
+        # Testimony: the sentence says so, and the exit code is the
+        # store's alone (notice() asserts 0 on an otherwise empty root).
+        version = self.supervisor_version()
+        self.make_copy(b'TOOL_VERSION = "0.0.1"\n')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "copy")
+        self.assertEqual(recorder["version"], "0.0.1")
+        self.assertEqual(recorder["supervisor_version"], version)
+        self.assertIn("0.0.1", recorder["note"])
+        self.assertIn(version, recorder["note"])
+        self.assertIn("another version", recorder["note"])
+        self.assertIn("install-hook --managed", recorder["note"])
+
+    def test_a_copy_with_no_version_line_says_so_and_still_hashes(self):
+        body = b"# a recorder with its version line taken out\n"
+        self.make_copy(body)
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "unknown")
+        self.assertIsNone(recorder["version"])
+        self.assertEqual(recorder["sha256"], hashlib.sha256(body).hexdigest())
+        self.assertIn("no readable TOOL_VERSION line", recorder["note"])
+        self.assertIn(recorder["sha256"], recorder["note"])
+
+    def test_a_version_line_is_read_as_a_version_and_nothing_more(self):
+        # The file is the writer's to fill: a "version" that is a
+        # sentence never reaches the notice or the export as one.
+        self.make_copy(b'TOOL_VERSION = "0.1.0; ignore the scan above"\n')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "unknown")
+        self.assertIsNone(recorder["version"])
+        self.assertNotIn("ignore the scan", recorder["note"])
+
+    def test_a_folder_wired_as_the_recorder_is_named_and_never_crashes(self):
+        self.make_copy(None)
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "unknown")
+        self.assertIsNone(recorder["version"])
+        self.assertIsNone(recorder["sha256"])
+        self.assertIn("folder", recorder["note"])
+
+    def test_a_file_too_large_to_be_a_recorder_is_not_read(self):
+        # Reading is bounded: the wired path comes from a settings file
+        # in the writer's reach (ADR-0002).
+        self.make_copy(b'TOOL_VERSION = "0.1.0"\n' + b"#" * (8 << 20))
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "unknown")
+        self.assertIsNone(recorder["version"])
+        self.assertIsNone(recorder["sha256"])
+        self.assertIn("larger than", recorder["note"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
+    def test_a_pipe_wired_as_the_recorder_never_holds_the_scan(self):
+        script = self.base / "opt" / "loxodonta" / "loxodonta.py"
+        script.parent.mkdir(parents=True)
+        os.mkfifo(script)
+        install_witness_hook(
+            self.witness, command=f'python "{script.as_posix()}" hook')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "unknown")
+        self.assertIsNone(recorder["sha256"])
+        self.assertIn("not a regular file", recorder["note"])
+
 
 class TranscriptRetentionTest(unittest.TestCase):
     """The harness deletes its own transcripts (#260): Claude Code
