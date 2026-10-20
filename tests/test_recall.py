@@ -1321,12 +1321,17 @@ class InstallerOwnershipTest(RecallBase):
             '--stamp "https://tsa.example.test"',
             '"C:\\Python312\\python.exe" "C:\\Tools\\loxodonta.py" hook',
             'C:\\Python312\\python.exe C:\\Tools\\loxodonta.py hook --anchor',
+            # Every command since ADR-0042 runs the interpreter isolated.
+            '"/usr/bin/python3" -I "/opt/loxodonta/loxodonta.py" hook',
+            '"C:/Program Files/Python313/python.exe" -I '
+            '"C:/Program Files/loxodonta/loxodonta.py" hook --anchor',
             "python3 /absolute/path/to/loxodonta.py hook",
         ]
         digest = [
             '"/usr/bin/python3" "/elsewhere/supervisor.py" digest',
             '"C:/Python312/python.exe" "C:/Tools/supervisor.py" digest '
             "--payload",
+            '"/usr/bin/python3" -I "/opt/loxodonta/supervisor.py" digest',
         ]
         self.seed(home, {"hooks": {
             "PostToolUse": [{"matcher": "*", "hooks": [
