@@ -81,7 +81,8 @@ Stated here once, so that none of them is a discovery.
 **Limits of the setup:**
 
 - A writer with administrator rights rewrites the managed file like any other (ADR-0040).
-- The recorder file itself sits at a path the operator owns (#460).
+- The recorder file, and the interpreter the hook command names, sit at paths the operator owns. The hook fires after the call it records, so a session that edits either file writes that edit's receipt with the edited code, and the chain stays `VALID`. What then holds is the count at the receiver, never the content of the receipts (#460; ruled in ADR-0042, not yet built).
+- The harness's own program sits where its installer put it, under the operator's account on a per-user install. A harness changed there fires no hook, managed or not; what shows it is the count at the receiver, where events stop arriving or arrive for calls that left no receipt (ADR-0042).
 - On a machine whose organization delivers settings from a server or through device management, the managed file may be skipped without a warning (ADR-0040).
 - That a managed hook runs under `--bare` is measured on one version of the harness and not stated in its documentation, so a later version may differ (#259).
 

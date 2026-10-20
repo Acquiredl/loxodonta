@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/CLAIMS.md` says what the recorder's path and the harness's own program open, and ADR-0042 rules where a managed install puts the recorder and how it moves; ADR-0015 and ADR-0040 gain addenda (#460).
+
 ## [0.17.0] - 2026-10-18
 
 ### Changed
