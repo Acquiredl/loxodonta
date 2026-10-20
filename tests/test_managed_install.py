@@ -622,7 +622,7 @@ class ManagedCopyTest(ManagedBase):
         self.assertEqual(len(commands), 4, commands)
         for command in commands:
             self.assertEqual(words(command)[1], "-I", command)
-        self.assertIn("healed 3 hook command(s)", done.stdout)
+        self.assertIn("healed 4 hook command(s)", done.stdout)
         again = self.install()
         self.assertIn("already installed", again.stdout)
 
@@ -1432,7 +1432,8 @@ class TelemetryPinTest(ManagedBase):
         self.plant(self.managed_file.parent / "another-tool.json",
                    {"hooks": {}})
         expected = self.everything()
-        for ours in (self.managed_file, self.pin_file):
+        for ours in (self.managed_file, self.pin_file, self.copy,
+                     self.copy_supervisor, self.program):
             del expected[str(ours.relative_to(self.work))]
 
         done = run(LOXODONTA, "uninstall-hook", "--managed", env=self.env)
@@ -1441,7 +1442,8 @@ class TelemetryPinTest(ManagedBase):
         self.assertIn(str(self.pin_file), done.stdout)
         self.assertIn(str(self.managed_file), done.stdout)
         self.assertEqual(self.everything(), expected,
-                         "both files are gone; nothing else moved")
+                         "both files and the copy are gone; nothing else "
+                         "moved")
 
     def test_uninstall_with_only_the_pin_standing_removes_it(self):
         self.full()

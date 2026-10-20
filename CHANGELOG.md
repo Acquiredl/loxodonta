@@ -10,9 +10,16 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `install-hook --managed` copies `loxodonta.py` and `supervisor.py` to `C:\Program Files\loxodonta` or `/opt/loxodonta`, and the managed commands name the copy; `uninstall-hook --managed` deletes it (#460).
+- A managed install first checks that its Python and the copy's folder are out of an ordinary account's reach, and otherwise refuses with exit 64, naming the path and the fix (#460).
+- Run again from other files, `install-hook --managed` replaces each copy whose bytes differ and says both versions, backwards included; the same files change nothing (#460).
+
 ### Changed
 
 - `docs/CLAIMS.md` says what the recorder's path and the harness's own program open, and ADR-0042 rules where a managed install puts the recorder and how it moves; ADR-0015 and ADR-0040 gain addenda (#460).
+- Every hook command the installer writes, managed and plain, Claude Code and Codex, runs Python with `-I`; entries an earlier install wrote are rewritten once on the next install (#460).
 
 ## [0.17.0] - 2026-10-18
 

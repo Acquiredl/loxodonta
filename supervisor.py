@@ -2536,9 +2536,13 @@ def is_interpreter(word):
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def owned_script(command, names):
     """The script path in `command` when the installer wrote it for one
-    of `names`, else None: an interpreter, then a script with one of
-    those file names, then the verb that script is wired with."""
+    of `names`, else None: an interpreter, `-I` or not (every command
+    since ADR-0042 carries it, and one written before is still ours to
+    heal and remove), then a script with one of those file names, then
+    the verb that script is wired with."""
     words = command_words(command)
+    if words and words[1:2] == ["-I"]:
+        words = words[:1] + words[2:]
     if not words or len(words) < 3:
         return None
     interpreter, script, verb = words[:3]

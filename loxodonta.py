@@ -5853,7 +5853,8 @@ def backup_settings(path):
 # The settings file is shared with the user's own hooks, so the installer
 # must know exactly which entries it wrote: those it may replace, heal and
 # remove. Every command it ever wrote is an interpreter (a bare `python3`
-# in the first install, the quoted `sys.executable` since), a script
+# in the first install, the quoted `sys.executable` since, followed by
+# `-I` since ADR-0042), a script
 # (either era's recorder name, ADR-0010, or the supervisor's) and the one
 # verb that script is wired with, then flags. Only that exact shape is
 # ours, and a supervisor.py also needs a recorder beside it (#293): a
@@ -5904,9 +5905,13 @@ def is_interpreter(word):
 
 def owned_script(command, names):
     """The script path in `command` when the installer wrote it for one
-    of `names`, else None: an interpreter, then a script with one of
-    those file names, then the verb that script is wired with."""
+    of `names`, else None: an interpreter, `-I` or not (every command
+    since ADR-0042 carries it, and one written before is still ours to
+    heal and remove), then a script with one of those file names, then
+    the verb that script is wired with."""
     words = command_words(command)
+    if words and words[1:2] == ["-I"]:
+        words = words[:1] + words[2:]
     if not words or len(words) < 3:
         return None
     interpreter, script, verb = words[:3]
@@ -5940,10 +5945,15 @@ def beside_a_recorder(script):
 PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 
 def recorder_command(actor=None, anchor=False, publish=None,
-                     publish_chain=None, stamp=None):
-    """The hook command the installers write: this interpreter, this
-    file, no shell expansion — the hook resolves the project itself, so
-    one command works on every platform. `actor` names the harness the
+                     publish_chain=None, stamp=None, folder=None):
+    """The hook command the installers write: this interpreter, isolated,
+    and this file or the one of that name in `folder` (a managed
+    install's copy, ADR-0042), no shell expansion — the hook resolves
+    the project itself, so one command works on every platform.
+    Isolated (`-I`) because a hook inherits the environment the harness
+    was launched with, and a PYTHONPATH there would put a module of the
+    writer's choosing ahead of the standard library (ADR-0042 ruling 4).
+    `actor` names the harness the
     receipts will say acted (ADR-0020); `anchor` is the session-end
     anchor opt-in, `publish` the URL the session's head is published
     to, `publish_chain` the URL its entries go to, and `stamp` the
@@ -5951,8 +5961,9 @@ def recorder_command(actor=None, anchor=False, publish=None,
     command so the choice is readable in the settings file (ADR-0024,
     ADR-0025, ADR-0031, ADR-0032)."""
     python = sys.executable.replace(os.sep, "/")
-    self_path = os.path.abspath(__file__).replace(os.sep, "/")
-    command = f'"{python}" "{self_path}" hook'
+    script = (os.path.join(folder, "loxodonta.py") if folder
+              else os.path.abspath(__file__))
+    command = f'"{python}" -I "{script.replace(os.sep, "/")}" hook'
     command += f" --actor {actor}" if actor else ""
     command += " --anchor" if anchor else ""
     command += f' --publish "{publish}"' if publish else ""
@@ -6122,14 +6133,25 @@ def supervisor_path():
     return os.path.join(here, "supervisor.py")
 
 
-def digest_command(payload=False):
-    """The SessionStart command: this interpreter, the supervisor beside
-    this file, `digest`. With `payload`, the digest takes its repo from
+def digest_command(payload=False, folder=None):
+    """The SessionStart command: this interpreter, isolated as the
+    recorder's is, the supervisor beside this file or the one in
+    `folder`, `digest`. With `payload`, the digest takes its repo from
     the hook payload's `cwd` — for a harness that sets no
     CLAUDE_PROJECT_DIR (ADR-0020)."""
     python = sys.executable.replace(os.sep, "/")
-    command = f'"{python}" "{supervisor_path().replace(os.sep, "/")}" digest'
+    script = (os.path.join(folder, "supervisor.py") if folder
+              else supervisor_path())
+    command = f'"{python}" -I "{script.replace(os.sep, "/")}" digest'
     return command + (" --payload" if payload else "")
+
+
+def same_path(one, other):
+    """Whether two script paths, as commands spell them, name one file
+    by their spelling: `~` expanded, either separator, and case on a
+    disk that ignores it."""
+    return (os.path.normcase(os.path.abspath(os.path.expanduser(one)))
+            == os.path.normcase(os.path.abspath(other)))
 
 
 def heal_hooks(blocks, names, command):
@@ -6138,15 +6160,21 @@ def heal_hooks(blocks, names, command):
     command as 'already installed' would leave recording silently
     dead. A command whose script is still on disk is someone's working
     install and is left alone; `~` is expanded first, since the shell
-    that runs the hook expands it too (#293)."""
+    that runs the hook expands it too (#293). The one exception is this
+    install's own script in the shape before ADR-0042, without `-I`:
+    that is this install, and it takes the shape every command now has,
+    once (ruling 4)."""
     count = 0
+    ours = owned_script(command, names)
     for block in blocks:
         for hook in block.get("hooks", []):
             old = hook.get("command", "")
             script = owned_script(old, names)
             if old == command or script is None:
                 continue
-            if not os.path.isfile(os.path.expanduser(script)):
+            unisolated = command_words(old)[1:2] != ["-I"]
+            if not os.path.isfile(os.path.expanduser(script)) \
+                    or (unisolated and ours and same_path(script, ours)):
                 hook["command"] = command
                 count += 1
     return count
@@ -6261,7 +6289,8 @@ def install_codex_hooks(publish=None, profile="local",
         print(f"  {line}")
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
-              "moved — now pointing at this install")
+              "moved, or that ran it without -I — now pointing at "
+              "this install")
     coverage_said(marked, unmarked)
     print("Codex asks you to review new hooks once: open Codex and run "
           "/hooks to trust them.")
@@ -6319,13 +6348,248 @@ def managed_dir_said():
     opens on when it is set, a plain install and a refusal included: a
     hook wired in a folder the harness does not read records nothing,
     a plain install reads that folder to decide whether to refuse, and
-    nothing else here would say which folder was read."""
+    nothing else here would say which folder was read. The same for
+    LOXODONTA_PROGRAM_DIR, the copy's stand-in (ADR-0042)."""
     if os.environ.get("LOXODONTA_MANAGED_DIR"):
         print("warning: LOXODONTA_MANAGED_DIR is set, so the managed file "
               f"is {managed_hooks_path()}. The harness reads its managed "
               f"settings from {harness_managed_folder()} whatever this "
               "variable says: unless it names that folder, no session "
               "runs a hook from this file.", file=sys.stderr)
+    if os.environ.get("LOXODONTA_PROGRAM_DIR"):
+        print("warning: LOXODONTA_PROGRAM_DIR is set, so a managed install "
+              f"copies the recorder to {program_folder()}, not to "
+              f"{system_program_folder()}, and its commands name that "
+              "copy.", file=sys.stderr)
+
+
+# --- The managed install's copy of the recorder (ADR-0042) --------------------
+# A managed file out of the writer's reach still names a script and an
+# interpreter, and the hook fires after the call it records: a session
+# that edits the recorder writes that edit's receipt with the edited
+# code, and the chain stays VALID. So a managed install copies the two
+# scripts its commands name into a folder of the recorder's own under
+# the system program area, after asking of the interpreter and of that
+# folder whether an ordinary account can reach them, as far as this tool
+# can see. It never raises its own rights, and an upgrade is the same
+# verb run again from newer files.
+
+COPIED = ("loxodonta.py", "supervisor.py")
+# Where Windows keeps what only an administrator writes, by name: the
+# standard library reads no access list (ADR-0042 ruling 3).
+SYSTEM_PLACES = ("C:\\Program Files", "C:\\Windows")
+
+
+def system_program_folder():
+    """The copy's folder, as ADR-0042 ruling 1 names it for each
+    platform. A literal, never %ProgramFiles%, for the reason
+    harness_managed_folder gives. /opt on macOS too: the parent of
+    /Library/Application Support is group-writable by admin."""
+    return ("C:\\Program Files\\loxodonta" if sys.platform == "win32"
+            else "/opt/loxodonta")
+
+
+def program_folder():
+    """The folder a managed install copies the two scripts into, and the
+    managed uninstall deletes them from. LOXODONTA_PROGRAM_DIR names a
+    folder to stand for it, which is how the suite reaches one it may
+    write, and every installer verb warns when it is set."""
+    return (os.environ.get("LOXODONTA_PROGRAM_DIR")
+            or system_program_folder())
+
+
+def within(path, folder):
+    """Whether `path` is `folder` or under it, as Windows spells paths."""
+    path, folder = os.path.normcase(path), os.path.normcase(folder)
+    try:
+        return os.path.commonpath([path, folder]) == folder
+    except ValueError:  # another drive
+        return False
+
+
+def in_reach(path):
+    """Why an ordinary account can reach `path`, as far as this tool can
+    see, or None when it cannot (ADR-0042 ruling 3). On POSIX, the path
+    and the folder that holds it, symlinks resolved, every component
+    from the root down that exists: owned by root, with no group or
+    other write bit, else the first that is not. A component not made
+    yet is the installer's to make. On Windows, by place: the standard
+    library reads no access list."""
+    if sys.platform == "win32":
+        real = os.path.realpath(path)
+        if any(within(real, place) for place in SYSTEM_PLACES):
+            return None
+        it = ("it" if os.path.normcase(real)
+              == os.path.normcase(os.path.abspath(path))
+              else f"it resolves to {real}, which")
+        if within(real, "C:\\Users") \
+                or within(real, os.path.expanduser("~")):
+            return f"{it} is under a user profile, which its account writes"
+        return (f"{it} is outside {' and '.join(SYSTEM_PLACES)}, and this "
+                "installer cannot read that folder's access list from here")
+    places = set()
+    for real in (os.path.realpath(path),
+                 os.path.realpath(os.path.dirname(os.path.abspath(path)))):
+        while real not in places:
+            places.add(real)
+            real = os.path.dirname(real)
+    for place in sorted(places, key=len):
+        try:
+            status = os.lstat(place)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as error:
+            return f"{place} cannot be looked at: {error.strerror or error}"
+        if status.st_uid != 0:
+            return f"{place} belongs to uid {status.st_uid}, not to root"
+        if status.st_mode & 0o022:
+            return (f"{place} can be written by "
+                    + ("its group" if status.st_mode & 0o020
+                       else "every account"))
+    return None
+
+
+def reach_refusals():
+    """The check before a managed install writes anything (ADR-0042
+    ruling 3), one question asked of two paths: the interpreter its
+    commands will name, which is the one running it, and the copy's
+    folder. Each that fails, in the refusal's words."""
+    refusals = []
+    why = in_reach(sys.executable)
+    if why:
+        refusals.append(
+            f"the interpreter the hook command would name, {sys.executable}, "
+            f"is not out of an ordinary account's reach: {why}. Run the "
+            "installer with a Python installed for all users (Python's own "
+            "installer offers that), from an administrator's shell.")
+    folder = program_folder()
+    why = in_reach(folder)
+    if why:
+        refusals.append(
+            f"the folder the recorder is copied to, {folder}, is not out of "
+            f"an ordinary account's reach: {why}. Only an administrator may "
+            "write there for the copy to hold: give it to one, or move it "
+            "away and let the installer make it.")
+    return refusals
+
+
+def version_in(data):
+    """The version a script's bytes say they are, read from its
+    TOOL_VERSION line and never run, or "unknown"."""
+    for line in data.splitlines():
+        if line.startswith(b'TOOL_VERSION = "'):
+            return visible(line.split(b'"')[1].decode("utf-8", "replace"))
+    return "unknown"
+
+
+def version_order(old, new):
+    """-1, 0 or 1 as `new` is older, the same as, or newer than `old`,
+    or None when either is not dotted numbers."""
+    try:
+        old, new = ([int(part) for part in version.split(".")]
+                    for version in (old, new))
+    except ValueError:
+        return None
+    return (new > old) - (new < old)
+
+
+def copy_plan(folder):
+    """What a managed install would copy: (the copy's path, the source's
+    bytes, the copy's bytes or None, its permission bits or None) for
+    each script beside this file, read before anything is written. A
+    supervisor that is not here is not copied, as a plain install wires
+    no digest without one. None, with the refusal printed, when this
+    file itself cannot be read."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    plan = []
+    for name in COPIED:
+        source = os.path.join(here, name)
+        data, refused = bytes_at(source)
+        if data is None:
+            if name == "loxodonta.py":
+                refuse_to_touch(source, refused.strerror or str(refused))
+                return None
+            continue
+        target = os.path.join(folder, name)
+        old, _ = bytes_at(target)
+        try:
+            mode = os.stat(target).st_mode & 0o7777
+        except OSError:
+            mode = None
+        plan.append((target, data, old, mode))
+    return plan
+
+
+def write_copy(plan, folder):
+    """Write each copy in `plan` whose bytes differ, through a temporary
+    file beside it moved into place (replace_file), making the folders
+    above that are absent, readable by every account as the managed
+    file is. Returns (what was written, for put_copy_back; None), or
+    (None, (the path refused, the OSError)) with everything this wrote
+    taken back: without the right, nothing is written anywhere
+    (ADR-0042 ruling 2)."""
+    made, above = [], os.path.abspath(folder)
+    while not os.path.lexists(above) and os.path.dirname(above) != above:
+        made.append(above)
+        above = os.path.dirname(above)
+    written, target = ([], made), folder
+    try:
+        for each in reversed(made):
+            os.mkdir(each)
+            os.chmod(each, 0o755)
+        for target, data, old, mode in plan:
+            if data != old:
+                replace_file(target, data, mode=0o644)
+                written[0].append((target, old, mode))
+    except OSError as error:
+        put_copy_back(written)
+        return None, (target, error)
+    return written, None
+
+
+def put_copy_back(written):
+    """Undo write_copy after a later refusal, so a refused install has
+    written nothing anywhere: each copy back to the bytes and bits it
+    had, or gone when there was none, and each folder made taken down.
+    Quiet on failure, as put_back is."""
+    files, made = written
+    for target, old, mode in reversed(files):
+        put_back(target, old, mode)
+    for folder in made:
+        try:
+            os.rmdir(folder)
+        except OSError:
+            pass
+
+
+def copy_said(plan):
+    """A line for each copy this install wrote, saying both versions: a
+    first copy, an upgrade, a move backwards, or other bytes under the
+    same version line. No sum: checking the copy against SHA256SUMS is
+    the administrator's (ADR-0042 ruling 8)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    lines = []
+    for target, data, old, _ in plan:
+        if data == old:
+            continue
+        source = os.path.join(here, os.path.basename(target))
+        new = version_in(data)
+        if old is None:
+            lines.append(f"copied {source} ({new}) to {target}")
+            continue
+        was = version_in(old)
+        order = version_order(was, new)
+        if order == 1:
+            lines.append(f"upgraded {target} from {was} to {new}")
+        elif order == -1:
+            lines.append(f"moved {target} back from {was} to {new}: the "
+                         f"files this ran from are older than the copy")
+        elif order == 0:
+            lines.append(f"replaced {target} with other bytes under the "
+                         f"same version line, {new}")
+        else:
+            lines.append(f"replaced {target}: {was} with {new}")
+    return lines
 
 
 def managed_way_out(managed, error):
@@ -6695,8 +6959,9 @@ def settle_telemetry_pin(path, wanted, found, standing, marked=False):
     return "removed", None
 
 
-def put_pin_back(path, data, mode):
-    """Undo settle_telemetry_pin after a refused hooks write, so a
+def put_back(path, data, mode):
+    """Undo settle_telemetry_pin after a refused hooks write, or one copy
+    write_copy wrote after a refusal later on, so a
     refused install has written nothing anywhere (ADR-0040 ruling 2):
     the very bytes that stood there under the permission bits `mode`
     they had (#487), never a re-serialisation (a file that was not JSON
@@ -6826,23 +7091,36 @@ def operator_settings_path():
     return os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 
 
-def wire_hooks(settings, args):
+def wire_hooks(settings, args, folder=None):
     """Merge the Claude Code hooks into `settings`, idempotently and
     without clobbering anything already there, in whichever home those
     settings are read from (ADR-0040). Each hook is checked separately,
     so an older install gains what it is missing on re-run. The
     commands carry no shell expansion — both tools read
     CLAUDE_PROJECT_DIR themselves — and the digest is fail-open: a
-    short timeout, and a chainless repo renders nothing. Returns (each
+    short timeout, and a chainless repo renders nothing. With `folder`,
+    the managed install's copy (ADR-0042), every entry of the
+    installer's names the scripts there, whatever it named before: the
+    managed file holds the installer's entries alone, and none of them
+    may name a file the operator's account writes. Returns (each
     thing wired, in words; how many commands were healed; the matchers
     the recorder is wired on for a completed call; and for a failed
     one)."""
     supervisor = supervisor_path()
-    record = recorder_command()
-    digest = digest_command()
+    record = recorder_command(folder=folder)
+    digest = digest_command(folder=folder)
     hooks = settings.setdefault("hooks", {})
     installed = []
     heal, ours = heal_hooks, block_is_ours  # shared with the Codex half
+    if folder:
+        for event, names, command in (
+                ("PostToolUse", RECORDER_NAMES, record),
+                ("PostToolUseFailure", RECORDER_NAMES, record),
+                ("SessionStart", DIGEST_NAMES, digest)):
+            for block in hooks.get(event, []):
+                for hook in block.get("hooks", []):
+                    if owned_script(hook.get("command"), names):
+                        hook["command"] = command
 
     post = hooks.setdefault("PostToolUse", [])
     healed = heal(post, RECORDER_NAMES, record)
@@ -6901,7 +7179,7 @@ def wire_hooks(settings, args):
     record_end = recorder_command(anchor=args.anchor_at_session_end,
                                   publish=args.publish_head,
                                   publish_chain=args.publish_chain,
-                                  stamp=args.authority)
+                                  stamp=args.authority, folder=folder)
     healed += heal(end, RECORDER_NAMES, record_end)
     # The session-end opt-ins ride on this command: the anchor
     # (ADR-0024), the published head (ADR-0025), the published chain
@@ -6953,7 +7231,8 @@ def installed_said(path, installed, healed, backup=""):
         print(f"  {line}")
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
-              "moved — now pointing at this install")
+              "moved, or that ran it without -I — now pointing at "
+              "this install")
 
 
 def cmd_install_hook(args):
@@ -7055,10 +7334,29 @@ def install_managed_hooks(args):
     the managed file, so a refused install records nothing. Run as
     another account than the one that owns the home, it writes the
     managed files and nothing under that home, and says the hook has
-    two homes (owned_by_another)."""
+    two homes (owned_by_another).
+
+    Before all of it, the check of ADR-0042 ruling 3 (reach_refusals),
+    and before the managed files, the copy of the two scripts the
+    commands name (write_copy): copy, managed files, operator's file,
+    so a failure after the copy leaves a file nothing points at, never a
+    command pointing at nothing, and a refused managed write puts the
+    copy back as it stood."""
     path = operator_settings_path()
     managed = managed_hooks_path()
     pin_path = managed_telemetry_path()
+    folder = program_folder()
+    for refusal in reach_refusals():
+        if not os.environ.get("LOXODONTA_MANAGED_DIR"):
+            print(f"refusing: {refusal} Nothing was written (ADR-0042).",
+                  file=sys.stderr)
+            return EX_USAGE
+        # The harness reads nothing the installer writes under the
+        # stand-in, so nothing is claimed; every real interpreter the
+        # suite runs on fails the check, so it goes on, saying so.
+        print(f"warning: {refusal} LOXODONTA_MANAGED_DIR is set, so this "
+              "goes on; without it, this refuses with exit 64.",
+              file=sys.stderr)
     settings, refused = load_settings(path)
     if refused:
         return refused
@@ -7101,23 +7399,34 @@ def install_managed_hooks(args):
             print(f"warning: could not read {other}, so whether it sends "
                   "the harness's events elsewhere is not known.",
                   file=sys.stderr)
+    plan = copy_plan(folder)
+    if plan is None:
+        return EX_NOINPUT
     existing = read_hooks(managed)
     target = our_hooks(existing)
     if not target["hooks"]:
         target = our_hooks(settings)
-    installed, healed, wired, failures = wire_hooks(target, args)
+    installed, healed, wired, failures = wire_hooks(target, args, folder)
 
+    copied, refusal = write_copy(plan, folder)
+    if refusal:
+        return cannot_write(*refusal)
     pinned, refused = settle_telemetry_pin(pin_path, wanted_pin, found_pin,
                                            pin_standing, bom_led(pin_data))
     if refused:
+        put_copy_back(copied)
         return refused
     changed = target != existing or bom_led(bytes_at(managed)[0])
     if changed:
         refusal = write_managed_file(managed, target)
         if refusal:
             if pinned:
-                put_pin_back(pin_path, pin_data, pin_mode)
+                put_back(pin_path, pin_data, pin_mode)
+            put_copy_back(copied)
             return cannot_write(managed, refusal)
+    for line in copy_said(plan):
+        print(line)
+    if changed:
         # Every entry the file now holds, not only what this run wired:
         # entries that moved here from the operator's file were wired
         # by an earlier run, and this is the one place that lists them.
@@ -7149,7 +7458,8 @@ def install_managed_hooks(args):
         RECORDER_NAMES + DIGEST_NAMES)
     if not changed:
         print(f"already installed in {managed}"
-              + ("" if removed or pinned else ": nothing changed"))
+              + ("" if removed or pinned or copied[0]
+                 else ": nothing changed"))
     if removed:
         why, backup = None, ""
         try:
@@ -7240,11 +7550,16 @@ def uninstall_managed_hooks():
     file, and no coverage marker is written (ADR-0030 ruling 2). A
     delete the system refuses names the file and exits 73, the number
     a refused managed install gives: the same missing right, met from
-    the other side."""
+    the other side. The copy of the recorder goes last, after the
+    files whose commands name it, and its folder with it when that
+    leaves the folder empty (ADR-0042 ruling 7)."""
     managed = managed_hooks_path()
     pin_path = managed_telemetry_path()
     path = operator_settings_path()
-    if not os.path.lexists(managed) and not os.path.lexists(pin_path):
+    folder = program_folder()
+    copies = [os.path.join(folder, name) for name in COPIED]
+    if not any(os.path.lexists(each)
+               for each in [managed, pin_path] + copies):
         print(f"nothing installed: no managed hook file at {managed}")
         return 0
     pinned, refused = settle_telemetry_pin(
@@ -7265,6 +7580,31 @@ def uninstall_managed_hooks():
                   file=sys.stderr)
             return EX_CANTCREAT
         print(f"removed {managed}")
+    for copy in copies:
+        if not os.path.lexists(copy):
+            continue
+        try:
+            os.unlink(copy)
+        except OSError as error:
+            print(f"cannot delete {copy}: {error.strerror or error}. The "
+                  "managed files were removed, so no hook runs it, and it "
+                  f"is left where it is. {managed_way_out(copy, error)}"
+                  .rstrip(), file=sys.stderr)
+            return EX_CANTCREAT
+        print(f"removed {copy}")
+    if os.path.isdir(folder) and not os.path.islink(folder):
+        try:
+            left = os.listdir(folder)
+            if not left:
+                os.rmdir(folder)
+        except OSError as error:
+            print(f"warning: could not remove {folder}: "
+                  f"{error.strerror or error}. No hook names anything "
+                  "in it.",
+                  file=sys.stderr)
+        else:
+            print(f"kept {folder}: it holds files the installer did not "
+                  "put there" if left else f"removed {folder}")
     if our_hooks(read_hooks(path))["hooks"]:
         print(f"the hook is still wired in {path}: `uninstall-hook` "
               "removes it there.")
@@ -7464,8 +7804,15 @@ def main(argv=None):
              "harness's events to the --remote URL in a second file of "
              "its own there, managed-settings.d/loxodonta-telemetry.json, "
              "and says what leaves through them (ADR-0041); at any other "
-             "profile it removes that pin. Run it from an account "
-             "that may write that folder (an administrator's shell, or "
+             "profile it removes that pin. First it copies loxodonta.py "
+             "and supervisor.py to C:\\Program Files\\loxodonta or "
+             "/opt/loxodonta, and the commands name the copy; run again "
+             "from other files, it moves the copy and says both "
+             "versions. It refuses, exit 64, when the Python running it "
+             "or that folder is in an ordinary account's reach: run it "
+             "with a Python installed for all users (ADR-0042). Run it "
+             "from an account "
+             "that may write those folders (an administrator's shell, or "
              "sudo): without the right it writes nothing and exits 73, "
              "and it never raises its own rights. Claude Code only")
     install_parser.add_argument(
@@ -7529,9 +7876,11 @@ def main(argv=None):
         help="remove the Codex hooks instead")
     uninstall_parser.add_argument(
         "--managed", action="store_true",
-        help="delete the file `install-hook --managed` wrote, and nothing "
-             "else in that folder; nothing is put back in the user "
-             "settings (ADR-0040). Needs the same right the install did")
+        help="delete the files `install-hook --managed` wrote, and "
+             "nothing else in those folders: the managed files, then the "
+             "copy of the two scripts and its folder when that leaves it "
+             "empty; nothing is put back in the user settings (ADR-0040, "
+             "ADR-0042). Needs the same right the install did")
     uninstall_parser.set_defaults(func=cmd_uninstall_hook)
 
     if argv is None:
