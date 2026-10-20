@@ -1140,6 +1140,32 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         # The copy the managed command names (ADR-0042).
         self.assertEqual(Path(report["recorder"]["path"]), self.copy)
 
+    def test_the_recorder_is_read_from_either_command_shape(self):
+        # ADR-0042 ruling 4 through the supervisor's own reading (the
+        # owned_script twin): a command with -I after the interpreter
+        # names the recorder as one without it does, in either home,
+        # and never reads "-I" as the script and the recorder unwired.
+        python = Path(sys.executable).as_posix()
+        for shape in (f'"{python}" -I "{LOXODONTA.as_posix()}" hook',
+                      f'"{python}" "{LOXODONTA.as_posix()}" hook'):
+            for settings in (self.operator_file, self.managed_file):
+                with self.subTest(shape=shape, file=settings.name):
+                    settings.parent.mkdir(parents=True, exist_ok=True)
+                    settings.write_text(json.dumps({"hooks": {
+                        "PostToolUse": [{"matcher": "*", "hooks": [
+                            {"type": "command", "command": shape}]}],
+                        "SessionEnd": [{"hooks": [
+                            {"type": "command", "command": shape}]}],
+                    }}), encoding="utf-8")
+
+                    report = json.loads(self.scan().stdout)
+
+                    self.assertNotEqual(report["recorder"]["state"],
+                                        "unwired", report["recorder"])
+                    self.assertEqual(Path(report["recorder"]["path"]),
+                                     LOXODONTA)
+                    settings.unlink()
+
     def an_entry_of_the_writers_own(self):
         """A recorder entry added to the operator's file after a managed
         install, which the writer can do and the installer did not:
