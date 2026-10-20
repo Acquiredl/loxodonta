@@ -9,6 +9,7 @@ assert those strings never reach the export. The allowlist is pinned as
 an exact key set, so a new scan field cannot slip in unnamed.
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -123,7 +124,8 @@ class ExportFileTest(ExportBase):
         self.assertEqual(list(data), ["redaction", "export", "machine",
                                       "sessions"])
         self.assertEqual(sorted(data["machine"]), sorted([
-            "recorder_commit", "python", "os", "matchers", "actors", "store",
+            "recorder_commit", "recorder_version", "recorder_sha256",
+            "python", "os", "matchers", "actors", "store",
             "day_book", "lifecycle", "scan_exit", "before_memory"]))
         self.assertEqual(sorted(data["machine"]["store"]),
                          ["bytes", "chains", "entries"])
@@ -338,6 +340,36 @@ class ExportSendTest(ExportBase):
         self.assertIn("field-data: ", issue)
         self.assertIn("2 sessions", issue)
         self.assertIn("issues/999", out + err)
+
+    def test_a_copied_recorder_travels_as_its_version_and_hash(self):
+        # A managed install's copy sits outside any checkout (ADR-0042
+        # ruling 6): the machine line names its version and SHA-256 where
+        # a checkout's commit would stand, and its path never travels.
+        copy = self.root / "opt" / "loxodonta" / "loxodonta.py"
+        copy.parent.mkdir(parents=True)
+        body = b'TOOL_VERSION = "0.0.1"\n'
+        copy.write_bytes(body)
+        (self.root / "settings.json").write_text(json.dumps({
+            "hooks": {"PostToolUse": [{
+                "matcher": "*",
+                "hooks": [{"type": "command",
+                           "command": f'python "{copy.as_posix()}" hook'}]}]}}),
+            encoding="utf-8")
+        fake_gh(self.bin, self.gh_log)
+        env = {"PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", "")}
+        result = self.export("--send", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(self.exported_file().read_text("utf-8"))
+        digest = hashlib.sha256(body).hexdigest()
+        self.assertIsNone(data["machine"]["recorder_commit"])
+        self.assertEqual(data["machine"]["recorder_version"], "0.0.1")
+        self.assertEqual(data["machine"]["recorder_sha256"], digest)
+        issue = next(self.work.glob("*.issue.md")).read_text("utf-8")
+        self.assertIn(f"recorder 0.0.1 (SHA-256 {digest})", issue)
+        for said in (self.exported_file().read_text("utf-8"), issue):
+            self.assertNotIn(copy.parent.as_posix(), said)
+            self.assertNotIn(str(copy.parent), said)
+            self.assertNotIn("loxodonta/loxodonta.py", said)
 
     def test_send_without_gh_says_so_and_leaves_the_file(self):
         empty = self.root / "empty-bin"
