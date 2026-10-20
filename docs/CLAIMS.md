@@ -27,7 +27,7 @@ A vantage point is a place with a clear view that the watched party cannot get t
 
 | # | Condition | How it is set | Standing |
 |---|---|---|---|
-| 1 | The hook cannot be switched off by the agent, nor the recorder or the interpreter it runs changed | `install-hook --managed`, run by an administrator with a Python installed for all users | ADR-0040 and ADR-0042. The switch measured on 2026-10-05 against a run with hooks switched off on its command line, and against a run under `--bare` (Claude Code 2.1.287, Windows; #259); the copy of the recorder not yet measured |
+| 1 | The hook cannot be switched off by the agent, nor the recorder or the interpreter it runs changed, as far as the installer can see | `install-hook --managed`, run by an administrator with a Python installed for all users | ADR-0040 and ADR-0042. The switch measured on 2026-10-05 against a run with hooks switched off on its command line, and against a run under `--bare` (Claude Code 2.1.287, Windows; #259). The copy of the recorder not yet measured; the installer checks the interpreter's path and not each file of its library, and on Windows judges a path by its place, not its access list |
 | 2 | The agent holds no administrator rights | The operator's own job. It is about the account the agent runs as, never about the harness's permission mode | Outside the tool |
 | 3 | A copy leaves the machine | The `full` [profile](GLOSSARY.md#profile) with a [receiver](GLOSSARY.md#receiver) the writer cannot reach; `timestamped` gives the second promise only | Built |
 | 4 | Somebody reads it | `supervisor serve` on its cadence, and a check of the chain against the copy off the machine | Built |
@@ -46,7 +46,7 @@ The full setup is what the two promises are made for, and it is the one to run w
 
 | Left out | What it opens |
 |---|---|
-| 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives |
+| 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives. And the recorder and its interpreter sit at paths the operator owns: the hook fires after the call it records, so a session that edits either writes that edit's receipt with the edited code, and the chain stays `VALID`; what then holds is the count at the receiver, never the content of the receipts |
 | 2, an agent without administrator rights | The managed file is as easy to rewrite as any other, and condition 1 is worth nothing |
 | 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration shows once the anchor matures, and a wiped store is gone |
 | 4, somebody reading it | Nothing is detected until someone looks |
