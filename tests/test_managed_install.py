@@ -781,6 +781,50 @@ class ManagedCopyTest(ManagedBase):
                 self.assertIn("LOXODONTA_PROGRAM_DIR must name", done.stderr)
                 self.assertEqual(self.everything(), before)
 
+    @unittest.skipUnless(sys.platform == "win32",
+                         "network and device paths are Windows spellings")
+    def test_a_stand_in_spelled_as_a_network_or_device_path_is_none(self):
+        # An administrative share or a \\?\ prefix reaches the folder it
+        # spells, which resolving does not undo, so it is never shown to
+        # be another folder (#571 review). Spelled here of the test's own
+        # stand-ins: a fix that waived anything would write into them,
+        # never into a system folder.
+        why = interpreter_in_reach()
+        if why is None:
+            self.skipTest("this interpreter may pass the check")
+
+        def spellings(folder):
+            text = str(folder)
+            return ["\\\\?\\" + text,
+                    "\\\\localhost\\" + text[0] + "$" + text[2:]]
+
+        before = self.everything()
+        for managed in spellings(self.managed):
+            with self.subTest(managed=managed):
+                env = {**self.env, "LOXODONTA_MANAGED_DIR": managed}
+                with home_guard.left_to_the_machine("LOXODONTA_MANAGED_DIR"):
+                    done = run(LOXODONTA, "install-hook", "--managed",
+                               env=env)
+
+                self.assertEqual(done.returncode, 64,
+                                 done.stdout + done.stderr)
+                self.assertIn("a Python installed for all users",
+                              done.stderr)
+                self.assertEqual(self.everything(), before, why)
+        for program in spellings(self.program):
+            for verb in ("install-hook", "uninstall-hook"):
+                with self.subTest(program=program, verb=verb):
+                    env = {**self.env, "LOXODONTA_PROGRAM_DIR": program}
+                    with home_guard.left_to_the_machine(
+                            "LOXODONTA_PROGRAM_DIR"):
+                        done = run(LOXODONTA, verb, "--managed", env=env)
+
+                    self.assertEqual(done.returncode, 64,
+                                     done.stdout + done.stderr)
+                    self.assertIn("LOXODONTA_PROGRAM_DIR must name",
+                                  done.stderr)
+                    self.assertEqual(self.everything(), before)
+
     def test_the_check_reads_the_interpreter_as_the_command_names_it(self):
         # A link to the folder of a Python only root writes, in a folder
         # an ordinary account writes: what the command names goes

@@ -6302,8 +6302,8 @@ def install_codex_hooks(publish=None, profile="local",
         print(f"  {line}")
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
-              "moved, or that ran it without -I — now pointing at "
-              "this install")
+              "moved, or that ran it without -I (with this Python now, if "
+              "another ran it) — now pointing at this install")
     coverage_said(marked, unmarked)
     print("Codex asks you to review new hooks once: open Codex and run "
           "/hooks to trust them.")
@@ -6420,13 +6420,27 @@ def same_folder(one, other):
 
 def stand_in(variable, real):
     """Whether the environment variable `variable` names a folder to
-    stand for `real`: set, and naming another. One that names `real`
-    itself, in any spelling, stands in for nothing, so nothing waived
-    for a stand-in is waived for it (ADR-0042 ruling 3): on Windows an
-    account sets a user variable without rights, and an administrator's
-    elevated shell inherits it."""
+    stand for `real`: set, and shown to name another. Anything else
+    stands in for nothing, so nothing waived for a stand-in is waived
+    for it (ADR-0042 ruling 3): on Windows an account sets a user
+    variable without rights, and an administrator's elevated shell
+    inherits it. Shown means: where both folders exist, not the same
+    folder by the system's own answer (samefile); where one does not,
+    another name once resolved and folded. A value spelled as a network
+    path or a device path (\\\\host\\share, \\\\?\\, \\\\.\\) is never shown to be
+    another: an administrative share or a prefix reaches the same
+    folder under a spelling resolving does not undo."""
     value = os.environ.get(variable)
-    return bool(value) and not same_folder(value, real)
+    if not value:
+        return False
+    if sys.platform == "win32" and value[:2] in ("\\\\", "//", "\\/", "/\\"):
+        return False
+    try:
+        if os.path.exists(value) and os.path.exists(real):
+            return not os.path.samefile(value, real)
+        return not same_folder(value, real)
+    except (OSError, ValueError):
+        return False
 
 
 def copy_stand_in_missing(waived, does):
@@ -7307,8 +7321,8 @@ def installed_said(path, installed, healed, backup=""):
         print(f"  {line}")
     if healed:
         print(f"  healed {healed} hook command(s) whose script had "
-              "moved, or that ran it without -I — now pointing at "
-              "this install")
+              "moved, or that ran it without -I (with this Python now, if "
+              "another ran it) — now pointing at this install")
 
 
 def cmd_install_hook(args):
