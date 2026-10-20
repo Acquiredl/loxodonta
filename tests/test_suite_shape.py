@@ -77,6 +77,9 @@ EVERY_HOME = {"LOXODONTA_HOME", "HOME", "USERPROFILE", "CODEX_HOME"}
 # The managed settings folder (#259), refused beside the homes for every
 # verb that reads the recorder's file in it. A `hook` does not.
 MANAGED = "LOXODONTA_MANAGED_DIR"
+# The managed install's copy of the recorder (#460), refused for the two
+# verbs that write or delete it when they run with --managed.
+PROGRAM = "LOXODONTA_PROGRAM_DIR"
 # A folder that is no temporary one, for a home the machine leaves unset:
 # the temp root's own parent, never under it. Not the checkout, which
 # may itself sit under the temp root and then pass the guard (#465).
@@ -252,6 +255,30 @@ class WriterHomeGuardTest(unittest.TestCase):
                                   encoding="utf-8", env=isolated,
                                   timeout=BOUND)
         self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_an_unset_copy_folder_is_refused_where_it_is_written(self):
+        # #460: a managed install copies the recorder into the system
+        # program area, and the managed uninstall deletes it there.
+        with tempfile.TemporaryDirectory() as home:
+            isolated = {**isolated_env(Path(home).resolve()),
+                        "PYTHONIOENCODING": "utf-8"}
+            unset = {k: v for k, v in isolated.items() if k != PROGRAM}
+            for verb in ("install-hook", "uninstall-hook"):
+                with self.subTest(verb=verb):
+                    with self.assertRaises(AssertionError) as refused:
+                        subprocess.run(
+                            [sys.executable, str(LOXODONTA), verb,
+                             "--managed", "--help"],
+                            capture_output=True, env=unset, timeout=BOUND)
+                    self.assertEqual(named_homes(refused.exception),
+                                     {PROGRAM})
+
+                    # A plain run of the same verb never reaches it.
+                    done = subprocess.run(self.command(verb),
+                                          capture_output=True,
+                                          encoding="utf-8", env=unset,
+                                          timeout=BOUND)
+                    self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_a_hook_with_a_project_the_test_did_not_choose_is_refused(self):
         # The project names the drawer a hook writes into: the inherited

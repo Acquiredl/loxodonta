@@ -27,7 +27,7 @@ A vantage point is a place with a clear view that the watched party cannot get t
 
 | # | Condition | How it is set | Standing |
 |---|---|---|---|
-| 1 | The hook cannot be switched off by the agent | `install-hook --managed`, run by an administrator | ADR-0040. Measured on 2026-10-05 against a run with hooks switched off on its command line, and against a run under `--bare` (Claude Code 2.1.287, Windows; #259) |
+| 1 | The hook cannot be switched off by the agent, nor the recorder or the interpreter it runs changed, as far as the installer can see | `install-hook --managed`, run by an administrator with a Python installed for all users | ADR-0040 and ADR-0042. The switch measured on 2026-10-05 against a run with hooks switched off on its command line, and against a run under `--bare` (Claude Code 2.1.287, Windows; #259). The copy of the recorder not yet measured; the installer checks the interpreter's path and not each file of its library, and on Windows judges a path by its place, not its access list |
 | 2 | The agent holds no administrator rights | The operator's own job. It is about the account the agent runs as, never about the harness's permission mode | Outside the tool |
 | 3 | A copy leaves the machine | The `full` [profile](GLOSSARY.md#profile) with a [receiver](GLOSSARY.md#receiver) the writer cannot reach; `timestamped` gives the second promise only | Built |
 | 4 | Somebody reads it | `supervisor serve` on its cadence, and a check of the chain against the copy off the machine | Built |
@@ -46,7 +46,7 @@ The full setup is what the two promises are made for, and it is the one to run w
 
 | Left out | What it opens |
 |---|---|
-| 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives |
+| 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives. And the recorder and its interpreter sit at paths the operator owns: the hook fires after the call it records, so a session that edits either writes that edit's receipt with the edited code, and the chain stays `VALID`; what then holds is the count at the receiver, never the content of the receipts |
 | 2, an agent without administrator rights | The managed file is as easy to rewrite as any other, and condition 1 is worth nothing |
 | 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration shows once the anchor matures, and a wiped store is gone |
 | 4, somebody reading it | Nothing is detected until someone looks |
@@ -81,7 +81,6 @@ Stated here once, so that none of them is a discovery.
 **Limits of the setup:**
 
 - A writer with administrator rights rewrites the managed file like any other (ADR-0040).
-- The recorder file, and the interpreter the hook command names, sit at paths the operator owns. The hook fires after the call it records, so a session that edits either file writes that edit's receipt with the edited code, and the chain stays `VALID`. What then holds is the count at the receiver, never the content of the receipts (#460; ruled in ADR-0042, not yet built).
 - The harness's own program sits where its installer put it, under the operator's account on a per-user install. A harness changed there fires no hook, managed or not; what shows it is the count at the receiver, where events stop arriving or arrive for calls that left no receipt (ADR-0042).
 - On a machine whose organization delivers settings from a server or through device management, the managed file may be skipped without a warning (ADR-0040).
 - That a managed hook runs under `--bare` is measured on one version of the harness and not stated in its documentation, so a later version may differ (#259).

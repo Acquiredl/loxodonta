@@ -59,7 +59,9 @@ def isolated_env(home, **knobs):
     neither this machine's own wiring nor its coverage marker, and the
     folder that stands in for the harness's managed settings folder
     (#259), which nothing creates until a test asks for a managed
-    install. Pair it with a `--witness` under a temporary folder. The
+    install, and the folder that stands in for the managed install's
+    copy of the recorder (ADR-0042). Pair it with a `--witness` under a
+    temporary folder. The
     knobs land last, so a test that keeps its store or its project
     somewhere of its own names it here (`LOXODONTA_HOME=...`,
     `CLAUDE_PROJECT_DIR=...`). Every start of scan, serve, calibrate,
@@ -70,7 +72,8 @@ def isolated_env(home, **knobs):
     env = clean_env(LOXODONTA_HOME=str(Path(home) / ".loxodonta"),
                     HOME=str(home), USERPROFILE=str(home),
                     CODEX_HOME=str(Path(home) / ".codex"),
-                    LOXODONTA_MANAGED_DIR=str(Path(home) / "managed"))
+                    LOXODONTA_MANAGED_DIR=str(Path(home) / "managed"),
+                    LOXODONTA_PROGRAM_DIR=str(Path(home) / "program"))
     env.pop("CLAUDE_PROJECT_DIR", None)
     env.update(knobs)
     return env

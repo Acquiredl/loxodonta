@@ -37,6 +37,14 @@ telemetry pin there (ADR-0041). That folder is under no home, so
 nothing keeps an unset LOXODONTA_MANAGED_DIR inside the test: a start of
 one of those nine verbs names it, in the temp root, or is refused.
 
+Since #460 a managed install copies the recorder into a folder of its
+own under the system program area (ADR-0042), and the managed uninstall
+deletes the copy, so a start of `install-hook --managed` or
+`uninstall-hook --managed` names LOXODONTA_PROGRAM_DIR in the temp root
+too. Inside `left_to_the_machine(...)` a start may leave either of those
+two unset or naming the machine's own folder: the tests of the managed
+installer's refusals, which only refuse when they are.
+
 The recall verbs (`digest`, `show`, `search`, `timeline`, `mcp`) read
 the home and write nothing to it, so their tests are isolated but not
 guarded. A process started another way (`os.system`, `os.spawn*`; this
@@ -52,6 +60,7 @@ names this module `home_guard`, so there is one of it and the hook goes
 in once. Not a test module: discovery collects `test_*.py` only.
 """
 
+import contextlib
 import os
 import re
 import sys
@@ -80,6 +89,11 @@ RECORDER_VERB = re.compile(r'(?:^|[\s"/\\])loxodonta\.py"?\s+"?([a-z-]+)')
 # (#259), and the verbs that read or write the recorder's file in it.
 MANAGED = "LOXODONTA_MANAGED_DIR"
 MANAGED_VERBS = HOME_READERS | RECORDER_WRITERS
+# The folder that stands in for the managed install's copy of the
+# recorder (#460), and the flag of the two verbs that write or delete it.
+PROGRAM = "LOXODONTA_PROGRAM_DIR"
+PROGRAM_VERBS = {"install-hook", "uninstall-hook"}
+MANAGED_FLAG = re.compile(r'(?:^|\s)"?--managed\b')
 
 
 def inside_the_temp_root(value, cwd):
@@ -96,12 +110,13 @@ def inside_the_temp_root(value, cwd):
         return False
 
 
-def strays(env, cwd, project_too=True, managed_too=True):
+def strays(env, cwd, project_too=True, managed_too=True, program_too=False):
     """The names in `env` that could still reach this machine's home: a
     home unset, outside the temp root, or no different from the one this
     process was started with; when `project_too`, a CLAUDE_PROJECT_DIR
-    the test did not choose; and, when `managed_too`, a managed settings
-    folder judged as a home is, with no exception for an unset one.
+    the test did not choose; when `managed_too`, a managed settings
+    folder judged as a home is, with no exception for an unset one; and
+    when `program_too`, the copy's folder judged the same way.
 
     Unset LOXODONTA_HOME and CODEX_HOME are the exception, when HOME and
     USERPROFILE both pass: the tools then fall back to `~/.loxodonta` and
@@ -125,6 +140,8 @@ def strays(env, cwd, project_too=True, managed_too=True):
                  or env.get(name)]
     if managed_too and stray(MANAGED):
         found.append(MANAGED)
+    if program_too and stray(PROGRAM):
+        found.append(PROGRAM)
     if (project_too and env.get("CLAUDE_PROJECT_DIR")
             and stray("CLAUDE_PROJECT_DIR")):
         found.append("CLAUDE_PROJECT_DIR")
@@ -165,7 +182,12 @@ def refuse_this_machines_home(event, args):
                    os.getcwd() if cwd is None else os.fsdecode(cwd),
                    project_too=tool == "supervisor.py"
                    or verb.group(1) == "hook",
-                   managed_too=verb.group(1) in MANAGED_VERBS)
+                   managed_too=verb.group(1) in MANAGED_VERBS
+                   and MANAGED not in _left,
+                   program_too=tool == "loxodonta.py"
+                   and verb.group(1) in PROGRAM_VERBS
+                   and MANAGED_FLAG.search(command) is not None
+                   and PROGRAM not in _left)
     if names:
         raise AssertionError(
             "%s %s started with this machine's %s (#242, the "
@@ -179,6 +201,26 @@ def refuse_this_machines_home(event, args):
 _armed = False
 # The machine's homes, as this process was started with them.
 _started_with = {}
+_left = set()
+
+
+@contextlib.contextmanager
+def left_to_the_machine(*names):
+    """Within it a start may leave the variables `names`, of
+    LOXODONTA_MANAGED_DIR and LOXODONTA_PROGRAM_DIR, unset or naming the
+    machine's own folder, and every other home is still held to the
+    test's own. For the tests of the managed installer's refusals alone
+    (ADR-0042 ruling 3): with both stand-ins set, a check that fails is
+    a warning and the install goes on. A test enters it only where the
+    installer refuses before it reads or writes anything: with the
+    managed stand-in set and the copy's unset, always; with the managed
+    folder the machine's own, once the test has seen for itself that the
+    check fails for the interpreter it starts."""
+    _left.update(names)
+    try:
+        yield
+    finally:
+        _left.clear()
 
 
 def arm():
@@ -189,7 +231,7 @@ def arm():
     if not _armed:
         _started_with.update(
             (name, os.environ[name])
-            for name in HOMES + (MANAGED, "CLAUDE_PROJECT_DIR")
+            for name in HOMES + (MANAGED, PROGRAM, "CLAUDE_PROJECT_DIR")
             if name in os.environ)
         sys.addaudithook(refuse_this_machines_home)
         _armed = True
