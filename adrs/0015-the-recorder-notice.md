@@ -84,3 +84,13 @@ is the same posture as everywhere else here — detection, not prevention.
   count's age themselves.
 - Not an alarm. Drift is a reason to look. Verdicts still come only from
   `verify`, and the exit code is untouched.
+
+## Addendum, 2026-10-19: a recorder outside a checkout
+
+ADR-0042 puts the managed copy of the recorder under the system program
+area, where git has nothing to say. The notice reads such a file by its
+own `TOOL_VERSION` line and its SHA-256, reports both, and says when the
+supervisor reading it is another version. Still local, still never a
+fetch, still never an update: the copy moves when an administrator runs
+`install-hook --managed` again from newer files, and the notice says so
+in those words.

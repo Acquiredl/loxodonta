@@ -88,7 +88,7 @@ The recommended setup posts the head to the receiver at every session end. By ha
 
 ![The head's digest goes to the OpenTimestamps calendars at session end and into a Bitcoin block a few hours later. The proof is a file beside the chain on the agent's machine. The rebuilt chain, checked against it, reads ANCHOR-MISMATCH.](docs/images/anchor.svg)
 
-The proof that ties the chain to the block is a file beside the chain. The agent cannot forge it but can delete it, and for now nothing sends it off the machine ([#524](https://github.com/Acquiredl/loxodonta/issues/524)), so keep a copy elsewhere. A company's own timestamp authority (RFC 3161) can sit beside Bitcoin's clock, never instead of it ([docs/ANCHORING.md](docs/ANCHORING.md)).
+The proof that ties the chain to the block is a file beside the chain. The agent cannot forge it but can delete it, and for now nothing sends it off the machine ([#524](https://github.com/Acquiredl/loxodonta/issues/524)), so keep a copy elsewhere. A timestamp authority you choose (RFC 3161) can stamp the same head beside Bitcoin's clock, never instead of it, since an authority can be leaned on and a block cannot: `install-hook --authority URL` asks it at every session end, and `verify --stamps` judges the tokens later with the authority's certificates in hand ([docs/ANCHORING.md](docs/ANCHORING.md)).
 
 **A receiver on another machine.** `receiver.py` runs on a second machine and keeps what is sent to it: every receipt and every head at session end and, in the recommended setup, the harness's own record of each tool call.
 
@@ -163,7 +163,7 @@ All of that runs on the agent's machine, so what it says is a reason to look, no
 The setup the promises in [docs/CLAIMS.md](docs/CLAIMS.md) are made for, and the one the red-team round attacked. It is for Claude Code, the one harness where every part of it exists; on Codex the head, the anchor and the receiver work, and there is no managed install or second record yet. Four things:
 
 1. A receiver on a machine the agent cannot reach. Copy `receiver.py` and `supervisor.py` there and run `python receiver.py serve`, which prints the URL to send to ([docs/RECEIVER.md](docs/RECEIVER.md)). I ran mine on a small rented server. A virtual machine or a container on the same computer counts only if the account the agent runs as cannot log in to it, open its files or reach its disk: no Docker access, no shared folder, no hand in the virtual machine's software.
-2. The hook, wired by an administrator: from an administrator shell, `python loxodonta.py install-hook --managed --profile full --remote URL`. The hook then lives in the harness's managed settings, which a run cannot switch off from its command line, and every session end sends the receipts and the head to the receiver and anchors the head, while the harness sends its own events there too.
+2. The hook, wired by an administrator: from an administrator shell, with a Python installed for all users, `python loxodonta.py install-hook --managed --profile full --remote URL`. The hook then lives in the harness's managed settings, which a run cannot switch off from its command line, and every session end sends the receipts and the head to the receiver and anchors the head, while the harness sends its own events there too.
 3. An agent without administrator rights. That one is about the account the agent runs as, and it is yours to set up: with those rights, the managed settings are as easy to rewrite as any other file.
 4. Somebody reading it. `python supervisor.py serve` on the agent's machine, and `python supervisor.py scan --receiver DIR` on the receiver's, where the count against the harness's events runs.
 
@@ -207,7 +207,7 @@ Use it. Wire it into your own work for a week and see whether it adds anything, 
 
 Break it, any way you can. `drill` rehearses four tampers on a sandbox copy, and that is only a start: strip the hooks, cut what is being sent, go after the receiver, find the indirect route nobody wrote down. [docs/CLAIMS.md](docs/CLAIMS.md) lists what the record promises and where it already says it stops, and a way around a promise is the most useful issue this repository can get.
 
-And tell me what you think. Does a receipt hold the right things, or too much, or too little? Does tying the recommended setup to Bitcoin through OpenTimestamps bother you, and would you rather have a clock with no money behind it? Criticism of how it is built is welcome too: the goal is a tool that works, and to keep learning while making it better.
+And tell me what you think. Does a receipt hold the right things, or too much, or too little? Does tying the recommended setup to Bitcoin through OpenTimestamps bother you, and is the authority timestamp beside it enough, or would you want it on its own? Criticism of how it is built is welcome too: the goal is a tool that works, and to keep learning while making it better.
 
 ## Read more
 

@@ -35,9 +35,10 @@ exactly those entries and nothing else.
 Two steps stay yours whatever the agent does. Check the files against
 `SHA256SUMS` yourself, since a sum your agent checked is only its word. And
 anything that needs an administrator, `install-hook --managed` above all, is
-run from your own shell and never by the agent: an agent that can act as
-administrator can rewrite the managed settings too. The five steps below
-need neither, so an agent can walk through all of them with you.
+run from your own shell, with a Python installed for all users, and never by
+the agent: an agent that can act as administrator can rewrite the managed
+settings too. The five steps below need neither, so an agent can walk through
+all of them with you.
 
 ## The five steps
 

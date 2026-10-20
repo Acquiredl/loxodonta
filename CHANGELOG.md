@@ -10,6 +10,20 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-20
+
+### Added
+
+- The recorder notice reads a recorder outside a git checkout, as a managed install's copy, by its `TOOL_VERSION` line and SHA-256, and says when the supervisor reading it is another version; the export's machine line names both (#460).
+- `install-hook --managed` copies `loxodonta.py` and `supervisor.py` to `C:\Program Files\loxodonta` or `/opt/loxodonta`, and the managed commands name the copy; `uninstall-hook --managed` deletes it (#460).
+- A managed install first checks that its Python and the copy's folder are out of an ordinary account's reach, and otherwise refuses with exit 64, naming the path and the fix (#460).
+- Run again from other files, `install-hook --managed` replaces each copy whose bytes differ and says both versions, backwards included; the same files change nothing (#460).
+
+### Changed
+
+- `docs/CLAIMS.md` says what the recorder's path and the harness's own program open, and ADR-0042 rules where a managed install puts the recorder and how it moves; ADR-0015 and ADR-0040 gain addenda (#460).
+- Every hook command the installer writes, managed and plain, Claude Code and Codex, runs Python with `-I`; entries an earlier install wrote are rewritten once on the next install (#460).
+
 ## [0.17.0] - 2026-10-18
 
 ### Changed
@@ -459,7 +473,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.17.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.18.0...dev
+[0.18.0]: https://github.com/Acquiredl/loxodonta/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Acquiredl/loxodonta/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Acquiredl/loxodonta/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/Acquiredl/loxodonta/compare/v0.15.0...v0.15.1
