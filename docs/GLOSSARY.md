@@ -24,7 +24,7 @@ If a concept is in your head but not in this file, the agent will guess — and 
 
 ### Operator
 
-The human who owns the machine and the receipt log, and who runs `verify`. The operator's job in the trust story is exactly one thing: keep a [head record](#head-record) somewhere the writer cannot reach.
+The human who owns the machine and the receipt log, and who runs `verify`. The operator's job in the trust story is exactly one thing: keep a [head record](#head-record) somewhere the writer cannot reach. An *administrator* is the operator, or someone they trust, acting from an account with rights the [writer](#writer)'s account lacks: the managed install and the copy of the recorder are theirs to make and theirs to move (ADR-0040, ADR-0042).
 
 ### Writer
 

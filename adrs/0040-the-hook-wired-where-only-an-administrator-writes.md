@@ -245,3 +245,15 @@ higher-ranked managed source.
 ## Addendum, 2026-10-06: the installer reads the other managed files once, and still writes only its own
 
 Ruling 1 said a managed install never reads or writes `managed-settings.json` or any other file in the folder. ADR-0041 ruling 7 narrows that to the writes. At `--profile full` the installer also writes a second file of its own beside the hooks file, `managed-settings.d/loxodonta-telemetry.json`, which pins the harness's events to the receiver, and before it writes the pin it opens `managed-settings.json` and every other `*.json` drop-in read-only, through the same reader that refuses a folder or a pipe, to look for an `env` that already sets one of the four telemetry variables. It warns naming the file and the key, never the value, and writes its pin all the same: the harness sends to one place, and an organisation that already collects its events keeps them. Nothing else moves: the installer still merges into no file of anyone else's, the hooks file still holds `hooks` and nothing else (ruling 5), and `uninstall-hook --managed` deletes the two files of the recorder's own and nothing else (ruling 4). A file at the pin's name that is not the installer's pin refuses a `full` install before anything is written, and is left alone and named by every other verb. Ruling 1 reads from this date: *it writes nothing to `managed-settings.json` or to any file there but its own two, and reads the others only to warn.*
+
+## Addendum, 2026-10-19: #460 ruled that the recorder moves too
+
+ADR-0042 copies the recorder and the supervisor into a folder of the
+recorder's own under the system program area, and the managed command
+names the copy. The folder is outside the harness's, so ruling 1 stands
+as the addendum of 2026-10-06 reads it: nothing is written there but
+the installer's own two files. Once the build lands, the sentence under
+*What it claims* gains its second half, a run without administrator
+rights can neither switch the recorder off nor change what it runs, and
+the line under *What it does not claim* about the recorder file goes.
+Until then both stand as written.
