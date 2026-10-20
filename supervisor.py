@@ -3067,7 +3067,7 @@ def recorder_drift(witness):
     home = script.parent
     branch = git_say(home, "rev-parse", "--abbrev-ref", "HEAD")
     if branch is None:
-        return recorder_copy(script, notice)
+        return recorder_versioned(script, notice)
     notice.update({
         "state": "tracked",
         "branch": branch,
@@ -3098,13 +3098,15 @@ def recorder_drift(witness):
     return notice
 
 
-def recorder_copy(script, notice):
-    """The notice for a recorder git has nothing to say about, a managed
-    install's copy under the system program area (ADR-0042): its
-    `TOOL_VERSION` line and the SHA-256 of its bytes, read from the
-    bytes and never imported or run, and whether this supervisor is the same
-    version. State `copy` when the version line reads; `unknown`, with
-    whatever could be read, when it does not."""
+def recorder_versioned(script, notice):
+    """The notice for a recorder git has nothing to say about: a managed
+    install's copy under the system program area (ADR-0042), or a
+    checkout read where git is not on the PATH, which this cannot tell
+    apart. Its `TOOL_VERSION` line and the SHA-256 of its bytes, read
+    from the bytes and never imported or run, and whether this
+    supervisor is the same version. State `versioned` when the version
+    line reads; `unknown`, with whatever could be read, when it does
+    not."""
     outside = "the recorder is not in a git checkout, or git is unavailable"
     try:
         with open_regular(script) as f:
@@ -3127,14 +3129,15 @@ def recorder_copy(script, notice):
                           "TOOL_VERSION line, so its version cannot be read "
                           f"from here; its SHA-256 is {notice['sha256']}")
         return notice
-    notice.update({"state": "copy", "version": found.group(1).decode("ascii"),
+    notice.update({"state": "versioned",
+                   "version": found.group(1).decode("ascii"),
                    "supervisor_version": TOOL_VERSION})
-    notice["note"] = (f"recording from a copy outside any git checkout, "
-                      f"version {notice['version']}, SHA-256 "
-                      f"{notice['sha256']}")
+    notice["note"] = (f"{outside}, so it is read by its own lines: version "
+                      f"{notice['version']}, SHA-256 {notice['sha256']}")
     if notice["version"] != TOOL_VERSION:
         notice["note"] += (f"; this supervisor is {TOOL_VERSION}, another "
-                           "version — the copy moves only when an "
+                           "version — a managed install's copy moves only "
+                           "when an "
                            "administrator runs `install-hook --managed` "
                            "again from newer files; nothing updates it "
                            "for you")
@@ -10410,7 +10413,8 @@ function renderStrip(report) {
     recLine.classList.toggle("drifted",
       !!(rec.dirty || rec.behind || rec.state === "unwired" ||
          rec.state === "unknown" ||
-         (rec.state === "copy" && rec.version !== rec.supervisor_version)));
+         (rec.state === "versioned" &&
+          rec.version !== rec.supervisor_version)));
   }
   const chains = report.repos.flatMap(r =>
     r.sessions.flatMap(s => s.chains));

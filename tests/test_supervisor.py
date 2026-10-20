@@ -4617,8 +4617,8 @@ class WalkFindingsTest(unittest.TestCase):
 
 class RecorderDriftTest(unittest.TestCase):
     """The harness executes the recorder from a working tree, so the
-    code that records you is whatever is checked out at that path right
-    now — no pin, no copy. The scan says which, and never fetches: a
+    code that records you is whatever is checked out or copied at that
+    path right now, with no pin. The scan says which, and never fetches: a
     recorder that reaches the network to update itself would hand the
     writer a second road to the one file that must stay trustworthy
     (ADR-0002). Reporting drift is the honest half of that trade."""
@@ -4770,10 +4770,13 @@ class RecorderDriftTest(unittest.TestCase):
 
         recorder = self.notice()
 
-        self.assertEqual(recorder["state"], "copy")
+        self.assertEqual(recorder["state"], "versioned")
         self.assertEqual(recorder["version"], version)
         self.assertEqual(recorder["sha256"], hashlib.sha256(body).hexdigest())
         self.assertIsNone(recorder["branch"])
+        # The notice cannot tell a copy from a checkout git is missing
+        # for, so its sentence keeps both readings.
+        self.assertIn("or git is unavailable", recorder["note"])
         self.assertIn(version, recorder["note"])
         self.assertIn(recorder["sha256"], recorder["note"])
         self.assertNotIn("another version", recorder["note"])
@@ -4787,13 +4790,33 @@ class RecorderDriftTest(unittest.TestCase):
 
         recorder = self.notice()
 
-        self.assertEqual(recorder["state"], "copy")
+        self.assertEqual(recorder["state"], "versioned")
         self.assertEqual(recorder["version"], "0.0.1")
         self.assertEqual(recorder["supervisor_version"], version)
         self.assertIn("0.0.1", recorder["note"])
         self.assertIn(version, recorder["note"])
         self.assertIn("another version", recorder["note"])
         self.assertIn("install-hook --managed", recorder["note"])
+
+    def test_a_checkout_read_without_git_is_never_called_a_copy(self):
+        # A hook or a login task can run with a narrower PATH than the
+        # shell: git absent, a checkout reads exactly as a copy does,
+        # and the sentence must not say which it is.
+        _, script = self.make_checkout()
+        script.write_bytes(b'TOOL_VERSION = "0.0.1"\n')
+        no_git = self.base / "no-git"
+        no_git.mkdir()
+        result = run_scan(self.root, "--witness", str(self.witness),
+                          env={**self.env, "PATH": str(no_git)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        recorder = json.loads(result.stdout)["recorder"]
+
+        self.assertEqual(recorder["state"], "versioned")
+        self.assertEqual(recorder["version"], "0.0.1")
+        self.assertIn("not in a git checkout, or git is unavailable",
+                      recorder["note"])
+        self.assertNotIn("outside any git checkout", recorder["note"])
 
     def test_a_copy_with_no_version_line_says_so_and_still_hashes(self):
         body = b"# a recorder with its version line taken out\n"
