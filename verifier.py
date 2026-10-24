@@ -2660,7 +2660,7 @@ def ceiling_lines(manifest, earned):
     return trust, verdict
 
 
-def judge_package(shown, folder, chain_file=None, block_headers=None):
+def judge_package(path, folder, chain_file=None, block_headers=None):
     """The ladder, in ADR-0026 ruling 5's order: the manifest's summary,
     each chain, the file references, each artifact, each declared seal,
     the unlisted files, one line of residual trust when the ladder allows
@@ -2683,7 +2683,7 @@ def judge_package(shown, folder, chain_file=None, block_headers=None):
               "others do not; which file is judged would depend on where "
               "it is verified, so this verifier refuses it")
         return 4
-    print_manifest_summary(shown, manifest)
+    print_manifest_summary(path, manifest)
     findings = []
     references = 0
     headers, used = block_headers or {}, set()

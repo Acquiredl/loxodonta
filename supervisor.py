@@ -3076,8 +3076,8 @@ def recorder_drift(witness):
               "head": None, "dirty": False, "upstream": None,
               "ahead": None, "behind": None, "fetched": None,
               "version": None, "sha256": None, "note": None}
-    # Windows's exists reads a named pipe whose every instance is taken
-    # as nothing there; the open names it, and the read below says so
+    # Windows's exists reads a named pipe as nothing there, and takes
+    # its free instance; the open names it, and the read below says so
     # (#573).
     if not os.path.exists(script) and file_problem(script) != NOT_REGULAR:
         notice["note"] = ("the wired recorder is not on disk — the hook "
