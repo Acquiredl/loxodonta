@@ -188,7 +188,8 @@ class LoggedTooDeepTest(unittest.TestCase):
     written and the line is `verify`'s to name."""
 
     def log_over(self, line):
-        """`log --file` on a chain of three whose entry 1 is `line`."""
+        """`log --file` on a chain of three whose entry 1 is `line`, and
+        the folder it ran in."""
         folder = temp_folder(self)
         env = isolated_env(temp_folder(self))
         run(LOXODONTA, "init", "--log", "c.jsonl", cwd=str(folder),
@@ -206,17 +207,25 @@ class LoggedTooDeepTest(unittest.TestCase):
                      "--action", "c", "--file", "f.txt", cwd=str(folder),
                      env=env, timeout=BOUND)
         self.assertNotIn("Traceback", result.stderr)
-        return result
+        return result, folder
 
     def test_a_chain_line_too_deep_reads_as_one_that_is_not_json(self):
-        plain = self.log_over(NOT_JSON)
+        plain, _ = self.log_over(NOT_JSON)
 
-        result = self.log_over(too_deep())
+        result, folder = self.log_over(too_deep())
 
         self.assertEqual((result.returncode, result.stdout),
                          (plain.returncode, plain.stdout))
         self.assertEqual((result.returncode, result.stdout),
                          (0, "logged entry 3\n"))
+        chain = (folder / "c.jsonl").read_bytes()
+        self.assertEqual(len(chain.splitlines()), 4)
+        verified = run(LOXODONTA, "verify", "--log", "c.jsonl",
+                       cwd=str(folder), timeout=BOUND)
+        self.assertEqual(verified.returncode, 1,
+                         verified.stdout + verified.stderr)
+        self.assertIn("BROKEN at entry 1: nesting too deep to read",
+                      verified.stdout)
 
 
 class DigestedTooDeepTest(unittest.TestCase):

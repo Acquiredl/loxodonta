@@ -45,6 +45,9 @@ OURS = ("loxodonta.py", "supervisor.py")
 HARNESS_FOLDER = {"win32": "C:\\Program Files\\ClaudeCode",
                   "darwin": "/Library/Application Support/ClaudeCode",
                   }.get(sys.platform, "/etc/claude-code")
+# The copy's own folder (ADR-0042 ruling 1), likewise.
+PROGRAM_FOLDER = ("C:\\Program Files\\loxodonta" if sys.platform == "win32"
+                  else "/opt/loxodonta")
 REMOTE = "http://127.0.0.1:9/hook"
 
 
@@ -744,7 +747,9 @@ class ManagedCopyTest(ManagedBase):
         if why is None:
             self.skipTest("this interpreter may pass the check")
         real = HARNESS_FOLDER
-        for managed in (None, real, real.upper(), real + os.sep):
+        # A trailing dot is another folder on POSIX, the same on Windows.
+        dotted = (real + ".",) if sys.platform == "win32" else ()
+        for managed in (None, real, real.upper(), real + os.sep, *dotted):
             with self.subTest(managed=managed):
                 env = {name: value for name, value in self.env.items()
                        if name != "LOXODONTA_MANAGED_DIR"}
@@ -846,6 +851,35 @@ class ManagedCopyTest(ManagedBase):
                                  done.stdout + done.stderr)
                 self.assertIn("LOXODONTA_PROGRAM_DIR must name", done.stderr)
                 self.assertEqual(self.everything(), before)
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "Windows drops a trailing dot or space")
+    def test_a_stand_in_spelling_the_real_copy_folder_is_none(self):
+        # Windows drops a trailing dot or space from a path's last part,
+        # and resolving keeps it, so each spelled the real copy folder,
+        # absent, as another, and an elevated install wrote the copy
+        # there with its check waived (#577 review). A second colon names
+        # a stream of the folder. Never near an install: refused before
+        # anything is read or written, and skipped where the folder is.
+        if os.path.exists(PROGRAM_FOLDER):
+            self.skipTest("the real copy folder exists here")
+        before = self.everything()
+        for program in (PROGRAM_FOLDER + ".", PROGRAM_FOLDER + "...",
+                        PROGRAM_FOLDER + " ", PROGRAM_FOLDER + ".\\",
+                        PROGRAM_FOLDER + "::$INDEX_ALLOCATION"):
+            for verb in ("install-hook", "uninstall-hook"):
+                with self.subTest(program=program, verb=verb):
+                    env = {**self.env, "LOXODONTA_PROGRAM_DIR": program}
+                    with home_guard.left_to_the_machine(
+                            "LOXODONTA_PROGRAM_DIR"):
+                        done = run(LOXODONTA, verb, "--managed", env=env)
+
+                    self.assertEqual(done.returncode, 64,
+                                     done.stdout + done.stderr)
+                    self.assertIn("LOXODONTA_PROGRAM_DIR must name",
+                                  done.stderr)
+                    self.assertEqual(self.everything(), before)
+        self.assertFalse(os.path.exists(PROGRAM_FOLDER))
 
     def test_the_check_reads_the_interpreter_as_the_command_names_it(self):
         # A link to the folder of a Python only root writes, in a folder
