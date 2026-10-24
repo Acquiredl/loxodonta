@@ -185,7 +185,7 @@ def files_base(log):
     record = os.path.join(log_dir, "project.json")
     if not os.path.exists(record):
         return log_dir, None
-    unread = f"{record} cannot be read as a project record"
+    unread = f"{visible(record)} cannot be read as a project record"
     try:
         # The record sits beside the chain, in the writer's reach, so a
         # pipe there is refused by name rather than waited on (#386).
@@ -210,7 +210,8 @@ def files_base(log):
             f"({visible(path)})"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
-    return None, f"{record} points at a missing project ({visible(path)})"
+    return None, (f"{visible(record)} points at a missing project "
+                  f"({visible(path)})")
 
 
 # --- The walk (SPEC §6) -------------------------------------------------------
@@ -850,6 +851,18 @@ def open_regular(path):
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
             raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
+        raise
+    except OSError as error:
+        # Windows refuses to open a named pipe whose every instance is
+        # taken, as an invalid argument, before its type can be asked;
+        # asked again by stat, it says the pipe is busy (Windows error
+        # 231), and a pipe is named a pipe here as everywhere else (#573).
+        if error.errno == errno.EINVAL:
+            try:
+                os.stat(path)
+            except OSError as asked:
+                if getattr(asked, "winerror", None) == 231:
+                    raise OSError(errno.EINVAL, NOT_REGULAR, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
@@ -2042,11 +2055,12 @@ def print_manifest_summary(path, manifest):
     """The manifest's displayed fields, testimony like every convenience
     copy (ADR-0007 ruling 3); the committed facts are judged below. The
     unit prints whatever it holds, so a later kind needs no new line.
-    `path` is the recipient's own; every other field is the issuer's
-    text, printed escaped."""
+    Every field is printed escaped, `path` too: a zip's file name is the
+    sender's choice, and a newline in it would print a line of its own
+    (#556)."""
     unit = manifest["unit"]
     seals = [visible(kind) for kind in manifest["seals"]]
-    print(f"package: {path}")
+    print(f"package: {visible(path)}")
     print(f"format: {manifest['format']}")
     print(f"packed: {visible(manifest.get('packed'))} by "
           f"{visible(manifest.get('tool'))} (testimony)")
@@ -2759,11 +2773,14 @@ def cmd_verify_package(args):
     end record shows, is refused unopened."""
     import zipfile  # only this command reads zips; the hook never pays for it
     path = args.path
+    # A zip's file name is the sender's choice: every line naming it is
+    # escaped, so a newline in it never prints a verdict of its own (#556).
+    shown = visible(path)
     headers = headers_by_root(args.block_header)
     if os.path.isdir(path):
         return judge_package(path, path, args.authority_chain, headers)
     if not os.path.isfile(path):
-        print(f"error: {path} not found", file=sys.stderr)
+        print(f"error: {shown} not found", file=sys.stderr)
         return EX_NOINPUT
     # Opened once, without waiting, and only that open file is read: a
     # pipe put at the name since the look above is never waited on, and
@@ -2774,7 +2791,7 @@ def cmd_verify_package(args):
         handle = io.BytesIO()
     if not zipfile.is_zipfile(handle):
         handle.close()
-        print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
+        print(f"UNSUPPORTED-FORMAT: {shown} is neither a folder nor a zip; "
               "not a loxodonta package")
         return 4
     with handle, tempfile.TemporaryDirectory() as unpacked:
@@ -2782,7 +2799,7 @@ def cmd_verify_package(args):
             with zipfile.ZipFile(handle) as package:
                 declared = sum(info.file_size for info in package.infolist())
                 if declared > PACKAGE_MAX_BYTES:
-                    print(f"UNSUPPORTED-FORMAT: {path} declares {declared} "
+                    print(f"UNSUPPORTED-FORMAT: {shown} declares {declared} "
                           "bytes unpacked, more than this verifier will "
                           f"unpack ({PACKAGE_MAX_BYTES})")
                     return 4
@@ -2791,7 +2808,7 @@ def cmd_verify_package(args):
                     first, second = (visible(repr(name)) for name in twice)
                     which = (f"{first} twice" if twice[0] == twice[1]
                              else f"{first} and {second}")
-                    print(f"UNSUPPORTED-FORMAT: {path} holds two members "
+                    print(f"UNSUPPORTED-FORMAT: {shown} holds two members "
                           f"that unpack to one file, {which}; which one is "
                           "read depends on the tool that unpacks it, so "
                           "this verifier refuses it unopened")
@@ -2802,7 +2819,7 @@ def cmd_verify_package(args):
                 crooked = next((name for name in package.namelist()
                                 if not bare_name(name)), None)
                 if crooked is not None:
-                    print(f"UNSUPPORTED-FORMAT: {path} holds a member named "
+                    print(f"UNSUPPORTED-FORMAT: {shown} holds a member named "
                           f"{visible(repr(crooked))}, not a bare file name; "
                           "some systems would unpack it under another name, "
                           "so this verifier refuses it unopened")
@@ -2813,7 +2830,7 @@ def cmd_verify_package(args):
         except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError,
                 ValueError) as e:
             # The reason may quote a member's name, the issuer's text.
-            print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked "
+            print(f"UNSUPPORTED-FORMAT: {shown} could not be unpacked "
                   f"({visible(e)}); not a loxodonta package")
             return 4
         return judge_package(path, unpacked, args.authority_chain, headers)
@@ -3142,8 +3159,8 @@ def write_line_to_disk(path, mode, line):
         try:
             os.fsync(f.fileno())
         except OSError as e:
-            print(f"warning: {path}: written, but not synced to disk: {e}",
-                  file=sys.stderr)
+            print(f"warning: {visible(path)}: written, but not synced to "
+                  f"disk: {e}", file=sys.stderr)
 
 
 # --- One writer at a time (ADR-0004) ------------------------------------------
@@ -3298,7 +3315,7 @@ def cmd_init(args):
         print(f"error: cannot create {visible(args.log)}: {e.strerror or e}",
               file=sys.stderr)
         return EX_CANTCREAT
-    print(f"initialized {args.log}")
+    print(f"initialized {visible(args.log)}")
     return 0
 
 
@@ -4780,7 +4797,8 @@ def cmd_stamp(args):
         try:
             head = sha256_file(args.manifest)
         except OSError as e:
-            print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
+            print(f"error: {visible(args.manifest)}: {e.strerror or e}",
+                  file=sys.stderr)
             return EX_NOINPUT
         return stamp_digest(args.manifest, head, None, args.authority)
     try:
@@ -4839,7 +4857,7 @@ def stamp_digest(target, head, n, url):
               f"written: {unwritable_why(stamps_path(target), e)}",
               file=sys.stderr)
         return EX_CANTCREAT
-    print(f"stamped {record_label(head, n)} via {url}")
+    print(f"stamped {record_label(head, n)} via {visible(url)}")
     return 0
 
 
@@ -4861,10 +4879,11 @@ def cmd_anchor(args):
         try:
             head = sha256_file(args.manifest)
         except OSError as e:
-            print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
+            print(f"error: {visible(args.manifest)}: {e.strerror or e}",
+                  file=sys.stderr)
             return EX_NOINPUT
         return submit_digest(args.manifest, head, None, args.calendar,
-                             f"--upgrade --manifest={args.manifest}",
+                             f"--upgrade --manifest={visible(args.manifest)}",
                              args.force)
     try:
         lines = read_log(args.log)
@@ -4903,25 +4922,26 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
     written = 0
     for calendar in (calendars or DEFAULT_CALENDARS):
         url = calendar.rstrip("/")
+        shown = visible(url)  # the operator's argument, never checked (#556)
         try:
             proof_bytes = calendar_request(url + "/digest", data=digest)
             judge_proof(head, proof_bytes)  # refuse to store what can't replay
         except (OSError, ProofError, ValueError) as e:
             # What a calendar refused with is its own text (#349).
-            print(f"warning: calendar {url}: {visible(e)}", file=sys.stderr)
+            print(f"warning: calendar {shown}: {visible(e)}", file=sys.stderr)
             continue
         try:
             append_anchor_record(target, head, n, url, proof_bytes)
         except OSError as e:
             # A proof the calendar gave and this machine could not keep
             # anchors nothing, and no other calendar's would land either.
-            print(f"error: calendar {url} answered, and the proof could not "
+            print(f"error: calendar {shown} answered, and the proof could not "
                   f"be written to {visible(anchors_path(target))}: "
                   f"{unwritable_why(anchors_path(target), e)}",
                   file=sys.stderr)
             return EX_CANTCREAT
         written += 1
-        print(f"anchored {record_label(head, n)} via {url}")
+        print(f"anchored {record_label(head, n)} via {shown}")
     if not written:
         print("error: no calendar accepted the digest — not anchored",
               file=sys.stderr)
@@ -5059,7 +5079,7 @@ def cmd_report(args):
         return EX_NOINPUT
 
     entries, breaks, warns = walk(lines)
-    print(f"receipt log: {args.log} ({len(lines)} entries)")
+    print(f"receipt log: {visible(args.log)} ({len(lines)} entries)")
     print()
     for line in timeline_lines(entries, breaks, warns):
         print(line)
