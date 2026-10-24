@@ -84,6 +84,14 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 A writer exits 73 when a file it must write cannot be, the supervisor's `drill` when its sandbox cannot be made, `package` when it cannot create or finish `--out`, and `calibrate`, `acknowledge` and `export` when the file they write cannot be; the keeper reads a recorder verb's 73 by the same name (ADR-0037, #430, #422, #448).
 
+### What the keepers read from a recorder verb
+
+Names: `EX_UNAVAILABLE`, `EX_SOFTWARE`, `EX_TEMPFAIL`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+The keepers name each exit of `anchor`, `stamp` and `publish` for what it is: 69 a calendar, an authority or a remote that did not do what was asked, and the only exit that names one; 70 the recorder itself failed; 75 another writer holds the chain's lock (ADR-0037, #557).
+
 ### Writing to the console
 
 Names: `speak_utf8`.

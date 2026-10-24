@@ -315,6 +315,18 @@ def parse_when(ts):
 
 # --- Verdict runner -----------------------------------------------------------
 
+def recorder_child(*args):
+    """The command line of every recorder the supervisor starts (#575):
+    -I, as on every hook the installer writes (ADR-0042 ruling 4), so
+    neither a PYTHONPATH in this environment nor a module beside the
+    recorder is imported ahead of the standard library. -I also reads
+    no PYTHONIOENCODING, so -X utf8 says it instead: a traceback the
+    recorder prints before it sets its own streams still comes down the
+    pipe as UTF-8 (#294)."""
+    return [sys.executable, "-I", "-X", "utf8", str(LOXODONTA),
+            *(str(arg) for arg in args)]
+
+
 def verify(log):
     """The single seam to receipts (ADR-0005): one subprocess per chain,
     verdict read from the exit code and the documented verdict lines.
@@ -328,10 +340,8 @@ def verify(log):
     # errors="replace" because a verdict lost to a decode error is a
     # supervisor that missed its one job.
     result = subprocess.run(
-        [sys.executable, str(LOXODONTA), "verify", "--anchors",
-         f"--log={log}"],
-        capture_output=True, encoding="utf-8", errors="replace",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        recorder_child("verify", "--anchors", f"--log={log}"),
+        capture_output=True, encoding="utf-8", errors="replace")
     printed = result.stdout.strip().splitlines()
     verdict = verdict_word(printed)
     detail = list(printed)
@@ -1911,26 +1921,33 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     attempted = False
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
     if os.path.isfile(sidecar):
-        finished = run_verb(["anchor", "--upgrade", f"--log={log}"], env)
+        finished = run_verb(["anchor", "--upgrade", f"--log={log}"])
         attempted = True
         if finished is None:
             notes.append("upgrading did not finish in time; the proofs stay "
                          "as the sidecar holds them and the keeper will try "
                          "again")
-        elif finished.returncode != 0:
+        elif finished.returncode == EX_UNAVAILABLE:
             notes.append("upgrade attempted; a calendar did not answer — "
                          "proofs stay pending and the keeper will try again")
+        elif finished.returncode == EX_CANTCREAT:
+            notes.append("upgrading failed — a calendar answered and the "
+                         "completion could not be written beside the "
+                         "chain; the proofs stay pending until the sidecar "
+                         "can be written")
+        elif finished.returncode != 0:
+            notes.append(recorder_exit_note("upgrade the pending proofs",
+                                            finished))
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
         if head:
             command = ["anchor", f"--log={log}"]
             for calendar in calendars:
                 command += ["--calendar", calendar]
-            finished = run_verb(command, env)
+            finished = run_verb(command)
             attempted = True
             if finished is None:
                 failed = True
@@ -1944,17 +1961,17 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                              "the proof could not be written beside the "
                              "chain; it stays unanchored until the sidecar "
                              "can be written")
-            elif finished.returncode == 1:
-                failed = True
-                notes.append(recorder_refusal("anchor this head", finished))
-            elif finished.returncode != 0:
+            elif finished.returncode == EX_UNAVAILABLE:
                 failed = True
                 notes.append("anchoring failed — no calendar accepted "
                              "this head; it stays unanchored and the "
                              "keeper will try again")
+            elif finished.returncode != 0:
+                failed = True
+                notes.append(recorder_exit_note("anchor this head", finished))
         if head and authority:
             finished = run_verb(["stamp", f"--log={log}", "--authority",
-                                 authority], env)
+                                 authority])
             attempted = True
             if finished is None:
                 notes.append("stamping did not finish in time; whether the "
@@ -1965,12 +1982,12 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append("stamping failed — the token could not be "
                              "written beside the chain; it stays unstamped "
                              "until the sidecar can be written")
-            elif finished.returncode == 1:
-                notes.append(recorder_refusal("stamp this head", finished))
-            elif finished.returncode != 0:
+            elif finished.returncode == EX_UNAVAILABLE:
                 notes.append("stamping failed — the authority did not "
                              "grant a token for this head; it stays "
                              "unstamped and the keeper will try again")
+            elif finished.returncode != 0:
+                notes.append(recorder_exit_note("stamp this head", finished))
     return attempted, "; ".join(notes) or None, failed
 
 
@@ -1981,32 +1998,48 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
 VERB_BACKSTOP = 120
 
 
-def run_verb(args, env):
+def run_verb(args):
     """One recorder verb as a subprocess, its output captured; None when
     it did not finish inside VERB_BACKSTOP, and it is then killed."""
     try:
-        return subprocess.run([sys.executable, str(LOXODONTA), *args],
-                              capture_output=True, encoding="utf-8", env=env,
+        return subprocess.run(recorder_child(*args), capture_output=True,
+                              encoding="utf-8", errors="replace",
                               timeout=VERB_BACKSTOP)
     except subprocess.TimeoutExpired:
         return None
 
 
-def recorder_refusal(doing, finished):
-    """The keeper's note when the recorder refused a verb with exit 1: a
-    damaged tail it will not build on (ADR-0037). Nothing left the
-    machine and no calendar, authority or remote was asked, so the note
-    names none, and it promises no retry, since the recorder refuses
-    again until the tail is dealt with (#533). The recorder's stderr is
-    shown as it said it, never read for a verdict (#504), and clipped, so
-    a traceback from a recorder that failed before it could refuse
-    cannot fill the note."""
-    said = " ".join(line.strip() for line in finished.stderr.splitlines()
-                    if line.strip())
+def recorder_exit_note(doing, finished):
+    """The keeper's note for a recorder exit that is not the far end's.
+    Only 69 says a calendar, an authority or a remote did not do what
+    was asked (ADR-0037), so no other exit names one: none was shown to
+    be asked (#557). 1 is a damaged tail the recorder refuses again until
+    it is dealt with (#533); 70 is the recorder itself falling over,
+    named by its traceback's last line; 66 is a chain or sidecar it
+    found nothing in to read. Of them all only 75, another writer's
+    lock, passes on its own, so only its note promises the next turn.
+    The recorder's stderr is shown as it said it, never read for a
+    verdict (#504), and clipped."""
+    code = finished.returncode
+    if code == EX_TEMPFAIL:
+        return (f"the recorder could not {doing} while another writer "
+                "holds the chain's lock, and the keeper will try again")
+    lines = [line.strip() for line in finished.stderr.splitlines()
+             if line.strip()]
+    said = " ".join(lines[-1:] if code == EX_SOFTWARE else lines)
     if said.startswith("error: "):
         said = said[len("error: "):]
     said = clip(said, 300)
-    return f"the recorder refused to {doing}" + (f": {said}" if said else "")
+    if code == 1:
+        what = f"the recorder refused to {doing}"
+    elif code == EX_SOFTWARE:
+        what = (f"the recorder failed while it tried to {doing}, a fault "
+                "to report")
+    elif code == EX_NOINPUT:
+        what = f"the recorder found no input it could read to {doing}"
+    else:
+        what = f"the recorder exited {code} when asked to {doing}"
+    return what + (f": {said}" if said else "")
 
 
 # --- Publish keeper -----------------------------------------------------------
@@ -2097,18 +2130,17 @@ def publish_through_recorder(log, url, what):
     Returns the note for the panel when it did not land, else None. The
     recorder's stderr names the failure and never the URL, but it is
     not repeated here: the note is the panel's, and one sentence the
-    operator can act on beats a transport error. A refusal is the one
-    exception: there the recorder's own sentence is the one to act on
-    (`recorder_refusal`)."""
+    operator can act on beats a transport error. An exit that is not the
+    remote's is the exception: there the recorder's own sentence is the
+    one to act on (`recorder_exit_note`)."""
     flags = ["--chain"] if what == "chain" else []
     stays = ("the head stays unpublished" if what == "head"
              else "the entries stay unsent")
     try:
         finished = subprocess.run(
-            [sys.executable, str(LOXODONTA), "publish", *flags,
-             f"--log={log}", url],
-            capture_output=True, encoding="utf-8", timeout=PUBLISH_BACKSTOP,
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            recorder_child("publish", *flags, f"--log={log}", url),
+            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=PUBLISH_BACKSTOP)
     except subprocess.TimeoutExpired:
         # The recorder bounds its own POST; this is the backstop above
         # it, so one stuck publish can never hold a tick.
@@ -2116,7 +2148,7 @@ def publish_through_recorder(log, url, what):
         # not say it stays unsent.
         return (f"publishing the {what} did not finish in time; whether "
                 "it left is unknown, and the keeper will try again")
-    if finished.returncode == 64:
+    if finished.returncode == EX_USAGE:
         # A usage exit is the URL refused, not the remote: retrying
         # would never help, and the note must say so.
         flag = "--publish-url" if what == "head" else "--publish-chain"
@@ -2128,11 +2160,11 @@ def publish_through_recorder(log, url, what):
         # written (#364), so the next turn posts it again.
         return (f"published the {what}, and the memo could not be written; "
                 "the keeper will post it again until it can be")
-    if finished.returncode == 1:
-        return recorder_refusal(f"publish the {what}", finished)
-    if finished.returncode != 0:
+    if finished.returncode == EX_UNAVAILABLE:
         return (f"publishing failed — the remote did not take this {what}; "
                 f"{stays} and the keeper will try again")
+    if finished.returncode != 0:
+        return recorder_exit_note(f"publish the {what}", finished)
     return None
 
 
@@ -3510,8 +3542,7 @@ def keep_tails(sessions):
         }).encode("utf-8")
         try:
             done = subprocess.run(
-                [sys.executable, str(LOXODONTA), "hook",
-                 f"--log-dir={row['home']}"],
+                recorder_child("hook", f"--log-dir={row['home']}"),
                 input=payload, capture_output=True, timeout=60)
         except (OSError, subprocess.SubprocessError):
             continue
@@ -6796,9 +6827,8 @@ def cmd_verify(args):
         return EX_NOINPUT if well_formed else EX_USAGE
     log = match[0]
     judged = subprocess.run(
-        [sys.executable, str(LOXODONTA), "verify", f"--log={log}"],
-        capture_output=True, encoding="utf-8", errors="replace",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        recorder_child("verify", f"--log={log}"),
+        capture_output=True, encoding="utf-8", errors="replace")
     print(f"chain: {visible(log.as_posix())}")
     sys.stdout.write(judged.stdout)
     sys.stderr.write(judged.stderr)
@@ -8329,24 +8359,21 @@ def seal_package(stage, seals, calendars, keyfile, authority=None):
         written += [MANIFEST_SIGNATURE, MANIFEST_PUBLIC_KEY]
     if SEAL_STAMP in seals:
         finished = subprocess.run(
-            [sys.executable, str(LOXODONTA), "stamp",
-             f"--manifest={stage / 'manifest.json'}",
-             "--authority", authority],
-            capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            recorder_child("stamp", f"--manifest={stage / 'manifest.json'}",
+                           "--authority", authority),
+            capture_output=True, encoding="utf-8")
         if finished.returncode != 0:
             print(finished.stderr.strip() or "the recorder gave no reason",
                   file=sys.stderr)
             return [], None, "the manifest was not stamped"
         written.append(MANIFEST_STAMPS)
     if SEAL_ANCHOR in seals:
-        command = [sys.executable, str(LOXODONTA), "anchor",
-                   f"--manifest={stage / 'manifest.json'}"]
+        command = recorder_child("anchor",
+                                 f"--manifest={stage / 'manifest.json'}")
         for calendar in calendars:
             command += ["--calendar", calendar]
-        finished = subprocess.run(
-            command, capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        finished = subprocess.run(command, capture_output=True,
+                                  encoding="utf-8")
         if finished.returncode != 0:
             print(finished.stderr.strip() or "the recorder gave no reason",
                   file=sys.stderr)
@@ -8724,10 +8751,8 @@ REHEARSAL = ("rehearsal on sandbox copies — nothing here is a verdict "
 
 
 def receipts_cli(*args):
-    return subprocess.run(
-        [sys.executable, str(LOXODONTA), *args],
-        capture_output=True, encoding="utf-8",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    return subprocess.run(recorder_child(*args), capture_output=True,
+                          encoding="utf-8")
 
 
 def write_lines(path, lines):
@@ -12119,6 +12144,12 @@ EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
 EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no
                    # package, no baseline for calibrate or acknowledge, no
                    # export; and what the keeper reads from a recorder verb
+
+# Read by the keepers from a recorder verb; the supervisor exits with none.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+EX_UNAVAILABLE = 69  # the far end: a calendar, an authority or a remote
+EX_SOFTWARE = 70  # the recorder itself failed
+EX_TEMPFAIL = 75  # another writer holds the chain's lock
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.

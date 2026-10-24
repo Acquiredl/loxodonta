@@ -122,6 +122,14 @@ TWINS = (
          "`calibrate`, `acknowledge` and `export` when the file they "
          "write cannot be; the keeper reads a recorder verb's 73 by the "
          "same name (ADR-0037, #430, #422, #448)."),
+    Twin("What the keepers read from a recorder verb",
+         ("EX_UNAVAILABLE", "EX_SOFTWARE", "EX_TEMPFAIL"),
+         ORIGINAL, SUPERVISOR,
+         "The keepers name each exit of `anchor`, `stamp` and `publish` "
+         "for what it is: 69 a calendar, an authority or a remote that did "
+         "not do what was asked, and the only exit that names one; 70 the "
+         "recorder itself failed; 75 another writer holds the chain's "
+         "lock (ADR-0037, #557)."),
     Twin("Writing to the console", ("speak_utf8",), ORIGINAL, BOTH,
          "Every file can print text a Windows console's code page cannot "
          "hold, and none of them may die on it (#294)."),
