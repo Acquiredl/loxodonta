@@ -785,14 +785,15 @@ class HookWorktreeTest(unittest.TestCase):
 
     def assert_refused_by_name(self, result):
         """A receipt the hook cannot file: the refusal `unwritable_log`
-        gives, last on stderr, exit 73, never a traceback (#555)."""
+        gives, alone on stderr, exit 73, never a traceback (#555). Alone:
+        the #452 warning says where the receipt goes, and it goes
+        nowhere."""
         self.assertEqual(result.returncode, 73, result.stderr)
-        self.assertNotIn("Traceback", result.stderr)
-        last = result.stderr.splitlines()[-1]
-        self.assertTrue(last.startswith("error: "), last)
-        self.assertIn(str(self.store / "receipts"), last)
-        self.assertIn("could not be written", last)
-        self.assertIn("no entry was written", last)
+        (said,) = result.stderr.splitlines()
+        self.assertTrue(said.startswith("error: "), said)
+        self.assertIn(str(self.store / "receipts"), said)
+        self.assertIn("could not be written", said)
+        self.assertIn("no entry was written", said)
 
     def test_a_file_at_a_store_folders_name_is_refused_by_name(self):
         # #555: the first receipt of a session whose drawer does not
