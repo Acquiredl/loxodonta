@@ -2847,16 +2847,26 @@ def block_header(value):
     return bytes.fromhex(v)
 
 
+# Seconds one local git question may take before git is read as unable
+# to say. The folder asked about need not be the one running this, and
+# a git that never returns must not hold the command that asked.
+GIT_TIMEOUT = 10
+
+
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
-    file, or a question that failed. Local git only: a version is a
-    label on the file, never a channel to fetch a newer one."""
+    file, a question that failed, or no answer within GIT_TIMEOUT.
+    Local git only: a version is a label on the file, never a channel
+    to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
-            capture_output=True, encoding="utf-8")
-    except (OSError, ValueError):
+            # Never a pipe on stderr: a program git starts inherits it,
+            # and on Windows the timeout then waits for that program.
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            encoding="utf-8", timeout=GIT_TIMEOUT)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return "unknown"
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 

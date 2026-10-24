@@ -3072,11 +3072,24 @@ def recorder_path(witness):
 
 def git_say(home, *question):
     """One read-only git question, or None when git cannot answer —
-    absent, or the path is not a checkout. Never fetches, never writes."""
+    absent, the path is not a checkout, or no answer within GIT_TIMEOUT.
+    Never fetches, never writes. The folder is named by the harness
+    settings, so its git config and hooks are the writer's to plant
+    (#572): fsmonitor is turned off, and no optional lock is taken, so
+    `status` writes no index and starts no post-index-change hook. A
+    clean filter its attributes name still runs on `status`; the timeout
+    bounds it."""
     try:
-        answered = subprocess.run(["git", "-C", str(home), *question],
-                                  capture_output=True, encoding="utf-8")
-    except (OSError, ValueError):
+        answered = subprocess.run(
+            # Empty, not false: before git 2.36 the value was a command,
+            # and `false` names one.
+            ["git", "--no-optional-locks", "-c", "core.fsmonitor=",
+             "-C", str(home), *question],
+            # Never a pipe on stderr: a program git starts inherits it,
+            # and on Windows the timeout then waits for that program.
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            encoding="utf-8", timeout=GIT_TIMEOUT)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
     return answered.stdout.strip() if answered.returncode == 0 else None
 
@@ -12103,16 +12116,24 @@ setInterval(loadActivity, 30000);
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+GIT_TIMEOUT = 10
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
-    file, or a question that failed. Local git only: a version is a
-    label on the file, never a channel to fetch a newer one."""
+    file, a question that failed, or no answer within GIT_TIMEOUT.
+    Local git only: a version is a label on the file, never a channel
+    to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
-            capture_output=True, encoding="utf-8")
-    except (OSError, ValueError):
+            # Never a pipe on stderr: a program git starts inherits it,
+            # and on Windows the timeout then waits for that program.
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            encoding="utf-8", timeout=GIT_TIMEOUT)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return "unknown"
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 

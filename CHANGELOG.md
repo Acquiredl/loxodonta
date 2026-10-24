@@ -10,6 +10,15 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- The supervisor starts every recorder child with `-I`, as the installer's hooks run, so a `PYTHONPATH` in the environment `scan`, `serve`, `drill` or `package` was started with reaches none of them (#575).
+
+### Fixed
+
+- A keeper's note names a calendar, an authority or a remote only for the recorder's exit 69; a held lock (75), a recorder failure (70) and nothing it could read (66) are each named for what they are (#557).
+- The recorder notice asks git with a 10-second bound, fsmonitor off and no optional locks: a git that never returns no longer holds the scan, and a planted fsmonitor command or post-index-change hook no longer runs (#572).
+
 ## [0.18.0] - 2026-10-20
 
 ### Added
