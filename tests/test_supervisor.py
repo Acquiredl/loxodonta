@@ -5426,24 +5426,38 @@ class ClosedFolderTest(unittest.TestCase):
 
     def test_a_closed_drawer_whose_name_holds_a_newline_is_named_escaped(
             self):
-        # #556: a drawer's name is in the writer's reach, and the sentence
-        # naming it is read in a terminal: a line planted there stays in
-        # the sentence, spelled `\n`.
+        # #556: a drawer's name is in the writer's reach, and each
+        # sentence naming it is read in a terminal: a line planted there
+        # stays in the sentence, spelled `\n`, in the scan's note, in a
+        # command's refusal, and in serve's 503 body.
         later = self.store / "receipts" / "later\nVALID: planted\n-00000000"
         later.mkdir()
         self.recorder("init", "--log", str(later / "receipts-sess-dddd.jsonl"))
         self.close(later)
         out = self.root / "export.json"
 
-        result = self.supervisor("export", "--witness", str(self.witness),
-                                 "--out", str(out))
+        exported = self.supervisor("export", "--witness", str(self.witness),
+                                   "--out", str(out))
+        refused = self.supervisor("search", "step", "--all", "--repo",
+                                  str(self.project))
+        served = []
+        url = self.serve()
+        for route in ("/api/activity", "/api/search?q=step"):
+            with self.assertRaises(urllib.error.HTTPError) as answered:
+                OPENER.open(url + route, timeout=30)
+            served.append(answered.exception.read().decode("utf-8"))
+            self.assertEqual(answered.exception.code, 503)
+            answered.exception.close()
 
-        self.answered(result, 0)
-        note = [line for line in result.stderr.splitlines()
-                if "cannot be listed" in line]
-        self.assertEqual(len(note), 1, result.stderr)
-        self.assertIn("later\\nVALID: planted\\n-00000000", note[0])
-        self.assertNotIn("VALID: planted", result.stderr.splitlines())
+        self.answered(exported, 0)
+        self.answered(refused, 66)
+        for said in (exported.stderr, refused.stderr, *served):
+            with self.subTest(said=said):
+                named = [line for line in said.splitlines()
+                         if "cannot be listed" in line]
+                self.assertEqual(len(named), 1, said)
+                self.assertIn("later\\nVALID: planted\\n-00000000", named[0])
+                self.assertNotIn("VALID: planted", said.splitlines())
 
     def test_a_drawer_looping_on_itself_is_named_itself(self):
         # Only a refused permission names the folder above (#448 item

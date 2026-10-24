@@ -185,7 +185,7 @@ def closed_words(closed):
 def closed_refusal(error):
     """A command's refusal for a folder it had to list and could not, 66:
     it names the folder and does nothing (#431)."""
-    return refused(f"{visible(Path(error.filename).as_posix())} cannot be "
+    return refused(f"{Path(error.filename).as_posix()} cannot be "
                    f"listed: {error.strerror} — {UNKNOWN}, so nothing was "
                    "done", EX_NOINPUT)
 
@@ -9258,7 +9258,7 @@ class Face(BaseHTTPRequestHandler):
             # by name; the status the page leads with names it too (#431).
             # Plain words, which the page shows as they stand (#448), the
             # name escaped for a terminal or curl reading them (#556).
-            self.reply(f"{visible(Path(error.filename).as_posix())} cannot "
+            self.reply(f"{Path(error.filename).as_posix()} cannot "
                        f"be listed: {error.strerror} — {UNKNOWN}"
                        .encode("utf-8"),
                        "text/plain; charset=utf-8", status=503)
