@@ -5608,7 +5608,13 @@ def cmd_hook(args):
         return code
 
     if not os.path.isdir(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
+        # A file at the folder's name or a folder closed by one chmod is
+        # in the writer's reach (ADR-0002): a refusal by name, not a
+        # traceback (#555).
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except OSError as e:
+            return unwritable_log(writable_chain(log_dir, safe), e)
         # A freshly created log dir gets a protective .gitignore: action
         # lines record every command a session ran, and that history must
         # not ride into a commit by accident (SPEC §8: no secrets).
