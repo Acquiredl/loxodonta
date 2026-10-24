@@ -3405,7 +3405,7 @@ def referenced_paths(lines):
     for line in lines:
         try:
             refs = json.loads(line).get("files")
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, RecursionError):  # #554
             continue
         if isinstance(refs, list):
             paths.update(ref["path"] for ref in refs
@@ -5608,7 +5608,13 @@ def cmd_hook(args):
         return code
 
     if not os.path.isdir(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
+        # A file at the folder's name or a folder closed by one chmod is
+        # in the writer's reach (ADR-0002): a refusal by name, not a
+        # traceback (#555).
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except OSError as e:
+            return unwritable_log(writable_chain(log_dir, safe), e)
         # A freshly created log dir gets a protective .gitignore: action
         # lines record every command a session ran, and that history must
         # not ride into a commit by accident (SPEC §8: no secrets).
@@ -6426,14 +6432,17 @@ def stand_in(variable, real):
     variable without rights, and an administrator's elevated shell
     inherits it. Shown means: where both folders exist, not the same
     folder by the system's own answer (samefile); where one does not,
-    another name once resolved and folded. A value spelled as a network
-    path or a device path (\\\\host\\share, \\\\?\\, \\\\.\\) is never shown to be
-    another: an administrative share or a prefix reaches the same
-    folder under a spelling resolving does not undo."""
+    another name once resolved and folded. On Windows a value that does
+    not start with a drive letter and a separator (C:\\ or C:/) is never
+    shown to be another: a network path, a device path or a prefix
+    (\\\\host\\share, \\\\?\\, \\\\.\\, \\??\\) reaches the same folder under a
+    spelling resolving does not undo (#577)."""
     value = os.environ.get(variable)
     if not value:
         return False
-    if sys.platform == "win32" and value[:2] in ("\\\\", "//", "\\/", "/\\"):
+    if sys.platform == "win32" and not (
+            value[:1].isascii() and value[:1].isalpha()
+            and value[1:3] in (":\\", ":/")):
         return False
     try:
         if os.path.exists(value) and os.path.exists(real):

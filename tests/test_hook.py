@@ -783,6 +783,72 @@ class HookWorktreeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
 
+    def assert_refused_by_name(self, result):
+        """A receipt the hook cannot file: the refusal `unwritable_log`
+        gives, last on stderr, exit 73, never a traceback (#555)."""
+        self.assertEqual(result.returncode, 73, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        last = result.stderr.splitlines()[-1]
+        self.assertTrue(last.startswith("error: "), last)
+        self.assertIn(str(self.store / "receipts"), last)
+        self.assertIn("could not be written", last)
+        self.assertIn("no entry was written", last)
+
+    def test_a_file_at_a_store_folders_name_is_refused_by_name(self):
+        # #555: the first receipt of a session whose drawer does not
+        # exist yet makes the drawer, and a file in the way of it, at the
+        # receipts folder's name or the drawer's, is one command away.
+        project = self.workdir / "alpha"
+        project.mkdir()
+        self.store.mkdir()
+        receipts = self.store / "receipts"
+        receipts.write_text("in the way\n", encoding="utf-8")
+        with self.subTest(at="receipts"):
+            result = run_hook(
+                payload(session="sess-blocked", tool="Bash",
+                        tool_input={"command": "ls"}),
+                self.workdir, extra_env=self.env_for(project))
+
+            self.assert_refused_by_name(result)
+            self.assertEqual(receipts.read_text(encoding="utf-8"),
+                             "in the way\n")
+        receipts.unlink()
+        run_hook(payload(session="sess-first"), self.workdir,
+                 extra_env=self.env_for(project))
+        drawer = drawer_of(self.store, "alpha")
+        shutil.rmtree(drawer)
+        drawer.write_text("in the way\n", encoding="utf-8")
+        with self.subTest(at="drawer"):
+            result = run_hook(
+                payload(session="sess-blocked", tool="Bash",
+                        tool_input={"command": "ls"}),
+                self.workdir, extra_env=self.env_for(project))
+
+            self.assert_refused_by_name(result)
+            self.assertEqual(drawer.read_text(encoding="utf-8"),
+                             "in the way\n")
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not enter")
+    def test_a_closed_receipts_folder_is_refused_by_name(self):
+        # #555: one chmod by the writer, and the drawer of a session's
+        # first receipt cannot be made in it.
+        project = self.workdir / "alpha"
+        project.mkdir()
+        receipts = self.store / "receipts"
+        receipts.mkdir(parents=True)
+        os.chmod(receipts, 0)
+        self.addCleanup(os.chmod, receipts, 0o755)
+
+        result = run_hook(
+            payload(session="sess-closed", tool="Bash",
+                    tool_input={"command": "ls"}),
+            self.workdir, extra_env=self.env_for(project))
+
+        self.assert_refused_by_name(result)
+        os.chmod(receipts, 0o755)
+        self.assertEqual(list(receipts.iterdir()), [])
+
     def test_sessions_from_two_worktrees_collect_in_one_drawer(self):
         _, first = self.make_worktree(worktree_name="feature-one")
         _, second = self.make_worktree(main_name="mainrepo",
