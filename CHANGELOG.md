@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- A package's README, `docs/PACKAGE.md`, `docs/TOPOLOGY.md` and the README point the recipient at `python -I verifier.py verify-package`, the file every release ships beside `SHA256SUMS`, instead of the whole recorder (#326).
+
 ## [0.18.0] - 2026-10-20
 
 ### Added
