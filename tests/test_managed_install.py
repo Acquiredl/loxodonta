@@ -795,7 +795,7 @@ class ManagedCopyTest(ManagedBase):
 
         def spellings(folder):
             text = str(folder)
-            return ["\\\\?\\" + text,
+            return ["\\\\?\\" + text, "\\??\\" + text,
                     "\\\\localhost\\" + text[0] + "$" + text[2:]]
 
         before = self.everything()
@@ -824,6 +824,28 @@ class ManagedCopyTest(ManagedBase):
                     self.assertIn("LOXODONTA_PROGRAM_DIR must name",
                                   done.stderr)
                     self.assertEqual(self.everything(), before)
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "a drive letter is a Windows spelling")
+    def test_a_stand_in_must_start_with_a_drive_letter(self):
+        # \??\ reaches the folder it spells, and resolving reads it as a
+        # path on the current drive, so the spellings compared differ
+        # whatever folder it names (#577). On Windows a stand-in starts
+        # with a drive letter and a separator, or stands in for nothing.
+        # The copy's folder is absent, so the comparison is by spelling.
+        self.assertFalse(self.program.exists())
+        program = "\\??\\" + str(self.program)
+        before = self.everything()
+        for verb in ("install-hook", "uninstall-hook"):
+            with self.subTest(verb=verb):
+                env = {**self.env, "LOXODONTA_PROGRAM_DIR": program}
+                with home_guard.left_to_the_machine("LOXODONTA_PROGRAM_DIR"):
+                    done = run(LOXODONTA, verb, "--managed", env=env)
+
+                self.assertEqual(done.returncode, 64,
+                                 done.stdout + done.stderr)
+                self.assertIn("LOXODONTA_PROGRAM_DIR must name", done.stderr)
+                self.assertEqual(self.everything(), before)
 
     def test_the_check_reads_the_interpreter_as_the_command_names_it(self):
         # A link to the folder of a Python only root writes, in a folder
