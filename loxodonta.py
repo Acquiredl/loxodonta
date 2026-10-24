@@ -3405,7 +3405,7 @@ def referenced_paths(lines):
     for line in lines:
         try:
             refs = json.loads(line).get("files")
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, RecursionError):  # #554
             continue
         if isinstance(refs, list):
             paths.update(ref["path"] for ref in refs
