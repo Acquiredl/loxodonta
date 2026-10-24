@@ -14,7 +14,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `log --file` reads a line of the chain nested past the JSON reader as one that is not JSON, so the receipt is written instead of ending in a traceback; the line stays `verify`'s to name (#554).
 - The hook refuses a receipt whose drawer it cannot make, a file at the receipts folder's name or the folder closed by a chmod, by name with exit 73, instead of a traceback and exit 70 (#555).
-- On Windows, `LOXODONTA_MANAGED_DIR` or `LOXODONTA_PROGRAM_DIR` stands in for another folder only when it starts with a drive letter and a separator; a `\??\` spelling that passed while the real folder was absent now stands in for nothing (#577).
+- On Windows, `LOXODONTA_MANAGED_DIR` or `LOXODONTA_PROGRAM_DIR` stands in for another folder only when it starts with a drive letter and a separator; a `\??\` or trailing-dot spelling of the real folder, absent, now stands in for nothing (#577).
 
 ## [0.18.0] - 2026-10-20
 
