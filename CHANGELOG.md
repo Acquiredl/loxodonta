@@ -10,6 +10,16 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- A conformance vector, `files-unsorted`, holds an entry whose `files` lists `b.txt` before `a.txt`, hashed as stored; every verifier here reads it `VALID`, so one that sorted `files` before hashing fails it (#491).
+
+### Changed
+
+- `docs/SPEC.md` section 3 makes sorting `files` by path the writer's duty at intake, not a step of canonical form: the array is hashed as stored, and a verifier neither sorts it nor refuses it unsorted (#491).
+- `docs/SPEC.md` section 6 says `head` reads the final line only, so a torn tail has no head (nothing on stdout, exit 1), and section 10.3 names the package listing's head rule as its own (#490).
+- `docs/SPEC.md` section 6 says every break is listed in walk order, so the last line names the last break, and quotes the torn-tail line as `verify` prints it, `entries 0..2 intact` (#492).
+
 ## [0.18.0] - 2026-10-20
 
 ### Added
