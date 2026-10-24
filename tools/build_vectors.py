@@ -15,7 +15,8 @@ implementation checks itself against the same rows
 The honest chains are written by the recorder itself, through its public
 command line, with SOURCE_DATE_EPOCH pinning every timestamp, so two runs
 give the same bytes. The lines no recorder writes (a key given twice, a
-wrong type, a lone surrogate, another spelling of the same entry) are
+wrong type, a lone surrogate, another spelling of the same entry, files
+out of order) are
 built here, and hashed here by SPEC section 4's rules written out again,
 never imported: every line the recorder wrote is hashed that way too, and
 the build stops if the two disagree. The packages are assembled here as
@@ -488,6 +489,23 @@ def build(workdir):
         "read as JSON: a lone surrogate, which has no UTF-8 form and so no "
         "canonical form.", 1, "BROKEN at entry 1: a string holds a lone "
         "surrogate, which has no canonical form")
+
+    # The recorder sorts files at intake, so this line is the script's.
+    unsorted = sealed({"n": 1, "ts": "2026-09-23T12:01:00Z",
+                       "actor": "agent", "action": "wrote b.txt and a.txt",
+                       "files": [{"path": "b.txt", "sha256": hashlib.sha256(
+                                     b"b\n").hexdigest()},
+                                 {"path": "a.txt", "sha256": hashlib.sha256(
+                                     b"a\n").hexdigest()}],
+                       "prev": genesis["entry_hash"]})
+    chain("files-unsorted", base[:1] + [stored(unsorted)])
+    row("files-unsorted", "verify", "Entry 1's files lists b.txt before "
+        "a.txt, its hash over the array as stored: canonical form keeps an "
+        "array's order (SPEC section 4), so the hash holds, and a verifier "
+        "neither sorts files nor refuses it unsorted (#491).", 0, "VALID",
+        canonical={"entry": 1, "text": canonical(
+            {k: v for k, v in unsorted.items() if k != "entry_hash"}
+        ).decode("utf-8")})
 
     first = TRANSCRIPT.split(b"\n")[0] + b"\n"
     second = first + TRANSCRIPT.split(b"\n")[1] + b"\n"

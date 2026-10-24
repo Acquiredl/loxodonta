@@ -297,6 +297,21 @@
       "last_line": "BROKEN at entry 1: a string holds a lone surrogate, which has no canonical form"
     },
     {
+      "name": "files-unsorted",
+      "about": "Entry 1's files lists b.txt before a.txt, its hash over the array as stored: canonical form keeps an array's order (SPEC section 4), so the hash holds, and a verifier neither sorts files nor refuses it unsorted (#491).",
+      "args": [
+        "verify",
+        "--log",
+        "files-unsorted.jsonl"
+      ],
+      "exit": 0,
+      "last_line": "VALID",
+      "canonical": {
+        "entry": 1,
+        "text": "{\"action\":\"wrote b.txt and a.txt\",\"actor\":\"agent\",\"files\":[{\"path\":\"b.txt\",\"sha256\":\"0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f\"},{\"path\":\"a.txt\",\"sha256\":\"87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7\"}],\"n\":1,\"prev\":\"f20b1b3b9b0dd649fc6f00125ad29f374143b0d5c0b4d0a68749bbb5657c1fd4\",\"ts\":\"2026-09-23T12:01:00Z\"}"
+      }
+    },
+    {
       "name": "transcript-commitment",
       "about": "Two transcript commitments (SPEC section 2.2), byte counts growing: judged from the chain alone.",
       "args": [
