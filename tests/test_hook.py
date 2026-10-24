@@ -789,7 +789,9 @@ class HookWorktreeTest(unittest.TestCase):
         the #452 warning says where the receipt goes, and it goes
         nowhere."""
         self.assertEqual(result.returncode, 73, result.stderr)
-        (said,) = result.stderr.splitlines()
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        said = lines[0]
         self.assertTrue(said.startswith("error: "), said)
         self.assertIn(str(self.store / "receipts"), said)
         self.assertIn("could not be written", said)

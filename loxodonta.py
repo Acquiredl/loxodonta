@@ -5390,37 +5390,38 @@ def deregistered_main(gitdir):
     return spelled[:at] if at > 0 else None
 
 
-def drawer_of_session(log_dir, session, quiet=False):
+def drawer_of_session(log_dir, session):
     """One session, one drawer (ADR-0023): the session's first receipt
     decides. When the resolved drawer holds no chain for this session yet
     but another drawer in the store does, the receipt goes there, so a
     resolution that changes mid-session (a worktree cleaned up under a
     running session) can never split a session in two. The normal case
-    costs nothing: the resolved drawer already has the chain. A store
-    folder that cannot be listed is said on stderr unless `quiet`, and
-    the receipt still goes to the resolved drawer, never lost (#452)."""
+    costs nothing: the resolved drawer already has the chain. Returns
+    the drawer and a warning, None unless a store folder cannot be
+    listed, and the receipt then still goes to the resolved drawer,
+    never lost (#452). The caller prints the warning once that drawer
+    exists, so a receipt refused for want of it prints the refusal
+    alone (#555)."""
     name = f"receipts-{session}.jsonl"
     if os.path.exists(os.path.join(log_dir, name)):
-        return log_dir
+        return log_dir, None
     root = os.path.join(store_home(), "receipts")
     try:
         drawers = os.listdir(root)
     except (FileNotFoundError, NotADirectoryError):
-        return log_dir
+        return log_dir, None
     except OSError as error:
-        if not quiet:
-            print(f"warning: {visible(root)} cannot be listed "
-                  f"({visible(error.strerror or error)}), so a chain this "
-                  "session may already have in another drawer cannot be "
-                  f"found: this receipt goes to {visible(log_dir)}, and the "
-                  "session may be split across two drawers (ADR-0023)",
-                  file=sys.stderr)
-        return log_dir
+        return log_dir, (
+            f"warning: {visible(root)} cannot be listed "
+            f"({visible(error.strerror or error)}), so a chain this "
+            "session may already have in another drawer cannot be "
+            f"found: this receipt goes to {visible(log_dir)}, and the "
+            "session may be split across two drawers (ADR-0023)")
     for drawer in drawers:
         other = os.path.join(root, drawer)
         if other != log_dir and os.path.exists(os.path.join(other, name)):
-            return other
-    return log_dir
+            return other, None
+    return log_dir, None
 
 
 def store_home():
@@ -5566,8 +5567,9 @@ def cmd_hook(args):
     # One session, one drawer (ADR-0023), for store-routed writes only:
     # an explicit --log-dir or the cwd-local default is the operator's
     # own choice and is left alone. SessionEnd stays silent (ADR-0017).
+    drawer_warning = None
     if project is not None:
-        log_dir = drawer_of_session(log_dir, safe, quiet=ending)
+        log_dir, drawer_warning = drawer_of_session(log_dir, safe)
 
     if ending:
         # The tail commitment (ADR-0017): a clean exit seals the
@@ -5624,6 +5626,8 @@ def cmd_hook(args):
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
+    if drawer_warning:
+        print(drawer_warning, file=sys.stderr)
     if project is not None:
         record_project(log_dir, project)
     # A damaged chain is not extended and not repaired — recording moves to
