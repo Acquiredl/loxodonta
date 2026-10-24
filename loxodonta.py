@@ -6419,9 +6419,15 @@ def program_folder():
 
 def same_folder(one, other):
     """Whether two folder names name one folder: resolved, and folded
-    for case and separators, as a disk that ignores case reads them."""
-    return (os.path.normcase(os.path.realpath(one)).casefold()
-            == os.path.normcase(os.path.realpath(other)).casefold())
+    for case and separators, as a disk that ignores case reads them. On
+    Windows each is first made whole as the system makes a name before
+    it opens one (abspath), which drops a trailing dot or space that
+    resolving keeps (#577)."""
+    def folded(name):
+        if sys.platform == "win32":
+            name = os.path.abspath(name)
+        return os.path.normcase(os.path.realpath(name)).casefold()
+    return folded(one) == folded(other)
 
 
 def stand_in(variable, real):
@@ -6433,16 +6439,17 @@ def stand_in(variable, real):
     inherits it. Shown means: where both folders exist, not the same
     folder by the system's own answer (samefile); where one does not,
     another name once resolved and folded. On Windows a value that does
-    not start with a drive letter and a separator (C:\\ or C:/) is never
-    shown to be another: a network path, a device path or a prefix
-    (\\\\host\\share, \\\\?\\, \\\\.\\, \\??\\) reaches the same folder under a
+    not start with a drive letter and a separator (C:\\ or C:/), or that
+    holds a second colon, is never shown to be another: a network path,
+    a device path, a prefix (\\\\host\\share, \\\\?\\, \\\\.\\, \\??\\) or a
+    stream (folder::$INDEX_ALLOCATION) reaches the same folder under a
     spelling resolving does not undo (#577)."""
     value = os.environ.get(variable)
     if not value:
         return False
     if sys.platform == "win32" and not (
             value[:1].isascii() and value[:1].isalpha()
-            and value[1:3] in (":\\", ":/")):
+            and value[1:3] in (":\\", ":/") and ":" not in value[3:]):
         return False
     try:
         if os.path.exists(value) and os.path.exists(real):
