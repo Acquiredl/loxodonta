@@ -2848,8 +2848,7 @@ def block_header(value):
 
 
 # Seconds one local git question may take before git is read as unable
-# to say. The folder asked about need not be the one running this, and
-# a git that never returns must not hold the command that asked.
+# to say: a git that never returns must not hold the command that asked.
 GIT_TIMEOUT = 10
 
 

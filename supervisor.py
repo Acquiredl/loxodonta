@@ -2012,8 +2012,8 @@ def run_verb(args):
 def recorder_exit_note(doing, finished):
     """The keeper's note for a recorder exit that is not the far end's.
     Only 69 says a calendar, an authority or a remote did not do what
-    was asked (ADR-0037), so no other exit names one: none was shown to
-    be asked (#557). 1 is a damaged tail the recorder refuses again until
+    was asked (ADR-0037), so no note written here names one: none was
+    shown to be asked (#557). 1 is a damaged tail the recorder refuses again until
     it is dealt with (#533); 70 is the recorder itself falling over,
     named by its traceback's last line; 66 is a chain or sidecar it
     found nothing in to read. Of them all only 75, another writer's
@@ -3070,13 +3070,14 @@ def recorder_path(witness):
     return None
 
 
-def git_say(home, *question):
-    """One read-only git question, or None when git cannot answer —
-    absent, the path is not a checkout, or no answer within GIT_TIMEOUT.
-    Never fetches, never writes. The folder is named by the harness
-    settings, so its git config and hooks are the writer's to plant
-    (#572): fsmonitor is turned off, and no optional lock is taken, so
-    `status` writes no index and starts no post-index-change hook. A
+def git_say(home, *question, refused=None):
+    """One read-only git question: its answer; `refused` when git ran and
+    exited non-zero, which for some questions is an answer (no upstream);
+    None when git could not answer at all — absent, or no answer within
+    GIT_TIMEOUT. Never fetches, never writes. The folder is named by the
+    harness settings, so its git config and hooks are the writer's to
+    plant (#572): fsmonitor is turned off, and no optional lock is taken,
+    so `status` writes no index and starts no post-index-change hook. A
     clean filter its attributes name still runs on `status`; the timeout
     bounds it."""
     try:
@@ -3091,7 +3092,7 @@ def git_say(home, *question):
             encoding="utf-8", timeout=GIT_TIMEOUT)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
-    return answered.stdout.strip() if answered.returncode == 0 else None
+    return answered.stdout.strip() if answered.returncode == 0 else refused
 
 
 def recorder_drift(witness):
@@ -3114,26 +3115,32 @@ def recorder_drift(witness):
                           "nothing looks exactly like a quiet one")
         return notice
     home = script.parent
+    # The sentence rests on every answer below, so a question git could
+    # not answer leaves the checkout read as outside git, never as clean
+    # or level (#572); each is asked only once the one before it
+    # answered. No upstream is an answer: "".
+    head = changed = upstream = counts = None
     branch = git_say(home, "rev-parse", "--abbrev-ref", "HEAD")
-    if branch is None:
-        return recorder_versioned(script, notice)
-    notice.update({
-        "state": "tracked",
-        "branch": branch,
-        "head": git_say(home, "rev-parse", "--short", "HEAD"),
+    if branch is not None:
+        head = git_say(home, "rev-parse", "--short", "HEAD")
+    if head is not None:
         # Only the executed file matters: an unrelated dirty file in the
         # same checkout is not drift in the recorder.
-        "dirty": bool(git_say(home, "status", "--porcelain", "--",
-                              script.name)),
-        "upstream": git_say(home, "rev-parse", "--abbrev-ref",
-                            "--symbolic-full-name", "@{u}"),
-    })
-    if notice["upstream"]:
+        changed = git_say(home, "status", "--porcelain", "--", script.name)
+    if changed is not None:
+        upstream = git_say(home, "rev-parse", "--abbrev-ref",
+                           "--symbolic-full-name", "@{u}", refused="")
+    if upstream:
         counts = git_say(home, "rev-list", "--left-right", "--count",
                          "@{u}...HEAD")
-        if counts and len(counts.split()) == 2:
-            behind, ahead = counts.split()
-            notice["behind"], notice["ahead"] = int(behind), int(ahead)
+    level = (counts or "").split()
+    counted = len(level) == 2 and all(n.isdigit() for n in level)
+    if not (upstream == "" or counted):
+        return recorder_versioned(script, notice)
+    notice.update({"state": "tracked", "branch": branch, "head": head,
+                   "dirty": bool(changed), "upstream": upstream or None})
+    if upstream:
+        notice["behind"], notice["ahead"] = (int(n) for n in level)
         git_dir = git_say(home, "rev-parse", "--git-dir")
         if git_dir:
             stamp = (home / git_dir) / "FETCH_HEAD"
@@ -3150,8 +3157,8 @@ def recorder_drift(witness):
 def recorder_versioned(script, notice):
     """The notice for a recorder git has nothing to say about: a managed
     install's copy under the system program area (ADR-0042), or a
-    checkout read where git is not on the PATH, which this cannot tell
-    apart. Its `TOOL_VERSION` line and the SHA-256 of its bytes, read
+    checkout read where git is not on the PATH or did not answer (#572),
+    which this cannot tell apart. Its `TOOL_VERSION` line and the SHA-256 of its bytes, read
     from the bytes and never imported or run, and whether this
     supervisor is the same version. State `versioned` when the version
     line reads; `unknown`, with whatever could be read, when it does

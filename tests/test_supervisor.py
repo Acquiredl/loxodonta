@@ -4965,15 +4965,38 @@ class RecorderDriftTest(unittest.TestCase):
         hook = home / ".git" / "hooks" / "post-index-change"
         hook.write_text(f"#!/bin/sh\n{writes}\n", encoding="utf-8")
         os.chmod(hook, 0o755)
+        # Changed, so `status` reads the file's bytes and has news to say.
+        with open(script, "a", encoding="utf-8") as f:
+            f.write("# edited after the commit\n")
+
+        recorder = self.notice()
+
+        self.assertFalse(ran.exists(), "a scan ran the checkout's program")
+        self.assertEqual(recorder["branch"], "main")
+        self.assertTrue(recorder["dirty"], "git status gave no answer")
+
+    def test_a_status_git_cannot_answer_never_reads_as_clean(self):
+        # #572: a question that fails or times out is git unable to say,
+        # never "nothing changed". A required clean filter that fails,
+        # named by attributes the writer can plant, makes `status` fail
+        # fast where a hung one would have run into the bound.
+        home, script = self.make_checkout()
+        self.git("config", "filter.planted.clean", "exit 1", cwd=home)
+        self.git("config", "filter.planted.required", "true", cwd=home)
+        info = home / ".git" / "info"
+        info.mkdir(exist_ok=True)
+        (info / "attributes").write_text("loxodonta.py filter=planted\n",
+                                         encoding="utf-8")
         # Touched, so git must look past the file's stat to its bytes.
         later = time.time() + 60
         os.utime(script, (later, later))
 
         recorder = self.notice()
 
-        self.assertFalse(ran.exists(), "a scan ran the checkout's program")
-        self.assertEqual(recorder["branch"], "main")
-        self.assertFalse(recorder["dirty"])
+        self.assertNotIn("clean", recorder["note"])
+        self.assertIsNone(recorder["branch"])
+        self.assertIn("not in a git checkout, or git is unavailable",
+                      recorder["note"])
 
     @unittest.skipIf(os.name == "nt", "subprocess finds no git.cmd on PATH "
                      "without a shell; the POSIX runners hold this")
