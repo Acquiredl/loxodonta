@@ -6190,7 +6190,9 @@ def resolve_chain(root, asked):
         path.relative_to(root.resolve())
     except (ValueError, OSError):
         return None
-    if (not path.name.endswith(".jsonl")
+    # The chain's suffix in any case and the sidecars' as written, both
+    # as the census reads them (`listed`, `chains_listed`; #445, #451).
+    if (not path.name.lower().endswith(".jsonl")
             or path.name.endswith(SIDECAR_SUFFIXES)
             or not os.path.isfile(path)):
         return None

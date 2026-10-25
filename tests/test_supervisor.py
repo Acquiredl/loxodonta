@@ -4510,6 +4510,21 @@ class DrillTest(unittest.TestCase):
         self.assertFalse((self.root / ".supervisor-drill").exists(),
                          "a refused drill writes nothing")
 
+    def test_a_chain_named_in_capitals_is_drilled(self):
+        # The census counts a `.JSONL` chain on every system (#445), so
+        # the gate the drill and the walker share finds it too (#451).
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        log.rename(log.with_name("receipts-sess-aaaa.JSONL"))
+
+        result = self.drill("alpha/receipts/receipts-sess-aaaa.JSONL")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["all_fired"])
+        self.assertEqual(report["log"],
+                         "alpha/receipts/receipts-sess-aaaa.JSONL")
+
     def test_a_chain_outside_the_root_is_refused(self):
         elsewhere = self.base.parent
 

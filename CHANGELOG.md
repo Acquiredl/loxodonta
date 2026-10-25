@@ -32,6 +32,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A keeper's note blames a calendar, an authority or a remote only for the recorder's exit 69; a held lock (75), a crash (70) and nothing to read (66) are each named as such (#557).
 - The recorder notice asks git with a 10-second bound, fsmonitor off and no optional locks: a git that never returns no longer holds the scan, and a planted fsmonitor command or post-index-change hook no longer runs (#572).
 - The reading over a receiver's folder quotes a chain's `second-record-cut:` note escaped and cut at 64 characters, so a newline or a long tail the writer planted in one reads as one short line (#487).
+- `drill` and the page's chain walker find a chain named `.JSONL`, which the census has counted since #445, instead of refusing it as no chain under the root (#451).
 
 ## [0.18.0] - 2026-10-20
 
