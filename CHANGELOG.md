@@ -25,6 +25,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `verify-package` prints the package's file name escaped, under the recorder and `verifier.py`, so a newline in a sender's zip name no longer prints a forged verdict line; the operator's paths and a closed folder's name are escaped too (#556).
 - A Windows named pipe wired as the recorder now reads as not a regular file, never "Invalid argument" or not on disk; the export says the fingerprints it removes are the receipts' (#573).
+- `log --file` reads a line of the chain nested past the JSON reader as one that is not JSON, so the receipt is written instead of ending in a traceback; the line stays `verify`'s to name (#554).
+- The hook refuses a receipt whose drawer it cannot make, a file at the receipts folder's name or the folder closed by a chmod, by name with exit 73, instead of a traceback and exit 70 (#555).
+- On Windows, `LOXODONTA_MANAGED_DIR` or `LOXODONTA_PROGRAM_DIR` stands in for another folder only when it starts with a drive letter and a separator; a `\??\` or trailing-dot spelling of the real folder, absent, now stands in for nothing (#577).
 
 ## [0.18.0] - 2026-10-20
 

@@ -3422,7 +3422,7 @@ def referenced_paths(lines):
     for line in lines:
         try:
             refs = json.loads(line).get("files")
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, RecursionError):  # #554
             continue
         if isinstance(refs, list):
             paths.update(ref["path"] for ref in refs
@@ -5410,37 +5410,38 @@ def deregistered_main(gitdir):
     return spelled[:at] if at > 0 else None
 
 
-def drawer_of_session(log_dir, session, quiet=False):
+def drawer_of_session(log_dir, session):
     """One session, one drawer (ADR-0023): the session's first receipt
     decides. When the resolved drawer holds no chain for this session yet
     but another drawer in the store does, the receipt goes there, so a
     resolution that changes mid-session (a worktree cleaned up under a
     running session) can never split a session in two. The normal case
-    costs nothing: the resolved drawer already has the chain. A store
-    folder that cannot be listed is said on stderr unless `quiet`, and
-    the receipt still goes to the resolved drawer, never lost (#452)."""
+    costs nothing: the resolved drawer already has the chain. Returns
+    the drawer and a warning, None unless a store folder cannot be
+    listed, and the receipt then still goes to the resolved drawer,
+    never lost (#452). The caller prints the warning once that drawer
+    exists, so a receipt refused for want of it prints the refusal
+    alone (#555)."""
     name = f"receipts-{session}.jsonl"
     if os.path.exists(os.path.join(log_dir, name)):
-        return log_dir
+        return log_dir, None
     root = os.path.join(store_home(), "receipts")
     try:
         drawers = os.listdir(root)
     except (FileNotFoundError, NotADirectoryError):
-        return log_dir
+        return log_dir, None
     except OSError as error:
-        if not quiet:
-            print(f"warning: {visible(root)} cannot be listed "
-                  f"({visible(error.strerror or error)}), so a chain this "
-                  "session may already have in another drawer cannot be "
-                  f"found: this receipt goes to {visible(log_dir)}, and the "
-                  "session may be split across two drawers (ADR-0023)",
-                  file=sys.stderr)
-        return log_dir
+        return log_dir, (
+            f"warning: {visible(root)} cannot be listed "
+            f"({visible(error.strerror or error)}), so a chain this "
+            "session may already have in another drawer cannot be "
+            f"found: this receipt goes to {visible(log_dir)}, and the "
+            "session may be split across two drawers (ADR-0023)")
     for drawer in drawers:
         other = os.path.join(root, drawer)
         if other != log_dir and os.path.exists(os.path.join(other, name)):
-            return other
-    return log_dir
+            return other, None
+    return log_dir, None
 
 
 def store_home():
@@ -5586,8 +5587,9 @@ def cmd_hook(args):
     # One session, one drawer (ADR-0023), for store-routed writes only:
     # an explicit --log-dir or the cwd-local default is the operator's
     # own choice and is left alone. SessionEnd stays silent (ADR-0017).
+    drawer_warning = None
     if project is not None:
-        log_dir = drawer_of_session(log_dir, safe, quiet=ending)
+        log_dir, drawer_warning = drawer_of_session(log_dir, safe)
 
     if ending:
         # The tail commitment (ADR-0017): a clean exit seals the
@@ -5628,7 +5630,13 @@ def cmd_hook(args):
         return code
 
     if not os.path.isdir(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
+        # A file at the folder's name or a folder closed by one chmod is
+        # in the writer's reach (ADR-0002): a refusal by name, not a
+        # traceback (#555).
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except OSError as e:
+            return unwritable_log(writable_chain(log_dir, safe), e)
         # A freshly created log dir gets a protective .gitignore: action
         # lines record every command a session ran, and that history must
         # not ride into a commit by accident (SPEC §8: no secrets).
@@ -5638,6 +5646,8 @@ def cmd_hook(args):
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
+    if drawer_warning:
+        print(drawer_warning, file=sys.stderr)
     if project is not None:
         record_project(log_dir, project)
     # A damaged chain is not extended and not repaired — recording moves to
@@ -6433,9 +6443,15 @@ def program_folder():
 
 def same_folder(one, other):
     """Whether two folder names name one folder: resolved, and folded
-    for case and separators, as a disk that ignores case reads them."""
-    return (os.path.normcase(os.path.realpath(one)).casefold()
-            == os.path.normcase(os.path.realpath(other)).casefold())
+    for case and separators, as a disk that ignores case reads them. On
+    Windows each is first made whole as the system makes a name before
+    it opens one (abspath), which drops a trailing dot or space that
+    resolving keeps (#577)."""
+    def folded(name):
+        if sys.platform == "win32":
+            name = os.path.abspath(name)
+        return os.path.normcase(os.path.realpath(name)).casefold()
+    return folded(one) == folded(other)
 
 
 def stand_in(variable, real):
@@ -6446,14 +6462,18 @@ def stand_in(variable, real):
     variable without rights, and an administrator's elevated shell
     inherits it. Shown means: where both folders exist, not the same
     folder by the system's own answer (samefile); where one does not,
-    another name once resolved and folded. A value spelled as a network
-    path or a device path (\\\\host\\share, \\\\?\\, \\\\.\\) is never shown to be
-    another: an administrative share or a prefix reaches the same
-    folder under a spelling resolving does not undo."""
+    another name once resolved and folded. On Windows a value that does
+    not start with a drive letter and a separator (C:\\ or C:/), or that
+    holds a second colon, is never shown to be another: a network path,
+    a device path, a prefix (\\\\host\\share, \\\\?\\, \\\\.\\, \\??\\) or a
+    stream (folder::$INDEX_ALLOCATION) reaches the same folder under a
+    spelling resolving does not undo (#577)."""
     value = os.environ.get(variable)
     if not value:
         return False
-    if sys.platform == "win32" and value[:2] in ("\\\\", "//", "\\/", "/\\"):
+    if sys.platform == "win32" and not (
+            value[:1].isascii() and value[:1].isalpha()
+            and value[1:3] in (":\\", ":/") and ":" not in value[3:]):
         return False
     try:
         if os.path.exists(value) and os.path.exists(real):
