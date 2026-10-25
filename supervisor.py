@@ -93,6 +93,44 @@ HOOK_ACTORS = ("claude-code", "codex", "openai-agents")
 BOOKKEEPING_ACTOR = "receipts"
 
 
+# The supervisor's exits stand up here, above the first number read
+# from the environment, since a number it cannot use is refused at
+# import (#487).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
+EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
+EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no
+                   # package, no baseline for calibrate or acknowledge, no
+                   # export; and what the keeper reads from a recorder verb
+
+# Read by the keepers from a recorder verb; the supervisor exits with none.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+EX_UNAVAILABLE = 69  # the far end: a calendar, an authority or a remote
+EX_SOFTWARE = 70  # the recorder itself failed
+EX_TEMPFAIL = 75  # another writer holds the chain's lock
+
+
+def env_number(name, default, kind=int):
+    """The number in environment variable `name`, read as `kind` (int
+    or float), or `default` when it is unset. A value that is not such a
+    number, or is negative or infinite, is refused by name: one line on
+    stderr and exit 64, at import and so before any verb runs, never a
+    traceback (#487)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = kind(raw)
+    except ValueError:
+        value = None
+    if value is None or not 0 <= value < float("inf"):
+        print(f"error: {name}={ascii(raw)} is not a "
+              f"{'whole' if kind is int else 'finite'} number 0 or more",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
+    return value
+
+
 # --- Census -------------------------------------------------------------------
 
 # What sits beside a chain and is not one: the anchor sidecar (proofs
@@ -1070,8 +1108,7 @@ def fortnight(days, now):
 
 # How often the keeper may ask a calendar about the same log. The env
 # knob is the test suite's clock handle.
-UPGRADE_EVERY_SECONDS = int(
-    os.environ.get("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600))
+UPGRADE_EVERY_SECONDS = env_number("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600)
 
 # verify's ANCHORED line as the scan meets it: the block an attestation
 # claims, not checked (ruling 3 on #299), since the scan runs verify
@@ -2312,16 +2349,15 @@ def assess_anchors(printed, entries):
 # Completeness itself stays the integration's job.
 
 # Ratified thresholds; the env knobs are the test suite's clock handle.
-GRACE_SECONDS = int(os.environ.get("SUPERVISOR_GRACE_SECONDS", 30))
-IDLE_END_SECONDS = int(os.environ.get("SUPERVISOR_IDLE_END_SECONDS", 1800))
+GRACE_SECONDS = env_number("SUPERVISOR_GRACE_SECONDS", 30)
+IDLE_END_SECONDS = env_number("SUPERVISOR_IDLE_END_SECONDS", 1800)
 # The lifecycle tiers (ADR-0018): flat and legible on purpose, decided
 # by observation epochs — how long the supervisor's own looks have seen
 # a session's chains not move. Defaults survived the real-store gap
 # measurement (docs/EXPERIMENTS.md §5): honest week-later resumes exist
 # and are meant to surface — reasons to look, never alarms.
-WANING_SECONDS = int(os.environ.get("SUPERVISOR_WANING_SECONDS", 86400))
-DORMANT_SECONDS = int(os.environ.get("SUPERVISOR_DORMANT_SECONDS",
-                                     172800))
+WANING_SECONDS = env_number("SUPERVISOR_WANING_SECONDS", 86400)
+DORMANT_SECONDS = env_number("SUPERVISOR_DORMANT_SECONDS", 172800)
 # The tail keeper (ADR-0018 ruling 6): on by default — protective
 # recording does not ask permission (ADR-0017's reasoning) — and
 # disableable for stores where the operator wants annotations only.
@@ -2335,7 +2371,7 @@ TAIL_KEEPER = os.environ.get("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 # cadence plus one. Judged early, a deficit resolves on the look after
 # the chain lands, and the day book keeps the day's worst claim; the
 # window is what keeps that rare.
-SETTLE_SECONDS = int(os.environ.get("SUPERVISOR_SETTLE_SECONDS", 7 * 3600))
+SETTLE_SECONDS = env_number("SUPERVISOR_SETTLE_SECONDS", 7 * 3600)
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
 # What the recorder writes down about the coverage it wired (ADR-0030).
@@ -4396,8 +4432,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
 # peaks on purpose: against the median *hour*, the first cut flagged a
 # fifth of this machine's honest history. The env knobs are the test
 # suite's threshold handle.
-HOT_TIMES = int(os.environ.get("SUPERVISOR_HOT_TIMES", 3))
-HOT_FLOOR = int(os.environ.get("SUPERVISOR_HOT_FLOOR", 60))
+HOT_TIMES = env_number("SUPERVISOR_HOT_TIMES", 3)
+HOT_FLOOR = env_number("SUPERVISOR_HOT_FLOOR", 60)
 
 CONSUMPTION_WORDS = {
     "RUNNING-HOT": "receipts arriving far above this store's norm and "
@@ -9167,7 +9203,7 @@ def metrics_text(report, age_seconds):
 # and the reason two requests must never race: a scan diffs the
 # baseline and then rewrites it, so concurrent scans could swallow a
 # tripwire event between them. The env knob is the test suite's handle.
-SCAN_TTL_SECONDS = float(os.environ.get("SUPERVISOR_SCAN_TTL_SECONDS", 3))
+SCAN_TTL_SECONDS = env_number("SUPERVISOR_SCAN_TTL_SECONDS", 3.0, float)
 
 # How often `serve` scans on its own while a keeper cadence is in force
 # (#271): the keepers run inside the scan, so a headless `serve` with no
@@ -9177,7 +9213,7 @@ SCAN_TTL_SECONDS = float(os.environ.get("SUPERVISOR_SCAN_TTL_SECONDS", 3))
 # constantly. The 0.1 s floor matters: the suite's idiom
 # SUPERVISOR_SCAN_TTL_SECONDS=0, typed here, would spin a core.
 KEEPER_TICK_SECONDS = max(
-    float(os.environ.get("SUPERVISOR_KEEPER_TICK_SECONDS", 60)), 0.1)
+    env_number("SUPERVISOR_KEEPER_TICK_SECONDS", 60.0, float), 0.1)
 
 
 def trouble_words(failure):
@@ -12194,20 +12230,6 @@ class VersionAction(argparse.Action):
         home = os.path.dirname(os.path.abspath(__file__))
         print(version_line(parser.prog, home))
         parser.exit()
-
-
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
-EX_NOINPUT = 66  # sysexits(3) EX_NOINPUT: no chain to judge, or to drill
-EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no
-                   # package, no baseline for calibrate or acknowledge, no
-                   # export; and what the keeper reads from a recorder verb
-
-# Read by the keepers from a recorder verb; the supervisor exits with none.
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-EX_UNAVAILABLE = 69  # the far end: a calendar, an authority or a remote
-EX_SOFTWARE = 70  # the recorder itself failed
-EX_TEMPFAIL = 75  # another writer holds the chain's lock
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.

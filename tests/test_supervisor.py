@@ -5436,6 +5436,60 @@ class UsageExitTest(unittest.TestCase):
         self.assertIn("not a cadence", result.stderr)
         self.assertEqual(result.stdout, "")
 
+    # Every number the supervisor reads from its environment at import,
+    # and whether it must be a whole one (#487 item 17).
+    NUMBER_SETTINGS = {"SUPERVISOR_UPGRADE_EVERY_SECONDS": True,
+                       "SUPERVISOR_GRACE_SECONDS": True,
+                       "SUPERVISOR_IDLE_END_SECONDS": True,
+                       "SUPERVISOR_WANING_SECONDS": True,
+                       "SUPERVISOR_DORMANT_SECONDS": True,
+                       "SUPERVISOR_SETTLE_SECONDS": True,
+                       "SUPERVISOR_HOT_TIMES": True,
+                       "SUPERVISOR_HOT_FLOOR": True,
+                       "SUPERVISOR_SCAN_TTL_SECONDS": False,
+                       "SUPERVISOR_KEEPER_TICK_SECONDS": False}
+
+    def version_with(self, name, value):
+        return run(SUPERVISOR, "--version", timeout=60,
+                   env=isolated_env(self.home, **{name: value}))
+
+    def test_a_setting_that_is_not_a_number_exits_64_naming_it(self):
+        result = self.version_with("SUPERVISOR_SETTLE_SECONDS", "abc")
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.splitlines(), [
+            "error: SUPERVISOR_SETTLE_SECONDS='abc' is not a whole number "
+            "0 or more"])
+        self.assertEqual(result.stdout, "")
+
+    def test_every_number_setting_refuses_what_it_cannot_use(self):
+        refused = [(name, value) for name in self.NUMBER_SETTINGS
+                   for value in ("abc", "-1")]
+        refused += [("SUPERVISOR_SETTLE_SECONDS", ""),
+                    ("SUPERVISOR_GRACE_SECONDS", "1.5"),
+                    ("SUPERVISOR_SCAN_TTL_SECONDS", "nan"),
+                    ("SUPERVISOR_KEEPER_TICK_SECONDS", "inf")]
+        for name, value in refused:
+            with self.subTest(name=name, value=value):
+                result = self.version_with(name, value)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                kind = "whole" if self.NUMBER_SETTINGS[name] else "finite"
+                self.assertEqual(result.stderr.splitlines(), [
+                    f"error: {name}={value!r} is not a {kind} number "
+                    "0 or more"])
+
+    def test_a_number_setting_it_can_use_is_taken(self):
+        for name, value in (("SUPERVISOR_SETTLE_SECONDS", "0"),
+                            ("SUPERVISOR_KEEPER_TICK_SECONDS", "0.5")):
+            with self.subTest(name=name):
+                result = self.version_with(name, value)
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn("supervisor", result.stdout)
+
 
 # Straight to 127.0.0.1, never through a proxy someone's shell configured.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
