@@ -173,8 +173,9 @@ UNKNOWN = "what it holds is unknown, and is never read as empty"
 
 def closed_words(closed):
     """The scan's sentence for the folders its census could not list,
-    each a {"folder", "why"} (#431)."""
-    named = "; ".join(f"{c['folder']} ({c['why']})" for c in closed)
+    each a {"folder", "why"} (#431). A folder's name is in the writer's
+    reach, so it is named escaped (#556)."""
+    named = "; ".join(f"{visible(c['folder'])} ({c['why']})" for c in closed)
     return (f"{len(closed)} folder(s) cannot be listed: {named} — "
             f"{UNKNOWN}. Closing a folder is in the writer's reach, so this "
             "is exit 5 on every look until it can be listed again "
@@ -184,9 +185,9 @@ def closed_words(closed):
 def closed_refusal(error):
     """A command's refusal for a folder it had to list and could not, 66:
     it names the folder and does nothing (#431)."""
-    return refused(f"{Path(error.filename).as_posix()} cannot be listed: "
-                   f"{error.strerror} — {UNKNOWN}, so nothing was done",
-                   EX_NOINPUT)
+    return refused(f"{visible(Path(error.filename).as_posix())} cannot be "
+                   f"listed: {error.strerror} — {UNKNOWN}, so nothing was "
+                   "done", EX_NOINPUT)
 
 
 def chains_listed(folder, pattern, closed=None):
@@ -1500,6 +1501,18 @@ def open_regular(path):
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
             raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
+        raise
+    except OSError as error:
+        # Windows refuses to open a named pipe whose every instance is
+        # taken, as an invalid argument, before its type can be asked;
+        # asked again by stat, it says the pipe is busy (Windows error
+        # 231), and a pipe is named a pipe here as everywhere else (#573).
+        if error.errno == errno.EINVAL:
+            try:
+                os.stat(path)
+            except OSError as asked:
+                if getattr(asked, "winerror", None) == 231:
+                    raise OSError(errno.EINVAL, NOT_REGULAR, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
@@ -3063,7 +3076,10 @@ def recorder_drift(witness):
               "head": None, "dirty": False, "upstream": None,
               "ahead": None, "behind": None, "fetched": None,
               "version": None, "sha256": None, "note": None}
-    if not os.path.exists(script):
+    # Windows's exists reads a named pipe as nothing there, and takes
+    # its free instance; the open names it, and the read below says so
+    # (#573).
+    if not os.path.exists(script) and file_problem(script) != NOT_REGULAR:
         notice["note"] = ("the wired recorder is not on disk — the hook "
                           "runs nothing, and a session that records "
                           "nothing looks exactly like a quiet one")
@@ -7265,7 +7281,7 @@ EXPORT_TOOLS = (
 EXPORT_REMOVED = [
     "every path (the store, the witness, the recorder, your home directory)",
     "every command line and action line",
-    "every file reference and fingerprint",
+    "every file reference and fingerprint the receipts carry",
     "every repo name (repos become repo-1, repo-2, ... in first-seen order)",
     "every tool name that is not a harness built-in on the written list "
     "(MCP calls fold into one 'mcp' bucket, Agents SDK function tools into "
@@ -8055,12 +8071,12 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "",
         "## How to verify",
         "",
-        "Get `loxodonta.py` from a release you trust "
+        "Get `verifier.py` from a release you trust "
         "(https://github.com/Acquiredl/loxodonta/releases; check it "
         "against the release's `SHA256SUMS`). Python 3.9 or newer, no "
         "dependencies. Then, on the zip or on the unpacked folder:",
         "",
-        "    python loxodonta.py verify-package <this package>",
+        "    python -I verifier.py verify-package <this package>",
         "",
     ]
     if stamped:
@@ -8072,7 +8088,7 @@ def package_readme(unit, packed, sessions, witness, record, notes,
             "issuer's word about whom to trust, and without one each token "
             "is reported as present and not judged. With it:",
             "",
-            "    python loxodonta.py verify-package <this package> "
+            "    python -I verifier.py verify-package <this package> "
             "--authority-chain <chain.pem>",
             "",
             "Every token here is judged against that one file, so when the "
@@ -9240,9 +9256,11 @@ class Face(BaseHTTPRequestHandler):
         except ClosedFolder as error:
             # A view over a store folder this user may not list refuses
             # by name; the status the page leads with names it too (#431).
-            # Plain words, which the page shows as they stand (#448).
-            self.reply(f"{Path(error.filename).as_posix()} cannot be "
-                       f"listed: {error.strerror} — {UNKNOWN}".encode("utf-8"),
+            # Plain words, which the page shows as they stand (#448), the
+            # name escaped for a terminal or curl reading them (#556).
+            self.reply(f"{visible(Path(error.filename).as_posix())} cannot "
+                       f"be listed: {error.strerror} — {UNKNOWN}"
+                       .encode("utf-8"),
                        "text/plain; charset=utf-8", status=503)
 
     def answer_get(self):

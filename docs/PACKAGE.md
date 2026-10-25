@@ -4,7 +4,7 @@
 
 ## 1. What a package is
 
-The evidence lives in the store on the machine that wrote it. To show it to someone who was never on that machine, the operator sends a **package**: the chains of one session, or of a repository's whole drawer, with their anchor and stamps sidecars, the drawer's project record, a witness snapshot labelled testimony, a plain-words README, the harness transcript on request, and last of all a **manifest** listing everything before it. The recipient downloads `loxodonta.py`, the same file that verifies a bare chain, and runs one command on the zip. It answers layer by layer, the recorder's own verdicts verbatim, and ends with the package verdict and one line of residual trust.
+The evidence lives in the store on the machine that wrote it. To show it to someone who was never on that machine, the operator sends a **package**: the chains of one session, or of a repository's whole drawer, with their anchor and stamps sidecars, the drawer's project record, a witness snapshot labelled testimony, a plain-words README, the harness transcript on request, and last of all a **manifest** listing everything before it. The recipient downloads `verifier.py`, the same file that verifies a bare chain, and runs one command on the zip. It answers layer by layer, the recorder's own verdicts verbatim, and ends with the package verdict and one line of residual trust.
 
 A package confirms that it is unaltered since packaging. It never confirms that the record inside is true or complete: a harness that lied at write time ships faithfully packaged lies (ADR-0002, ADR-0026). Without a seal it cannot say when the set existed or which key packed it either, and its ceiling verdict says so in as many words.
 
@@ -102,7 +102,7 @@ Why a list, and the same list for a session package: the scan's own report lists
 ## 5. Verifying
 
 ```
-loxodonta verify-package PATH [--authority-chain FILE] [--block-header HEX]...   # a zip, or an unpacked folder
+python -I verifier.py verify-package PATH [--authority-chain FILE] [--block-header HEX]...   # a zip, or an unpacked folder
 ```
 
 `--block-header HEX` is a Bitcoin block header, 80 bytes as 160 hex characters, from a source the recipient trusts, and it is repeatable, one per anchored block. Each is checked against every anchor the package carries, the chains' and the manifest's, by the merkle root it holds, exactly as `verify --anchors --block-header` checks a chain's (docs/ANCHORING.md §3, *Checking the block*). Without one, every completed anchor names the block its attestation claims and says the block was not checked.

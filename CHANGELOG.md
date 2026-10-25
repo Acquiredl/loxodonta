@@ -19,9 +19,12 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/SPEC.md` section 3 makes sorting `files` by path the writer's duty at intake, not a step of canonical form: the array is hashed as stored, and a verifier neither sorts it nor refuses it unsorted (#491).
 - `docs/SPEC.md` section 6 says `head` reads the final line only, so a torn tail has no head (nothing on stdout, exit 1), and section 10.3 names the package listing's head rule as its own (#490).
 - `docs/SPEC.md` section 6 says every break is listed in walk order, so the last line names the last break, and quotes the torn-tail line as `verify` prints it, `entries 0..2 intact` (#492).
+- A package's README, `docs/PACKAGE.md`, `docs/TOPOLOGY.md` and `README.md` point the recipient at `python -I verifier.py verify-package`, the file every release since v0.9.0 ships beside `SHA256SUMS`, instead of the whole recorder (#326).
 
 ### Fixed
 
+- `verify-package` prints the package's file name escaped, under the recorder and `verifier.py`, so a newline in a sender's zip name no longer prints a forged verdict line; the operator's paths and a closed folder's name are escaped too (#556).
+- A Windows named pipe wired as the recorder now reads as not a regular file, never "Invalid argument" or not on disk; the export says the fingerprints it removes are the receipts' (#573).
 - `log --file` reads a line of the chain nested past the JSON reader as one that is not JSON, so the receipt is written instead of ending in a traceback; the line stays `verify`'s to name (#554).
 - The hook refuses a receipt whose drawer it cannot make, a file at the receipts folder's name or the folder closed by a chmod, by name with exit 73, instead of a traceback and exit 70 (#555).
 - On Windows, `LOXODONTA_MANAGED_DIR` or `LOXODONTA_PROGRAM_DIR` stands in for another folder only when it starts with a drive letter and a separator; a `\??\` or trailing-dot spelling of the real folder, absent, now stands in for nothing (#577).

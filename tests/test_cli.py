@@ -7,6 +7,7 @@ there.
 """
 
 import hashlib
+import io
 import json
 import os
 import signal
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import time
 import unittest
+import zipfile
 from pathlib import Path
 
 # This folder on sys.path, so the sibling import below also resolves
@@ -2223,6 +2225,157 @@ class RefusalIsOneLineTest(ReceiptsCliTest):
         self.assert_one_line(
             run(LOXODONTA, "head", "--log", name, cwd=self.workdir),
             1, "damaged tail")
+
+
+class PackageNameIsOneLineTest(ReceiptsCliTest):
+    """#556: whoever sends a package chooses its file name, and stdout is
+    where the recipient reads the verdict, so the name goes through the
+    escapes a refusal's does (#511): a newline in it is spelled `\\n`, and
+    a line planted there never reads as a verdict, under the recorder and
+    the verifier alike. A test that makes the file is skipped where the
+    file system refuses the name: Windows does, Linux and macOS take
+    one."""
+
+    PLANTED = "VALID: planted"
+    VECTOR = REPO_ROOT / "tests" / "vectors" / "package-unsealed"
+
+    def plant(self, data, suffix=".zip"):
+        """A file whose name holds the planted line; its name."""
+        name = f"package\n{self.PLANTED}\n{suffix}"
+        try:
+            (self.workdir / name).write_bytes(data)
+        except OSError as error:
+            self.skipTest(f"the file system refuses the name: {error}")
+        return name
+
+    def zipped(self, members):
+        """`members`, (name, bytes) pairs, as a zip's bytes, stored."""
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as package:
+            for name, data in members:
+                package.writestr(name, data)
+        return buffer.getvalue()
+
+    def vector(self):
+        return [(member.name, member.read_bytes())
+                for member in sorted(self.VECTOR.iterdir())]
+
+    def lines_under_both(self, name, exit_code):
+        """stdout's lines from verify-package on `name`, the same under
+        both files, the verifier run as a recipient is told to (-I)."""
+        seen = []
+        for tool in (LOXODONTA, VERIFIER):
+            result = run(tool, "verify-package", name, cwd=self.workdir,
+                         isolated=True)
+            self.assertEqual(result.returncode, exit_code,
+                             f"{tool.name}: {result.stdout}{result.stderr}")
+            self.assertNotIn("Traceback", result.stderr)
+            seen.append(result.stdout.splitlines())
+        self.assertEqual(seen[0], seen[1], "the two files disagree")
+        self.assertNotIn(self.PLANTED, seen[0])
+        return seen[0]
+
+    def test_a_package_whose_name_holds_a_newline_prints_its_name_once(self):
+        name = self.plant(self.zipped(self.vector()))
+
+        said = self.lines_under_both(name, 0)
+
+        self.assertEqual(said[0], f"package: package\\n{self.PLANTED}\\n.zip")
+        self.assertTrue(said[-1].startswith("SELF-CONSISTENT"), said)
+
+    def test_a_refused_package_whose_name_holds_a_newline_is_one_line(self):
+        manifest = dict(self.vector())["manifest.json"]
+        stored = self.zipped([("manifest.json", manifest)])
+        # The member's bytes changed after its checksum was taken: the
+        # zip opens, and its unpacking fails.
+        damaged = stored.replace(manifest[:16], b"!" * 16, 1)
+        cases = [
+            ("not a zip", b"not a zip\n", "is neither a folder nor a zip"),
+            ("two members", self.zipped([("a.jsonl", b"1"),
+                                         ("A.jsonl", b"2")]),
+             "holds two members that unpack to one file"),
+            ("crooked member", self.zipped([("dir/a.jsonl", b"1")]),
+             "not a bare file name"),
+            ("damaged", damaged, "could not be unpacked"),
+        ]
+        for case, data, words in cases:
+            with self.subTest(case=case):
+                name = self.plant(data)
+
+                said = self.lines_under_both(name, 4)
+
+                self.assertEqual(len(said), 1, said)
+                self.assertTrue(said[0].startswith(
+                    f"UNSUPPORTED-FORMAT: package\\n{self.PLANTED}\\n.zip "),
+                    said)
+                self.assertIn(words, said[0])
+
+    def test_a_missing_package_whose_name_holds_a_newline_is_one_line(self):
+        # Nothing is made, so this runs everywhere: Linux finds no such
+        # file, and Windows refuses the name; both say it is not found.
+        name = f"package\n{self.PLANTED}\n.zip"
+        for tool in (LOXODONTA, VERIFIER):
+            with self.subTest(tool=tool.name):
+                result = run(tool, "verify-package", name, cwd=self.workdir,
+                             isolated=True)
+
+                self.assertEqual(result.returncode, 66, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr.splitlines(), [
+                    f"error: package\\n{self.PLANTED}\\n.zip not found"])
+
+
+class TypedPathIsEscapedTest(ReceiptsCliTest):
+    """#556: a path the operator typed, or the folder a chain sits in, is
+    printed through the escapes too, so whatever a name holds, the line
+    naming it says what is there. Shown with U+202E, which turns the
+    rest of a line around on screen and which every system takes in a
+    file name, so each case runs everywhere."""
+
+    TURN = "‮"
+
+    def assert_escaped(self, said, words):
+        self.assertIn(words, said)
+        self.assertNotIn(self.TURN, said)
+
+    def test_init_and_report_name_the_chain_escaped(self):
+        log = f"receipts{self.TURN}.jsonl"
+
+        made = run(LOXODONTA, "init", "--log", log, cwd=self.workdir)
+        told = run(LOXODONTA, "report", "--log", log, cwd=self.workdir)
+
+        self.assertEqual(made.returncode, 0, made.stderr)
+        self.assert_escaped(made.stdout, "initialized receipts\\u202e.jsonl")
+        self.assertEqual(told.returncode, 0, told.stderr)
+        self.assert_escaped(told.stdout.splitlines()[0],
+                            "receipt log: receipts\\u202e.jsonl (1 entries)")
+
+    def test_a_manifest_that_is_not_there_is_named_escaped(self):
+        # Refused before anything is asked of the network.
+        manifest = f"manifest{self.TURN}.json"
+        for verb in (["stamp", "--authority", "http://127.0.0.1:9"],
+                     ["anchor"]):
+            with self.subTest(verb=verb[0]):
+                result = run(LOXODONTA, *verb, "--manifest", manifest,
+                             cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 66, result.stderr)
+                self.assert_escaped(result.stderr,
+                                    "error: manifest\\u202e.json: ")
+
+    def test_an_unreadable_project_record_is_named_escaped(self):
+        drawer = self.workdir / f"drawer{self.TURN}"
+        drawer.mkdir()
+        log = drawer / "receipts.jsonl"
+        run(LOXODONTA, "init", "--log", str(log), check=True)
+        (drawer / "project.json").write_text("not json", encoding="utf-8")
+
+        result = run(LOXODONTA, "verify", "--log", str(log), "--files")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_escaped(result.stdout, "drawer\\u202e")
+        self.assertIn("cannot be read as a project record: it is not JSON",
+                      result.stdout)
 
 
 class WriterExitTest(ReceiptsCliTest):
