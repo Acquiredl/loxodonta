@@ -1694,11 +1694,12 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
             + (["STAMP-INVALID"] if stamps_bad else [])
 
     if transcript_diverged:
-        # Printed after the anchor lines so that when this verdict
-        # governs, it is the last line, where a script reading verify's
-        # last line looks for the verdict. A graver finding still wins
-        # the exit, whether a head mismatch printed after this line or
-        # an anchor finding before it (all reported, gravest sets the code).
+        # Printed after the anchor and stamp lines so that when this
+        # verdict governs, it is the last line, where a script reading
+        # verify's last line looks for the verdict. A graver finding
+        # still wins the exit, whether a head mismatch printed after this
+        # line or an anchor or stamp finding before it (all reported,
+        # gravest sets the code).
         print("TRANSCRIPT-DIVERGED: chain intact, but a committed "
               "transcript prefix no longer holds")
 
