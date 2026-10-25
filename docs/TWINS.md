@@ -54,11 +54,11 @@ The files ship in one release, whose tag must match the tool version in every fi
 
 ### The version line
 
-Names: `checkout_commit`, `version_line`, `VersionAction`.
+Names: `GIT_TIMEOUT`, `checkout_commit`, `version_line`, `VersionAction`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
 
-Every file answers `--version` with the same line, tool, format and the commit it sits in, read by local git only and never fetched (ADR-0015, ADR-0022).
+Every file answers `--version` with the same line, tool, format and the commit it sits in, read by local git only and never fetched (ADR-0015, ADR-0022), and a git that has not answered within the same bound reads as unknown (#572).
 
 ### A usage error
 
@@ -83,6 +83,14 @@ Names: `EX_CANTCREAT`.
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 A writer exits 73 when a file it must write cannot be, the supervisor's `drill` when its sandbox cannot be made, `package` when it cannot create or finish `--out`, and `calibrate`, `acknowledge` and `export` when the file they write cannot be; the keeper reads a recorder verb's 73 by the same name (ADR-0037, #430, #422, #448).
+
+### What the keepers read from a recorder verb
+
+Names: `EX_UNAVAILABLE`, `EX_SOFTWARE`, `EX_TEMPFAIL`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+The keepers name each exit of `anchor`, `stamp` and `publish` for what it is, and say a calendar, an authority or a remote did not do what was asked only for 69; 70 is the recorder itself failing, 75 another writer holding the chain's lock (ADR-0037, #557).
 
 ### Writing to the console
 

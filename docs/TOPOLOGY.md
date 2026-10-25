@@ -35,7 +35,7 @@ Three files, the machine the agent works on, and the places beyond it that the r
                                          |
  what leaves by hand                     |
    a package --------------------------->|  THE RECIPIENT
-                                         |  loxodonta verify-package
+                                         |  verifier.py verify-package
    export --send, field data ----------->|  a secret gist under your gh
                                          |  login, and an issue on this repo
 ```
@@ -83,7 +83,7 @@ At `full` the entries leave with their action lines, which are command lines, an
 
 ## The recipient of a package
 
-**What runs there.** `loxodonta verify-package PATH [--authority-chain FILE]` ([PACKAGE.md](PACKAGE.md) §5), the same one file that verifies a bare chain, downloaded and checked against `SHA256SUMS` ([README](../README.md#install)) on a machine that was never the agent's.
+**What runs there.** `python -I verifier.py verify-package PATH [--authority-chain FILE]` ([PACKAGE.md](PACKAGE.md) §5), the same one file that verifies a bare chain, downloaded and checked against `SHA256SUMS` ([README](../README.md#install)) on a machine that was never the agent's.
 
 **What it holds.** One package: a session's or a drawer's chains with their sidecars, the project record, a witness snapshot labelled testimony, a README, the harness transcript only on request, and the manifest written last, with whatever seals the operator applied. `supervisor package` built it on the agent's machine, from the store there, and the operator carried it off.
 

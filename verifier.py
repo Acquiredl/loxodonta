@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.18.0"
+TOOL_VERSION = "0.19.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -192,7 +192,7 @@ def files_base(log):
     record = os.path.join(log_dir, "project.json")
     if not os.path.exists(record):
         return log_dir, None
-    unread = f"{record} cannot be read as a project record"
+    unread = f"{visible(record)} cannot be read as a project record"
     try:
         # The record sits beside the chain, in the writer's reach, so a
         # pipe there is refused by name rather than waited on (#386).
@@ -217,7 +217,8 @@ def files_base(log):
             f"({visible(path)})"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
-    return None, f"{record} points at a missing project ({visible(path)})"
+    return None, (f"{visible(record)} points at a missing project "
+                  f"({visible(path)})")
 
 
 # --- The walk (SPEC §6) -------------------------------------------------------
@@ -857,6 +858,18 @@ def open_regular(path):
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
             raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
+        raise
+    except OSError as error:
+        # Windows refuses to open a named pipe whose every instance is
+        # taken, as an invalid argument, before its type can be asked;
+        # asked again by stat, it says the pipe is busy (Windows error
+        # 231), and a pipe is named a pipe here as everywhere else (#573).
+        if error.errno == errno.EINVAL:
+            try:
+                os.stat(path)
+            except OSError as asked:
+                if getattr(asked, "winerror", None) == 231:
+                    raise OSError(errno.EINVAL, NOT_REGULAR, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
@@ -1688,11 +1701,12 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
             + (["STAMP-INVALID"] if stamps_bad else [])
 
     if transcript_diverged:
-        # Printed after the anchor lines so that when this verdict
-        # governs, it is the last line, where a script reading verify's
-        # last line looks for the verdict. A graver finding still wins
-        # the exit, whether a head mismatch printed after this line or
-        # an anchor finding before it (all reported, gravest sets the code).
+        # Printed after the anchor and stamp lines so that when this
+        # verdict governs, it is the last line, where a script reading
+        # verify's last line looks for the verdict. A graver finding
+        # still wins the exit, whether a head mismatch printed after this
+        # line or an anchor or stamp finding before it (all reported,
+        # gravest sets the code).
         print("TRANSCRIPT-DIVERGED: chain intact, but a committed "
               "transcript prefix no longer holds")
 
@@ -2049,11 +2063,12 @@ def print_manifest_summary(path, manifest):
     """The manifest's displayed fields, testimony like every convenience
     copy (ADR-0007 ruling 3); the committed facts are judged below. The
     unit prints whatever it holds, so a later kind needs no new line.
-    `path` is the recipient's own; every other field is the issuer's
-    text, printed escaped."""
+    Every field is printed escaped, `path` too: a zip's file name is the
+    sender's choice, and a newline in it would print a line of its own
+    (#556)."""
     unit = manifest["unit"]
     seals = [visible(kind) for kind in manifest["seals"]]
-    print(f"package: {path}")
+    print(f"package: {visible(path)}")
     print(f"format: {manifest['format']}")
     print(f"packed: {visible(manifest.get('packed'))} by "
           f"{visible(manifest.get('tool'))} (testimony)")
@@ -2646,7 +2661,7 @@ def ceiling_lines(manifest, earned):
     return trust, verdict
 
 
-def judge_package(shown, folder, chain_file=None, block_headers=None):
+def judge_package(path, folder, chain_file=None, block_headers=None):
     """The ladder, in ADR-0026 ruling 5's order: the manifest's summary,
     each chain, the file references, each artifact, each declared seal,
     the unlisted files, one line of residual trust when the ladder allows
@@ -2669,7 +2684,7 @@ def judge_package(shown, folder, chain_file=None, block_headers=None):
               "others do not; which file is judged would depend on where "
               "it is verified, so this verifier refuses it")
         return 4
-    print_manifest_summary(shown, manifest)
+    print_manifest_summary(path, manifest)
     findings = []
     references = 0
     headers, used = block_headers or {}, set()
@@ -2766,11 +2781,14 @@ def cmd_verify_package(args):
     end record shows, is refused unopened."""
     import zipfile  # only this command reads zips; the hook never pays for it
     path = args.path
+    # A zip's file name is the sender's choice: every line naming it is
+    # escaped, so a newline in it never prints a verdict of its own (#556).
+    shown = visible(path)
     headers = headers_by_root(args.block_header)
     if os.path.isdir(path):
         return judge_package(path, path, args.authority_chain, headers)
     if not os.path.isfile(path):
-        print(f"error: {path} not found", file=sys.stderr)
+        print(f"error: {shown} not found", file=sys.stderr)
         return EX_NOINPUT
     # Opened once, without waiting, and only that open file is read: a
     # pipe put at the name since the look above is never waited on, and
@@ -2781,7 +2799,7 @@ def cmd_verify_package(args):
         handle = io.BytesIO()
     if not zipfile.is_zipfile(handle):
         handle.close()
-        print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
+        print(f"UNSUPPORTED-FORMAT: {shown} is neither a folder nor a zip; "
               "not a loxodonta package")
         return 4
     with handle, tempfile.TemporaryDirectory() as unpacked:
@@ -2789,7 +2807,7 @@ def cmd_verify_package(args):
             with zipfile.ZipFile(handle) as package:
                 declared = sum(info.file_size for info in package.infolist())
                 if declared > PACKAGE_MAX_BYTES:
-                    print(f"UNSUPPORTED-FORMAT: {path} declares {declared} "
+                    print(f"UNSUPPORTED-FORMAT: {shown} declares {declared} "
                           "bytes unpacked, more than this verifier will "
                           f"unpack ({PACKAGE_MAX_BYTES})")
                     return 4
@@ -2798,7 +2816,7 @@ def cmd_verify_package(args):
                     first, second = (visible(repr(name)) for name in twice)
                     which = (f"{first} twice" if twice[0] == twice[1]
                              else f"{first} and {second}")
-                    print(f"UNSUPPORTED-FORMAT: {path} holds two members "
+                    print(f"UNSUPPORTED-FORMAT: {shown} holds two members "
                           f"that unpack to one file, {which}; which one is "
                           "read depends on the tool that unpacks it, so "
                           "this verifier refuses it unopened")
@@ -2809,7 +2827,7 @@ def cmd_verify_package(args):
                 crooked = next((name for name in package.namelist()
                                 if not bare_name(name)), None)
                 if crooked is not None:
-                    print(f"UNSUPPORTED-FORMAT: {path} holds a member named "
+                    print(f"UNSUPPORTED-FORMAT: {shown} holds a member named "
                           f"{visible(repr(crooked))}, not a bare file name; "
                           "some systems would unpack it under another name, "
                           "so this verifier refuses it unopened")
@@ -2820,7 +2838,7 @@ def cmd_verify_package(args):
         except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError,
                 ValueError) as e:
             # The reason may quote a member's name, the issuer's text.
-            print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked "
+            print(f"UNSUPPORTED-FORMAT: {shown} could not be unpacked "
                   f"({visible(e)}); not a loxodonta package")
             return 4
         return judge_package(path, unpacked, args.authority_chain, headers)
@@ -2854,16 +2872,25 @@ def block_header(value):
     return bytes.fromhex(v)
 
 
+# Seconds one local git question may take before git is read as unable
+# to say: a git that never returns must not hold the command that asked.
+GIT_TIMEOUT = 10
+
+
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
-    file, or a question that failed. Local git only: a version is a
-    label on the file, never a channel to fetch a newer one."""
+    file, a question that failed, or no answer within GIT_TIMEOUT.
+    Local git only: a version is a label on the file, never a channel
+    to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
-            capture_output=True, encoding="utf-8")
-    except (OSError, ValueError):
+            # Never a pipe on stderr: a program git starts inherits it,
+            # and on Windows the timeout then waits for that program.
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            encoding="utf-8", timeout=GIT_TIMEOUT)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return "unknown"
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 

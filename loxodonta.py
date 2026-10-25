@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.18.0"
+TOOL_VERSION = "0.19.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -185,7 +185,7 @@ def files_base(log):
     record = os.path.join(log_dir, "project.json")
     if not os.path.exists(record):
         return log_dir, None
-    unread = f"{record} cannot be read as a project record"
+    unread = f"{visible(record)} cannot be read as a project record"
     try:
         # The record sits beside the chain, in the writer's reach, so a
         # pipe there is refused by name rather than waited on (#386).
@@ -210,7 +210,8 @@ def files_base(log):
             f"({visible(path)})"
     if isinstance(path, str) and os.path.isdir(path):
         return path, None
-    return None, f"{record} points at a missing project ({visible(path)})"
+    return None, (f"{visible(record)} points at a missing project "
+                  f"({visible(path)})")
 
 
 # --- The walk (SPEC §6) -------------------------------------------------------
@@ -850,6 +851,18 @@ def open_regular(path):
         # permission; it is named a folder here as everywhere else (#270).
         if os.path.isdir(path):
             raise OSError(errno.EISDIR, IS_A_FOLDER, path) from None
+        raise
+    except OSError as error:
+        # Windows refuses to open a named pipe whose every instance is
+        # taken, as an invalid argument, before its type can be asked;
+        # asked again by stat, it says the pipe is busy (Windows error
+        # 231), and a pipe is named a pipe here as everywhere else (#573).
+        if error.errno == errno.EINVAL:
+            try:
+                os.stat(path)
+            except OSError as asked:
+                if getattr(asked, "winerror", None) == 231:
+                    raise OSError(errno.EINVAL, NOT_REGULAR, path) from None
         raise
     try:
         mode = os.fstat(fd).st_mode
@@ -1681,11 +1694,12 @@ def verify_log(log, files=False, expect_head=None, transcript=None,
             + (["STAMP-INVALID"] if stamps_bad else [])
 
     if transcript_diverged:
-        # Printed after the anchor lines so that when this verdict
-        # governs, it is the last line, where a script reading verify's
-        # last line looks for the verdict. A graver finding still wins
-        # the exit, whether a head mismatch printed after this line or
-        # an anchor finding before it (all reported, gravest sets the code).
+        # Printed after the anchor and stamp lines so that when this
+        # verdict governs, it is the last line, where a script reading
+        # verify's last line looks for the verdict. A graver finding
+        # still wins the exit, whether a head mismatch printed after this
+        # line or an anchor or stamp finding before it (all reported,
+        # gravest sets the code).
         print("TRANSCRIPT-DIVERGED: chain intact, but a committed "
               "transcript prefix no longer holds")
 
@@ -2042,11 +2056,12 @@ def print_manifest_summary(path, manifest):
     """The manifest's displayed fields, testimony like every convenience
     copy (ADR-0007 ruling 3); the committed facts are judged below. The
     unit prints whatever it holds, so a later kind needs no new line.
-    `path` is the recipient's own; every other field is the issuer's
-    text, printed escaped."""
+    Every field is printed escaped, `path` too: a zip's file name is the
+    sender's choice, and a newline in it would print a line of its own
+    (#556)."""
     unit = manifest["unit"]
     seals = [visible(kind) for kind in manifest["seals"]]
-    print(f"package: {path}")
+    print(f"package: {visible(path)}")
     print(f"format: {manifest['format']}")
     print(f"packed: {visible(manifest.get('packed'))} by "
           f"{visible(manifest.get('tool'))} (testimony)")
@@ -2639,7 +2654,7 @@ def ceiling_lines(manifest, earned):
     return trust, verdict
 
 
-def judge_package(shown, folder, chain_file=None, block_headers=None):
+def judge_package(path, folder, chain_file=None, block_headers=None):
     """The ladder, in ADR-0026 ruling 5's order: the manifest's summary,
     each chain, the file references, each artifact, each declared seal,
     the unlisted files, one line of residual trust when the ladder allows
@@ -2662,7 +2677,7 @@ def judge_package(shown, folder, chain_file=None, block_headers=None):
               "others do not; which file is judged would depend on where "
               "it is verified, so this verifier refuses it")
         return 4
-    print_manifest_summary(shown, manifest)
+    print_manifest_summary(path, manifest)
     findings = []
     references = 0
     headers, used = block_headers or {}, set()
@@ -2759,11 +2774,14 @@ def cmd_verify_package(args):
     end record shows, is refused unopened."""
     import zipfile  # only this command reads zips; the hook never pays for it
     path = args.path
+    # A zip's file name is the sender's choice: every line naming it is
+    # escaped, so a newline in it never prints a verdict of its own (#556).
+    shown = visible(path)
     headers = headers_by_root(args.block_header)
     if os.path.isdir(path):
         return judge_package(path, path, args.authority_chain, headers)
     if not os.path.isfile(path):
-        print(f"error: {path} not found", file=sys.stderr)
+        print(f"error: {shown} not found", file=sys.stderr)
         return EX_NOINPUT
     # Opened once, without waiting, and only that open file is read: a
     # pipe put at the name since the look above is never waited on, and
@@ -2774,7 +2792,7 @@ def cmd_verify_package(args):
         handle = io.BytesIO()
     if not zipfile.is_zipfile(handle):
         handle.close()
-        print(f"UNSUPPORTED-FORMAT: {path} is neither a folder nor a zip; "
+        print(f"UNSUPPORTED-FORMAT: {shown} is neither a folder nor a zip; "
               "not a loxodonta package")
         return 4
     with handle, tempfile.TemporaryDirectory() as unpacked:
@@ -2782,7 +2800,7 @@ def cmd_verify_package(args):
             with zipfile.ZipFile(handle) as package:
                 declared = sum(info.file_size for info in package.infolist())
                 if declared > PACKAGE_MAX_BYTES:
-                    print(f"UNSUPPORTED-FORMAT: {path} declares {declared} "
+                    print(f"UNSUPPORTED-FORMAT: {shown} declares {declared} "
                           "bytes unpacked, more than this verifier will "
                           f"unpack ({PACKAGE_MAX_BYTES})")
                     return 4
@@ -2791,7 +2809,7 @@ def cmd_verify_package(args):
                     first, second = (visible(repr(name)) for name in twice)
                     which = (f"{first} twice" if twice[0] == twice[1]
                              else f"{first} and {second}")
-                    print(f"UNSUPPORTED-FORMAT: {path} holds two members "
+                    print(f"UNSUPPORTED-FORMAT: {shown} holds two members "
                           f"that unpack to one file, {which}; which one is "
                           "read depends on the tool that unpacks it, so "
                           "this verifier refuses it unopened")
@@ -2802,7 +2820,7 @@ def cmd_verify_package(args):
                 crooked = next((name for name in package.namelist()
                                 if not bare_name(name)), None)
                 if crooked is not None:
-                    print(f"UNSUPPORTED-FORMAT: {path} holds a member named "
+                    print(f"UNSUPPORTED-FORMAT: {shown} holds a member named "
                           f"{visible(repr(crooked))}, not a bare file name; "
                           "some systems would unpack it under another name, "
                           "so this verifier refuses it unopened")
@@ -2813,7 +2831,7 @@ def cmd_verify_package(args):
         except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError,
                 ValueError) as e:
             # The reason may quote a member's name, the issuer's text.
-            print(f"UNSUPPORTED-FORMAT: {path} could not be unpacked "
+            print(f"UNSUPPORTED-FORMAT: {shown} could not be unpacked "
                   f"({visible(e)}); not a loxodonta package")
             return 4
         return judge_package(path, unpacked, args.authority_chain, headers)
@@ -2847,16 +2865,25 @@ def block_header(value):
     return bytes.fromhex(v)
 
 
+# Seconds one local git question may take before git is read as unable
+# to say: a git that never returns must not hold the command that asked.
+GIT_TIMEOUT = 10
+
+
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
-    file, or a question that failed. Local git only: a version is a
-    label on the file, never a channel to fetch a newer one."""
+    file, a question that failed, or no answer within GIT_TIMEOUT.
+    Local git only: a version is a label on the file, never a channel
+    to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
-            capture_output=True, encoding="utf-8")
-    except (OSError, ValueError):
+            # Never a pipe on stderr: a program git starts inherits it,
+            # and on Windows the timeout then waits for that program.
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            encoding="utf-8", timeout=GIT_TIMEOUT)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return "unknown"
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 
@@ -3142,8 +3169,8 @@ def write_line_to_disk(path, mode, line):
         try:
             os.fsync(f.fileno())
         except OSError as e:
-            print(f"warning: {path}: written, but not synced to disk: {e}",
-                  file=sys.stderr)
+            print(f"warning: {visible(path)}: written, but not synced to "
+                  f"disk: {e}", file=sys.stderr)
 
 
 # --- One writer at a time (ADR-0004) ------------------------------------------
@@ -3298,7 +3325,7 @@ def cmd_init(args):
         print(f"error: cannot create {visible(args.log)}: {e.strerror or e}",
               file=sys.stderr)
         return EX_CANTCREAT
-    print(f"initialized {args.log}")
+    print(f"initialized {visible(args.log)}")
     return 0
 
 
@@ -3405,7 +3432,7 @@ def referenced_paths(lines):
     for line in lines:
         try:
             refs = json.loads(line).get("files")
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, RecursionError):  # #554
             continue
         if isinstance(refs, list):
             paths.update(ref["path"] for ref in refs
@@ -4780,7 +4807,8 @@ def cmd_stamp(args):
         try:
             head = sha256_file(args.manifest)
         except OSError as e:
-            print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
+            print(f"error: {visible(args.manifest)}: {e.strerror or e}",
+                  file=sys.stderr)
             return EX_NOINPUT
         return stamp_digest(args.manifest, head, None, args.authority)
     try:
@@ -4839,7 +4867,7 @@ def stamp_digest(target, head, n, url):
               f"written: {unwritable_why(stamps_path(target), e)}",
               file=sys.stderr)
         return EX_CANTCREAT
-    print(f"stamped {record_label(head, n)} via {url}")
+    print(f"stamped {record_label(head, n)} via {visible(url)}")
     return 0
 
 
@@ -4861,10 +4889,11 @@ def cmd_anchor(args):
         try:
             head = sha256_file(args.manifest)
         except OSError as e:
-            print(f"error: {args.manifest}: {e.strerror or e}", file=sys.stderr)
+            print(f"error: {visible(args.manifest)}: {e.strerror or e}",
+                  file=sys.stderr)
             return EX_NOINPUT
         return submit_digest(args.manifest, head, None, args.calendar,
-                             f"--upgrade --manifest={args.manifest}",
+                             f"--upgrade --manifest={visible(args.manifest)}",
                              args.force)
     try:
         lines = read_log(args.log)
@@ -4903,25 +4932,26 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
     written = 0
     for calendar in (calendars or DEFAULT_CALENDARS):
         url = calendar.rstrip("/")
+        shown = visible(url)  # the operator's argument, never checked (#556)
         try:
             proof_bytes = calendar_request(url + "/digest", data=digest)
             judge_proof(head, proof_bytes)  # refuse to store what can't replay
         except (OSError, ProofError, ValueError) as e:
             # What a calendar refused with is its own text (#349).
-            print(f"warning: calendar {url}: {visible(e)}", file=sys.stderr)
+            print(f"warning: calendar {shown}: {visible(e)}", file=sys.stderr)
             continue
         try:
             append_anchor_record(target, head, n, url, proof_bytes)
         except OSError as e:
             # A proof the calendar gave and this machine could not keep
             # anchors nothing, and no other calendar's would land either.
-            print(f"error: calendar {url} answered, and the proof could not "
+            print(f"error: calendar {shown} answered, and the proof could not "
                   f"be written to {visible(anchors_path(target))}: "
                   f"{unwritable_why(anchors_path(target), e)}",
                   file=sys.stderr)
             return EX_CANTCREAT
         written += 1
-        print(f"anchored {record_label(head, n)} via {url}")
+        print(f"anchored {record_label(head, n)} via {shown}")
     if not written:
         print("error: no calendar accepted the digest — not anchored",
               file=sys.stderr)
@@ -5059,7 +5089,7 @@ def cmd_report(args):
         return EX_NOINPUT
 
     entries, breaks, warns = walk(lines)
-    print(f"receipt log: {args.log} ({len(lines)} entries)")
+    print(f"receipt log: {visible(args.log)} ({len(lines)} entries)")
     print()
     for line in timeline_lines(entries, breaks, warns):
         print(line)
@@ -5390,37 +5420,38 @@ def deregistered_main(gitdir):
     return spelled[:at] if at > 0 else None
 
 
-def drawer_of_session(log_dir, session, quiet=False):
+def drawer_of_session(log_dir, session):
     """One session, one drawer (ADR-0023): the session's first receipt
     decides. When the resolved drawer holds no chain for this session yet
     but another drawer in the store does, the receipt goes there, so a
     resolution that changes mid-session (a worktree cleaned up under a
     running session) can never split a session in two. The normal case
-    costs nothing: the resolved drawer already has the chain. A store
-    folder that cannot be listed is said on stderr unless `quiet`, and
-    the receipt still goes to the resolved drawer, never lost (#452)."""
+    costs nothing: the resolved drawer already has the chain. Returns
+    the drawer and a warning, None unless a store folder cannot be
+    listed, and the receipt then still goes to the resolved drawer,
+    never lost (#452). The caller prints the warning once that drawer
+    exists, so a receipt refused for want of it prints the refusal
+    alone (#555)."""
     name = f"receipts-{session}.jsonl"
     if os.path.exists(os.path.join(log_dir, name)):
-        return log_dir
+        return log_dir, None
     root = os.path.join(store_home(), "receipts")
     try:
         drawers = os.listdir(root)
     except (FileNotFoundError, NotADirectoryError):
-        return log_dir
+        return log_dir, None
     except OSError as error:
-        if not quiet:
-            print(f"warning: {visible(root)} cannot be listed "
-                  f"({visible(error.strerror or error)}), so a chain this "
-                  "session may already have in another drawer cannot be "
-                  f"found: this receipt goes to {visible(log_dir)}, and the "
-                  "session may be split across two drawers (ADR-0023)",
-                  file=sys.stderr)
-        return log_dir
+        return log_dir, (
+            f"warning: {visible(root)} cannot be listed "
+            f"({visible(error.strerror or error)}), so a chain this "
+            "session may already have in another drawer cannot be "
+            f"found: this receipt goes to {visible(log_dir)}, and the "
+            "session may be split across two drawers (ADR-0023)")
     for drawer in drawers:
         other = os.path.join(root, drawer)
         if other != log_dir and os.path.exists(os.path.join(other, name)):
-            return other
-    return log_dir
+            return other, None
+    return log_dir, None
 
 
 def store_home():
@@ -5566,8 +5597,9 @@ def cmd_hook(args):
     # One session, one drawer (ADR-0023), for store-routed writes only:
     # an explicit --log-dir or the cwd-local default is the operator's
     # own choice and is left alone. SessionEnd stays silent (ADR-0017).
+    drawer_warning = None
     if project is not None:
-        log_dir = drawer_of_session(log_dir, safe, quiet=ending)
+        log_dir, drawer_warning = drawer_of_session(log_dir, safe)
 
     if ending:
         # The tail commitment (ADR-0017): a clean exit seals the
@@ -5608,7 +5640,13 @@ def cmd_hook(args):
         return code
 
     if not os.path.isdir(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
+        # A file at the folder's name or a folder closed by one chmod is
+        # in the writer's reach (ADR-0002): a refusal by name, not a
+        # traceback (#555).
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except OSError as e:
+            return unwritable_log(writable_chain(log_dir, safe), e)
         # A freshly created log dir gets a protective .gitignore: action
         # lines record every command a session ran, and that history must
         # not ride into a commit by accident (SPEC §8: no secrets).
@@ -5618,6 +5656,8 @@ def cmd_hook(args):
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
+    if drawer_warning:
+        print(drawer_warning, file=sys.stderr)
     if project is not None:
         record_project(log_dir, project)
     # A damaged chain is not extended and not repaired — recording moves to
@@ -6413,9 +6453,15 @@ def program_folder():
 
 def same_folder(one, other):
     """Whether two folder names name one folder: resolved, and folded
-    for case and separators, as a disk that ignores case reads them."""
-    return (os.path.normcase(os.path.realpath(one)).casefold()
-            == os.path.normcase(os.path.realpath(other)).casefold())
+    for case and separators, as a disk that ignores case reads them. On
+    Windows each is first made whole as the system makes a name before
+    it opens one (abspath), which drops a trailing dot or space that
+    resolving keeps (#577)."""
+    def folded(name):
+        if sys.platform == "win32":
+            name = os.path.abspath(name)
+        return os.path.normcase(os.path.realpath(name)).casefold()
+    return folded(one) == folded(other)
 
 
 def stand_in(variable, real):
@@ -6426,14 +6472,18 @@ def stand_in(variable, real):
     variable without rights, and an administrator's elevated shell
     inherits it. Shown means: where both folders exist, not the same
     folder by the system's own answer (samefile); where one does not,
-    another name once resolved and folded. A value spelled as a network
-    path or a device path (\\\\host\\share, \\\\?\\, \\\\.\\) is never shown to be
-    another: an administrative share or a prefix reaches the same
-    folder under a spelling resolving does not undo."""
+    another name once resolved and folded. On Windows a value that does
+    not start with a drive letter and a separator (C:\\ or C:/), or that
+    holds a second colon, is never shown to be another: a network path,
+    a device path, a prefix (\\\\host\\share, \\\\?\\, \\\\.\\, \\??\\) or a
+    stream (folder::$INDEX_ALLOCATION) reaches the same folder under a
+    spelling resolving does not undo (#577)."""
     value = os.environ.get(variable)
     if not value:
         return False
-    if sys.platform == "win32" and value[:2] in ("\\\\", "//", "\\/", "/\\"):
+    if sys.platform == "win32" and not (
+            value[:1].isascii() and value[:1].isalpha()
+            and value[1:3] in (":\\", ":/") and ":" not in value[3:]):
         return False
     try:
         if os.path.exists(value) and os.path.exists(real):

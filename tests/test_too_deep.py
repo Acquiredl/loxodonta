@@ -8,7 +8,9 @@ of them treats a file too deep to read exactly as one that is not
 JSON: `install-hook` and `uninstall-hook` refuse such settings by name,
 65, before a byte is written; the marker is bookkeeping, read as none;
 the scan and `serve` read either as absent; `digest --payload` reads
-such a payload as no payload (#487 item 16). Never a traceback.
+such a payload as no payload (#487 item 16); `log --file` reads such a
+chain line, met by its case check, as one that is not JSON (#554).
+Never a traceback.
 
 Every test drives the public CLI, in homes of the test's own.
 """
@@ -177,6 +179,53 @@ class ServedTooDeepTest(unittest.TestCase):
         self.assertFalse(reader.is_alive(), "serve never said it started")
         self.assertIn("http://127.0.0.1:", said[0])
         self.assertIn("anchor off (no profile on record; no flag)", said[1])
+
+
+class LoggedTooDeepTest(unittest.TestCase):
+    """`log --file` with a line of the chain other than the tail nested
+    too deep to read (#554): the case check parses every line, and it
+    reads that one as a line that is not JSON, so the receipt is still
+    written and the line is `verify`'s to name."""
+
+    def log_over(self, line):
+        """`log --file` on a chain of three whose entry 1 is `line`, and
+        the folder it ran in."""
+        folder = temp_folder(self)
+        env = isolated_env(temp_folder(self))
+        run(LOXODONTA, "init", "--log", "c.jsonl", cwd=str(folder),
+            env=env, timeout=BOUND, check=True)
+        for action in ("a", "b"):
+            run(LOXODONTA, "log", "--log", "c.jsonl", "--actor", "a",
+                "--action", action, cwd=str(folder), env=env,
+                timeout=BOUND, check=True)
+        (folder / "f.txt").write_text("f\n", encoding="utf-8")
+        chain = folder / "c.jsonl"
+        lines = chain.read_bytes().splitlines()
+        lines[1] = line.encode("utf-8")
+        chain.write_bytes(b"\n".join(lines) + b"\n")
+        result = run(LOXODONTA, "log", "--log", "c.jsonl", "--actor", "a",
+                     "--action", "c", "--file", "f.txt", cwd=str(folder),
+                     env=env, timeout=BOUND)
+        self.assertNotIn("Traceback", result.stderr)
+        return result, folder
+
+    def test_a_chain_line_too_deep_reads_as_one_that_is_not_json(self):
+        plain, _ = self.log_over(NOT_JSON)
+
+        result, folder = self.log_over(too_deep())
+
+        self.assertEqual((result.returncode, result.stdout),
+                         (plain.returncode, plain.stdout))
+        self.assertEqual((result.returncode, result.stdout),
+                         (0, "logged entry 3\n"))
+        chain = (folder / "c.jsonl").read_bytes()
+        self.assertEqual(len(chain.splitlines()), 4)
+        verified = run(LOXODONTA, "verify", "--log", "c.jsonl",
+                       cwd=str(folder), timeout=BOUND)
+        self.assertEqual(verified.returncode, 1,
+                         verified.stdout + verified.stderr)
+        self.assertIn("BROKEN at entry 1: nesting too deep to read",
+                      verified.stdout)
 
 
 class DigestedTooDeepTest(unittest.TestCase):

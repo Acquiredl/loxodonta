@@ -10,6 +10,33 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-25
+
+### Added
+
+- A conformance vector, `files-unsorted`, holds an entry whose `files` lists `b.txt` before `a.txt`, hashed as stored; every verifier here reads it `VALID`, so one that sorted `files` before hashing fails it (#491).
+
+### Changed
+
+- `docs/SPEC.md` section 3 makes sorting `files` by path the writer's duty at intake, not a step of canonical form: the array is hashed as stored, and a verifier neither sorts it nor refuses it unsorted (#491).
+- `docs/SPEC.md` section 6 says `head` reads the final line only, so a torn tail has no head (nothing on stdout, exit 1), and section 10.3 names the package listing's head rule as its own (#490).
+- `docs/SPEC.md` section 6 says every break is listed in walk order, so the last line names the last break, and quotes the torn-tail line as `verify` prints it, `entries 0..2 intact` (#492).
+- A package's README, `docs/PACKAGE.md`, `docs/TOPOLOGY.md` and `README.md` point the recipient at `python -I verifier.py verify-package`, the file every release since v0.9.0 ships beside `SHA256SUMS`, instead of the whole recorder (#326).
+- The supervisor starts every recorder child with `-I`, as the installer's hooks run, so a `PYTHONPATH` in the environment `scan`, `serve`, `drill` or `package` was started with reaches none of them (#575).
+
+### Fixed
+
+- `verify-package` prints the package's file name escaped, under the recorder and `verifier.py`, so a newline in a sender's zip name no longer prints a forged verdict line; the operator's paths and a closed folder's name are escaped too (#556).
+- A Windows named pipe wired as the recorder now reads as not a regular file, never "Invalid argument" or not on disk; the export says the fingerprints it removes are the receipts' (#573).
+- `log --file` reads a line of the chain nested past the JSON reader as one that is not JSON, so the receipt is written instead of ending in a traceback; the line stays `verify`'s to name (#554).
+- The hook refuses a receipt whose drawer it cannot make, a file at the receipts folder's name or the folder closed by a chmod, by name with exit 73, instead of a traceback and exit 70 (#555).
+- On Windows, `LOXODONTA_MANAGED_DIR` or `LOXODONTA_PROGRAM_DIR` stands in for another folder only when it starts with a drive letter and a separator; a `\??\` or trailing-dot spelling of the real folder, absent, now stands in for nothing (#577).
+- A keeper's note blames a calendar, an authority or a remote only for the recorder's exit 69; a held lock (75), a crash (70) and nothing to read (66) are each named as such (#557).
+- The recorder notice asks git with a 10-second bound, fsmonitor off and no optional locks: a git that never returns no longer holds the scan, and a planted fsmonitor command or post-index-change hook no longer runs (#572).
+- The reading over a receiver's folder quotes a chain's `second-record-cut:` note escaped and cut at 64 characters, so a newline or a long tail the writer planted in one reads as one short line (#487).
+- `drill` and the page's chain walker find a chain named `.JSONL`, which the census has counted since #445, instead of refusing it as no chain under the root (#451).
+- `SUPERVISOR_SETTLE_SECONDS=abc`, or any `SUPERVISOR_*` number the supervisor cannot use, is refused by name with exit 64 before any verb runs, instead of a traceback at import; a negative, which it used to take, is refused too (#487).
+
 ## [0.18.0] - 2026-10-20
 
 ### Added
@@ -473,7 +500,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.18.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.19.0...dev
+[0.19.0]: https://github.com/Acquiredl/loxodonta/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Acquiredl/loxodonta/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Acquiredl/loxodonta/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Acquiredl/loxodonta/compare/v0.15.1...v0.16.0

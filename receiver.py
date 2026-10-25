@@ -60,7 +60,7 @@ from urllib.parse import urlsplit
 # FORMAT_VERSION is the frozen receipt format of the chain files it
 # keeps (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.18.0"
+TOOL_VERSION = "0.19.0"
 FORMAT_VERSION = "0.1"
 
 DEFAULT_PORT = 8790
@@ -808,16 +808,24 @@ def cmd_serve(args):
 # --- The command line ----------------------------------------------------------
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+GIT_TIMEOUT = 10
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
-    file, or a question that failed. Local git only: a version is a
-    label on the file, never a channel to fetch a newer one."""
+    file, a question that failed, or no answer within GIT_TIMEOUT.
+    Local git only: a version is a label on the file, never a channel
+    to fetch a newer one."""
     try:
         asked = subprocess.run(
             ["git", "-C", home, "rev-parse", "--short", "HEAD"],
-            capture_output=True, encoding="utf-8")
-    except (OSError, ValueError):
+            # Never a pipe on stderr: a program git starts inherits it,
+            # and on Windows the timeout then waits for that program.
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            encoding="utf-8", timeout=GIT_TIMEOUT)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return "unknown"
     return asked.stdout.strip() if asked.returncode == 0 else "unknown"
 

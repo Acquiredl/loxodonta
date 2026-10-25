@@ -4188,6 +4188,92 @@ class AnchorKeeperTest(unittest.TestCase):
             self.assertNotIn("remote", said["note"].lower())
             self.assertTrue(said["failed"], "the head did not leave")
 
+    # A recorder that answers the keepers' verbs with one exit and hands
+    # every other verb to the real one, beside a copy of the supervisor,
+    # which starts the recorder that sits beside it. No keeper verb takes
+    # the chain's lock and no honest input makes one crash, so these
+    # exits reach the keepers no other way (#557).
+    STAND_IN = (
+        "import runpy\n"
+        "import sys\n"
+        "if sys.argv[1:2] in ([\"anchor\"], [\"stamp\"], [\"publish\"]):\n"
+        "    sys.stderr.write({said!r})\n"
+        "    sys.exit({code!r})\n"
+        "sys.argv[0] = {real!r}\n"
+        "runpy.run_path({real!r}, run_name=\"__main__\")\n")
+
+    def supervisor_beside_a_stand_in(self, code, said):
+        folder = temp_folder(self)
+        shutil.copyfile(SUPERVISOR, folder / "supervisor.py")
+        (folder / "loxodonta.py").write_text(
+            self.STAND_IN.format(code=code, said=said, real=str(LOXODONTA)),
+            encoding="utf-8")
+        return folder / "supervisor.py"
+
+    def test_an_exit_that_is_not_the_far_ends_names_no_far_end(self):
+        # #557: only 69 says a calendar, an authority or a remote did not
+        # do what was asked (ADR-0037). A held lock, a recorder that fell
+        # over, or a chain it found nothing in to read asked none of
+        # them, so each is named for what it is, and only the held lock,
+        # which passes, promises the keeper's next turn.
+        cases = (
+            (75, "error: receipts-sess-held.jsonl is locked by another "
+                 "writer - no entry was written.\n",
+             ("another writer holds the chain's lock",)),
+            (70, "Traceback (most recent call last):\n"
+                 "  File \"loxodonta.py\", line 1, in <module>\n"
+                 "RuntimeError: the stand-in fell over\n",
+             ("the recorder failed", "RuntimeError: the stand-in fell over")),
+            (66, "error: receipts-sess-held.jsonl is empty - run "
+                 "`loxodonta init` first\n",
+             ("the recorder found no input it could read", "is empty")),
+        )
+        for code, stderr, named in cases:
+            with self.subTest(exit=code):
+                supervisor = self.supervisor_beside_a_stand_in(code, stderr)
+                root = temp_folder(self)
+                make_chain(root / "alpha" / "receipts", "sess-held")
+
+                result = run(supervisor, "scan", "--root", str(root),
+                             "--json", *self.UNREACHABLE_KEEPERS,
+                             "--publish-chain", "http://127.0.0.1:1",
+                             env=self.env)
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                chain = self.chain_report(result, "alpha", "sess-held")
+                self.assertEqual(chain["verdict"], "VALID")
+                for said in (chain["anchors"], chain["left"]):
+                    note = said["note"]
+                    for words in named:
+                        self.assertIn(words, note)
+                    for far_end in ("calendar", "remote", "authority"):
+                        self.assertNotIn(far_end, note.lower())
+                    self.assertNotIn("Traceback", note,
+                                     "a crash is named by its last line")
+                    if code == 75:
+                        self.assertIn("will try again", note)
+                    else:
+                        self.assertNotIn("try again", note)
+                    self.assertTrue(said["failed"], "the head did not leave")
+
+    def test_an_upgrade_with_no_proof_to_read_names_no_calendar(self):
+        # #557: an anchors sidecar with no row leaves the upgrade nothing
+        # to ask, and the recorder exits 66 having asked no calendar.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-no-rows")
+        Path(str(log) + ".anchors.jsonl").write_bytes(b"")
+        env = {**self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"}
+
+        result = run_scan(self.root, env=env)
+
+        self.assertNotIn("Traceback", result.stderr)
+        note = self.chain_report(result, "alpha", "sess-no-rows")[
+            "anchors"]["note"]
+        self.assertIn("the recorder found no input it could read", note)
+        self.assertIn("no anchors found", note,
+                      "the recorder's own words are shown")
+        self.assertNotIn("calendar", note.lower())
+
     def test_a_stood_down_chain_is_handed_to_neither_keeper_again(self):
         # #533: a torn tail with a sibling is stood down (ADR-0004), and
         # the recorder refuses its head on every turn, so once a look has
@@ -4307,6 +4393,53 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertTrue(anchored["anchors"]["head"]["anchored"])
 
 
+class RecorderChildTest(unittest.TestCase):
+    """Every recorder the supervisor starts runs with -I (#575), as every
+    hook the installer writes does (ADR-0042 ruling 4), so a PYTHONPATH
+    in the environment `scan` or `drill` was started with reaches no
+    child. The supervisor itself is started with -I as well, which keeps
+    the variable in its environment and out of its own imports: a
+    planted module that runs was imported by a child."""
+
+    def setUp(self):
+        self.root = temp_folder(self)
+        planted = temp_folder(self)
+        self.imported = planted / "imported"
+        (planted / "hashlib.py").write_text(
+            f"with open({str(self.imported)!r}, 'a') as f:\n"
+            "    f.write('a recorder child imported this hashlib')\n"
+            "raise ImportError('a planted hashlib')\n", encoding="utf-8")
+        self.env = isolated_env(temp_folder(self), PYTHONPATH=str(planted))
+
+    def test_the_scan_and_its_keepers_import_nothing_from_pythonpath(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+
+        result = run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                     *AnchorKeeperTest.UNREACHABLE_KEEPERS, env=self.env,
+                     isolated=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.imported.exists(),
+                         "a recorder child read PYTHONPATH")
+        (chain,) = chains_by_session(json.loads(result.stdout))[
+            ("alpha", "sess-aaaa")]
+        self.assertEqual(chain["verdict"], "VALID")
+        # Each keeper's recorder ran as far as asking its far end.
+        self.assertIn("no calendar accepted", chain["anchors"]["note"])
+        self.assertIn("the remote did not take", chain["left"]["note"])
+
+    def test_the_drill_imports_nothing_from_pythonpath(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa", entries=3)
+
+        result = run(SUPERVISOR, "drill", "--root", str(self.root), "--log",
+                     "alpha/receipts/receipts-sess-aaaa.jsonl", "--json",
+                     timeout=300, env=self.env, isolated=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.imported.exists(),
+                         "a recorder child read PYTHONPATH")
+
+
 class DrillTest(unittest.TestCase):
     """The fire drill (issue #24): the tamper playground graduated into
     its honest job — rehearse detection on sandbox copies so the
@@ -4376,6 +4509,21 @@ class DrillTest(unittest.TestCase):
         self.assertIn("too short", result.stdout + result.stderr)
         self.assertFalse((self.root / ".supervisor-drill").exists(),
                          "a refused drill writes nothing")
+
+    def test_a_chain_named_in_capitals_is_drilled(self):
+        # The census counts a `.JSONL` chain on every system (#445), so
+        # the gate the drill and the walker share finds it too (#451).
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa",
+                         entries=3)
+        log.rename(log.with_name("receipts-sess-aaaa.JSONL"))
+
+        result = self.drill("alpha/receipts/receipts-sess-aaaa.JSONL")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["all_fired"])
+        self.assertEqual(report["log"],
+                         "alpha/receipts/receipts-sess-aaaa.JSONL")
 
     def test_a_chain_outside_the_root_is_refused(self):
         elsewhere = self.base.parent
@@ -4818,6 +4966,77 @@ class RecorderDriftTest(unittest.TestCase):
                       recorder["note"])
         self.assertNotIn("outside any git checkout", recorder["note"])
 
+    def test_a_planted_git_setting_runs_nothing_at_a_scan(self):
+        # #572: the recorder's folder is named by the harness settings,
+        # which the writer can reach, so the checkout's .git is the
+        # writer's to plant. An fsmonitor command in its config and a
+        # post-index-change hook beside it would each run at every scan.
+        home, script = self.make_checkout()
+        ran = self.base / "ran"
+        python = Path(sys.executable).as_posix()
+        writes = (f'"{python}" -c "open(\'{ran.as_posix()}\', \'a\')'
+                  '.write(\'x\')"')
+        self.git("config", "core.fsmonitor", writes, cwd=home)
+        hook = home / ".git" / "hooks" / "post-index-change"
+        hook.write_text(f"#!/bin/sh\n{writes}\n", encoding="utf-8")
+        os.chmod(hook, 0o755)
+        # Changed, so `status` reads the file's bytes and has news to say.
+        with open(script, "a", encoding="utf-8") as f:
+            f.write("# edited after the commit\n")
+
+        recorder = self.notice()
+
+        self.assertFalse(ran.exists(), "a scan ran the checkout's program")
+        self.assertEqual(recorder["branch"], "main")
+        self.assertTrue(recorder["dirty"], "git status gave no answer")
+
+    def test_a_status_git_cannot_answer_never_reads_as_clean(self):
+        # #572: a question that fails or times out is git unable to say,
+        # never "nothing changed". A required clean filter that fails,
+        # named by attributes the writer can plant, makes `status` fail
+        # fast where a hung one would have run into the bound.
+        home, script = self.make_checkout()
+        self.git("config", "filter.planted.clean", "exit 1", cwd=home)
+        self.git("config", "filter.planted.required", "true", cwd=home)
+        info = home / ".git" / "info"
+        info.mkdir(exist_ok=True)
+        (info / "attributes").write_text("loxodonta.py filter=planted\n",
+                                         encoding="utf-8")
+        # Touched, so git must look past the file's stat to its bytes.
+        later = time.time() + 60
+        os.utime(script, (later, later))
+
+        recorder = self.notice()
+
+        self.assertNotIn("clean", recorder["note"])
+        self.assertIsNone(recorder["branch"])
+        self.assertIn("not in a git checkout, or git is unavailable",
+                      recorder["note"])
+
+    @unittest.skipIf(os.name == "nt", "subprocess finds no git.cmd on PATH "
+                     "without a shell; the POSIX runners hold this")
+    def test_a_git_that_never_answers_holds_no_scan(self):
+        # #572: a question git does not answer within its bound reads as
+        # git unable to answer, and the scan goes on to say so.
+        _, script = self.make_checkout()
+        script.write_bytes(b'TOOL_VERSION = "0.0.1"\n')
+        stalled = self.base / "stalled"
+        stalled.mkdir()
+        git = stalled / "git"
+        git.write_text("#!/bin/sh\nexec sleep 600\n", encoding="utf-8")
+        os.chmod(git, 0o755)
+        env = {**self.env,
+               "PATH": f"{stalled}{os.pathsep}{self.env.get('PATH', '')}"}
+
+        result = run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                     "--witness", str(self.witness), env=env, timeout=60)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        recorder = json.loads(result.stdout)["recorder"]
+        self.assertEqual(recorder["state"], "versioned")
+        self.assertIn("not in a git checkout, or git is unavailable",
+                      recorder["note"])
+
     def test_a_copy_with_no_version_line_says_so_and_still_hashes(self):
         body = b"# a recorder with its version line taken out\n"
         self.make_copy(body)
@@ -4876,6 +5095,25 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertEqual(recorder["state"], "unknown")
         self.assertIsNone(recorder["sha256"])
         self.assertIn("not a regular file", recorder["note"])
+
+    @unittest.skipUnless(os.name == "nt", "a Windows named pipe")
+    def test_a_windows_pipe_wired_as_the_recorder_reads_as_one(self):
+        # Windows answers an open of a pipe whose instances are all
+        # taken with "Invalid argument", before any type can be asked
+        # (#573): the sentence still names a pipe, as it does on POSIX.
+        from multiprocessing.connection import Listener
+        pipe = f"\\\\.\\pipe\\lox-{os.getpid()}-{id(self)}\\loxodonta.py"
+        listener = Listener(pipe, family="AF_PIPE")
+        self.addCleanup(listener.close)
+        install_witness_hook(
+            self.witness, command=f'python "{Path(pipe).as_posix()}" hook')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "unknown")
+        self.assertIsNone(recorder["sha256"])
+        self.assertIn("not a regular file", recorder["note"])
+        self.assertNotIn("Invalid argument", recorder["note"])
 
 
 class TranscriptRetentionTest(unittest.TestCase):
@@ -5198,6 +5436,60 @@ class UsageExitTest(unittest.TestCase):
         self.assertIn("not a cadence", result.stderr)
         self.assertEqual(result.stdout, "")
 
+    # Every number the supervisor reads from its environment at import,
+    # and whether it must be a whole one (#487 item 17).
+    NUMBER_SETTINGS = {"SUPERVISOR_UPGRADE_EVERY_SECONDS": True,
+                       "SUPERVISOR_GRACE_SECONDS": True,
+                       "SUPERVISOR_IDLE_END_SECONDS": True,
+                       "SUPERVISOR_WANING_SECONDS": True,
+                       "SUPERVISOR_DORMANT_SECONDS": True,
+                       "SUPERVISOR_SETTLE_SECONDS": True,
+                       "SUPERVISOR_HOT_TIMES": True,
+                       "SUPERVISOR_HOT_FLOOR": True,
+                       "SUPERVISOR_SCAN_TTL_SECONDS": False,
+                       "SUPERVISOR_KEEPER_TICK_SECONDS": False}
+
+    def version_with(self, name, value):
+        return run(SUPERVISOR, "--version", timeout=60,
+                   env=isolated_env(self.home, **{name: value}))
+
+    def test_a_setting_that_is_not_a_number_exits_64_naming_it(self):
+        result = self.version_with("SUPERVISOR_SETTLE_SECONDS", "abc")
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.splitlines(), [
+            "error: SUPERVISOR_SETTLE_SECONDS='abc' is not a whole number "
+            "0 or more"])
+        self.assertEqual(result.stdout, "")
+
+    def test_every_number_setting_refuses_what_it_cannot_use(self):
+        refused = [(name, value) for name in self.NUMBER_SETTINGS
+                   for value in ("abc", "-1")]
+        refused += [("SUPERVISOR_SETTLE_SECONDS", ""),
+                    ("SUPERVISOR_GRACE_SECONDS", "1.5"),
+                    ("SUPERVISOR_SCAN_TTL_SECONDS", "nan"),
+                    ("SUPERVISOR_KEEPER_TICK_SECONDS", "inf")]
+        for name, value in refused:
+            with self.subTest(name=name, value=value):
+                result = self.version_with(name, value)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                kind = "whole" if self.NUMBER_SETTINGS[name] else "finite"
+                self.assertEqual(result.stderr.splitlines(), [
+                    f"error: {name}={value!r} is not a {kind} number "
+                    "0 or more"])
+
+    def test_a_number_setting_it_can_use_is_taken(self):
+        for name, value in (("SUPERVISOR_SETTLE_SECONDS", "0"),
+                            ("SUPERVISOR_KEEPER_TICK_SECONDS", "0.5")):
+            with self.subTest(name=name):
+                result = self.version_with(name, value)
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn("supervisor", result.stdout)
+
 
 # Straight to 127.0.0.1, never through a proxy someone's shell configured.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -5404,6 +5696,41 @@ class ClosedFolderTest(unittest.TestCase):
         self.assertEqual(report["baseline"]["events"], [])
         self.assertEqual([c["folder"] for c in report["closed"]],
                          [later.as_posix()])
+
+    def test_a_closed_drawer_whose_name_holds_a_newline_is_named_escaped(
+            self):
+        # #556: a drawer's name is in the writer's reach, and each
+        # sentence naming it is read in a terminal: a line planted there
+        # stays in the sentence, spelled `\n`, in the scan's note, in a
+        # command's refusal, and in serve's 503 body.
+        later = self.store / "receipts" / "later\nVALID: planted\n-00000000"
+        later.mkdir()
+        self.recorder("init", "--log", str(later / "receipts-sess-dddd.jsonl"))
+        self.close(later)
+        out = self.root / "export.json"
+
+        exported = self.supervisor("export", "--witness", str(self.witness),
+                                   "--out", str(out))
+        refused = self.supervisor("search", "step", "--all", "--repo",
+                                  str(self.project))
+        served = []
+        url = self.serve()
+        for route in ("/api/activity", "/api/search?q=step"):
+            with self.assertRaises(urllib.error.HTTPError) as answered:
+                OPENER.open(url + route, timeout=30)
+            served.append(answered.exception.read().decode("utf-8"))
+            self.assertEqual(answered.exception.code, 503)
+            answered.exception.close()
+
+        self.answered(exported, 0)
+        self.answered(refused, 66)
+        for said in (exported.stderr, refused.stderr, *served):
+            with self.subTest(said=said):
+                named = [line for line in said.splitlines()
+                         if "cannot be listed" in line]
+                self.assertEqual(len(named), 1, said)
+                self.assertIn("later\\nVALID: planted\\n-00000000", named[0])
+                self.assertNotIn("VALID: planted", said.splitlines())
 
     def test_a_drawer_looping_on_itself_is_named_itself(self):
         # Only a refused permission names the folder above (#448 item
@@ -5961,6 +6288,23 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(report["exit"], deficit["exit"])
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
+
+    def test_a_planted_cut_note_is_quoted_as_one_clipped_line(self):
+        # The chain is in the writer's reach (ADR-0002), so the note the
+        # row quotes is the writer's text: a newline and a long tail in
+        # it read as one line, cut short (#487 item 8).
+        chain_copy(self.data, "cut-session-2222", notes=(
+            "second-record-cut: reason=telemetry-off\nFORGED: all clean "
+            + "x" * 500,))
+
+        row = self.rows(self.report())["cut-session-2222"]
+
+        quoted = row["second_record_cut"]
+        self.assertTrue(quoted.startswith(
+            "second-record-cut: reason=telemetry-off\\nFORGED"), quoted)
+        self.assertNotIn("\n", quoted)
+        self.assertLessEqual(len(quoted), 64)
+        self.assertTrue(quoted.endswith("..."), quoted)
 
     def test_a_sequence_cut_out_of_the_events_is_a_gap_naming_the_numbers(self):
         lay_events(self.data, drop=(29, 30))

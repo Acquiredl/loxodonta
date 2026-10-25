@@ -745,6 +745,14 @@ class DemoStorePackageTest(PackageCase):
             self.assertIn("; no package written", result.stderr)
             self.assertEqual(list(closed.iterdir()), [])
 
+    def test_readme_points_the_recipient_at_the_verifier_isolated(self):
+        # #326: the recipient needs verifier.py, not the whole recorder,
+        # and -I keeps a module dropped beside it off sys.path (ADR-0035).
+        readme = (self.folder_package() / "README.md").read_text("utf-8")
+        self.assertIn("    python -I verifier.py verify-package "
+                      "<this package>\n", readme)
+        self.assertNotIn("loxodonta.py verify-package", readme)
+
     def test_readme_never_holds_the_manifest_hash_and_manifest_is_last(self):
         folder = self.folder_package()
         manifest = folder / "manifest.json"

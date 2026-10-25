@@ -50,7 +50,7 @@ the home and write nothing to it, so their tests are isolated but not
 guarded. A process started another way (`os.system`, `os.spawn*`; this
 suite uses neither) passes the guard unseen.
 
-tests/test_supervisor.py arms it, and every suite that starts one of
+tests/support.py arms it, and every suite that starts one of
 those verbs imports from there (directly, or through test_anchor or
 test_recall), so the guard is on whether the suite runs under discovery
 or one module at a time. `isolated_env` there is the way to give a start
@@ -192,7 +192,7 @@ def refuse_this_machines_home(event, args):
         raise AssertionError(
             "%s %s started with this machine's %s (#242, the "
             "home guard). Give it isolated_env(home) from "
-            "tests/test_supervisor.py, with the home in a temporary folder "
+            "tests/support.py, with the home in a temporary folder "
             "of the test's own. Started from:\n  %s"
             % (tool, verb.group(1), ", ".join(names),
                "\n  ".join(started_from()) or "outside tests/"))
