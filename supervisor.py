@@ -8946,10 +8946,13 @@ METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 # The label values every scrape carries, at zero when nothing is in them,
 # so a panel never meets a missing series. Each is the scan's own string.
 # One the scan emits that is not listed here is rendered all the same.
-# ANCHOR-PENDING and ANCHOR-UNANSWERED stay listed, at zero now, because
-# releases before #496 read the word off verify's last line and served
-# them, and a label value once served is never withdrawn.
-KNOWN_VERDICTS = ("VALID", "BROKEN", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
+# A value once listed is never withdrawn, so ANCHOR-PENDING and
+# ANCHOR-UNANSWERED stay, at zero since #496 took the word from the
+# gravest line verify printed. ANCHORED, which the last-line reading
+# before #496 also served on the chains that read it, was never listed
+# and is not: no verdict, and a standing zero would read as no chain
+# anchored, which loxodonta_heads_unanchored answers (#505).
+KNOWN_VERDICTS =("VALID", "BROKEN", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
                   "ANCHOR-PENDING", "ANCHOR-UNANSWERED",
                   "TRANSCRIPT-DIVERGED", "UNSUPPORTED-VERSION", "NO-VERDICT")
 KNOWN_COMPLETENESS = ("OK", "LAGGING", "SURPLUS", "QUIET", "ALARM-SILENT",
