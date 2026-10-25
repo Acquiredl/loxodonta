@@ -2026,12 +2026,12 @@ def recorder_exit_note(doing, finished):
     """The keeper's note for a recorder exit that is not the far end's.
     Only 69 says a calendar, an authority or a remote did not do what
     was asked (ADR-0037), so no note written here names one: none was
-    shown to be asked (#557). 1 is a damaged tail the recorder refuses again until
-    it is dealt with (#533); 70 is the recorder itself falling over,
-    named by its traceback's last line; 66 is a chain or sidecar it
-    found nothing in to read. Of them all only 75, another writer's
-    lock, passes on its own, so only its note promises the next turn.
-    The recorder's stderr is shown as it said it, never read for a
+    shown to be asked (#557). 1 is a damaged tail the recorder refuses
+    again until it is dealt with (#533); 70 is the recorder itself
+    falling over, named by its traceback's last line; 66 is a chain or
+    sidecar it found nothing in to read. Of them all only 75, another
+    writer's lock, passes on its own, so only its note promises the next
+    turn. The recorder's stderr is shown as it said it, never read for a
     verdict (#504), and clipped."""
     code = finished.returncode
     if code == EX_TEMPFAIL:
@@ -3174,11 +3174,11 @@ def recorder_versioned(script, notice):
     """The notice for a recorder git has nothing to say about: a managed
     install's copy under the system program area (ADR-0042), or a
     checkout read where git is not on the PATH or did not answer (#572),
-    which this cannot tell apart. Its `TOOL_VERSION` line and the SHA-256 of its bytes, read
-    from the bytes and never imported or run, and whether this
-    supervisor is the same version. State `versioned` when the version
-    line reads; `unknown`, with whatever could be read, when it does
-    not."""
+    which this cannot tell apart. Its `TOOL_VERSION` line and the
+    SHA-256 of its bytes, read from the bytes and never imported or run,
+    and whether this supervisor is the same version. State `versioned`
+    when the version line reads; `unknown`, with whatever could be read,
+    when it does not."""
     outside = "the recorder is not in a git checkout, or git is unavailable"
     try:
         with open_regular(script) as f:
