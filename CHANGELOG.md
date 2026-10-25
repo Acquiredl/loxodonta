@@ -33,7 +33,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The recorder notice asks git with a 10-second bound, fsmonitor off and no optional locks: a git that never returns no longer holds the scan, and a planted fsmonitor command or post-index-change hook no longer runs (#572).
 - The reading over a receiver's folder quotes a chain's `second-record-cut:` note escaped and cut at 64 characters, so a newline or a long tail the writer planted in one reads as one short line (#487).
 - `drill` and the page's chain walker find a chain named `.JSONL`, which the census has counted since #445, instead of refusing it as no chain under the root (#451).
-- `SUPERVISOR_SETTLE_SECONDS=abc`, or any `SUPERVISOR_*` number the supervisor cannot use (a negative, a fraction where a whole number is read), is refused by name with exit 64 before any verb runs, instead of a traceback at import (#487).
+- `SUPERVISOR_SETTLE_SECONDS=abc`, or any `SUPERVISOR_*` number the supervisor cannot use, is refused by name with exit 64 before any verb runs, instead of a traceback at import; a negative, which it used to take, is refused too (#487).
 
 ## [0.18.0] - 2026-10-20
 

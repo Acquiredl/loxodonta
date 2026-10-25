@@ -4941,8 +4941,8 @@ def family_facts(look, relpath, log, entries, grew):
             if e.get("actor") == "receipts" and str(
                     e.get("action", "")).startswith("second-record-cut:"):
                 # The chain is in the writer's reach (ADR-0002), so the
-                # note is the writer's text: escaped and cut, never
-                # quoted whole (#487).
+                # note is the writer's text: escaped and cut to
+                # CUT_NOTE_WIDTH (#487).
                 facts["cut"] = clip(e["action"], CUT_NOTE_WIDTH)
                 break
     return facts
@@ -8997,7 +8997,7 @@ METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 # before #496 also served on the chains that read it, was never listed
 # and is not: no verdict, and a standing zero would read as no chain
 # anchored, which loxodonta_heads_unanchored answers (#505).
-KNOWN_VERDICTS =("VALID", "BROKEN", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
+KNOWN_VERDICTS = ("VALID", "BROKEN", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
                   "ANCHOR-PENDING", "ANCHOR-UNANSWERED",
                   "TRANSCRIPT-DIVERGED", "UNSUPPORTED-VERSION", "NO-VERDICT")
 KNOWN_COMPLETENESS = ("OK", "LAGGING", "SURPLUS", "QUIET", "ALARM-SILENT",
