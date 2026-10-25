@@ -10,6 +10,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-25
+
 ### Added
 
 - A conformance vector, `files-unsorted`, holds an entry whose `files` lists `b.txt` before `a.txt`, hashed as stored; every verifier here reads it `VALID`, so one that sorted `files` before hashing fails it (#491).
@@ -498,7 +500,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.18.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.19.0...dev
+[0.19.0]: https://github.com/Acquiredl/loxodonta/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Acquiredl/loxodonta/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Acquiredl/loxodonta/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Acquiredl/loxodonta/compare/v0.15.1...v0.16.0
