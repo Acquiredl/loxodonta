@@ -117,6 +117,11 @@ class ExportFileTest(ExportBase):
         for removed in ("path", "command", "repo name", "file"):
             self.assertIn(removed, words)
         self.assertIn("allowlist", redaction["words"].lower())
+        # The kept list keeps the recorder's SHA-256 (#570): the
+        # fingerprints removed are the receipts', and say so (#573).
+        (fingerprints,) = [item for item in redaction["removed"]
+                           if "fingerprint" in item]
+        self.assertIn("receipts", fingerprints)
 
     def test_the_allowlist_is_exactly_the_documented_shape(self):
         self.export()

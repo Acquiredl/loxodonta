@@ -21,6 +21,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/SPEC.md` section 6 says every break is listed in walk order, so the last line names the last break, and quotes the torn-tail line as `verify` prints it, `entries 0..2 intact` (#492).
 - A package's README, `docs/PACKAGE.md`, `docs/TOPOLOGY.md` and `README.md` point the recipient at `python -I verifier.py verify-package`, the file every release since v0.9.0 ships beside `SHA256SUMS`, instead of the whole recorder (#326).
 
+### Fixed
+
+- `verify-package` prints the package's file name escaped, under the recorder and `verifier.py`, so a newline in a sender's zip name no longer prints a forged verdict line; the operator's paths and a closed folder's name are escaped too (#556).
+- A Windows named pipe wired as the recorder now reads as not a regular file, never "Invalid argument" or not on disk; the export says the fingerprints it removes are the receipts' (#573).
+
 ## [0.18.0] - 2026-10-20
 
 ### Added
