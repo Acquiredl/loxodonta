@@ -103,11 +103,12 @@ TWINS = (
          "version in every file, and each prints both on `--version` "
          "(ADR-0022)."),
     Twin("The version line",
-         ("checkout_commit", "version_line", "VersionAction"),
+         ("GIT_TIMEOUT", "checkout_commit", "version_line", "VersionAction"),
          ORIGINAL, BOTH,
          "Every file answers `--version` with the same line, tool, format "
          "and the commit it sits in, read by local git only and never "
-         "fetched (ADR-0015, ADR-0022)."),
+         "fetched (ADR-0015, ADR-0022), and a git that has not answered "
+         "within the same bound reads as unknown (#572)."),
     Twin("A usage error", ("EX_USAGE", "UsageParser"), ORIGINAL, BOTH,
          "A wrong flag exits 64 from every file, never a number a script "
          "could read as an answer (ADR-0026 ruling 7)."),
@@ -122,6 +123,14 @@ TWINS = (
          "`calibrate`, `acknowledge` and `export` when the file they "
          "write cannot be; the keeper reads a recorder verb's 73 by the "
          "same name (ADR-0037, #430, #422, #448)."),
+    Twin("What the keepers read from a recorder verb",
+         ("EX_UNAVAILABLE", "EX_SOFTWARE", "EX_TEMPFAIL"),
+         ORIGINAL, SUPERVISOR,
+         "The keepers name each exit of `anchor`, `stamp` and `publish` "
+         "for what it is, and say a calendar, an authority or a remote did "
+         "not do what was asked only for 69; 70 is the recorder itself "
+         "failing, 75 another writer holding the chain's lock (ADR-0037, "
+         "#557)."),
     Twin("Writing to the console", ("speak_utf8",), ORIGINAL, BOTH,
          "Every file can print text a Windows console's code page cannot "
          "hold, and none of them may die on it (#294)."),
