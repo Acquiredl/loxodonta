@@ -6220,6 +6220,23 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
+    def test_a_planted_cut_note_is_quoted_as_one_clipped_line(self):
+        # The chain is in the writer's reach (ADR-0002), so the note the
+        # row quotes is the writer's text: a newline and a long tail in
+        # it read as one line, cut short (#487 item 8).
+        chain_copy(self.data, "cut-session-2222", notes=(
+            "second-record-cut: reason=telemetry-off\nFORGED: all clean "
+            + "x" * 500,))
+
+        row = self.rows(self.report())["cut-session-2222"]
+
+        quoted = row["second_record_cut"]
+        self.assertTrue(quoted.startswith(
+            "second-record-cut: reason=telemetry-off\\nFORGED"), quoted)
+        self.assertNotIn("\n", quoted)
+        self.assertLessEqual(len(quoted), 64)
+        self.assertTrue(quoted.endswith("..."), quoted)
+
     def test_a_sequence_cut_out_of_the_events_is_a_gap_naming_the_numbers(self):
         lay_events(self.data, drop=(29, 30))
         chain_copy(self.data, FIXTURE_SESSION)

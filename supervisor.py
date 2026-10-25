@@ -4904,7 +4904,10 @@ def family_facts(look, relpath, log, entries, grew):
         for e in entries:
             if e.get("actor") == "receipts" and str(
                     e.get("action", "")).startswith("second-record-cut:"):
-                facts["cut"] = e["action"]
+                # The chain is in the writer's reach (ADR-0002), so the
+                # note is the writer's text: escaped and cut, never
+                # quoted whole (#487).
+                facts["cut"] = clip(e["action"], CUT_NOTE_WIDTH)
                 break
     return facts
 
@@ -6268,6 +6271,9 @@ ADDRESS_RE = re.compile(r"^[0-9a-f]{4,64}$")
 
 DIGEST_LIMIT = 30    # rows, not entries: the budget is the honesty cap
 ACTION_WIDTH = 110
+# The longest second-record note SPEC section 2.2's grammar allows is 44
+# characters (`reason=endpoint-elsewhere`); a quote is cut a little above.
+CUT_NOTE_WIDTH = 64
 
 
 def repo_chains(repo):
