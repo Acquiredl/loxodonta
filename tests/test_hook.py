@@ -1241,6 +1241,11 @@ class SecondRecordCutTest(unittest.TestCase):
             ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
               "OTEL_EXPORTER_OTLP_ENDPOINT":
               "http://127.0.0.1:9/other"}, "endpoint-elsewhere"),
+            # A logs endpoint set but empty yields to the base one, and
+            # with no base one the events go to no pinned URL (#495).
+            ({**IN_FORCE, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": ""}, None),
+            ({"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+              "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": ""}, "endpoint-elsewhere"),
             # A key the hook's environment does not hold is not a cut
             # (#495): Claude Code 2.1.294 keeps every OTEL_* variable
             # away from the hooks it runs, pinned or not.
