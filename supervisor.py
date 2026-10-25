@@ -8495,7 +8495,7 @@ def make_folders(folder, made):
         made.append(each)
 
 
-def refuse_package(words, made, out, tail="nothing written", code=1):
+def refuse_package(out, words, made, tail="nothing written", code=1):
     """A refusal of a package that has begun to make things: what it
     made, in `made`, is removed newest first, the package at `out` and
     then the folders made for it (#422); then `words` on stderr, ending
@@ -8531,24 +8531,25 @@ def out_refused(out, error=None, made=()):
     the system's words. What was made for it goes (`refuse_package`)."""
     if error is None or (isinstance(error, FileExistsError)
                          and os.path.lexists(out)):
-        return refuse_package(f"{out} already exists; choose another --out",
-                              made, out, tail=None, code=EX_CANTCREAT)
+        return refuse_package(
+            out, f"{out} already exists; choose another --out", made,
+            tail=None, code=EX_CANTCREAT)
     # The parent that is in the way, when it is not --out itself.
     where = "" if error.filename in (None, str(out)) \
         else f" at {error.filename}"
-    return refuse_package(f"{out} could not be written: "
-                          f"{error.strerror or error}{where}", made, out,
+    return refuse_package(out, f"{out} could not be written: "
+                          f"{error.strerror or error}{where}", made,
                           tail="no package written", code=EX_CANTCREAT)
 
 
-def swapped_out(error, made, out):
+def swapped_out(out, error, made):
     """The refusal when a file `package` checked stopped being one before
     it was copied: a chain swapped for a pipe or a folder in that window
     (#374). Named as the check names it, and nothing written."""
     name = os.path.basename(str(error.filename)) if error.filename \
         else "a file"
-    return refuse_package(f"{name} cannot be packed: "
-                          f"{error.strerror or error}", made, out)
+    return refuse_package(out, f"{name} cannot be packed: "
+                          f"{error.strerror or error}", made)
 
 
 def unpackageable(sessions, with_transcripts):
@@ -8705,10 +8706,10 @@ def cmd_package(args):
                                     packed, seals, transcripts)
         except OSError as error:
             # Swapped after the check above (#374): no half-written folder.
-            return swapped_out(error, made, out)
+            return swapped_out(out, error, made)
         problem = package_too_large(out, written)
         if problem:
-            return refuse_package(problem, made, out)
+            return refuse_package(out, problem, made)
         # A package declaring a seal it does not carry would verify
         # SEAL-MISSING; better nothing than that.
         sealed, fingerprint, problem = seal_package(out, seals, calendars,
@@ -8720,10 +8721,10 @@ def cmd_package(args):
                                         Path(staging), packed, seals,
                                         transcripts)
             except OSError as error:
-                return swapped_out(error, made, out)
+                return swapped_out(out, error, made)
             problem = package_too_large(Path(staging), written)
             if problem:
-                return refuse_package(problem, made, out)
+                return refuse_package(out, problem, made)
             sealed, fingerprint, problem = seal_package(
                 Path(staging), seals, calendars, keyfile, args.stamp)
             if not problem:
@@ -8732,7 +8733,7 @@ def cmd_package(args):
                 if refused is not None:
                     return out_refused(out, refused, made)
     if problem:
-        return refuse_package(problem, made, out)
+        return refuse_package(out, problem, made)
     written += sealed
     chains = sum(len(logs) for logs in sessions.values())
     print(f"written: {out.name} ({label}, {chains} chain(s), "
