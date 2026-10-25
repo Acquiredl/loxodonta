@@ -138,6 +138,11 @@ class StampedPackageTest(StampedStoreCase):
         self.assertEqual(record["authority"], self.authority.url)
         self.assertEqual(base64.b64decode(record["response"]), GRANTED)
         self.assertEqual(self.manifest_of(folder)["seals"], ["stamp"])
+        # #326: the README's stamped command names the recipient's file.
+        readme = (folder / "README.md").read_text("utf-8")
+        self.assertIn("    python -I verifier.py verify-package "
+                      "<this package> --authority-chain <chain.pem>\n",
+                      readme)
 
     def test_the_zip_carries_the_token_after_the_manifest(self):
         # The zip keeps the write order, and the seal is applied after

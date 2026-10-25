@@ -102,7 +102,7 @@ It only ever adds, so a wiped machine's chain survives there as of the last send
 
 A session short of receipts reads `ENDED-DEFICIT`, tool by tool. One whose receipts arrived and whose events never did reads `SECOND-RECORD-ABSENT`.
 
-**Handing it to someone else.** `python supervisor.py package <session-id>` puts a session in a zip, and `python loxodonta.py verify-package <zip>` checks it on the other person's machine with one file, nothing running and nobody to ask ([docs/PACKAGE.md](docs/PACKAGE.md)). They can tell that what they hold is what you sent. A seal adds when it existed or who issued it; unsealed, a package rebuilt whole looks the same.
+**Handing it to someone else.** `python supervisor.py package <session-id>` puts a session in a zip, and `python -I verifier.py verify-package <zip>` checks it on the other person's machine with one file, nothing running and nobody to ask ([docs/PACKAGE.md](docs/PACKAGE.md)). They can tell that what they hold is what you sent. A seal adds when it existed or who issued it; unsealed, a package rebuilt whole looks the same.
 
 ### Every verdict in one place
 

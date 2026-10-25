@@ -19,6 +19,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/SPEC.md` section 3 makes sorting `files` by path the writer's duty at intake, not a step of canonical form: the array is hashed as stored, and a verifier neither sorts it nor refuses it unsorted (#491).
 - `docs/SPEC.md` section 6 says `head` reads the final line only, so a torn tail has no head (nothing on stdout, exit 1), and section 10.3 names the package listing's head rule as its own (#490).
 - `docs/SPEC.md` section 6 says every break is listed in walk order, so the last line names the last break, and quotes the torn-tail line as `verify` prints it, `entries 0..2 intact` (#492).
+- A package's README, `docs/PACKAGE.md`, `docs/TOPOLOGY.md` and `README.md` point the recipient at `python -I verifier.py verify-package`, the file every release since v0.9.0 ships beside `SHA256SUMS`, instead of the whole recorder (#326).
 
 ## [0.18.0] - 2026-10-20
 

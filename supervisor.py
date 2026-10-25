@@ -8055,12 +8055,12 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "",
         "## How to verify",
         "",
-        "Get `loxodonta.py` from a release you trust "
+        "Get `verifier.py` from a release you trust "
         "(https://github.com/Acquiredl/loxodonta/releases; check it "
         "against the release's `SHA256SUMS`). Python 3.9 or newer, no "
         "dependencies. Then, on the zip or on the unpacked folder:",
         "",
-        "    python loxodonta.py verify-package <this package>",
+        "    python -I verifier.py verify-package <this package>",
         "",
     ]
     if stamped:
@@ -8072,7 +8072,7 @@ def package_readme(unit, packed, sessions, witness, record, notes,
             "issuer's word about whom to trust, and without one each token "
             "is reported as present and not judged. With it:",
             "",
-            "    python loxodonta.py verify-package <this package> "
+            "    python -I verifier.py verify-package <this package> "
             "--authority-chain <chain.pem>",
             "",
             "Every token here is judged against that one file, so when the "
