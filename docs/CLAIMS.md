@@ -19,7 +19,9 @@ This page is for someone who wants to rely on a loxodonta record, or build a too
 
 It is not a promise. A Claude Code session that ran tool calls owing a receipt and wrote fewer is reported by the supervisor. That catches faults: a hook that stopped firing, a wedged lock, a silent fork. It does not hold against a writer who can edit or delete the transcript: the second record it counts against is on the same machine, and a session whose transcript is garbled, emptied or gone reads as quiet or is not seen at all (#473). (GLOSSARY, *Second record*; GROUNDING section 3.)
 
-It becomes a promise the day a second record exists that the agent cannot reach.
+At the receiver the same count runs against the harness's own events. At `full`, a managed install pins those events to the receiver, and `supervisor scan --receiver DIR`, run on the receiver's machine, counts each session's receipts against them tool by tool once nothing of the session has arrived for the settle window. It names a session short of receipts, one whose events never arrived, and one whose events' counter has holes (RECEIVER.md section 7). The agent cannot delete those events once they land. It holds the URL, though, so it can add events, and the reading cannot tell an event it posted from one the harness sent.
+
+That count is not a promise either. ADR-0041 is still proposed, and the promise it names for a session the receiver heard from waits on a ruling.
 
 ## The vantage setup
 
@@ -30,7 +32,7 @@ A vantage point is a place with a clear view that the watched party cannot get t
 | 1 | The hook cannot be switched off by the agent, nor the recorder or the interpreter it runs changed, as far as the installer can see | `install-hook --managed`, run by an administrator with a Python installed for all users | ADR-0040 and ADR-0042. The switch measured on 2026-10-05 against a run with hooks switched off on its command line, and against a run under `--bare` (Claude Code 2.1.287, Windows; #259). The copy of the recorder not yet measured; the installer checks the interpreter's path and not each file of its library, and on Windows judges a path by its place, not its access list |
 | 2 | The agent holds no administrator rights | The operator's own job. It is about the account the agent runs as, never about the harness's permission mode | Outside the tool |
 | 3 | A copy leaves the machine | The `full` [profile](GLOSSARY.md#profile) with a [receiver](GLOSSARY.md#receiver) the writer cannot reach; `timestamped` gives the second promise only | Built |
-| 4 | Somebody reads it | `supervisor serve` on its cadence, and a check of the chain against the copy off the machine | Built |
+| 4 | Somebody reads it | `supervisor serve` on its cadence, and a check of the chain against the copy off the machine; on the receiver's machine, `supervisor scan --receiver DIR` | Built |
 
 **Checking condition 1.**
 
@@ -40,13 +42,15 @@ A vantage point is a place with a clear view that the watched party cannot get t
 
 **Condition 2 has no check on this page.** An elevated shell, or `sudo` that asks for no password, breaks it. The supervisor runs as the same account as the agent, so it is the one placed to say when that account can rewrite the managed file (#469).
 
+**The pin on the harness's events is not a condition.** A managed install at `full` writes it as a second managed file of its own (ADR-0041). It holds against the settings files and the command line, and not against the environment a run is launched with. On Claude Code 2.1.294 the hook sees a run launched with its telemetry off and notes it in the chain; a run launched with its events sent elsewhere leaves no note, and reads at the receiver as one whose events never arrived (HOOK.md).
+
 ## Running less than the vantage setup
 
 The full setup is what the two promises are made for, and it is the one to run when the record has to hold against the agent that writes it. Every condition can be left out. Each one left out opens something, and this is what.
 
 | Left out | What it opens |
 |---|---|
-| 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives. And the recorder and its interpreter sit at paths the operator owns: the hook fires after the call it records, so a session that edits either writes that edit's receipt with the edited code, and the chain stays `VALID`; what then holds is the count at the receiver, never the content of the receipts |
+| 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives. And the recorder and its interpreter sit at paths the operator owns: the hook fires after the call it records, so a session that edits either writes that edit's receipt with the edited code, and the chain stays `VALID`; what is then left is the count at the receiver, never the content of the receipts |
 | 2, an agent without administrator rights | The managed file is as easy to rewrite as any other, and condition 1 is worth nothing |
 | 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration shows once the anchor matures, and a wiped store is gone |
 | 4, somebody reading it | Nothing is detected until someone looks |
