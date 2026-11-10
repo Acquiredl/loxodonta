@@ -102,7 +102,7 @@ Stated here once, so that none of them is a discovery.
 
 **Limits of what a receipt holds:**
 
-- An action line holds at most the first 160 characters of what ran, with runs of whitespace collapsed to one space. What came after is not in the record; a cut line ends with the count of characters dropped, and nothing more of them (#470).
+- An action line holds the tool's name and one field of its input: the first that is a string and not empty, from a fixed list (a file path, a notebook's path, a command, a path, a pattern, a URL, a query, a prompt, a summary). Of that field it holds at most the first 160 characters, with runs of whitespace collapsed to one space. What came after is not in the record; a cut line ends with the count of characters dropped, and nothing more of them (#470). A call whose input holds none of those fields is recorded by its tool's name alone. The input's other fields are not recorded, and nothing marks that they were left out.
 - No receipt exists for what is not a tool call: configuration that runs when the harness starts, what happens inside an MCP server, a call the harness denied.
 - A receipt never holds tool output or conversation. Those are in the transcript, which the chain commits by its hash, which the writer can reach, and which the harness deletes after its retention period (ADR-0017, HOOK.md).
 
