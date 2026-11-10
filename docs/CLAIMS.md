@@ -98,6 +98,7 @@ Stated here once, so that none of them is a discovery.
 **Limits of what the supervisor remembers:**
 
 - The baseline, the day book and the coverage marker are files on the agent's machine. A baseline deleted alone is an alarm. The baseline and the day book deleted together read as a new install, and a session the scan had already reported as silent is then never judged again (ADR-0039, ADR-0029).
+- An edit in place to the baseline or the day book is not detected either, and `acknowledge`, which stands an alarm down, can be run by the account the agent runs as.
 - What holds against the writer is what is kept off the machine: the anchor, the published head and the published chain. Nothing the supervisor remembers about sessions is kept there today, so a machine that keeps its only memory beside the agent is at risk of losing it to the agent.
 
 **Limits of what a receipt holds:**
