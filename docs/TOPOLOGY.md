@@ -70,7 +70,7 @@ At `full` the entries leave with their action lines, which are command lines, an
 
 ## The receiver's machine
 
-**What runs there.** `python receiver.py serve`, on a box the writer cannot reach: an old laptop, a small VPS, a second box on the same shelf. Its data directory, `~/.loxodonta/receiver` by default, holds the `token`, `heads.jsonl` with one line per published head, and one `receipts-<session>.jsonl` per published chain. The recorder judges those files on that box ([RECEIVER.md](RECEIVER.md)).
+**What runs there.** `python receiver.py serve`, on a box the writer cannot reach: an old laptop, a small VPS, a second box on the same shelf. Its data directory, `~/.loxodonta/receiver` by default, holds the `token`, `heads.jsonl` with one line per published head, one `receipts-<session>.jsonl` per published chain, and the harness's events in one `events-<day>.jsonl` per day. The recorder judges those files on that box, and `supervisor scan --receiver DIR` reads the folder as a store, counting each session's receipts against its events ([RECEIVER.md](RECEIVER.md) section 7).
 
 **Why it counts.** The URL is the only credential the writer's machine holds for it, and it can add and do nothing else: no route returns, lists or deletes. That is the head-record test of ADR-0025, met. The receiver never runs `verify` and serves nothing back.
 
@@ -93,6 +93,6 @@ At `full` the entries leave with their action lines, which are command lines, an
 
 Said plainly, so nothing above reads as more:
 
-- **Nothing gathers several machines into one reading.** Each agent's machine runs its own supervisor over its own store. The receiver keeps what it is sent and serves nothing back, `verify-package` judges the one package it is handed, and `/metrics` answers a scrape on its own machine and pushes nothing. No supervisor pulls chains or packages from many machines.
+- **One reading gathers several machines only at a receiver.** Each agent's machine runs its own supervisor over its own store. `supervisor scan --receiver DIR` reads one receiver's folder, which holds what every machine sending to it sent, and nothing else. The receiver keeps what it is sent and serves nothing back, `verify-package` judges the one package it is handed, and `/metrics` answers a scrape on its own machine and pushes nothing. No supervisor pulls chains or packages from many machines.
 - **`verify --ledger` is not built** (#174). It would check every head in a saved copy of `heads.jsonl` at its `n` in one step; today that is the by-hand run above, one cut and one `verify --expect-head` per head.
 - **The sidecars and the baseline do not travel to the receiver.** The published chain is chain lines and nothing else. The anchor and stamps sidecars, the memo and the baseline stay on the agent's machine unless you copy them off yourself; a package carries the two sidecars and none of the rest.
