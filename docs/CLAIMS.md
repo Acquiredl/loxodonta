@@ -17,7 +17,7 @@ This page is for someone who wants to rely on a loxodonta record, or build a too
 
 ## What the witness adds
 
-It is not a promise. A Claude Code session that ran tool calls owing a receipt and wrote fewer is reported by the supervisor. That catches faults: a hook that stopped firing, a wedged lock, a silent fork. It does not hold against a writer who can edit or delete the transcript: the second record it counts against is on the same machine, and a session whose transcript is garbled, emptied or gone reads as quiet or is not seen at all (#473). (GLOSSARY, *Second record*; GROUNDING section 3.)
+It is not a promise. A Claude Code session that ran tool calls owing a receipt and wrote fewer is reported by the supervisor. That catches faults: a hook that stopped firing, a wedged lock, a silent fork. It does not hold against a writer who can edit or delete the transcript: the second record it counts against is on the same machine, and a session whose transcript is garbled, emptied or gone reads as quiet or is not seen at all (#473). Its other limits are under *Where the promises stop*. (GLOSSARY, *Second record*; GROUNDING section 3.)
 
 At the receiver the same count runs against the harness's own events. At `full`, a managed install pins those events to the receiver, and `supervisor scan --receiver DIR`, run on the receiver's machine, counts each session's receipts against them tool by tool once nothing of the session has arrived for the settle window. It names a session short of receipts, one whose events never arrived, and one whose events' counter has holes (RECEIVER.md section 7). The agent cannot delete those events once they land. It holds the URL, though, so it can add events, and the reading cannot tell an event it posted from one the harness sent.
 
@@ -50,7 +50,7 @@ The full setup is what the two promises are made for, and it is the one to run w
 
 | Left out | What it opens |
 |---|---|
-| 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives. And the recorder and its interpreter sit at paths the operator owns: the hook fires after the call it records, so a session that edits either writes that edit's receipt with the edited code, and the chain stays `VALID`; what is then left is the count at the receiver, never the content of the receipts |
+| 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives, and a hook taken out of your settings file reads to it as coverage ended, a note and not an alarm. And the recorder and its interpreter sit at paths the operator owns: the hook fires after the call it records, so a session that edits either writes that edit's receipt with the edited code, and the chain stays `VALID`; what is then left is the count at the receiver, never the content of the receipts |
 | 2, an agent without administrator rights | The managed file is as easy to rewrite as any other, and condition 1 is worth nothing |
 | 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration shows once the anchor matures, if a copy of its proof was kept off the machine, since nothing sends it there (#524); and a wiped store is gone |
 | 4, somebody reading it | Nothing is detected until someone looks |
@@ -88,6 +88,12 @@ Stated here once, so that none of them is a discovery.
 - The harness's own program sits where its installer put it, under the operator's account on a per-user install. A harness changed there fires no hook, managed or not; what shows it is the count at the receiver, where events stop arriving or arrive for calls that left no receipt (ADR-0042).
 - On a machine whose organization delivers settings from a server or through device management, the managed file may be skipped without a warning (ADR-0040).
 - That a managed hook runs under `--bare` is measured on one version of the harness and not stated in its documentation, so a later version may differ (#259).
+
+**Limits of the witness on the agent's machine:**
+
+- What a session owed is read from the harness's settings files and the coverage marker, files on the agent's machine, and a change of coverage is dated by the settings file's modification time (ADR-0016, ADR-0030).
+- A session is counted against the transcript file named for its session id; whatever file holds that name is the second record it reads.
+- Receipts are paired with calls by count within each tool, not call by call: a receipt for a call the transcript does not show covers a lost call of the same tool, and a hand-written entry naming no tool the transcript shows covers a lost call of any tool (ADR-0034).
 
 **Limits of what the supervisor remembers:**
 
