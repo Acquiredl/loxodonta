@@ -64,9 +64,9 @@ The full setup does not make the record complete. Whether anything is missing is
 | One entry edited, deleted or moved | shows | shows | shows |
 | Regenerated whole | only against a head you kept by hand | shows once the anchor matures | shows at once, at the remote |
 | The store wiped | gone | gone, and the anchor says a chain existed | survives at the remote as of the last send |
-| The tail since the last send rewritten | does not show | does not show | does not show until the next send |
+| The tail since the last send rewritten | does not show | does not show | does not show: the rewritten tail reaches the remote as the only version |
 
-(GLOSSARY, *Profile*; TOPOLOGY.md.)
+The hook sends at session end, and the keeper sends a chain only once it has sat unchanged past its cadence, so every entry of a live session is in that tail. (GLOSSARY, *Profile*; TOPOLOGY.md; HOOK.md.)
 
 ## Where the promises stop
 
