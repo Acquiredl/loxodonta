@@ -52,7 +52,7 @@ The full setup is what the two promises are made for, and it is the one to run w
 |---|---|
 | 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives. And the recorder and its interpreter sit at paths the operator owns: the hook fires after the call it records, so a session that edits either writes that edit's receipt with the edited code, and the chain stays `VALID`; what is then left is the count at the receiver, never the content of the receipts |
 | 2, an agent without administrator rights | The managed file is as easy to rewrite as any other, and condition 1 is worth nothing |
-| 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration shows once the anchor matures, and a wiped store is gone |
+| 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration shows once the anchor matures, if a copy of its proof was kept off the machine, since nothing sends it there (#524); and a wiped store is gone |
 | 4, somebody reading it | Nothing is detected until someone looks |
 
 The full setup does not make the record complete. Whether anything is missing is the witness's question, and its limit is above.
@@ -62,8 +62,8 @@ The full setup does not make the record complete. Whether anything is missing is
 | What happened to the chain | `local` | `timestamped` | `full` |
 |---|---|---|---|
 | One entry edited, deleted or moved | shows | shows | shows |
-| Regenerated whole | only against a head you kept by hand | shows once the anchor matures | shows at once, at the remote |
-| The store wiped | gone | gone, and the anchor says a chain existed | survives at the remote as of the last send |
+| Regenerated whole | only against a head you kept by hand | shows once the anchor matures, if its proof was kept off the machine | shows at once, at the remote |
+| The store wiped | gone | gone, and a copy of the anchor's proof kept off the machine says a chain existed | survives at the remote as of the last send |
 | The tail since the last send rewritten | does not show | does not show | does not show: the rewritten tail reaches the remote as the only version |
 
 The hook sends at session end, and the keeper sends a chain only once it has sat unchanged past its cadence, so every entry of a live session is in that tail. (GLOSSARY, *Profile*; TOPOLOGY.md; HOOK.md.)
