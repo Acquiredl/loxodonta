@@ -214,7 +214,7 @@ The property the tool deliberately does **not** guarantee: that every action pro
 
 ### Witness
 
-The [supervisor](#supervisor)'s checking role: it reads a session's [second record](#second-record), counts the tool events that owed a receipt under the [coverage](#coverage) in force at the time, and reconciles that count against the chain, tool by tool (ADR-0034). It judges [completeness](#completeness) and nothing else; verdicts about the chain stay with [verify](#verify). Not the transparency-log sense of the word, where a witness cosigns a log's checkpoints; the nearest thing here to that role is the [receiver](#receiver).
+The [supervisor](#supervisor)'s checking role: it reads a session's [second record](#second-record), counts the tool events that owed a receipt under the [coverage](#coverage) in force at the time, and reconciles that count against the chain, tool by tool (ADR-0034). It judges [completeness](#completeness) and nothing else; verdicts about the chain stay with [verify](#verify). On the agent's machine it catches faults and is no defence against a writer in the same account, since every file it reads is in that account's reach. At the [receiver](#receiver) it reads the [harness events](#harness-events), pairs a call with its receipt by the call's id where both name it, and a settled session that falls short raises the exit until someone there acknowledges it (ADR-0046). Not the transparency-log sense of the word, where a witness cosigns a log's checkpoints; the nearest thing here to that role is the [receiver](#receiver).
 
 ### Second record
 

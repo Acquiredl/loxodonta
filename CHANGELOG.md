@@ -17,6 +17,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - At `full`, each entry leaves as it is written: the recording command carries the chain's URL, and the hook posts the lines it appended, from memory, within one second, quietly, after the lock is let go (ADR-0045).
 - The receiver keeps a chain's line only when it is an entry, its hash recomputed, refuses a hole with 409, and answers each batch with `held_n` and `connects`, true only when everything down to the genesis is held (ADR-0045).
 - A chain's anchor and stamp rows travel to its URL, and the receiver keeps them beside its copy, where `verify --anchors` and `--stamps` read them; a send that fails is an attempt row, step `publish-rows` (ADR-0045).
+- `supervisor acknowledge --receiver DIR --session SESSION STATE` accepts a settled finding at the receiver with the counts the scan reports, refused when the session is not in that state; it raises again if its counts change (ADR-0046).
 
 ### Changed
 
@@ -29,6 +30,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - Each send goes on from the receiver's answer, the memo deciding nothing: the recording call and the session end ask every time, find a gap by halving, and a step cut short is taken up by the next (ADR-0045).
 - Within its ripeness test, the keeper sends a chain written to since its last turn, one whose memo does not show the end held, or one whose last send failed (ADR-0045).
 - A chain row is written only for a batch the receiver appended to; the chain's attempt rows name their remote by fingerprint, and `publish --chain` writes one every time (ADR-0045).
+- `supervisor scan --receiver DIR` exits 6 for `ENDED-DEFICIT`, `SECOND-RECORD-ABSENT` and `SECOND-RECORD-GAP`, at every scan, until each is acknowledged there: a receiver's scan that exited 0 over old findings now exits 6 (ADR-0046).
+- Where the harness's event and the receipt both name the call, the reading at the receiver pairs them by its id and names each call with no receipt; `paired_by` says which rule judged the session (ADR-0046).
+- `SUPERVISOR_SETTLE_SECONDS` defaults to one hour, where it was seven, and the docs say the on-machine witness catches faults while the receiver judges whether anything is missing (ADR-0046).
 
 ### Fixed
 

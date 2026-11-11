@@ -1,6 +1,6 @@
 # ADR-0046: A disagreement is a finding until it is accepted out of the writer's reach
 
-**Status:** proposed 2026-11-11. Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its four choices and a one-hour settle window. Nothing is built yet: accepted once the build lands.
+**Status:** proposed 2026-11-11. Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its four choices and a one-hour settle window. Accepted once the build lands.
 **Deciders:** Acquiredl
 
 ## Context
