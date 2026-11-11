@@ -289,22 +289,38 @@ class ExportRawTest(ExportBase):
 
 
 def fake_gh(bin_dir, log):
-    """A `gh` that records its argv and answers with URLs, on both
-    shell families."""
-    posix = bin_dir / "gh"
-    posix.write_bytes((  # LF on every platform; 3.9's write_text has no newline=
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$*\" >> \"{log.as_posix()}\"\n"
-        "if [ \"$1\" = gist ]; then echo https://gist.github.com/fake/abc123;"
-        " else echo https://github.com/Acquiredl/loxodonta/issues/999; fi\n"
-    ).encode("utf-8"))
-    posix.chmod(0o755)
-    (bin_dir / "gh.cmd").write_text(
-        "@echo off\r\n"
-        f"echo %* >> \"{log}\"\r\n"
-        "if \"%1\"==\"gist\" (echo https://gist.github.com/fake/abc123) "
-        "else (echo https://github.com/Acquiredl/loxodonta/issues/999)\r\n",
+    """A `gh` that records its argv and answers with URLs. On Windows it
+    is a real gh.exe: the supervisor runs only an .exe or .com found on
+    PATH, never a batch file (ADR-0043 ruling 4), so the stand-in is a
+    Python script behind the launcher pip itself puts console scripts
+    behind. A Windows without pip skips the test."""
+    if sys.platform != "win32":
+        posix = bin_dir / "gh"
+        posix.write_bytes((  # LF on every platform; 3.9's write_text has no newline=
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> \"{log.as_posix()}\"\n"
+            "if [ \"$1\" = gist ]; then echo https://gist.github.com/fake/abc123;"
+            " else echo https://github.com/Acquiredl/loxodonta/issues/999; fi\n"
+        ).encode("utf-8"))
+        posix.chmod(0o755)
+        return
+    try:
+        from pip._vendor.distlib.scripts import ScriptMaker
+    except ImportError:
+        raise unittest.SkipTest("no pip here to build a gh.exe stand-in")
+    source = bin_dir.parent / "gh-source"
+    source.mkdir(exist_ok=True)
+    (source / "gh").write_text(
+        "#!python\n"
+        "import sys\n"
+        f"with open({str(log)!r}, 'a', encoding='utf-8') as said:\n"
+        "    said.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "print('https://gist.github.com/fake/abc123' if sys.argv[1:2] == "
+        "['gist'] else 'https://github.com/Acquiredl/loxodonta/issues/999')\n",
         encoding="utf-8")
+    maker = ScriptMaker(str(source), str(bin_dir), add_launchers=True)
+    maker.executable = sys.executable
+    maker.make("gh")
 
 
 class ExportSendTest(ExportBase):

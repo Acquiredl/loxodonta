@@ -1358,6 +1358,38 @@ STAMP_NO_ATTIME = ("the authority's certificate has expired, and this "
                    "openssl cannot judge a token as of the time it states")
 
 
+def helper_path(name):
+    """The full path of the helper program `name` (openssl, ssh-keygen,
+    git, gh, claude), found by walking PATH: only entries that are
+    absolute paths, never an empty one, a relative one or one that is
+    the working directory under any spelling, so a file of that name in
+    the folder a check is run from is never the program that runs. On
+    Windows, where a bare name is looked for in the working directory
+    before PATH, an entry with no drive letter or server is read against
+    the working directory's drive, so it counts as relative there; the
+    names tried are `name.exe` and `name.com`, never a batch file, which
+    would run through cmd.exe. Raises FileNotFoundError when none is
+    found, as running an absent program does, so a missing helper is
+    said as it always was."""
+    windows = sys.platform == "win32"
+    endings = (".exe", ".com") if windows else ("",)
+    for folder in os.get_exec_path():
+        absolute = os.path.isabs(folder) and (
+            not windows or os.path.splitdrive(folder)[0] != "")
+        if not absolute:
+            continue
+        try:
+            if os.path.samefile(folder, os.getcwd()):
+                continue
+        except OSError:
+            continue  # an entry that cannot be compared is not trusted
+        for ending in endings:
+            found = os.path.join(folder, name + ending)
+            if os.path.isfile(found) and os.access(found, os.X_OK):
+                return found
+    raise FileNotFoundError(errno.ENOENT, "not found on PATH", name)
+
+
 def openssl_verify(head, token, chain_file, *more):
     """`openssl ts -verify` on one token file: `-in` reads the whole
     TimeStampResp the sidecar keeps; `-digest` is the head, the sha256
@@ -1365,7 +1397,7 @@ def openssl_verify(head, token, chain_file, *more):
     operator saved. `more` is `-attime` and a moment, when the question
     is about some other moment than now."""
     return subprocess.run(
-        ["openssl", "ts", "-verify", "-digest", head, "-sha256",
+        [helper_path("openssl"), "ts", "-verify", "-digest", head, "-sha256",
          "-in", token, "-CAfile", chain_file, *more],
         capture_output=True, encoding="utf-8", errors="replace")
 
@@ -1380,8 +1412,8 @@ def token_time(token):
     set a `Time stamp:` line of the writer's own ahead of the
     authority's (#264). With it, a second such line is signed or breaks
     the signature, so two of them is a time nobody can read."""
-    shown = subprocess.run(["openssl", "ts", "-reply", "-in", token,
-                            "-token_out", "-text"],
+    shown = subprocess.run([helper_path("openssl"), "ts", "-reply", "-in",
+                            token, "-token_out", "-text"],
                            capture_output=True, encoding="utf-8",
                            errors="replace")
     stated = [line.partition(":")[2] for line in shown.stdout.splitlines()
@@ -1407,8 +1439,9 @@ def token_time(token):
 def takes_attime():
     """Whether this openssl can judge a token as of a given moment: its
     `ts -help` lists `-attime` when `ts -verify` takes it."""
-    shown = subprocess.run(["openssl", "ts", "-help"], capture_output=True,
-                           encoding="utf-8", errors="replace")
+    shown = subprocess.run([helper_path("openssl"), "ts", "-help"],
+                           capture_output=True, encoding="utf-8",
+                           errors="replace")
     return "-attime" in shown.stdout + shown.stderr
 
 
@@ -2405,7 +2438,7 @@ def key_fingerprint(public_key):
     it (`ssh-keygen -lf`), or None when the file is not a key it reads.
     The fingerprint is the key's identity (ADR-0008 ruling 6); the
     comment ssh-keygen prints beside it is a name, and stays unread."""
-    listed = subprocess.run(["ssh-keygen", "-lf", public_key],
+    listed = subprocess.run([helper_path("ssh-keygen"), "-lf", public_key],
                             capture_output=True, encoding="utf-8",
                             errors="replace")
     words = listed.stdout.split()
@@ -2456,7 +2489,7 @@ def judge_manifest_signature(folder):
                 f.write(f"{SIGNATURE_PRINCIPAL} {key}\n")
             with open_regular(manifest) as shipped:
                 verified = subprocess.run(
-                    ["ssh-keygen", "-Y", "verify", "-f", allowed,
+                    [helper_path("ssh-keygen"), "-Y", "verify", "-f", allowed,
                      "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
                      "-s", signature],
                     stdin=shipped, capture_output=True, encoding="utf-8",
@@ -2878,7 +2911,7 @@ def checkout_commit(home):
     to fetch a newer one."""
     try:
         asked = subprocess.run(
-            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
+            [helper_path("git"), "-C", home, "rev-parse", "--short", "HEAD"],
             # Never a pipe on stderr: a program git starts inherits it,
             # and on Windows the timeout then waits for that program.
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -3112,6 +3145,35 @@ EX_CANTCREAT = 73    # a file this verb must write cannot be: a log that
 EX_TEMPFAIL = 75     # another writer holds the lock; try again
 
 
+# --- What the environment may say (ADR-0043) ----------------------------------
+# A managed install writes `--managed` on the hook's and the digest's
+# commands, in a file only an administrator writes: the one bit the
+# writer cannot set. Under it every variable these tools read is unset
+# but the few the harness itself sets, so a line in a shell profile or
+# an `env` key in the operator's settings moves nothing. The home folder
+# is still found through the environment, by the standard library.
+
+MANAGED_READS = ("CLAUDE_PROJECT_DIR",)
+MANAGED_VERB = "hook"  # the supervisor's is "digest"
+# Read from the command's own words before the parser runs, since knobs
+# read at import must already see it; never from anything a run can set.
+MANAGED_RUN = (sys.argv[1:2] == [MANAGED_VERB]
+               and "--managed" in sys.argv[2:])
+
+
+def environment(name, default=None):
+    """The environment variable `name`, or `default` when it is unset,
+    or when this run's command carries `--managed` and `name` is not one
+    the harness sets (MANAGED_READS). Every read of the environment
+    goes through here but two: the check that the harness's own
+    telemetry variables still match the pin (note_second_record_cut),
+    which is a reading of the environment as it stands, and the
+    verifier's walk of PATH for a helper, which the hook never runs."""
+    if MANAGED_RUN and name not in MANAGED_READS:
+        return default
+    return os.environ.get(name, default)
+
+
 # --- Writing a line -----------------------------------------------------------
 # The clock an entry is stamped with, the line it becomes, and the one
 # way a line reaches the disk.
@@ -3123,7 +3185,7 @@ def now_ts():
     # Nothing is given away: timestamps are testimony either way, and the
     # writer, being the adversary, could always have said any time it
     # liked (ADR-0002).
-    epoch = os.environ.get("SOURCE_DATE_EPOCH", "")
+    epoch = environment("SOURCE_DATE_EPOCH", "")
     if epoch.isdigit():
         return datetime.fromtimestamp(int(epoch), timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ")
@@ -3191,8 +3253,8 @@ class LockTimeout(Exception):
 
 def lock_timeout():
     try:
-        return float(os.environ.get("LOXODONTA_LOCK_TIMEOUT",
-                                    LOCK_TIMEOUT_SECONDS))
+        return float(environment("LOXODONTA_LOCK_TIMEOUT",
+                                 LOCK_TIMEOUT_SECONDS))
     except ValueError:
         return LOCK_TIMEOUT_SECONDS
 
@@ -3702,6 +3764,16 @@ def append_anchor_record(log, head, n, calendar, proof_bytes):
     append_sidecar_record(anchors_path(log), record)
 
 
+def opener(*handlers):
+    """urllib's opener with `handlers`. Under a managed command it also
+    names no proxy, so neither HTTPS_PROXY and its kin nor the system's
+    proxy settings choose the road: every send, stamp and anchor the
+    hook makes connects directly (ADR-0043 ruling 3)."""
+    if MANAGED_RUN:
+        handlers += (urllib.request.ProxyHandler({}),)
+    return urllib.request.build_opener(*handlers)
+
+
 class RedirectWatch(urllib.request.HTTPRedirectHandler):
     """urllib's redirects, followed as before, and remembered from the
     moment the 3xx arrives: after one, an address http cannot send is
@@ -3740,7 +3812,7 @@ def calendar_request(url, data=None, timeout=15):
     )
     redirects = RedirectWatch()
     try:
-        with urllib.request.build_opener(redirects).open(
+        with opener(redirects).open(
                 request, timeout=timeout) as response:
             return response.read(MAX_PROOF_BYTES)
     except (http.client.InvalidURL, ValueError) as error:
@@ -4094,7 +4166,7 @@ def post_for_reply(url, body, timeout, content_type, want_reply=False,
             url, data=body,
             headers={"Content-Type": content_type,
                      "User-Agent": "loxodonta", **(headers or {})})
-        with urllib.request.build_opener(NoRedirect).open(
+        with opener(NoRedirect).open(
                 request, timeout=timeout) as response:
             if not want_reply:
                 return b"", None
@@ -4262,8 +4334,8 @@ def chain_batch_cap():
     `--version`. A value that is not a positive number is the default,
     the way `lock_timeout` treats its own knob."""
     try:
-        cap = int(os.environ.get("LOXODONTA_CHAIN_BATCH_BYTES",
-                                 CHAIN_BATCH_CAP))
+        cap = int(environment("LOXODONTA_CHAIN_BATCH_BYTES",
+                              CHAIN_BATCH_CAP))
     except ValueError:
         return CHAIN_BATCH_CAP
     return cap if cap > 0 else CHAIN_BATCH_CAP
@@ -5165,12 +5237,15 @@ def cmd_explain(args):
         verdict=verdict,
         timeline="\n".join(timeline_lines(entries, breaks, warns)),
     )
-    command = split_command(args.llm)
+    typed = args.llm is not None
+    command = split_command(args.llm) if typed else ["claude", "-p"]
     if not command:
         print("error: --llm is empty — pass a command to narrate with, "
               "or install the `claude` CLI", file=sys.stderr)
         return EX_USAGE
     try:
+        if not typed:  # the default is found as every helper is (ADR-0043)
+            command[0] = helper_path(command[0])
         # The prompt crosses the pipe as UTF-8 whatever the console
         # speaks — actions carry arbitrary characters, and the locale
         # codec would crash on the first one it cannot spell, stranding
@@ -5457,7 +5532,7 @@ def drawer_of_session(log_dir, session):
 def store_home():
     """The machine-wide home of hook-written chains (ADR-0011):
     ~/.loxodonta, or wherever LOXODONTA_HOME points."""
-    return (os.environ.get("LOXODONTA_HOME")
+    return (environment("LOXODONTA_HOME")
             or os.path.join(os.path.expanduser("~"), ".loxodonta"))
 
 
@@ -5576,7 +5651,7 @@ def cmd_hook(args):
     log_dir = args.log_dir
     project = None
     if log_dir is None:
-        env_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        env_project = environment("CLAUDE_PROJECT_DIR")
         # A harness that sets no CLAUDE_PROJECT_DIR names the project in
         # the payload instead — Codex and the Agents SDK adapter send
         # `cwd` (ADR-0020). The environment wins when both are present.
@@ -5987,7 +6062,8 @@ def beside_a_recorder(script):
 PRE_0016_MATCHER = "Edit|Write|NotebookEdit|Bash|PowerShell"
 
 def recorder_command(actor=None, anchor=False, publish=None,
-                     publish_chain=None, stamp=None, folder=None):
+                     publish_chain=None, stamp=None, folder=None,
+                     managed=False):
     """The hook command the installers write: this interpreter, isolated,
     and this file or the one of that name in `folder` (a managed
     install's copy, ADR-0042), no shell expansion — the hook resolves
@@ -6001,11 +6077,13 @@ def recorder_command(actor=None, anchor=False, publish=None,
     to, `publish_chain` the URL its entries go to, and `stamp` the
     authority the head is stamped by, all carried on the SessionEnd
     command so the choice is readable in the settings file (ADR-0024,
-    ADR-0025, ADR-0031, ADR-0032)."""
+    ADR-0025, ADR-0031, ADR-0032). `managed` writes `--managed` after
+    the verb, which only a managed install does (ADR-0043 ruling 1)."""
     python = sys.executable.replace(os.sep, "/")
     script = (os.path.join(folder, "loxodonta.py") if folder
               else os.path.abspath(__file__))
     command = f'"{python}" -I "{script.replace(os.sep, "/")}" hook'
+    command += " --managed" if managed else ""
     command += f" --actor {actor}" if actor else ""
     command += " --anchor" if anchor else ""
     command += f' --publish "{publish}"' if publish else ""
@@ -6175,16 +6253,17 @@ def supervisor_path():
     return os.path.join(here, "supervisor.py")
 
 
-def digest_command(payload=False, folder=None):
+def digest_command(payload=False, folder=None, managed=False):
     """The SessionStart command: this interpreter, isolated as the
     recorder's is, the supervisor beside this file or the one in
     `folder`, `digest`. With `payload`, the digest takes its repo from
     the hook payload's `cwd` — for a harness that sets no
-    CLAUDE_PROJECT_DIR (ADR-0020)."""
+    CLAUDE_PROJECT_DIR (ADR-0020). `managed` as recorder_command's."""
     python = sys.executable.replace(os.sep, "/")
     script = (os.path.join(folder, "supervisor.py") if folder
               else supervisor_path())
     command = f'"{python}" -I "{script.replace(os.sep, "/")}" digest'
+    command += " --managed" if managed else ""
     return command + (" --payload" if payload else "")
 
 
@@ -6248,7 +6327,7 @@ def write_hooks_file(path, settings, mode=None):
 def codex_hooks_path():
     """Where Codex reads user-level hooks: $CODEX_HOME/hooks.json,
     default ~/.codex/hooks.json."""
-    home = (os.environ.get("CODEX_HOME")
+    home = (environment("CODEX_HOME")
             or os.path.join(os.path.expanduser("~"), ".codex"))
     return os.path.join(home, "hooks.json")
 
@@ -6391,7 +6470,7 @@ def managed_hooks_path():
     reaches one it may write. It moves where these tools read and
     write, never where the harness reads, and every installer verb that
     reads it warns when it is set."""
-    folder = (os.environ.get("LOXODONTA_MANAGED_DIR")
+    folder = (environment("LOXODONTA_MANAGED_DIR")
               or harness_managed_folder())
     return os.path.join(folder, "managed-settings.d", "loxodonta.json")
 
@@ -6403,13 +6482,13 @@ def managed_dir_said():
     a plain install reads that folder to decide whether to refuse, and
     nothing else here would say which folder was read. The same for
     LOXODONTA_PROGRAM_DIR, the copy's stand-in (ADR-0042)."""
-    if os.environ.get("LOXODONTA_MANAGED_DIR"):
+    if environment("LOXODONTA_MANAGED_DIR"):
         print("warning: LOXODONTA_MANAGED_DIR is set, so the managed file "
               f"is {managed_hooks_path()}. The harness reads its managed "
               f"settings from {harness_managed_folder()} whatever this "
               "variable says: unless it names that folder, no session "
               "runs a hook from this file.", file=sys.stderr)
-    if os.environ.get("LOXODONTA_PROGRAM_DIR"):
+    if environment("LOXODONTA_PROGRAM_DIR"):
         print("warning: LOXODONTA_PROGRAM_DIR is set, so a managed install "
               f"copies the recorder to {program_folder()}, not to "
               f"{system_program_folder()}, and its commands name that "
@@ -6447,7 +6526,7 @@ def program_folder():
     managed uninstall deletes them from. LOXODONTA_PROGRAM_DIR names a
     folder to stand for it, which is how the suite reaches one it may
     write, and every installer verb warns when it is set."""
-    return (os.environ.get("LOXODONTA_PROGRAM_DIR")
+    return (environment("LOXODONTA_PROGRAM_DIR")
             or system_program_folder())
 
 
@@ -6478,7 +6557,7 @@ def stand_in(variable, real):
     a device path, a prefix (\\\\host\\share, \\\\?\\, \\\\.\\, \\??\\) or a
     stream (folder::$INDEX_ALLOCATION) reaches the same folder under a
     spelling resolving does not undo (#577)."""
-    value = os.environ.get(variable)
+    value = environment(variable)
     if not value:
         return False
     if sys.platform == "win32" and not (
@@ -7225,7 +7304,7 @@ def operator_settings_path():
     return os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 
 
-def wire_hooks(settings, args, folder=None, digest_too=True):
+def wire_hooks(settings, args, folder=None, digest_too=True, matcher=None):
     """Merge the Claude Code hooks into `settings`, idempotently and
     without clobbering anything already there, in whichever home those
     settings are read from (ADR-0040). Each hook is checked separately,
@@ -7239,13 +7318,17 @@ def wire_hooks(settings, args, folder=None, digest_too=True):
     may name a file the operator's account writes; `digest_too` says
     whether the copy holds a supervisor, and without one the digest's
     entries are left out, since a command never names a file the copy
-    does not hold. Returns (each
+    does not hold. Every command a managed install writes carries
+    `--managed` (ADR-0043 ruling 1). `matcher`, a managed install's, is
+    the one the recorder's blocks are wired on, whatever they held
+    (ruling 5); None leaves a matcher as the operator set it. Returns (each
     thing wired, in words; how many commands were healed; the matchers
     the recorder is wired on for a completed call; and for a failed
     one)."""
     supervisor = supervisor_path()
-    record = recorder_command(folder=folder)
-    digest = digest_command(folder=folder)
+    managed = bool(folder)
+    record = recorder_command(folder=folder, managed=managed)
+    digest = digest_command(folder=folder, managed=managed)
     hooks = settings.setdefault("hooks", {})
     installed = []
     heal, ours = heal_hooks, block_is_ours  # shared with the Codex half
@@ -7287,10 +7370,14 @@ def wire_hooks(settings, args, folder=None, digest_too=True):
             "hooks": [{"type": "command", "command": record}],
         })
         installed.append(f"PostToolUse: {record}")
+    if matcher is not None:
+        installed += set_matcher(post, matcher, "PostToolUse", ours)
     for block in post:
-        matcher = block.get("matcher", "*")
-        if ours(block) and matcher != "*":
-            print(f'note: your recorder matcher "{matcher}" is narrower '
+        narrow = block.get("matcher", "*")
+        # A managed install's matcher is the administrator's own choice:
+        # it says what it wrote and nothing more (ADR-0043).
+        if ours(block) and narrow != "*" and matcher is None:
+            print(f'note: your recorder matcher "{narrow}" is narrower '
                   'than the current default "*" — uncovered tool calls '
                   "leave no receipts (see docs/HOOK.md)")
 
@@ -7304,10 +7391,12 @@ def wire_hooks(settings, args, folder=None, digest_too=True):
     failed = hooks.setdefault("PostToolUseFailure", [])
     healed += heal(failed, RECORDER_NAMES, record)
     if not any(ours(b) for b in failed):
-        matcher = next((b.get("matcher", "*") for b in post if ours(b)), "*")
-        failed.append({"matcher": matcher,
+        same = next((b.get("matcher", "*") for b in post if ours(b)), "*")
+        failed.append({"matcher": same,
                        "hooks": [{"type": "command", "command": record}]})
         installed.append(f"PostToolUseFailure: {record}")
+    elif matcher is not None:
+        installed += set_matcher(failed, matcher, "PostToolUseFailure", ours)
 
     # The tail commitment (ADR-0017, issue #79): SessionEnd runs the
     # same recorder command — the payload's hook_event_name is the
@@ -7318,7 +7407,8 @@ def wire_hooks(settings, args, folder=None, digest_too=True):
     record_end = recorder_command(anchor=args.anchor_at_session_end,
                                   publish=args.publish_head,
                                   publish_chain=args.publish_chain,
-                                  stamp=args.authority, folder=folder)
+                                  stamp=args.authority, folder=folder,
+                                  managed=managed)
     healed += heal(end, RECORDER_NAMES, record_end)
     # The session-end opt-ins ride on this command: the anchor
     # (ADR-0024), the published head (ADR-0025), the published chain
@@ -7362,6 +7452,23 @@ def wire_hooks(settings, args, folder=None, digest_too=True):
     return (installed, healed,
             [block.get("matcher", "*") for block in post if ours(block)],
             [block.get("matcher", "*") for block in failed if ours(block)])
+
+
+def set_matcher(blocks, matcher, event, ours):
+    """Wire the recorder's blocks among `blocks` on `matcher`, a managed
+    install's own (ADR-0043 ruling 5): `*`, or what its --matcher says.
+    Returns a line for each block it moved, saying from what: a re-run
+    without the flag widens a narrowed file, and says so."""
+    said = []
+    for block in blocks:
+        was = block.get("matcher", "*")
+        if ours(block) and was != matcher:
+            block["matcher"] = matcher
+            how = ("widened" if matcher == "*" else "set")
+            said.append(f'{event}: matcher {how} from "{was}" to '
+                        f'"{matcher}"' + (" (narrow it with --matcher)"
+                                          if matcher == "*" else ""))
+    return said
 
 
 def installed_said(path, installed, healed, backup=""):
@@ -7458,9 +7565,10 @@ def install_managed_hooks(args):
     """The managed half of install-hook (ADR-0040): the same entries, in
     the recorder's own file among the harness's managed settings, and
     then out of the operator's file, so the hook has one home. The
-    entries start from what is already wired, in the managed file or
-    else in the operator's, so a matcher the operator narrowed moves
-    with them as a plain re-run would have left it.
+    entries start from what the managed file already holds, never from
+    the operator's file, which the writer can edit: the recorder is
+    wired on `*`, or on what --matcher says, and a narrower matcher in
+    the operator's file is named and not carried (ADR-0043 ruling 5).
 
     Everything is read before anything is written, and the managed
     files are written first, the telemetry pin and then the hooks file
@@ -7548,12 +7656,16 @@ def install_managed_hooks(args):
         return EX_NOINPUT
     existing = read_hooks(managed)
     target = our_hooks(existing)
-    if not target["hooks"]:
-        target = our_hooks(settings)
+    wanted = args.matcher or "*"
     installed, healed, wired, failures = wire_hooks(
         target, args, folder,
         digest_too=any(os.path.basename(copy[0]) == "supervisor.py"
-                       for copy in plan))
+                       for copy in plan),
+        matcher=wanted)
+    left = sorted({block.get("matcher", "*") for event in
+                   ("PostToolUse", "PostToolUseFailure")
+                   for block in our_hooks(settings)["hooks"].get(event, [])}
+                  - {"*", wanted})
 
     copied, refusal = write_copy(plan, folder)
     if refusal:
@@ -7575,8 +7687,7 @@ def install_managed_hooks(args):
         print(line)
     if changed:
         # Every entry the file now holds, not only what this run wired:
-        # entries that moved here from the operator's file were wired
-        # by an earlier run, and this is the one place that lists them.
+        # entries an earlier run wired are listed nowhere else.
         held = []
         for event in HOOK_EVENTS:
             held += ([line for line in installed
@@ -7631,6 +7742,11 @@ def install_managed_hooks(args):
         # their own then removes.
         print(f"  nothing of the installer's was wired in {path}")
     coverage_said(marked, unmarked)
+    for narrow in left:
+        print(f'note: the recorder matcher "{narrow}" in {path} was not '
+              f'carried: {managed} wires "{wanted}". A managed install '
+              "takes a narrower matcher only from its own command line: "
+              f'install-hook --managed --matcher "{narrow}" (ADR-0043).')
     if apart:
         print("note: this ran as another account than the one that owns "
               f"the home of {path}. Nothing under that home was touched: "
@@ -7929,11 +8045,17 @@ def main(argv=None):
                                   "head, after the two publishes and "
                                   "before the anchor, quietly (ADR-0032; "
                                   "install-hook --authority wires this)")
+    hook_parser.add_argument("--managed", action="store_true",
+                             help="read no environment variable but "
+                                  "CLAUDE_PROJECT_DIR, and send through no "
+                                  "proxy: every other setting has its "
+                                  "built-in value. Only `install-hook "
+                                  "--managed` writes this (ADR-0043)")
     hook_parser.set_defaults(func=cmd_hook)
     explain_parser = sub.add_parser(
         "explain", parents=[common],
         help="narrate the log via a language model (testimony, not a verdict)")
-    explain_parser.add_argument("--llm", default="claude -p", metavar="CMD",
+    explain_parser.add_argument("--llm", metavar="CMD",
                                 help="command the prompt is piped to "
                                      "(default: `claude -p`)")
     explain_parser.set_defaults(func=cmd_explain)
@@ -7966,7 +8088,15 @@ def main(argv=None):
              "from an account "
              "that may write those folders (an administrator's shell, or "
              "sudo): without the right it writes nothing and exits 73, "
-             "and it never raises its own rights. Claude Code only")
+             "and it never raises its own rights. The recorder is wired on "
+             "every tool call unless --matcher says otherwise, and its "
+             "commands carry --managed, so the hook reads no setting from "
+             "the environment (ADR-0043). Claude Code only")
+    install_parser.add_argument(
+        "--matcher", default=None, metavar="PATTERN",
+        help="with --managed: the matcher the recorder is wired on, in "
+             "place of \"*\", every tool call. A re-run without it widens "
+             "the managed file again, and says so (ADR-0043)")
     install_parser.add_argument(
         "--profile", choices=PROFILES, default=None,
         help="what leaves the machine, in one word (ADR-0031): local "
@@ -8061,6 +8191,11 @@ def main(argv=None):
                 args.publish_chain, args.authority, args.remote)
         except ValueError as e:
             install_parser.error(str(e))
+        if args.matcher is not None and not (args.managed and args.matcher):
+            # A plain install's matcher is the operator's, edited in
+            # their own file; only a managed one is the command's.
+            install_parser.error("--matcher goes with --managed, and names "
+                                 "a pattern (ADR-0043)")
     for verb, verb_parser in (("install-hook", install_parser),
                               ("uninstall-hook", uninstall_parser)):
         if args.command == verb and args.managed and args.codex:

@@ -10,9 +10,18 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `install-hook --managed --matcher PATTERN` narrows the recorder's matcher in the managed file. Without it a managed install wires `*`, and a matcher narrowed in the operator's own settings file is named and not carried (ADR-0043).
+
 ### Changed
 
+- A managed install writes `--managed` on the hook's and the digest's commands. Under it they read no environment variable but `CLAUDE_PROJECT_DIR`, and the hook sends through no proxy. The first managed install after this rewrites the managed file once (ADR-0043).
 - `docs/CLAIMS.md`, `docs/RECEIVER.md`, `docs/TOPOLOGY.md` and `README.md` agree with each other and with the code at v0.19.0: the count at the receiver is built and not a promise, and limits they left unsaid are stated.
+
+### Fixed
+
+- `openssl`, `ssh-keygen`, `git`, `gh` and `explain`'s default `claude` run by the full path a walk of `PATH` finds, never from the working folder, so a file of that name where `verify` runs is never the program run (ADR-0043).
 
 ## [0.19.0] - 2026-10-25
 

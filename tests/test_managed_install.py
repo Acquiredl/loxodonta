@@ -93,6 +93,11 @@ class ManagedBase(unittest.TestCase):
                 for block in settings.get("hooks", {}).get(event, [])
                 for hook in block["hooks"]]
 
+    def every_command(self, path):
+        settings = self.read(path)
+        return [command for event in settings["hooks"]
+                for command in self.commands(settings, event)]
+
     def ours_in(self, path):
         """The commands in the hooks file at `path` that name one of the
         project's two scripts."""
@@ -193,12 +198,16 @@ class ManagedInstallTest(ManagedBase):
 
                 self.install("--managed", *flags)
 
-                # The same entries, naming the copy (ADR-0042 ruling 2).
+                # The same entries, naming the copy (ADR-0042 ruling 2),
+                # each command saying --managed after its verb (ADR-0043
+                # ruling 1).
                 copied = json.loads(
                     json.dumps({"hooks": plain["hooks"]})
-                    .replace(LOXODONTA.as_posix(), self.copy.as_posix())
-                    .replace(SUPERVISOR.as_posix(),
-                             self.copy_supervisor.as_posix()))
+                    .replace(f'{LOXODONTA.as_posix()}\\" hook',
+                             f'{self.copy.as_posix()}\\" hook --managed')
+                    .replace(f'{SUPERVISOR.as_posix()}\\" digest',
+                             f'{self.copy_supervisor.as_posix()}\\" '
+                             "digest --managed"))
                 self.assertEqual(self.read(self.managed_file), copied)
 
     def test_the_entries_leave_the_operators_file_and_nothing_else_does(self):
@@ -221,9 +230,17 @@ class ManagedInstallTest(ManagedBase):
         self.assertEqual(len(self.ours_in(self.managed_file)), 4)
         self.assertIn(str(self.operator_file), done.stdout)
 
-    def test_a_narrowed_matcher_moves_with_the_entries(self):
-        # A plain install leaves a matcher the operator narrowed, and
-        # says so; the same choice in another home.
+    def matchers(self, path):
+        """The matcher of each recorder block in the hooks file at
+        `path`, for a completed call and a failed one."""
+        hooks = self.read(path)["hooks"]
+        return [block.get("matcher") for event in
+                ("PostToolUse", "PostToolUseFailure")
+                for block in hooks.get(event, [])]
+
+    def test_a_narrowed_matcher_in_the_operators_file_is_not_carried(self):
+        # ADR-0043 ruling 5: the operator's file is the writer's to
+        # edit, so a matcher narrowed there stays there, and is named.
         self.install()
         settings = self.read(self.operator_file)
         for event in ("PostToolUse", "PostToolUseFailure"):
@@ -232,11 +249,85 @@ class ManagedInstallTest(ManagedBase):
 
         done = self.install("--managed")
 
-        managed = self.read(self.managed_file)
-        self.assertEqual(managed["hooks"]["PostToolUse"][0]["matcher"],
-                         "Edit|Write|Bash")
-        self.assertIn("narrower", done.stdout)
+        self.assertEqual(self.matchers(self.managed_file), ["*", "*"])
+        self.assertIn('the recorder matcher "Edit|Write|Bash" in '
+                      f"{self.operator_file} was not carried", done.stdout)
+        self.assertIn('install-hook --managed --matcher "Edit|Write|Bash"',
+                      done.stdout)
+        self.assertEqual(self.epochs()[-1]["matchers"], ["*"])
+
+    def test_the_matcher_flag_narrows_and_a_rerun_without_it_widens(self):
+        # The administrator narrows it on the command line; the next
+        # run without the flag widens it again, and says from what.
+        narrowed = self.install("--managed", "--matcher", "Edit|Write|Bash")
+        # It says what it wrote, and not the plain install's warning.
+        self.assertNotIn("is narrower", narrowed.stdout)
+        self.assertEqual(self.matchers(self.managed_file),
+                         ["Edit|Write|Bash", "Edit|Write|Bash"])
         self.assertEqual(self.epochs()[-1]["matchers"], ["Edit|Write|Bash"])
+
+        done = self.install("--managed")
+
+        self.assertEqual(self.matchers(self.managed_file), ["*", "*"])
+        self.assertIn('PostToolUse: matcher widened from "Edit|Write|Bash" '
+                      'to "*"', done.stdout)
+        self.assertIn('PostToolUseFailure: matcher widened from '
+                      '"Edit|Write|Bash" to "*"', done.stdout)
+        self.assertEqual(self.epochs()[-1]["matchers"], ["*"])
+
+    def test_the_matcher_flag_goes_with_managed_alone(self):
+        # A plain install's matcher is the operator's, in their file.
+        for flags in (("--matcher", "Bash"), ("--managed", "--matcher", "")):
+            with self.subTest(flags=flags):
+                before = self.everything()
+
+                done = run(LOXODONTA, "install-hook", *flags, env=self.env)
+
+                self.assertEqual(done.returncode, 64, done.stdout + done.stderr)
+                self.assertIn("--matcher goes with --managed", done.stderr)
+                self.assertEqual(self.everything(), before)
+
+    def test_every_managed_command_says_managed_and_no_plain_one_does(self):
+        # ADR-0043 ruling 1: the word is written by the managed install,
+        # right after the verb, and by no other.
+        self.install("--profile", "full", "--remote", REMOTE)
+        plain = [command for event in ("PostToolUse", "PostToolUseFailure",
+                                       "SessionEnd", "SessionStart")
+                 for command in self.commands(self.read(self.operator_file),
+                                              event)]
+        self.assertEqual(len(plain), 4)
+        for command in plain:
+            self.assertNotIn("--managed", words(command), command)
+
+        self.install("--managed", "--profile", "full", "--remote", REMOTE)
+
+        commands = self.every_command(self.managed_file)
+        self.assertEqual(len(commands), 4)
+        for command in commands:
+            self.assertIn(words(command)[3:5], (["hook", "--managed"],
+                                                ["digest", "--managed"]),
+                          command)
+
+    def test_a_managed_file_without_the_word_is_rewritten_once(self):
+        # A managed file written before ADR-0043: the next managed
+        # install puts the word on every command, and the one after
+        # that finds nothing to do.
+        self.install("--managed")
+        text = self.managed_file.read_text(encoding="utf-8")
+        self.managed_file.write_text(text.replace(" --managed", ""),
+                                     encoding="utf-8")
+        self.assertNotIn("--managed", self.managed_file.read_text(
+            encoding="utf-8"))
+
+        done = self.install("--managed")
+
+        self.assertNotIn("nothing changed", done.stdout)
+        commands = self.every_command(self.managed_file)
+        self.assertEqual(len(commands), 4)
+        for command in commands:
+            self.assertEqual(words(command)[4], "--managed", command)
+        again = self.install("--managed")
+        self.assertIn("nothing changed", again.stdout)
 
     def test_the_marker_says_the_hook_moved(self):
         # Case 2, and ruling 6: the matchers did not change, the home
@@ -546,11 +637,6 @@ class ManagedCopyTest(ManagedBase):
                 f'TOOL_VERSION = "{version_of(script)}"'.encode(),
                 f'TOOL_VERSION = "{version}"'.encode()))
         return folder / "loxodonta.py"
-
-    def every_command(self, path):
-        settings = self.read(path)
-        return [command for event in settings["hooks"]
-                for command in self.commands(settings, event)]
 
     def test_the_commands_name_a_copy_of_the_two_files(self):
         done = self.install("--managed")

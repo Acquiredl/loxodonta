@@ -1365,6 +1365,38 @@ STAMP_NO_ATTIME = ("the authority's certificate has expired, and this "
                    "openssl cannot judge a token as of the time it states")
 
 
+def helper_path(name):
+    """The full path of the helper program `name` (openssl, ssh-keygen,
+    git, gh, claude), found by walking PATH: only entries that are
+    absolute paths, never an empty one, a relative one or one that is
+    the working directory under any spelling, so a file of that name in
+    the folder a check is run from is never the program that runs. On
+    Windows, where a bare name is looked for in the working directory
+    before PATH, an entry with no drive letter or server is read against
+    the working directory's drive, so it counts as relative there; the
+    names tried are `name.exe` and `name.com`, never a batch file, which
+    would run through cmd.exe. Raises FileNotFoundError when none is
+    found, as running an absent program does, so a missing helper is
+    said as it always was."""
+    windows = sys.platform == "win32"
+    endings = (".exe", ".com") if windows else ("",)
+    for folder in os.get_exec_path():
+        absolute = os.path.isabs(folder) and (
+            not windows or os.path.splitdrive(folder)[0] != "")
+        if not absolute:
+            continue
+        try:
+            if os.path.samefile(folder, os.getcwd()):
+                continue
+        except OSError:
+            continue  # an entry that cannot be compared is not trusted
+        for ending in endings:
+            found = os.path.join(folder, name + ending)
+            if os.path.isfile(found) and os.access(found, os.X_OK):
+                return found
+    raise FileNotFoundError(errno.ENOENT, "not found on PATH", name)
+
+
 def openssl_verify(head, token, chain_file, *more):
     """`openssl ts -verify` on one token file: `-in` reads the whole
     TimeStampResp the sidecar keeps; `-digest` is the head, the sha256
@@ -1372,7 +1404,7 @@ def openssl_verify(head, token, chain_file, *more):
     operator saved. `more` is `-attime` and a moment, when the question
     is about some other moment than now."""
     return subprocess.run(
-        ["openssl", "ts", "-verify", "-digest", head, "-sha256",
+        [helper_path("openssl"), "ts", "-verify", "-digest", head, "-sha256",
          "-in", token, "-CAfile", chain_file, *more],
         capture_output=True, encoding="utf-8", errors="replace")
 
@@ -1387,8 +1419,8 @@ def token_time(token):
     set a `Time stamp:` line of the writer's own ahead of the
     authority's (#264). With it, a second such line is signed or breaks
     the signature, so two of them is a time nobody can read."""
-    shown = subprocess.run(["openssl", "ts", "-reply", "-in", token,
-                            "-token_out", "-text"],
+    shown = subprocess.run([helper_path("openssl"), "ts", "-reply", "-in",
+                            token, "-token_out", "-text"],
                            capture_output=True, encoding="utf-8",
                            errors="replace")
     stated = [line.partition(":")[2] for line in shown.stdout.splitlines()
@@ -1414,8 +1446,9 @@ def token_time(token):
 def takes_attime():
     """Whether this openssl can judge a token as of a given moment: its
     `ts -help` lists `-attime` when `ts -verify` takes it."""
-    shown = subprocess.run(["openssl", "ts", "-help"], capture_output=True,
-                           encoding="utf-8", errors="replace")
+    shown = subprocess.run([helper_path("openssl"), "ts", "-help"],
+                           capture_output=True, encoding="utf-8",
+                           errors="replace")
     return "-attime" in shown.stdout + shown.stderr
 
 
@@ -2412,7 +2445,7 @@ def key_fingerprint(public_key):
     it (`ssh-keygen -lf`), or None when the file is not a key it reads.
     The fingerprint is the key's identity (ADR-0008 ruling 6); the
     comment ssh-keygen prints beside it is a name, and stays unread."""
-    listed = subprocess.run(["ssh-keygen", "-lf", public_key],
+    listed = subprocess.run([helper_path("ssh-keygen"), "-lf", public_key],
                             capture_output=True, encoding="utf-8",
                             errors="replace")
     words = listed.stdout.split()
@@ -2463,7 +2496,7 @@ def judge_manifest_signature(folder):
                 f.write(f"{SIGNATURE_PRINCIPAL} {key}\n")
             with open_regular(manifest) as shipped:
                 verified = subprocess.run(
-                    ["ssh-keygen", "-Y", "verify", "-f", allowed,
+                    [helper_path("ssh-keygen"), "-Y", "verify", "-f", allowed,
                      "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
                      "-s", signature],
                     stdin=shipped, capture_output=True, encoding="utf-8",
@@ -2885,7 +2918,7 @@ def checkout_commit(home):
     to fetch a newer one."""
     try:
         asked = subprocess.run(
-            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
+            [helper_path("git"), "-C", home, "rev-parse", "--short", "HEAD"],
             # Never a pipe on stderr: a program git starts inherits it,
             # and on Windows the timeout then waits for that program.
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

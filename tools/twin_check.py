@@ -219,6 +219,17 @@ TWINS = (
          "file among the harness's managed settings, and the supervisor "
          "reads what is wired from the same file, so both name one path "
          "(ADR-0040)."),
+    Twin("What the environment may say",
+         ("MANAGED_READS", "MANAGED_RUN", "environment"),
+         ORIGINAL, SUPERVISOR,
+         "A managed install writes `--managed` on the hook's and the "
+         "digest's commands, and under it both read no variable but the "
+         "ones the harness sets, so the store and the managed file they "
+         "name are the built-in ones (ADR-0043)."),
+    Twin("Finding a helper program", ("helper_path",), ORIGINAL, BOTH,
+         "openssl, ssh-keygen, git, gh and claude run by the full path a walk of PATH "
+         "finds, never from the working directory, in every file that "
+         "runs one (ADR-0043 ruling 4)."),
     Twin("A chain batch's content type", ("CHAIN_TYPE",), ORIGINAL, RECEIVER,
          "The recorder sends a batch of the chain under this content type, "
          "and the receiver takes a batch only under it (ADR-0031)."),
@@ -234,6 +245,9 @@ DIFFERENT = (
     Different("cmd_serve", ("supervisor.py", "receiver.py"),
               "The supervisor serves its dashboard and recall; the "
               "receiver serves the URL published chains are sent to."),
+    Different("MANAGED_VERB", ("loxodonta.py", "supervisor.py"),
+              "The verb whose `--managed` sets the bit: the recorder's "
+              "`hook`, the supervisor's `digest` (ADR-0043)."),
 )
 
 

@@ -180,6 +180,22 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 `install-hook --managed` writes the hook entries to this one file among the harness's managed settings, and the supervisor reads what is wired from the same file, so both name one path (ADR-0040).
 
+### What the environment may say
+
+Names: `MANAGED_READS`, `MANAGED_RUN`, `environment`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+A managed install writes `--managed` on the hook's and the digest's commands, and under it both read no variable but the ones the harness sets, so the store and the managed file they name are the built-in ones (ADR-0043).
+
+### Finding a helper program
+
+Names: `helper_path`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+openssl, ssh-keygen, git, gh and claude run by the full path a walk of PATH finds, never from the working directory, in every file that runs one (ADR-0043 ruling 4).
+
 ### A chain batch's content type
 
 Names: `CHAIN_TYPE`.
@@ -197,3 +213,4 @@ These names are defined in more than one file, and each file means its own thing
 | `main` | `loxodonta.py`, `supervisor.py`, `receiver.py` | Each file's own command line. |
 | `cmd_verify` | `loxodonta.py`, `supervisor.py` | The recorder's `verify` judges the chain at a path; the supervisor's finds the chain holding an entry address, then prints the recorder's verdict on it. |
 | `cmd_serve` | `supervisor.py`, `receiver.py` | The supervisor serves its dashboard and recall; the receiver serves the URL published chains are sent to. |
+| `MANAGED_VERB` | `loxodonta.py`, `supervisor.py` | The verb whose `--managed` sets the bit: the recorder's `hook`, the supervisor's `digest` (ADR-0043). |

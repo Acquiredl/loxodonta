@@ -110,13 +110,35 @@ EX_SOFTWARE = 70  # the recorder itself failed
 EX_TEMPFAIL = 75  # another writer holds the chain's lock
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+MANAGED_READS = ("CLAUDE_PROJECT_DIR",)
+MANAGED_VERB = "digest"  # the recorder's is "hook"
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+MANAGED_RUN = (sys.argv[1:2] == [MANAGED_VERB]
+               and "--managed" in sys.argv[2:])
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def environment(name, default=None):
+    """The environment variable `name`, or `default` when it is unset,
+    or when this run's command carries `--managed` and `name` is not one
+    the harness sets (MANAGED_READS). Every read of the environment
+    goes through here but two: the check that the harness's own
+    telemetry variables still match the pin (note_second_record_cut),
+    which is a reading of the environment as it stands, and the
+    verifier's walk of PATH for a helper, which the hook never runs."""
+    if MANAGED_RUN and name not in MANAGED_READS:
+        return default
+    return os.environ.get(name, default)
+
+
 def env_number(name, default, kind=int):
     """The number in environment variable `name`, read as `kind` (int
     or float), or `default` when it is unset. A value that is not such a
     number, or is negative or infinite, is refused by name: one line on
     stderr and exit 64, at import and so before any verb runs, never a
     traceback (#487)."""
-    raw = os.environ.get(name)
+    raw = environment(name)
     if raw is None:
         return default
     try:
@@ -1288,7 +1310,7 @@ def marker_profile(witness=None):
 def codex_hooks_file():
     """Where Codex reads user-level hooks, by the recorder's rule:
     $CODEX_HOME/hooks.json, default ~/.codex/hooks.json."""
-    home = (os.environ.get("CODEX_HOME")
+    home = (environment("CODEX_HOME")
             or os.path.join(os.path.expanduser("~"), ".codex"))
     return Path(home) / "hooks.json"
 
@@ -2361,7 +2383,7 @@ DORMANT_SECONDS = env_number("SUPERVISOR_DORMANT_SECONDS", 172800)
 # The tail keeper (ADR-0018 ruling 6): on by default — protective
 # recording does not ask permission (ADR-0017's reasoning) — and
 # disableable for stores where the operator wants annotations only.
-TAIL_KEEPER = os.environ.get("SUPERVISOR_TAIL_KEEPER", "1") != "0"
+TAIL_KEEPER = environment("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 # The settle window of the reading over a receiver's folder (ADR-0041
 # ruling 4): a session is judged there once nothing of it has arrived
 # for this long, by its events' arrival times and its chain copy's own
@@ -2522,7 +2544,7 @@ def managed_hooks_path():
     reaches one it may write. It moves where these tools read and
     write, never where the harness reads, and every installer verb that
     reads it warns when it is set."""
-    folder = (os.environ.get("LOXODONTA_MANAGED_DIR")
+    folder = (environment("LOXODONTA_MANAGED_DIR")
               or harness_managed_folder())
     return os.path.join(folder, "managed-settings.d", "loxodonta.json")
 
@@ -3133,7 +3155,8 @@ def git_say(home, *question, refused=None):
         answered = subprocess.run(
             # Empty, not false: before git 2.36 the value was a command,
             # and `false` names one.
-            ["git", "--no-optional-locks", "-c", "core.fsmonitor=",
+            [helper_path("git"), "--no-optional-locks", "-c",
+             "core.fsmonitor=",
              "-C", str(home), *question],
             # Never a pipe on stderr: a program git starts inherits it,
             # and on Windows the timeout then waits for that program.
@@ -6374,7 +6397,7 @@ def invoking_repo(args):
     link left as typed, ADR-0011), then a worktree resolved to its
     repository. Resolving links here and not there would hash two names
     for one drawer."""
-    spoken = args.repo or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()
+    spoken = args.repo or environment("CLAUDE_PROJECT_DIR") or Path.cwd()
     return main_repo_of(Path(os.path.abspath(str(spoken))))
 
 
@@ -6382,7 +6405,7 @@ def invoking_repo(args):
 def store_home():
     """The machine-wide home of hook-written chains (ADR-0011):
     ~/.loxodonta, or wherever LOXODONTA_HOME points."""
-    return (os.environ.get("LOXODONTA_HOME")
+    return (environment("LOXODONTA_HOME")
             or os.path.join(os.path.expanduser("~"), ".loxodonta"))
 
 
@@ -6781,7 +6804,7 @@ def cmd_digest(args):
     all reachable, never all injected), budget-capped, zero subprocess
     spawns — recall owns no verdicts, so nothing here runs verify."""
     if getattr(args, "payload", False) and not args.repo \
-            and not os.environ.get("CLAUDE_PROJECT_DIR"):
+            and not environment("CLAUDE_PROJECT_DIR"):
         args.repo = payload_cwd()  # the environment wins when present
     repo = invoking_repo(args)
     families, rows = gather(project_chains(repo))
@@ -7745,7 +7768,10 @@ def send_export(data, out, archive):
     then the issue. The issue body is written beside the export first,
     so a missing `gh` leaves everything needed to file by hand."""
     issue = out.with_name(out.stem + ".issue.md")
-    gh = shutil.which("gh")
+    try:
+        gh = helper_path("gh")
+    except FileNotFoundError:
+        gh = None
     if gh is None:
         refused = write_export(issue, issue_body(data, None,
                                                  archive is not None),
@@ -8351,7 +8377,7 @@ def key_fingerprint(public_key):
     it (`ssh-keygen -lf`), or None when the file is not a key it reads.
     The fingerprint is the key's identity (ADR-0008 ruling 6); the
     comment ssh-keygen prints beside it is a name, and stays unread."""
-    listed = subprocess.run(["ssh-keygen", "-lf", public_key],
+    listed = subprocess.run([helper_path("ssh-keygen"), "-lf", public_key],
                             capture_output=True, encoding="utf-8",
                             errors="replace")
     words = listed.stdout.split()
@@ -8374,7 +8400,8 @@ def sign_manifest(stage, keyfile):
     sentence)."""
     manifest = stage / "manifest.json"
     signed = subprocess.run(
-        ["ssh-keygen", "-q", "-Y", "sign", "-n", SIGNATURE_NAMESPACE,
+        [helper_path("ssh-keygen"), "-q", "-Y", "sign", "-n",
+         SIGNATURE_NAMESPACE,
          "-f", str(keyfile), str(manifest)])
     if signed.returncode != 0:
         return None, (f"the manifest was not signed (ssh-keygen exited "
@@ -8383,7 +8410,8 @@ def sign_manifest(stage, keyfile):
     if os.path.isfile(beside):
         line = beside.read_text("utf-8", errors="replace")
     else:
-        derived = subprocess.run(["ssh-keygen", "-y", "-f", str(keyfile)],
+        derived = subprocess.run([helper_path("ssh-keygen"), "-y", "-f",
+                                  str(keyfile)],
                                  stdout=subprocess.PIPE, encoding="utf-8",
                                  errors="replace")
         if derived.returncode != 0:
@@ -8398,7 +8426,8 @@ def sign_manifest(stage, keyfile):
         write_lf(allowed, f"{SIGNATURE_PRINCIPAL} {key}\n")
         with open(manifest, "rb") as shipped:
             verified = subprocess.run(
-                ["ssh-keygen", "-Y", "verify", "-f", str(allowed),
+                [helper_path("ssh-keygen"), "-Y", "verify", "-f",
+                 str(allowed),
                  "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
                  "-s", str(stage / MANIFEST_SIGNATURE)],
                 stdin=shipped, capture_output=True, encoding="utf-8",
@@ -12193,6 +12222,39 @@ GIT_TIMEOUT = 10
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def helper_path(name):
+    """The full path of the helper program `name` (openssl, ssh-keygen,
+    git, gh, claude), found by walking PATH: only entries that are
+    absolute paths, never an empty one, a relative one or one that is
+    the working directory under any spelling, so a file of that name in
+    the folder a check is run from is never the program that runs. On
+    Windows, where a bare name is looked for in the working directory
+    before PATH, an entry with no drive letter or server is read against
+    the working directory's drive, so it counts as relative there; the
+    names tried are `name.exe` and `name.com`, never a batch file, which
+    would run through cmd.exe. Raises FileNotFoundError when none is
+    found, as running an absent program does, so a missing helper is
+    said as it always was."""
+    windows = sys.platform == "win32"
+    endings = (".exe", ".com") if windows else ("",)
+    for folder in os.get_exec_path():
+        absolute = os.path.isabs(folder) and (
+            not windows or os.path.splitdrive(folder)[0] != "")
+        if not absolute:
+            continue
+        try:
+            if os.path.samefile(folder, os.getcwd()):
+                continue
+        except OSError:
+            continue  # an entry that cannot be compared is not trusted
+        for ending in endings:
+            found = os.path.join(folder, name + ending)
+            if os.path.isfile(found) and os.access(found, os.X_OK):
+                return found
+    raise FileNotFoundError(errno.ENOENT, "not found on PATH", name)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
@@ -12201,7 +12263,7 @@ def checkout_commit(home):
     to fetch a newer one."""
     try:
         asked = subprocess.run(
-            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
+            [helper_path("git"), "-C", home, "rev-parse", "--short", "HEAD"],
             # Never a pipe on stderr: a program git starts inherits it,
             # and on Windows the timeout then waits for that program.
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -12462,6 +12524,11 @@ def main(argv):
                              "one (Codex wiring, ADR-0020)")
     digest.add_argument("--since", default=None, metavar="YYYY-MM-DD",
                         help="only entries on or after this date")
+    digest.add_argument("--managed", action="store_true",
+                        help="read no environment variable but "
+                             "CLAUDE_PROJECT_DIR: the store and the managed "
+                             "file are the built-in ones. Only `install-hook "
+                             "--managed` writes this (ADR-0043)")
     digest.set_defaults(func=cmd_digest)
     show = sub.add_parser(
         "show", parents=[recall_common],
