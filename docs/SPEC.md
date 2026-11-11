@@ -2,7 +2,7 @@
 
 This document specifies three parts, and each has its own version:
 
-- **The chain format:** `0.1`, sections 1 to 8, amended through 0.1.5.
+- **The chain format:** `0.1`, sections 1 to 8, amended through 0.1.6.
 - **The sidecars:** every row names its kind (ADR-0038), section 9.
 - **The package format:** `loxodonta-package/1`, section 10.
 
@@ -15,6 +15,7 @@ A revision of this document is not a format version: each part changes only unde
 - **0.1.3** (2026-09-23, ADR-0036, ADR-0037) freezes the hash chain across format versions (§4), so a verifier walks the hashes before it refuses a version (§2.1), and gives exit 1 to `BROKEN` alone (§6): verifier behavior, and a promise about later versions.
 - **0.1.4** (2026-09-24, #332, #336) changes words only: §5 says the head commits to canonical form, not to the file's bytes, and §8 splits into what the design cannot claim (§8.1) and the format's non-goals (§8.2), stating whole-chain regeneration as closed only for what a commitment held off the machine covers.
 - **0.1.5** (2026-10-06, ADR-0041) pins the grammar of a third bookkeeping kind, the second-record note (§2.2): additive vocabulary over ordinary entries, as 0.1.2 was.
+- **0.1.6** (2026-11-11, ADR-0047) pins the grammar of the suffix a hook receipt ends with, the call's id and a hash of its whole input, and the words a receipt holds when a file it names could not be fingerprinted (§2.3): additive vocabulary over ordinary entries, as 0.1.2 was.
 
 This document defines the receipt log format precisely enough that an independent implementation, in any language, produces byte-identical hashes. That reproducibility is the whole game: a hash chain is only as trustworthy as the serialization rules underneath it.
 
@@ -78,6 +79,21 @@ second-record-cut: reason=<telemetry-off|exporter-off|endpoint-elsewhere>
 - A reason is read only from a value the environment holds: an exporter or endpoint variable it does not hold is no difference, while an absent telemetry switch reads `telemetry-off`. Claude Code 2.1.294 hands its hooks the switch and no `OTEL_*` variable, so there a hook writes `telemetry-off` alone. *(Stated 2026-10-12, #495; writer behavior, not a format change.)*
 - `files` is `[]`. The note is an ordinary entry in every other respect, like the commitment: chained, hashed, no new schema fields, so a verifier that predates this amendment walks it without noticing.
 - The honest claim: the note is written by the hook from the environment the harness gave it, which whoever launches the harness can set, and never from anything the receiver saw. A session whose events never arrived is named at the receiver whether or not its chain carries a note; the note is the chain's own word that they were not going to.
+
+### 2.3 The receipt's suffix *(amended v0.1.6, ADR-0047)*
+
+A receipt the hook writes for a tool call ends its action line with a **suffix**: the harness's id for the call, and a commitment to the call's whole input. It is the third machine-parsed action line, beside the two of §2.2, and its grammar is pinned: after the action line, one space and one bracketed group, one space between fields, nothing after the closing bracket:
+
+```
+Bash: curl -s https://example.org/a… (+440) [call=toolu_01AbC input sha256=<64 lowercase hex> bytes=612]
+```
+
+- `call=<id>` is the id the payload gives for the call (`tool_use_id`), written only when it is 1 to 128 characters, each an ASCII letter, a digit, `_` or `-`. A payload that names none, or one that fails that, leaves the field out.
+- `input sha256=<64 lowercase hex> bytes=<decimal byte count>` commits to the call's input: the SHA-256 of the input in the canonical form of §4, and the length of that form in bytes. An input §4 has no form for is not hashed, and the field reads `input=unhashed`: one holding, anywhere in it, a number that is not an integer in the payload's JSON (written with a fraction or an exponent, `1.5`, `1.0` and `2e5` alike, or `NaN` or `Infinity`, which a lenient JSON reader takes as numbers), a string holding a lone surrogate, or nesting deeper than the writer's reader can follow. Booleans and `null` are hashed as JSON writes them, `true`, `false` and `null`. A payload with no input, or whose input is `null`, leaves the field out.
+- The fields come in that order, and a group with no field is not written. A reader takes the last such group on the line, and only when nothing follows it.
+- A file the call names that cannot be fingerprinted never loses the receipt. The receipt is written without that reference, and its action line says so before the suffix, after one space: `(<count> not fingerprinted)`. The hook exits as for any receipt written, 0 when it is on the chain, and names each reference it could not make in a warning.
+- Bookkeeping entries carry no suffix, and neither do the entries `log` and `run` write: they have no call and no input object. The schema, §4 and the hashing are untouched, so a verifier that predates this amendment reads the suffix as part of the line's text.
+- The honest claim: the suffix is writer-authored, like the rest of the line. It says which call the receipt is for and holds a hash that any copy of that call's input either reproduces or does not; the input itself is not in the chain, and an input that can be guessed can be confirmed against its hash (§8.2's rule on secrets stands). A line from a recorder before this amendment that happens to end in such a group is the writer's text.
 
 ## 3. File references
 

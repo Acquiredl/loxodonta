@@ -104,11 +104,16 @@ def payload_for(span, project):
         tool = getattr(data, "name", None) or "tool"
         tool_input = arguments_of(getattr(data, "input", None))
     trace = getattr(span, "trace_id", None) or "untraced"
-    return {"session_id": str(trace),
-            "hook_event_name": "PostToolUse",
-            "tool_name": str(tool),
-            "tool_input": tool_input,
-            "cwd": project}
+    payload = {"session_id": str(trace),
+               "hook_event_name": "PostToolUse",
+               "tool_name": str(tool),
+               "tool_input": tool_input,
+               "cwd": project}
+    if kind != "handoff" and getattr(data, "input", None) is None:
+        # Input the SDK withheld (trace_include_sensitive_data=False) is
+        # no input, and the receipt hashes none (ADR-0047 ruling 3).
+        del payload["tool_input"]
+    return payload
 
 
 class ReceiptRecorder(_Base):

@@ -6262,6 +6262,20 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(row["state"], "ENDED-CLEAN")
         self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 2}})
 
+    def test_suffixed_receipts_count_by_tool_as_unsuffixed_ones_do(self):
+        # ADR-0047: the suffix is set aside before the tool is read, so
+        # the count by tool is what it was without it, a tool named bare
+        # included, whose line has no colon before the suffix.
+        digest = "0" * 64
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash [call=toolu_1 input sha256={digest} bytes=2]",
+            "Bash: false [call=toolu_2 input=unhashed]"))
+
+        row = self.rows(self.report())[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "ENDED-CLEAN")
+        self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 2}})
+
     def test_a_receipt_short_in_the_copy_is_a_deficit_naming_its_tool(self):
         chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
 

@@ -14,6 +14,7 @@ internals, and every chain written is judged by `loxodonta verify`.
 
 import json
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -30,6 +31,19 @@ from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
 sys.path.insert(0, str(REPO_ROOT))
 
 from adapters.openai_agents import ReceiptRecorder  # noqa: E402
+from test_hook import suffix  # noqa: E402
+
+# The suffix an Agents SDK receipt ends with (ADR-0047): the adapter
+# sends no call id, and the input it hashes is the one it built.
+SDK_SUFFIX = re.compile(r" \[(input sha256=[0-9a-f]{64} bytes=[1-9][0-9]*"
+                        r"|input=unhashed)\]$")
+
+
+def summary_of(action):
+    """An SDK receipt's line before its suffix, which must be there."""
+    found = SDK_SUFFIX.search(action)
+    assert found, f"no suffix on {action!r}"
+    return action[:found.start()]
 
 
 def drawer_of(store, project_name):
@@ -87,7 +101,8 @@ class CodexHookTest(unittest.TestCase):
         self.assertEqual(Path(record["path"]).resolve(), self.project)
         last = entries(log)[-1]
         self.assertEqual(last["actor"], "codex")
-        self.assertEqual(last["action"], "Bash: npm test")
+        self.assertEqual(last["action"], "Bash: npm test"
+                         + suffix({"command": "npm test"}, call="call-1"))
         # Outcome-blind (.out-of-scope/001): the receipt says what was
         # attempted, never how it went.
         self.assertNotIn("failed", json.dumps(last))
@@ -144,8 +159,11 @@ class CodexHookTest(unittest.TestCase):
             / "receipts-019374ab-codex-session.jsonl"
         actions = [e["action"] for e in entries(log)[1:]]
         self.assertEqual(actions, [
-            "apply_patch: *** Begin Patch *** Update File: a.py",
-            "mcp__github__create_issue"])
+            "apply_patch: *** Begin Patch *** Update File: a.py"
+            + suffix({"command": "*** Begin Patch\n*** Update File: a.py"},
+                     call="call-1"),
+            "mcp__github__create_issue"
+            + suffix({"title": "flaky test"}, call="call-1")])
         judged = run(LOXODONTA, "verify", "--log", str(log), env=self.env)
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertIn("VALID", judged.stdout)
@@ -160,7 +178,10 @@ class CodexHookTest(unittest.TestCase):
         log = drawer_of(self.store, "someproject") \
             / "receipts-019374ab-codex-session.jsonl"
         self.assertEqual([e["action"] for e in entries(log)[1:]],
-                         ["Bash: echo " + chr(92) + "ud800", "Bash: ls"])
+                         ["Bash: echo " + chr(92) + "ud800"
+                          + " [call=call-1 input=unhashed]",
+                          "Bash: ls" + suffix({"command": "ls"},
+                                              call="call-1")])
         judged = run(LOXODONTA, "verify", "--log", str(log), env=self.env)
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertIn("VALID", judged.stdout)
@@ -184,7 +205,8 @@ class CodexHookTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         log = drawer_of(self.store, "odd-project") \
             / "receipts-019374ab-codex-session.jsonl"
-        self.assertEqual(entries(log)[-1]["action"], "Bash: make")
+        self.assertEqual(entries(log)[-1]["action"], "Bash: make"
+                         + suffix({"command": "make"}, call="call-1"))
         start = {"session_id": "019374ab-codex-session",
                  "hook_event_name": "SessionStart", "source": "startup",
                  "transcript_path": None, "cwd": str(project)}
@@ -440,20 +462,20 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         log = self.chain()
         last = entries(log)[-1]
         self.assertEqual(last["actor"], "openai-agents")
-        self.assertEqual(last["action"], "run_shell: pytest -q")
+        self.assertEqual(summary_of(last["action"]), "run_shell: pytest -q")
         record = json.loads((log.parent / "project.json").read_text("utf-8"))
         self.assertEqual(Path(record["path"]).resolve(), self.project)
 
     def test_handoff_span_is_recorded_as_a_handoff(self):
         self.recorder.on_span_end(span("handoff", from_agent="triage",
                                        to_agent="billing"))
-        self.assertEqual(entries(self.chain())[-1]["action"],
+        self.assertEqual(summary_of(entries(self.chain())[-1]["action"]),
                          "handoff: triage -> billing")
 
     def test_arguments_without_a_named_key_fall_back_to_a_summary(self):
         self.recorder.on_span_end(span(
             "function", "lookup_ticket", '{"ticket": 42, "note": "vip"}'))
-        self.assertEqual(entries(self.chain())[-1]["action"],
+        self.assertEqual(summary_of(entries(self.chain())[-1]["action"]),
                          'lookup_ticket: {"ticket": 42, "note": "vip"}')
 
     def test_missing_arguments_record_the_tool_name_alone(self):
@@ -475,7 +497,7 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         failed.error = {"message": "exit 2"}
         self.recorder.on_span_end(failed)
         last = entries(self.chain())[-1]
-        self.assertEqual(last["action"], "run_shell: make")
+        self.assertEqual(summary_of(last["action"]), "run_shell: make")
         self.assertNotIn("exit 2", json.dumps(last))
 
     def test_a_lone_surrogate_in_the_arguments_is_recorded_as_escape_text(self):
@@ -488,7 +510,7 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         self.recorder.on_span_end(span(
             "function", "run_shell", '{"command": "pytest"}'))
         log = self.chain()
-        self.assertEqual([e["action"] for e in entries(log)[1:]],
+        self.assertEqual([summary_of(e["action"]) for e in entries(log)[1:]],
                          ["run_shell: echo " + escape + " hi",
                           "run_shell: pytest"])
         judged = run(LOXODONTA, "verify", "--log", str(log))
@@ -503,7 +525,7 @@ class AgentsSdkRecorderTest(unittest.TestCase):
         self.recorder.on_span_end(span("handoff", from_agent="coder",
                                        to_agent="reviewer"))
         log = self.chain()
-        actions = [e["action"] for e in entries(log)[1:]]
+        actions = [summary_of(e["action"]) for e in entries(log)[1:]]
         self.assertEqual(actions, ["read_file: a.py", "edit_file: a.py",
                                    "run_shell: pytest",
                                    "handoff: coder -> reviewer"])

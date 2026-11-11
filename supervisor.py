@@ -3402,6 +3402,45 @@ def failed_call_owes(record, block, name, epoch):
     return "may_owe"
 
 
+def transcript_records(transcript, closed):
+    """Each record of a session's transcript files (`witness_files`) as
+    (the file, the record, its message's content blocks), in file order,
+    the parent's first and then each subagent's. A line
+    that is not a JSON object is passed over, and a file that cannot be
+    opened raises as `open_regular` does. The witness counts calls by
+    it, and `show` finds a call's input by it (ADR-0047)."""
+    for path in witness_files(transcript, closed):
+        # A transcript is in the writer's reach, so a pipe at its name is
+        # refused rather than waited on (#386).
+        with io.TextIOWrapper(open_regular(path), encoding="utf-8",
+                              errors="replace") as lines:
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue  # the transcript is writer-reachable (#331)
+                if not isinstance(record, dict):
+                    continue
+                message = record.get("message")
+                blocks = (message.get("content")
+                          if isinstance(message, dict) else None)
+                yield (path, record,
+                       blocks if isinstance(blocks, list) else [])
+
+
+def witness_transcripts(witness, closed):
+    """Every session's transcript under the witness layout, by session
+    id, as every file of that name in sorted order: one project folder
+    each, `<witness>/<project>/<session>.jsonl`. Where several folders
+    hold one name, the last is the one read (the scan's choice since it
+    first paired them), and `show` reads the same one and says how many
+    there were (ADR-0047)."""
+    found = {}
+    for path in listed(witness, "*/*.jsonl", closed):
+        found.setdefault(path.stem, []).append(path)
+    return found
+
+
 def read_witness(transcript, calibration):
     """The witness signal, as a dict. `owed` is the tool events that owe
     a receipt, as (timestamp, tool) in time order: a tool_use block
@@ -3431,72 +3470,56 @@ def read_witness(transcript, calibration):
     first = None
     worded = unworded = 0
     closed = []
-    for path in witness_files(transcript, closed):
-        # A transcript is in the writer's reach, so a pipe at its name is
-        # refused rather than waited on (#386).
-        with io.TextIOWrapper(open_regular(path), encoding="utf-8",
-                              errors="replace") as lines:
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                except (ValueError, RecursionError):
-                    continue  # the transcript is writer-reachable (#331)
-                if not isinstance(record, dict):
-                    continue
-                stamped = parse_when(record.get("timestamp"))
-                if stamped is not None:
-                    if stamped.tzinfo is None:
-                        stamped = stamped.replace(tzinfo=timezone.utc)
-                    if latest is None or stamped > latest:
-                        latest = stamped
-                message = record.get("message")
-                blocks = (message.get("content")
-                          if isinstance(message, dict) else None)
-                if not isinstance(blocks, list):
-                    blocks = []
-                for block in blocks:
-                    if isinstance(block, dict) \
-                            and block.get("type") == "tool_use":
-                        names[block.get("id")] = block.get("name")
-                found = next((block for block in blocks
-                              if isinstance(block, dict)
-                              and block.get("type") == "tool_result"), None)
-                result = record.get("toolUseResult")
-                # The completed call, in either shape the harness writes:
-                # a parent's record carries `toolUseResult` and the block,
-                # a subagent's only the block (#211; keying on the field
-                # alone missed most sidechain calls). The block is the
-                # signal, the field the corroboration.
-                if result is None and found is None:
-                    continue
-                # A failed call, as the harness really writes it: the
-                # result collapses to an error string and the flag sits
-                # on the tool_result block (field capture, 2026-08-29).
-                # In a sidechain file that block is the only place it
-                # ever sits.
-                failed = ((isinstance(result, dict)
-                           and result.get("is_error"))
-                          or (found is not None and found.get("is_error")))
-                name = names.get(found.get("tool_use_id")) if found else None
-                witnessed.add(name)
-                when = record.get("timestamp")
-                epoch = epoch_at(calibration, when)
-                # Before every filter below: a call that failed, or one
-                # no matcher covered, is still the session at work.
-                if isinstance(when, str) and (first is None or when < first):
-                    first = when
-                if failed:
-                    owes = failed_call_owes(record, found, name, epoch)
-                    if owes == "may_owe":
-                        may_owe.setdefault(name, []).append(when)
-                        if name in SHELL_TOOLS:
-                            unworded += 1
-                    if owes != "owed":
-                        continue
-                    worded += 1
-                    owed.append((when, name))
-                elif owes_receipt(name, epoch["matchers"]):
-                    owed.append((when, name))
+    for _, record, blocks in transcript_records(transcript, closed):
+        stamped = parse_when(record.get("timestamp"))
+        if stamped is not None:
+            if stamped.tzinfo is None:
+                stamped = stamped.replace(tzinfo=timezone.utc)
+            if latest is None or stamped > latest:
+                latest = stamped
+        for block in blocks:
+            if isinstance(block, dict) \
+                    and block.get("type") == "tool_use":
+                names[block.get("id")] = block.get("name")
+        found = next((block for block in blocks
+                      if isinstance(block, dict)
+                      and block.get("type") == "tool_result"), None)
+        result = record.get("toolUseResult")
+        # The completed call, in either shape the harness writes:
+        # a parent's record carries `toolUseResult` and the block,
+        # a subagent's only the block (#211; keying on the field
+        # alone missed most sidechain calls). The block is the
+        # signal, the field the corroboration.
+        if result is None and found is None:
+            continue
+        # A failed call, as the harness really writes it: the
+        # result collapses to an error string and the flag sits
+        # on the tool_result block (field capture, 2026-08-29).
+        # In a sidechain file that block is the only place it
+        # ever sits.
+        failed = ((isinstance(result, dict)
+                   and result.get("is_error"))
+                  or (found is not None and found.get("is_error")))
+        name = names.get(found.get("tool_use_id")) if found else None
+        witnessed.add(name)
+        when = record.get("timestamp")
+        epoch = epoch_at(calibration, when)
+        # Before every filter below: a call that failed, or one
+        # no matcher covered, is still the session at work.
+        if isinstance(when, str) and (first is None or when < first):
+            first = when
+        if failed:
+            owes = failed_call_owes(record, found, name, epoch)
+            if owes == "may_owe":
+                may_owe.setdefault(name, []).append(when)
+                if name in SHELL_TOOLS:
+                    unworded += 1
+            if owes != "owed":
+                continue
+            worded += 1
+            owed.append((when, name))
+        elif owes_receipt(name, epoch["matchers"]):
+            owed.append((when, name))
     # Merged across files, so order is no longer a given, and the
     # deficit clock reads the first unpaired call, which names the right
     # moment only in time order.
@@ -3736,8 +3759,8 @@ def watch_completeness(root, witness, families, everywhere=False,
     # empty: closed, it would hide more quietly than a deleted witness.
     witness_closed = []
     if os.path.isdir(witness):
-        transcripts = {t.stem: t
-                       for t in listed(witness, "*/*.jsonl", witness_closed)}
+        transcripts = {stem: found[-1] for stem, found in
+                       witness_transcripts(witness, witness_closed).items()}
     else:
         watch["note"] = (f"witness absent — no transcript layout at "
                          f"{witness.as_posix()}; completeness cannot be "
@@ -4489,8 +4512,120 @@ def tool_of(action):
     dominant tool, the digest's collapse key, and the completeness
     witness, which pairs each receipt with calls of the tool it names
     (ADR-0034). A line from another writer is read by the same rule and
-    trusted no more than the rest of its testimony."""
-    return str(action).partition(":")[0].strip()
+    trusted no more than the rest of its testimony. The suffix is set
+    aside first (ADR-0047), since a bare tool name has no colon before
+    it."""
+    return split_suffix(action)[0].partition(":")[0].strip()
+
+
+# --- The receipt's suffix (ADR-0047) ------------------------------------------
+# A hook receipt ends with the call's id and a commitment to its whole
+# input. The supervisor reads the suffix to find the tool a line names
+# and, in `show`, to compare the commitment with the transcript.
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def canonical_bytes(entry_without_hash):
+    return json.dumps(
+        entry_without_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+CALL_ID_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+CALL_ID_LONGEST = 128
+UNHASHED_INPUT = "input=unhashed"
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def is_call_id(text):
+    """Whether `text` may stand as a call's id in the suffix: ASCII
+    letters, digits, `_` and `-` only, 1 to 128 of them (ADR-0047
+    ruling 2), so it can never end the group or open another."""
+    return (isinstance(text, str) and 0 < len(text) <= CALL_ID_LONGEST
+            and set(text) <= CALL_ID_CHARACTERS)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def holds_fraction(value):
+    """Whether a JSON value holds, anywhere in it, a number that is not
+    an integer in the JSON it was read from: one written with a fraction
+    or an exponent (`1.5`, `1.0`, `2e5`), or `NaN` or `Infinity`, which
+    Python's reader takes as numbers. Each is a float here, and SPEC \u00a74
+    rule 4 gives none a canonical form; booleans and `null` are not
+    numbers here and are hashed as JSON writes them. Walked without
+    recursion: the payload may nest as deep as the JSON reader took."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, float):
+            return True
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def input_form(value):
+    """A call's input in SPEC \u00a74's canonical form, written by the one
+    writer entries are hashed with, or None where \u00a74 has no form for
+    it: a number that is not an integer (`holds_fraction`), or anything
+    that writer refuses (a lone surrogate, which has no UTF-8; nesting
+    past the recursion limit). Every such input reads `input=unhashed`
+    (ADR-0047 ruling 3, SPEC \u00a72.3)."""
+    if holds_fraction(value):
+        return None
+    try:
+        return canonical_bytes(value)
+    except (ValueError, RecursionError):
+        # UnicodeEncodeError is a ValueError.
+        return None
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def split_suffix(action):
+    """An action line as (the text before its suffix, the suffix's
+    fields), or (the line, None) when it ends in no group of the pinned
+    grammar. Only the last group is read, and only when nothing follows
+    it (ADR-0047 ruling 1). The fields are a dict holding `call`,
+    `sha256` and `bytes`, or `unhashed`, as the group gave them. A line
+    from before the suffix that happens to end in such a group is the
+    writer's text, read the same way."""
+    action = str(action)
+    at = action.rfind(" [")
+    if at < 0 or not action.endswith("]"):
+        return action, None
+    words = action[at + 2:-1].split(" ")
+    fields = {}
+    if words[0].startswith("call=") and is_call_id(words[0][5:]):
+        fields["call"] = words.pop(0)[5:]
+    if words == [UNHASHED_INPUT]:
+        fields["unhashed"] = True
+    elif len(words) == 3 and words[0] == "input" \
+            and words[1].startswith("sha256=") \
+            and words[2].startswith("bytes="):
+        digest, size = words[1][7:], words[2][6:]
+        if len(digest) != 64 or not set(digest) <= set("0123456789abcdef") \
+                or not size or not set(size) <= set("0123456789") \
+                or size != str(int(size)):
+            return action, None
+        fields["sha256"], fields["bytes"] = digest, int(size)
+    elif words:
+        return action, None
+    if not fields:
+        return action, None
+    return action[:at], fields
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def listed_action(action):
+    """An action line as a listing shows it, without its suffix: the
+    suffix is for a reader that checks, and a listing for a person
+    scanning (ADR-0047). A whole line is in the chain, in `show` and in
+    every JSON output."""
+    return split_suffix(action)[0]
 
 
 def busiest_hour(moments):
@@ -6119,7 +6254,7 @@ def panel_tool_key(entry):
         return None
     if actor not in HOOK_ACTORS:
         return "hand-logged"
-    head = str(entry.get("action", "")).split(":", 1)[0].strip()
+    head = tool_of(entry.get("action", ""))
     if not head:
         return "unnamed"
     if head.startswith("mcp__"):
@@ -6326,6 +6461,7 @@ def search_root(root, query, store=False, receiver=False):
                         "chain": log.name, "n": entry.get("n"),
                         "ts": entry.get("ts"), "actor": entry.get("actor"),
                         "action": action,
+                        "listed": listed_action(action),
                     })
     hits.sort(key=lambda hit: str(hit["ts"] or ""), reverse=True)
     return {"root": root.as_posix(), "testimony": TESTIMONY,
@@ -6719,9 +6855,10 @@ def run_action(unit):
     a run says how long it was, the shared tool, and where it ended —
     `14x Read, last: supervisor.py`. The newest detail is shown
     because it is what the session did most recently; the rest is one
-    `timeline` away."""
+    `timeline` away. The digest is a listing, so the suffix is folded
+    (ADR-0047)."""
     rows = unit["rows"]
-    action = str(rows[-1]["entry"].get("action", ""))
+    action = listed_action(rows[-1]["entry"].get("action", ""))
     if len(rows) == 1:
         return action
     label, _, rest = action.partition(":")
@@ -6989,25 +7126,72 @@ def match_address(prefix, logs, where,
         for log, entry in matches[:20]:
             print(f"  {address_of(entry)}  {visible(entry.get('ts', ''))}  "
                   f"session {visible(session_of(log)[:8])}  "
-                  f"{clip(entry.get('action', ''), 60)}", file=sys.stderr)
+                  f"{clip(listed_action(entry.get('action', '')), 60)}", file=sys.stderr)
         return None, 1
     return matches[0], 0
+
+
+FROM_THE_WRITERS_REACH = "testimony from a file in the writer's reach"
+
+
+def call_testimony(log, action, witness):
+    """What the session's transcript says of the call a receipt names,
+    as one line, or None when the receipt carries no call id and input
+    hash or no transcript is found (ADR-0047 ruling 5): the input
+    matches, differs, or the transcript holds no such call. The
+    transcript is in the writer's reach, so this is testimony, and the
+    line says so. The transcript is the one the scan's witness reads for
+    the session (`witness_transcripts`), its subagents' files included;
+    a record that names another session is not this session's call, and
+    a session id held by more than one project folder is said."""
+    fields = split_suffix(action)[1]
+    if not fields or "call" not in fields or "sha256" not in fields:
+        return None
+    session, call = session_of(log), fields["call"]
+    try:
+        found = witness_transcripts(witness, []).get(session)
+        if not found:
+            return None
+        inputs = [(path, block.get("input"))
+                  for path, record, blocks in transcript_records(found[-1], [])
+                  if record.get("sessionId", session) == session
+                  for block in blocks
+                  if isinstance(block, dict)
+                  and block.get("type") == "tool_use"
+                  and block.get("id") == call]
+    except OSError:
+        return None  # a transcript that cannot be read is none found
+    also = (f", one of {len(found)} transcripts named {visible(session)}"
+            ".jsonl under the witness, the one the scan reads"
+            if len(found) > 1 else "")
+    if not inputs:
+        return (f"input: the transcript holds no call {call} "
+                f"({visible(found[-1].as_posix())}{also}), "
+                f"{FROM_THE_WRITERS_REACH}")
+    forms = [input_form(given) for _, given in inputs]
+    same = all(form is not None
+               and hashlib.sha256(form).hexdigest() == fields["sha256"]
+               and len(form) == fields["bytes"] for form in forms)
+    return (f"input: {'matches' if same else 'differs from'} the "
+            f"transcript's record of call {call} "
+            f"({visible(inputs[0][0].as_posix())}{also}), "
+            f"{FROM_THE_WRITERS_REACH}")
 
 
 def cmd_show(args):
     """One full entry by address. The address is the fingerprint: the
     fetched entry is re-hashed against it, so recall's pointers are
-    self-verifying — the one place recall touches a hash, and still not
-    a verdict: a mismatch is a warning that names the real judge."""
+    self-verifying — still not a verdict: a mismatch is a warning that
+    names the real judge. A receipt that names its call and hashes its
+    input is held against the transcript's record of that call
+    (`call_testimony`, ADR-0047), testimony and never a verdict."""
     match, code = resolve_address(args)
     if match is None:
         return code
     log, entry = match
     stored = entry["entry_hash"]
     unhashed = {k: v for k, v in entry.items() if k != "entry_hash"}
-    recomputed = hashlib.sha256(json.dumps(
-        unhashed, sort_keys=True, separators=(",", ":"),
-        ensure_ascii=False).encode("utf-8")).hexdigest()
+    recomputed = hashlib.sha256(canonical_bytes(unhashed)).hexdigest()
     verified = recomputed == stored
 
     # Hashed above on the raw entry; from here on only the display is
@@ -7035,6 +7219,11 @@ def cmd_show(args):
                       f"{visible(ref.get('sha256', ''))}")
     else:
         print("files: (none)")
+    said = call_testimony(log, entry.get("action", ""),
+                          Path(getattr(args, "witness", None)
+                               or WITNESS_ROOT))
+    if said:
+        print(said)
     me = Path(__file__).resolve().as_posix()
     print(f'context: python "{me}" timeline {visible(stored[:8])} '
           f'--repo "{invoking_repo(args).as_posix()}"')
@@ -7075,7 +7264,7 @@ def cmd_search_cli(args):
         print(f"{address_of(entry)}  {visible(ts[:10])} {hhmm(ts)}  "
               f"{visible(repo_name)}/{visible(session[:8])}  "
               f"{clip(entry.get('actor', ''), 16)}  "
-              f"{clip(entry.get('action', ''))}")
+              f"{clip(listed_action(entry.get('action', '')))}")
     return 0
 
 
@@ -7099,7 +7288,7 @@ def cmd_timeline(args):
         mark = "   <- here" if e is entries[idx] else ""
         print(f"{address_of(e)}  {hhmm(str(e.get('ts', '')))}  "
               f"{clip(e.get('actor', ''), 16)}  "
-              f"{clip(e.get('action', ''))}{mark}")
+              f"{clip(listed_action(e.get('action', '')))}{mark}")
     return 0
 
 
@@ -7461,7 +7650,7 @@ def histogram_key(entry):
     actor = entry.get("actor")
     if actor not in HOOK_ACTORS:
         return "other"
-    head = str(entry.get("action", "")).split(":", 1)[0].strip()
+    head = tool_of(entry.get("action", ""))
     if head.startswith("mcp__"):
         return "mcp"
     if actor == "openai-agents" and head != "handoff":
@@ -12179,7 +12368,7 @@ function hitRow(hit) {
   row.appendChild(el("span", "where", hit.repo + " · " + hit.session));
   row.appendChild(el("span", "entry",
     "entry " + hit.n + (hit.ts ? " · " + hit.ts : "")));
-  row.appendChild(el("p", "said", hit.action));
+  row.appendChild(el("p", "said", hit.listed));
   row.addEventListener("click", () => visit(hit));
   return row;
 }
@@ -12588,6 +12777,11 @@ def main(argv):
         "show", parents=[recall_common],
         help="one full entry by entry address (self-verifying)")
     show.add_argument("address", help="entry-hash prefix, 4+ hex chars")
+    show.add_argument("--witness", default=str(WITNESS_ROOT),
+                      help="the harness transcript layout where the "
+                           "session's transcript is looked for, to compare "
+                           "a receipt's input hash with its record of the "
+                           "call (ADR-0047)")
     show.set_defaults(func=cmd_show)
     verify = sub.add_parser(
         "verify", parents=[recall_common],

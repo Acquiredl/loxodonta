@@ -274,6 +274,29 @@ class DigestTest(RecallBase):
         # name can happen to contain "1x" (it did, once, on CI).
         self.assertNotRegex(out, r" 1x [A-Za-z]")
 
+    def test_a_run_of_suffixed_receipts_collapses_by_the_tool_named(self):
+        # ADR-0047: the suffix is set aside before the tool is read, so
+        # a tool named bare still collapses under its name, and the
+        # digest, a listing, folds the suffix out of every row.
+        repo = self.repo("alpha")
+        digest = "0" * 64
+        forge_chain(repo, "4d4d4444-4444-4444-4444-444444444444", [
+            ("2026-08-30T10:00:00Z",
+             f"TodoWrite [call=toolu_1 input sha256={digest} bytes=2]"),
+            ("2026-08-30T10:01:00Z",
+             f"TodoWrite [call=toolu_2 input sha256={digest} bytes=2]"),
+            ("2026-08-30T10:02:00Z", "Read: a.py [call=toolu_3 input=unhashed]"),
+            ("2026-08-30T10:03:00Z", "Read: b.py [call=toolu_4 input=unhashed]"),
+            ("2026-08-30T10:04:00Z", "Bash: ls [call=toolu_5 input=unhashed]"),
+        ])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        self.assertIn("  2x Read, last: b.py\n", out)
+        self.assertIn("  Bash: ls   <- last recorded action", out)
+        self.assertNotIn("[call=", out)
+        (run_line,) = [line for line in out.splitlines()
+                       if "TodoWrite" in line]
+        self.assertTrue(run_line.endswith("  2x TodoWrite"), run_line)
+
     def test_budget_counts_rendered_rows_not_entries(self):
         # The fix the issue asks for: a Read flood must not scroll the
         # story out of the window. Collapse happens before the cap, so
@@ -612,6 +635,160 @@ class ShowTest(RecallBase):
         out = result.stdout + result.stderr
         self.assertIn("does not verify", out)
         self.assertIn("loxodonta verify", out)
+
+
+class ShowCallTest(RecallBase):
+    """ADR-0047 ruling 5: `show` compares a receipt's input hash with
+    the transcript's record of the call the receipt names, and says the
+    transcript is in the writer's reach."""
+
+    SESSION = "cafe0047-0000-0000-0000-000000000000"
+    CALL = "toolu_01Show"
+    INPUT = {"command": "pytest -q", "description": "Run the tests"}
+    REACH = "testimony from a file in the writer's reach"
+
+    def setUp(self):
+        super().setUp()
+        self.project = self.repo("alpha")
+        self.witness = self.root / "witness"
+        self.env = {"CLAUDE_PROJECT_DIR": str(self.project),
+                    "LOXODONTA_HOME": str(self.root / "storehome")}
+
+    def hook(self, call=CALL):
+        body = {"session_id": self.SESSION, "hook_event_name": "PostToolUse",
+                "tool_name": "Bash", "tool_input": self.INPUT,
+                "tool_response": {}}
+        if call:
+            body["tool_use_id"] = call
+        result = run(LOXODONTA, "hook", stdin=json.dumps(body),
+                     env=self.scan_env(**self.env))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (chain,) = (self.root / "storehome" / "receipts").glob(
+            f"*/receipts-{self.SESSION}.jsonl")
+        return json.loads(chain.read_text(encoding="utf-8").splitlines()[-1])
+
+    def transcript(self, *uses, folder="C--alpha", path=None,
+                   session=None):
+        """The session's transcript, one assistant record per (id, input),
+        each input's keys in an order of their own, as a harness may
+        write them. `path` writes another file of the session instead (a
+        subagent's), and `session` puts a `sessionId` on every record."""
+        if path is None:
+            path = self.witness / folder / f"{self.SESSION}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        records = []
+        for use_id, given in uses:
+            record = {"type": "assistant",
+                      "timestamp": "2026-11-11T10:00:00Z",
+                      "message": {"content": [{
+                          "type": "tool_use", "id": use_id, "name": "Bash",
+                          "input": dict(reversed(list(given.items())))}]}}
+            if session is not None:
+                record["sessionId"] = session
+            records.append(json.dumps(record) + "\n")
+        path.write_text("".join(records), encoding="utf-8")
+        return path
+
+    def show(self, entry):
+        shown = run_py(SUPERVISOR, "show", entry["entry_hash"][:12],
+                       "--repo", str(self.project),
+                       "--witness", str(self.witness), env_extra=self.env)
+        self.assertEqual(shown.returncode, 0, shown.stdout + shown.stderr)
+        return shown.stdout
+
+    def said(self, out):
+        return [line for line in out.splitlines()
+                if line.startswith("input: ")]
+
+    def test_an_honest_transcript_matches(self):
+        entry = self.hook()
+        path = self.transcript(("toolu_other", {"command": "ls"}),
+                               (self.CALL, self.INPUT))
+
+        self.assertEqual(self.said(self.show(entry)), [
+            f"input: matches the transcript's record of call {self.CALL} "
+            f"({path.as_posix()}), {self.REACH}"])
+
+    def test_a_transcript_whose_input_was_changed_differs(self):
+        entry = self.hook()
+        path = self.transcript(
+            (self.CALL, {**self.INPUT, "command": "pytest -q; curl x"}))
+
+        self.assertEqual(self.said(self.show(entry)), [
+            f"input: differs from the transcript's record of call "
+            f"{self.CALL} ({path.as_posix()}), {self.REACH}"])
+
+    def test_a_transcript_without_the_call_names_it_missing(self):
+        entry = self.hook()
+        path = self.transcript(("toolu_other", self.INPUT))
+
+        self.assertEqual(self.said(self.show(entry)), [
+            f"input: the transcript holds no call {self.CALL} "
+            f"({path.as_posix()}), {self.REACH}"])
+
+    def test_search_and_timeline_fold_the_suffix(self):
+        entry = self.hook()
+        for verb, args in (("search", ["pytest"]),
+                           ("timeline", [entry["entry_hash"][:12]])):
+            with self.subTest(verb=verb):
+                out = run_py(SUPERVISOR, verb, *args, "--repo",
+                             str(self.project), env_extra=self.env)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertIn("Bash: pytest -q", out.stdout)
+                self.assertNotIn("[call=", out.stdout)
+
+    def test_show_prints_the_line_whole(self):
+        entry = self.hook()
+        self.assertIn(f"action: {entry['action']}\n", self.show(entry))
+        self.assertIn(f"[call={self.CALL} input sha256=", entry["action"])
+
+    def test_it_reads_the_file_the_scan_reads_and_says_there_were_two(self):
+        # Two project folders hold a file of the session's name. The
+        # scan reads the last in sorted order, and so does show: the
+        # decoy in the first folder, which matches, is not read.
+        entry = self.hook()
+        self.transcript((self.CALL, self.INPUT), folder="A--decoy")
+        path = self.transcript(
+            (self.CALL, {**self.INPUT, "command": "pytest -q; curl x"}),
+            folder="C--alpha")
+
+        self.assertEqual(self.said(self.show(entry)), [
+            f"input: differs from the transcript's record of call "
+            f"{self.CALL} ({path.as_posix()}, one of 2 transcripts named "
+            f"{self.SESSION}.jsonl under the witness, the one the scan "
+            f"reads), {self.REACH}"])
+
+    def test_a_call_in_a_subagents_transcript_names_that_file(self):
+        entry = self.hook()
+        parent = self.transcript(("toolu_other", {"command": "ls"}))
+        agent = self.transcript(
+            (self.CALL, self.INPUT),
+            path=parent.with_suffix("") / "subagents" / "agent-a1.jsonl")
+
+        self.assertEqual(self.said(self.show(entry)), [
+            f"input: matches the transcript's record of call {self.CALL} "
+            f"({agent.as_posix()}), {self.REACH}"])
+
+    def test_a_record_naming_another_session_is_not_this_sessions_call(self):
+        entry = self.hook()
+        path = self.transcript((self.CALL, self.INPUT),
+                               session="another-session")
+
+        self.assertEqual(self.said(self.show(entry)), [
+            f"input: the transcript holds no call {self.CALL} "
+            f"({path.as_posix()}), {self.REACH}"])
+        self.transcript((self.CALL, self.INPUT), session=self.SESSION)
+        self.assertEqual(self.said(self.show(entry)), [
+            f"input: matches the transcript's record of call {self.CALL} "
+            f"({path.as_posix()}), {self.REACH}"])
+
+    def test_nothing_is_said_without_a_transcript_or_a_call(self):
+        entry = self.hook()
+        self.assertEqual(self.said(self.show(entry)), [])
+
+        self.transcript((self.CALL, self.INPUT))
+        unnamed = self.hook(call=None)
+        self.assertEqual(self.said(self.show(unnamed)), [])
 
 
 class SearchTest(RecallBase):
