@@ -259,7 +259,9 @@ class ManagedInstallTest(ManagedBase):
     def test_the_matcher_flag_narrows_and_a_rerun_without_it_widens(self):
         # The administrator narrows it on the command line; the next
         # run without the flag widens it again, and says from what.
-        self.install("--managed", "--matcher", "Edit|Write|Bash")
+        narrowed = self.install("--managed", "--matcher", "Edit|Write|Bash")
+        # It says what it wrote, and not the plain install's warning.
+        self.assertNotIn("is narrower", narrowed.stdout)
         self.assertEqual(self.matchers(self.managed_file),
                          ["Edit|Write|Bash", "Edit|Write|Bash"])
         self.assertEqual(self.epochs()[-1]["matchers"], ["Edit|Write|Bash"])

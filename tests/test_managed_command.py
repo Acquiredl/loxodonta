@@ -211,6 +211,19 @@ class TheDigestTest(ManagedCommandBase):
         self.assertEqual(managed.returncode, 0, managed.stderr)
         self.assertEqual(managed.stdout, "")
 
+    def test_under_the_word_a_malformed_knob_does_not_silence_it(self):
+        # The supervisor reads its knobs at import, before the parser:
+        # SUPERVISOR_HOT_TIMES=x stops a plain digest with 64, and a
+        # managed one never reads it.
+        env = {**self.env, "SUPERVISOR_HOT_TIMES": "x"}
+
+        plain = run(SUPERVISOR, "digest", env=env, timeout=60)
+        managed = run(SUPERVISOR, "digest", "--managed", env=env, timeout=60)
+
+        self.assertEqual(plain.returncode, 64, plain.stderr)
+        self.assertIn("SUPERVISOR_HOT_TIMES", plain.stderr)
+        self.assertEqual(managed.returncode, 0, managed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

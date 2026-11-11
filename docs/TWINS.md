@@ -194,7 +194,7 @@ Names: `helper_path`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
 
-openssl, ssh-keygen and git run by the full path a walk of PATH finds, never from the working directory, in every file that runs one (ADR-0043 ruling 4).
+openssl, ssh-keygen, git, gh and claude run by the full path a walk of PATH finds, never from the working directory, in every file that runs one (ADR-0043 ruling 4).
 
 ### A chain batch's content type
 
@@ -213,3 +213,4 @@ These names are defined in more than one file, and each file means its own thing
 | `main` | `loxodonta.py`, `supervisor.py`, `receiver.py` | Each file's own command line. |
 | `cmd_verify` | `loxodonta.py`, `supervisor.py` | The recorder's `verify` judges the chain at a path; the supervisor's finds the chain holding an entry address, then prints the recorder's verdict on it. |
 | `cmd_serve` | `supervisor.py`, `receiver.py` | The supervisor serves its dashboard and recall; the receiver serves the URL published chains are sent to. |
+| `MANAGED_VERB` | `loxodonta.py`, `supervisor.py` | The verb whose `--managed` sets the bit: the recorder's `hook`, the supervisor's `digest` (ADR-0043). |

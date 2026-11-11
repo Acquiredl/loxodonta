@@ -80,10 +80,13 @@ set, and reads the environment in one place.
    connect directly.
 
 4. **A helper program is run by its full path, in every mode and in
-   every tool.** `openssl`, `ssh-keygen` and `git` are found by the
-   tool's own walk of `PATH`, which skips the working directory and
-   every entry that is not an absolute path, and the path found is the
-   one run. A helper not found is absent, and what was said for an
+   every tool.** `openssl`, `ssh-keygen`, `git`, `gh` and the default
+   `claude` of `explain` are found by the tool's own walk of `PATH`,
+   which skips the working directory under any spelling and every
+   entry that is not an absolute path, and the path found is the one
+   run. On Windows only an `.exe` or `.com` is taken, never a batch
+   file. An `--llm` the operator types is
+   run as typed. A helper not found is absent, and what was said for an
    absent helper is said. This is in the verifier's fence, so
    `verifier.py` is generated again and carries it to the recipient.
 
@@ -133,6 +136,10 @@ It does not claim:
 - **A proxy the network requires.** A managed install behind a proxy
   it must use cannot publish, stamp or anchor until the install has a
   way to name one.
+- **The certificates a send trusts.** The TLS library still reads
+  `SSL_CERT_FILE` and `SSL_CERT_DIR` under the word. The road is
+  fixed, but who is believed at its end is not, and using that needs
+  a place on the network.
 
 ### Measured
 

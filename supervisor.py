@@ -112,8 +112,10 @@ EX_TEMPFAIL = 75  # another writer holds the chain's lock
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 MANAGED_READS = ("CLAUDE_PROJECT_DIR",)
+MANAGED_VERB = "digest"  # the recorder's is "hook"
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-MANAGED_RUN = False
+MANAGED_RUN = (sys.argv[1:2] == [MANAGED_VERB]
+               and "--managed" in sys.argv[2:])
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
@@ -7766,7 +7768,10 @@ def send_export(data, out, archive):
     then the issue. The issue body is written beside the export first,
     so a missing `gh` leaves everything needed to file by hand."""
     issue = out.with_name(out.stem + ".issue.md")
-    gh = shutil.which("gh")
+    try:
+        gh = helper_path("gh")
+    except FileNotFoundError:
+        gh = None
     if gh is None:
         refused = write_export(issue, issue_body(data, None,
                                                  archive is not None),
@@ -12219,30 +12224,29 @@ GIT_TIMEOUT = 10
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def helper_path(name):
     """The full path of the helper program `name` (openssl, ssh-keygen,
-    git), found by walking PATH: only entries that are absolute paths,
-    never an empty one, a relative one or the working directory, so a
-    file of that name in the folder a check is run from is never the
-    program that runs. On Windows, where a bare name is looked for in
-    the working directory before PATH, an entry with no drive letter
-    or server is read against the working directory's drive, so it
-    counts as relative there, and each name is tried with the PATHEXT
-    extensions. Raises FileNotFoundError when none is found, as running
-    an absent program does, so a missing helper is said as it always
-    was."""
-    try:
-        here = os.path.normcase(os.getcwd())
-    except OSError:
-        here = None
+    git, gh, claude), found by walking PATH: only entries that are
+    absolute paths, never an empty one, a relative one or one that is
+    the working directory under any spelling, so a file of that name in
+    the folder a check is run from is never the program that runs. On
+    Windows, where a bare name is looked for in the working directory
+    before PATH, an entry with no drive letter or server is read against
+    the working directory's drive, so it counts as relative there; the
+    names tried are `name.exe` and `name.com`, never a batch file, which
+    would run through cmd.exe. Raises FileNotFoundError when none is
+    found, as running an absent program does, so a missing helper is
+    said as it always was."""
     windows = sys.platform == "win32"
-    endings = [""]
-    if windows:
-        endings = [ending for ending in os.environ.get(
-            "PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if ending]
+    endings = (".exe", ".com") if windows else ("",)
     for folder in os.get_exec_path():
         absolute = os.path.isabs(folder) and (
             not windows or os.path.splitdrive(folder)[0] != "")
-        if not absolute or os.path.normcase(os.path.normpath(folder)) == here:
+        if not absolute:
             continue
+        try:
+            if os.path.samefile(folder, os.getcwd()):
+                continue
+        except OSError:
+            continue  # an entry that cannot be compared is not trusted
         for ending in endings:
             found = os.path.join(folder, name + ending)
             if os.path.isfile(found) and os.access(found, os.X_OK):
@@ -12655,8 +12659,6 @@ def main(argv):
     package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)
-    global MANAGED_RUN
-    MANAGED_RUN = args.command == "digest" and args.managed
     # The cadence says when and a URL says where, the head's or the
     # chain's; one without the other is a command spoken wrong, refused
     # before any tick runs. `serve` settles this itself, after reading

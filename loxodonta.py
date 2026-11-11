@@ -1360,30 +1360,29 @@ STAMP_NO_ATTIME = ("the authority's certificate has expired, and this "
 
 def helper_path(name):
     """The full path of the helper program `name` (openssl, ssh-keygen,
-    git), found by walking PATH: only entries that are absolute paths,
-    never an empty one, a relative one or the working directory, so a
-    file of that name in the folder a check is run from is never the
-    program that runs. On Windows, where a bare name is looked for in
-    the working directory before PATH, an entry with no drive letter
-    or server is read against the working directory's drive, so it
-    counts as relative there, and each name is tried with the PATHEXT
-    extensions. Raises FileNotFoundError when none is found, as running
-    an absent program does, so a missing helper is said as it always
-    was."""
-    try:
-        here = os.path.normcase(os.getcwd())
-    except OSError:
-        here = None
+    git, gh, claude), found by walking PATH: only entries that are
+    absolute paths, never an empty one, a relative one or one that is
+    the working directory under any spelling, so a file of that name in
+    the folder a check is run from is never the program that runs. On
+    Windows, where a bare name is looked for in the working directory
+    before PATH, an entry with no drive letter or server is read against
+    the working directory's drive, so it counts as relative there; the
+    names tried are `name.exe` and `name.com`, never a batch file, which
+    would run through cmd.exe. Raises FileNotFoundError when none is
+    found, as running an absent program does, so a missing helper is
+    said as it always was."""
     windows = sys.platform == "win32"
-    endings = [""]
-    if windows:
-        endings = [ending for ending in os.environ.get(
-            "PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if ending]
+    endings = (".exe", ".com") if windows else ("",)
     for folder in os.get_exec_path():
         absolute = os.path.isabs(folder) and (
             not windows or os.path.splitdrive(folder)[0] != "")
-        if not absolute or os.path.normcase(os.path.normpath(folder)) == here:
+        if not absolute:
             continue
+        try:
+            if os.path.samefile(folder, os.getcwd()):
+                continue
+        except OSError:
+            continue  # an entry that cannot be compared is not trusted
         for ending in endings:
             found = os.path.join(folder, name + ending)
             if os.path.isfile(found) and os.access(found, os.X_OK):
@@ -3155,9 +3154,11 @@ EX_TEMPFAIL = 75     # another writer holds the lock; try again
 # is still found through the environment, by the standard library.
 
 MANAGED_READS = ("CLAUDE_PROJECT_DIR",)
-# Set once, by main, from `--managed` on the hook's or the digest's
-# command; never from anything a run can set.
-MANAGED_RUN = False
+MANAGED_VERB = "hook"  # the supervisor's is "digest"
+# Read from the command's own words before the parser runs, since knobs
+# read at import must already see it; never from anything a run can set.
+MANAGED_RUN = (sys.argv[1:2] == [MANAGED_VERB]
+               and "--managed" in sys.argv[2:])
 
 
 def environment(name, default=None):
@@ -5236,12 +5237,15 @@ def cmd_explain(args):
         verdict=verdict,
         timeline="\n".join(timeline_lines(entries, breaks, warns)),
     )
-    command = split_command(args.llm)
+    typed = args.llm is not None
+    command = split_command(args.llm) if typed else ["claude", "-p"]
     if not command:
         print("error: --llm is empty — pass a command to narrate with, "
               "or install the `claude` CLI", file=sys.stderr)
         return EX_USAGE
     try:
+        if not typed:  # the default is found as every helper is (ADR-0043)
+            command[0] = helper_path(command[0])
         # The prompt crosses the pipe as UTF-8 whatever the console
         # speaks — actions carry arbitrary characters, and the locale
         # codec would crash on the first one it cannot spell, stranding
@@ -7370,7 +7374,9 @@ def wire_hooks(settings, args, folder=None, digest_too=True, matcher=None):
         installed += set_matcher(post, matcher, "PostToolUse", ours)
     for block in post:
         narrow = block.get("matcher", "*")
-        if ours(block) and narrow != "*":
+        # A managed install's matcher is the administrator's own choice:
+        # it says what it wrote and nothing more (ADR-0043).
+        if ours(block) and narrow != "*" and matcher is None:
             print(f'note: your recorder matcher "{narrow}" is narrower '
                   'than the current default "*" — uncovered tool calls '
                   "leave no receipts (see docs/HOOK.md)")
@@ -8049,7 +8055,7 @@ def main(argv=None):
     explain_parser = sub.add_parser(
         "explain", parents=[common],
         help="narrate the log via a language model (testimony, not a verdict)")
-    explain_parser.add_argument("--llm", default="claude -p", metavar="CMD",
+    explain_parser.add_argument("--llm", metavar="CMD",
                                 help="command the prompt is piped to "
                                      "(default: `claude -p`)")
     explain_parser.set_defaults(func=cmd_explain)
@@ -8170,8 +8176,6 @@ def main(argv=None):
         argv = argv[:split]
 
     args = parser.parse_args(argv)
-    global MANAGED_RUN
-    MANAGED_RUN = args.command == "hook" and args.managed
     if args.command == "run":
         if not command_argv:
             parser.error("run requires `-- <command> [args...]` after its flags")

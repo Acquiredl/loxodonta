@@ -227,7 +227,7 @@ TWINS = (
          "ones the harness sets, so the store and the managed file they "
          "name are the built-in ones (ADR-0043)."),
     Twin("Finding a helper program", ("helper_path",), ORIGINAL, BOTH,
-         "openssl, ssh-keygen and git run by the full path a walk of PATH "
+         "openssl, ssh-keygen, git, gh and claude run by the full path a walk of PATH "
          "finds, never from the working directory, in every file that "
          "runs one (ADR-0043 ruling 4)."),
     Twin("A chain batch's content type", ("CHAIN_TYPE",), ORIGINAL, RECEIVER,
@@ -245,6 +245,9 @@ DIFFERENT = (
     Different("cmd_serve", ("supervisor.py", "receiver.py"),
               "The supervisor serves its dashboard and recall; the "
               "receiver serves the URL published chains are sent to."),
+    Different("MANAGED_VERB", ("loxodonta.py", "supervisor.py"),
+              "The verb whose `--managed` sets the bit: the recorder's "
+              "`hook`, the supervisor's `digest` (ADR-0043)."),
 )
 
 

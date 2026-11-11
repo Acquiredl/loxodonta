@@ -540,56 +540,66 @@ class StampCommandTest(StoreCase):
         self.assertRegex(result.stdout, r"(?m)^VALID$")
 
     def plant_openssl(self, folder):
-        """A stand-in openssl in `folder` that leaves a file named `ran`
-        beside itself when it runs: a script on POSIX, a .bat and a .cmd
-        on Windows, where a bare name finds those through PATHEXT."""
+        """A program named openssl in `folder` that is not openssl: on
+        Windows a copy of the system's where.exe, a real executable, so
+        Windows' own lookup would run it by a bare name; on POSIX a
+        script that exits 1. Either way, when verify runs it, verify
+        does not say openssl is missing."""
         if sys.platform == "win32":
-            for ending in (".bat", ".cmd"):
-                (folder / f"openssl{ending}").write_text(
-                    '@echo ran> "%~dp0ran"\r\n', encoding="utf-8")
+            system = os.environ.get("SystemRoot", r"C:\Windows")
+            shutil.copyfile(os.path.join(system, "System32", "where.exe"),
+                            folder / "openssl.exe")
         else:
             script = folder / "openssl"
-            script.write_text(
-                f"#!{sys.executable}\n"
-                "import os, sys\n"
-                "open(os.path.join(os.path.dirname(os.path.abspath("
-                "sys.argv[0])), 'ran'), 'w').close()\n", encoding="utf-8")
+            script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
             script.chmod(0o755)
-        return folder / "ran"
+
+    def spellings(self, folder):
+        """The working folder under names other than its own: a symlink
+        on POSIX; a junction and the long-path form on Windows."""
+        linked = temp_folder(self) / "linked"
+        if sys.platform == "win32":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(linked),
+                            str(folder)], capture_output=True, check=True,
+                           timeout=30)
+            return [str(linked), "\\\\?\\" + str(folder)]
+        linked.symlink_to(folder, target_is_directory=True)
+        return [str(linked)]
 
     def test_an_openssl_in_the_working_folder_is_never_run(self):
-        # ADR-0043 ruling 4: PATH names the working folder three ways, as
-        # ".", as an empty entry and by its full path, and a stand-in
-        # openssl sits there. It is not run: verify says what it says
-        # when there is no openssl, and the token is not judged.
+        # ADR-0043 ruling 4: PATH names the working folder as ".", as an
+        # empty entry, by its full path and under other spellings, and a
+        # program named openssl sits there. It is not run: verify says
+        # what it says when there is no openssl, and exits 0.
         self.stamp()
         chain_file = self.workdir / "authority.pem"
         chain_file.write_text("not read\n", encoding="utf-8")
-        ran = self.plant_openssl(self.workdir)
-        nowhere = temp_folder(self)
-        path = os.pathsep.join([".", "", str(self.workdir), str(nowhere)])
+        self.plant_openssl(self.workdir)
+        path = os.pathsep.join([".", "", str(self.workdir),
+                                *self.spellings(self.workdir),
+                                str(temp_folder(self))])
 
         result = self.verify("--authority-chain", str(chain_file),
                              env=clean_env(PATH=path))
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("stamp not judged: openssl is not on PATH", result.stdout)
-        self.assertFalse(ran.exists(), "the working folder's openssl ran")
 
     def test_an_openssl_elsewhere_on_path_is_run(self):
-        # The same stand-in in a folder PATH names that is not the
+        # The same program in a folder PATH names that is not the
         # working folder is the openssl verify runs, so the test above
-        # is not passing because the stand-in never runs anywhere.
+        # is not passing because the program never runs anywhere.
         self.stamp()
         chain_file = self.workdir / "authority.pem"
         chain_file.write_text("not read\n", encoding="utf-8")
         elsewhere = temp_folder(self)
-        ran = self.plant_openssl(elsewhere)
+        self.plant_openssl(elsewhere)
 
-        self.verify("--authority-chain", str(chain_file),
-                    env=clean_env(PATH=str(elsewhere)))
+        result = self.verify("--authority-chain", str(chain_file),
+                             env=clean_env(PATH=str(elsewhere)))
 
-        self.assertTrue(ran.exists(), "the openssl on PATH did not run")
+        self.assertNotIn("openssl is not on PATH", result.stdout)
+        self.assertIn("stamp", result.stdout)
 
     def test_verify_never_asks_the_authority(self):
         self.stamp()

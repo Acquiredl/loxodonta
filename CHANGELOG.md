@@ -21,7 +21,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
-- `openssl`, `ssh-keygen` and `git` run by the full path a walk of `PATH` finds, skipping the working folder, empty entries and relative ones, so a file of that name where `verify` runs is never the program run (ADR-0043).
+- `openssl`, `ssh-keygen`, `git`, `gh` and `explain`'s default `claude` run by the full path a walk of `PATH` finds, never from the working folder, so a file of that name where `verify` runs is never the program run (ADR-0043).
 
 ## [0.19.0] - 2026-10-25
 
