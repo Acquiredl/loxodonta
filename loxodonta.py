@@ -4848,6 +4848,8 @@ def deliver(log, url, session, start, budget, steady=False):
             batches.append((first, last, head, answer.appended))
             if answer.connects:
                 good = max(good, last)
+                if bad is not None and bad <= good:
+                    bad = None   # a fill after a 409 closed the gap below it
             elif first <= good + 1:
                 # The entry before it connects, so it must: a remote that
                 # says otherwise is not one this search can follow.

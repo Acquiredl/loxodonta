@@ -199,6 +199,39 @@ class EmptyHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class ScriptedHandler(http.server.BaseHTTPRequestHandler):
+    """A remote whose answer to each batch is the test's: the server's
+    `script(server, ns)`, given the `n` of every entry posted, returns
+    (status, the JSON body). What `receiver.py` never says within one
+    send, a remote in front of it may."""
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        ns = [json.loads(line)["n"] for line in body.splitlines()]
+        self.server.received.append(self.headers.get("X-Loxodonta-Range"))
+        status, said = self.server.script(self.server, ns)
+        answer = json.dumps(said).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(answer)))
+        self.end_headers()
+        self.wfile.write(answer)
+
+    def log_message(self, *_):
+        pass
+
+
+def serve_scripted(case, script):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+                                             ScriptedHandler)
+    server.received, server.script, server.held = [], script, None
+    server.url = f"http://127.0.0.1:{server.server_address[1]}/hook"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    case.addCleanup(server.server_close)
+    case.addCleanup(server.shutdown)
+    return server
+
+
 def serve_empty(case):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), EmptyHandler)
     server.received = []
@@ -1133,6 +1166,57 @@ class ConnectsToGenesisTest(AsWrittenBase):
                          [0, 1, 2])
         (row,) = entry_attempts(log)
         self.assertIn("line 3 of the chain is not an entry", row["outcome"])
+
+    def test_a_remote_whose_answers_contradict_each_other_is_named(self):
+        # It says the genesis connects and every entry above it does not,
+        # entry 1 included: no gap can be found between them, so the
+        # search stops and the attempt row says why.
+        flags, log = self.drawer_chain(3)
+
+        def script(server, ns):
+            server.held = max(ns + [server.held or 0])
+            return 200, {"appended": len(ns), "dropped": 0,
+                         "held_n": server.held, "connects": ns[0] == 0}
+
+        remote = serve_scripted(self, script)
+
+        done = self.call(*flags, "--publish-chain", remote.url)
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        # The entry in hand, two halvings, then entries 1 to 3 from the
+        # genesis that connects.
+        self.assertEqual(remote.received, ["3-3", "1-1", "0-0", "1-3"])
+        (row,) = entry_attempts(log)
+        self.assertEqual(row["outcome"],
+                         "the remote's answers contradict each other")
+
+    def test_a_409_in_the_halving_search_fills_from_what_is_held(self):
+        # The entry in hand is kept and does not connect; then the remote
+        # answers as one holding the genesis alone, so the halving's post
+        # is a hole. The fill from entry 1 reaches the entry in hand and
+        # connects: the send is done, and nothing is written down.
+        flags, log = self.drawer_chain(6)
+
+        def script(server, ns):
+            if server.held is None:
+                server.held = 0
+                return 200, {"appended": 1, "dropped": 0, "held_n": ns[-1],
+                             "connects": False}
+            if ns[0] > server.held + 1:
+                return 409, {"held_n": server.held, "connects": False,
+                             "refused": f"entry {ns[0]} leaves a hole"}
+            server.held = max(server.held, ns[-1])
+            return 200, {"appended": len(ns), "dropped": 0,
+                         "held_n": server.held, "connects": True}
+
+        remote = serve_scripted(self, script)
+
+        done = self.call(*flags, "--publish-chain", remote.url)
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(remote.received, ["6-6", "2-2", "1-6"])
+        self.assertEqual(entry_attempts(log), [])
 
     def test_one_entry_past_the_cap_still_goes_alone(self):
         # The cap bounds how many entries share a batch: a cap smaller
