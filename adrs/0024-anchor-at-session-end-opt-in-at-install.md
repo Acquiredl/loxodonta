@@ -148,3 +148,18 @@ the event boundary is the one that needs no daemon running.
 - Raised: README grill, 2026-09-06; issue #146.
 - Glossary terms **added or sharpened**: *Anchor* (the session-end
   anchor), *Head record* (a same-login remote is writer-reachable).
+
+## Addendum, 2026-11-11: the recording path sends at `full`
+
+Ruling 1 kept the network out of the recording path, against a budget
+of about 135 ms a call. ADR-0045 ruling 3 narrows it: at `full`, and
+under `custom` with the chain's flag, the installer writes the chain's
+URL on the recording command too, and the hook sends the entries the
+receiver does not hold before it returns, waiting at most one second,
+name lookup included, after the receipt is on disk and the chain's
+lock let go. A send that fails is never the hook's failure, and prints
+nothing. Below `full`, and under `custom` without that flag, ruling 1
+stands as written: nothing is sent in the recording path. Anchoring
+every N receipts inside the hook stays rejected; the anchor's rows,
+like the stamp's, now follow the anchor to the chain's URL instead
+(ADR-0045 ruling 5).

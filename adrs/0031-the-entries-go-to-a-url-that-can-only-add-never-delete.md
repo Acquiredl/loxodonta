@@ -212,3 +212,20 @@ one-switch version.
   modes for the ladder and its plain names.
 - Raised: the author, 2026-09-15, after the first community post; grilled
   2026-09-15 and 2026-09-16.
+
+## Addendum, 2026-11-11: each entry leaves as it is written, and the receiver says what it holds
+
+ADR-0045 narrows rulings 2, 3 and 4. Ruling 2's send starts from the
+entry after the last one the remote says it holds: the receiver answers
+each batch with the `n` and the `entry_hash` of the last entry it holds
+of that chain, and the memo's chain rows are a hint for where to start
+and a note of what left, deciding nothing. Ruling 3's last sentence no
+longer holds at `full`: the recording hook sends each entry as it is
+written, under one second, and the session end and the keeper send what
+those sends left, by the same rule. Ruling 4's receiver gains a
+refusal, `409` for a batch that would leave a hole after what it holds,
+and a second kind of file, a chain's anchor and stamp rows kept beside
+its copy. It still refuses everything but a POST and has no read
+endpoint. *The tail since the last send*, under *What none of this
+survives*, is at `full` about a second long while the receiver is
+reachable, and as long as a send is stopped.
