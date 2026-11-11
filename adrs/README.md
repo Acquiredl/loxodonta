@@ -50,3 +50,4 @@ Each ADR records a decision that is hard to reverse and why it was made; filenam
 | 0044 | [ANCHORED names a block that was checked](0044-anchored-names-a-block-that-was-checked.md) | proposed |
 | 0045 | [Entries leave as they are written, and the receiver says what it holds](0045-entries-leave-as-written-the-receiver-says-what-it-holds.md) | proposed |
 | 0046 | [A disagreement is a finding until it is accepted out of the writer's reach](0046-a-disagreement-is-a-finding-until-accepted-out-of-reach.md) | proposed |
+| 0047 | [The receipt names its call and commits to its whole input](0047-the-receipt-names-its-call-and-commits-to-its-input.md) | proposed |
