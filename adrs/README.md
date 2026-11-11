@@ -47,3 +47,4 @@ Each ADR records a decision that is hard to reverse and why it was made; filenam
 | 0041 | [The harness's events are a second record out of reach, judged where they land](0041-the-harness-events-are-a-second-record-out-of-reach.md) | proposed |
 | 0042 | [A managed install copies the recorder where only an administrator writes](0042-the-recorder-copied-where-only-an-administrator-writes.md) | proposed |
 | 0043 | [A managed hook takes its orders from its command, never from the environment](0043-a-managed-hook-takes-its-orders-from-its-command.md) | proposed |
+| 0044 | [ANCHORED names a block that was checked](0044-anchored-names-a-block-that-was-checked.md) | proposed |

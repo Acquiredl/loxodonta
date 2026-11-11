@@ -72,8 +72,8 @@ def write_pending_anchor(log, head, submitted,
 def write_completed_anchor(log, head, height=850000, append=False):
     """A minimal but genuine OTS timestamp: one sha256 op, then a Bitcoin
     attestation — enough for `verify --anchors` to replay offline and
-    report ANCHORED, with no network and no calendar (ANCHORING.md §4).
-    `append=True` adds it behind whatever the sidecar already holds,
+    report ANCHOR-CLAIMED, with no network and no calendar (ANCHORING.md
+    §4). `append=True` adds it behind whatever the sidecar already holds,
     the way an upgrade lands beside the pending record it completes."""
     payload = ots_varint(height)
     proof = (b"\x08"
@@ -262,16 +262,16 @@ class StoreScanTest(unittest.TestCase):
         # #504: verify's refusal of an empty chain quoted the path raw on
         # stderr until #511, and a name in it can hold a newline on Linux
         # and macOS, so a writer (ADR-0002) could put a line spelled like
-        # verify's own ANCHORED line into the scan's evidence with nothing
+        # verify's own ANCHOR-CLAIMED line into the scan's evidence with nothing
         # but an empty file at a path it chose. Only a line verify printed
         # on stdout earns the flag (#349); the refusal stays the evidence.
         # Since #511 these asserts also hold because the recorder escapes
         # the path: the #504 guard is a second layer the CLI cannot reach.
         # The line sits in the drawer's name: as a file name, `receipts-`,
-        # a newline, the shortest ANCHORED line, a newline and `.jsonl`
-        # make 256 bytes, one over what Linux allows a name.
-        line = ("ANCHORED: entries 0..0: the attestation claims Bitcoin "
-                "block 0, and the block was not checked; that block's "
+        # a newline, the shortest ANCHOR-CLAIMED line, a newline and
+        # `.jsonl` make 262 bytes, seven over what Linux allows a name.
+        line = ("ANCHOR-CLAIMED: entries 0..0: the attestation claims "
+                "Bitcoin block 0, and the block was not checked; that block's "
                 "merkle root must read " + "0" * 64 + ", which "
                 "--block-header with its header checks")
         self.plant(self.home / "receipts" / f"p\n{line}\n"
@@ -286,7 +286,9 @@ class StoreScanTest(unittest.TestCase):
         self.assertEqual(chain["verdict"], "NO-VERDICT")
         self.assertEqual(chain["exit"], 4)
         self.assertFalse(chain["anchored"], chain["detail"])
+        self.assertFalse(chain["claimed"], chain["detail"])
         self.assertEqual(chain["anchors"]["anchored"], [])
+        self.assertEqual(chain["anchors"]["claimed"], [])
         # #511: the refusal names the path escaped, so the planted line
         # stays inside the one refusal and is no line of its own.
         self.assertNotIn(line, chain["detail"])
@@ -1108,15 +1110,19 @@ class ScanVerdictTest(unittest.TestCase):
 
 
 class ScanAnchorTest(unittest.TestCase):
-    """The scan judges anchors too: VALID and ANCHORED are different
-    claims (ADR-0002), and an anchor that contradicts the log is the
-    exit-3 tier — "this is not the recorded history"."""
+    """The scan judges anchors too: VALID, ANCHOR-CLAIMED and ANCHORED
+    are different claims (ADR-0002, ADR-0044), and an anchor that
+    contradicts the log is the exit-3 tier — "this is not the recorded
+    history"."""
 
     def setUp(self):
         self.root = temp_folder(self)
         self.env = isolated_env(temp_folder(self))
 
-    def test_an_anchored_chain_is_a_distinct_claim_not_just_valid(self):
+    def test_a_claimed_anchor_is_a_distinct_claim_and_never_anchored(self):
+        # The scan gives verify no block header, so a completed proof
+        # names a block nobody checked: ANCHOR-CLAIMED, never ANCHORED
+        # (ADR-0044 ruling 4).
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         write_completed_anchor(log, chain_head(log))
         make_chain(self.root / "beta" / "receipts", "sess-bbbb")
@@ -1125,15 +1131,20 @@ class ScanAnchorTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         sessions = chains_by_session(json.loads(result.stdout))
-        (anchored,) = sessions[("alpha", "sess-aaaa")]
-        self.assertEqual(anchored["verdict"], "VALID")
-        self.assertTrue(anchored["anchored"])
-        self.assertTrue(any(l.startswith("ANCHORED") for l in
-                            anchored["detail"]),
+        (claimed,) = sessions[("alpha", "sess-aaaa")]
+        self.assertEqual(claimed["verdict"], "VALID")
+        self.assertTrue(claimed["claimed"])
+        self.assertFalse(claimed["anchored"])
+        self.assertTrue(any(l.startswith("ANCHOR-CLAIMED") for l in
+                            claimed["detail"]),
                         "the anchor's own words are the evidence")
+        self.assertFalse(any(l.startswith("ANCHORED") for l in
+                             claimed["detail"]), claimed["detail"])
         (plain,) = sessions[("beta", "sess-bbbb")]
         self.assertEqual(plain["verdict"], "VALID")
         self.assertFalse(plain["anchored"],
+                         "unanchored VALID must never borrow the claim")
+        self.assertFalse(plain["claimed"],
                          "unanchored VALID must never borrow the claim")
 
     def test_a_regenerated_chain_fails_the_scan_at_the_gravest_tier(self):
@@ -1250,10 +1261,11 @@ class ScanAnchorTest(unittest.TestCase):
                                      result.stdout + result.stderr)
                     (chain,) = chains_by_session(json.loads(result.stdout))[
                         ("alpha", "sess-aaaa")]
-                    spans = chain["anchors"]["anchored"]
+                    spans = chain["anchors"]["claimed"]
                     self.assertEqual(spans, [{"upto": 2, "height": 850000}]
                                      if settled else [])
-                    self.assertEqual(chain["anchored"], settled)
+                    self.assertEqual(chain["claimed"], settled)
+                    self.assertFalse(chain["anchored"])
                     self.assertFalse(any(line.startswith(
                         "ANCHORED: entries 0..99") for line in chain["detail"]),
                         chain["detail"])
@@ -3928,8 +3940,10 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         anch = self.chain_report(result, "alpha", "sess-anch")["anchors"]
-        self.assertEqual(anch["anchored"], [{"upto": 2, "height": 850000}])
-        self.assertTrue(anch["head"]["anchored"])
+        self.assertEqual(anch["claimed"], [{"upto": 2, "height": 850000}])
+        self.assertEqual(anch["anchored"], [])
+        self.assertTrue(anch["head"]["claimed"])
+        self.assertFalse(anch["head"]["anchored"])
         pend = self.chain_report(result, "alpha", "sess-pend")["anchors"]
         (proof,) = pend["pending"]
         self.assertEqual(proof["submitted"], json.loads(
@@ -3937,10 +3951,13 @@ class AnchorKeeperTest(unittest.TestCase):
             .read_text(encoding="utf-8"))["ts"])
         self.assertIn("calendar", proof)
         self.assertFalse(pend["head"]["anchored"])
+        self.assertFalse(pend["head"]["claimed"])
         bare = self.chain_report(result, "beta", "sess-bare")["anchors"]
         self.assertEqual(bare["anchored"], [])
+        self.assertEqual(bare["claimed"], [])
         self.assertEqual(bare["pending"], [])
         self.assertFalse(bare["head"]["anchored"])
+        self.assertFalse(bare["head"]["claimed"])
         self.assertTrue(bare["head"]["ts"], "age is the reader's to judge "
                         "from the surfaced timestamp")
 
@@ -3958,12 +3975,12 @@ class AnchorKeeperTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         chain = self.chain_report(result, "alpha", "sess-split")
-        self.assertEqual(chain["anchors"]["anchored"],
+        self.assertEqual(chain["anchors"]["claimed"],
                          [{"upto": 2, "height": 850000}])
         self.assertEqual(chain["anchors"]["pending"], [],
                          "a settled head owes no pending proof")
-        self.assertTrue(chain["anchors"]["head"]["anchored"])
-        self.assertTrue(chain["anchored"])
+        self.assertTrue(chain["anchors"]["head"]["claimed"])
+        self.assertTrue(chain["claimed"])
 
     def test_a_completed_calendar_upgrades_on_tick_with_no_operator(self):
         calendar = self.start_calendar()
@@ -3976,11 +3993,11 @@ class AnchorKeeperTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         chain = self.chain_report(result, "alpha", "sess-aaaa")
-        self.assertEqual(chain["anchors"]["anchored"],
+        self.assertEqual(chain["anchors"]["claimed"],
                          [{"upto": 2, "height": 850000}])
         self.assertEqual(chain["anchors"]["pending"], [],
                          "the panel reflects the upgrade the same tick")
-        self.assertTrue(chain["anchored"])
+        self.assertTrue(chain["claimed"])
         self.assertEqual(len(calendar.polled), 1)
 
     def test_upgrade_attempts_are_polite_between_ticks(self):
@@ -4001,7 +4018,7 @@ class AnchorKeeperTest(unittest.TestCase):
         still = self.chain_report(throttled, "alpha", "sess-aaaa")
         self.assertEqual(len(still["anchors"]["pending"]), 1)
         done = self.chain_report(eager, "alpha", "sess-aaaa")
-        self.assertEqual(done["anchors"]["anchored"],
+        self.assertEqual(done["anchors"]["claimed"],
                          [{"upto": 2, "height": 850000}])
         self.assertEqual(first.returncode, 0, first.stderr)
 
@@ -4387,10 +4404,10 @@ class AnchorKeeperTest(unittest.TestCase):
 
         sessions = chains_by_session(json.loads(result.stdout))
         bare, anchored = sessions[("alpha", "sess-sib")]
-        self.assertFalse(bare["anchors"]["head"]["anchored"])
-        self.assertEqual(anchored["anchors"]["anchored"],
+        self.assertFalse(bare["anchors"]["head"]["claimed"])
+        self.assertEqual(anchored["anchors"]["claimed"],
                          [{"upto": 1, "height": 900000}])
-        self.assertTrue(anchored["anchors"]["head"]["anchored"])
+        self.assertTrue(anchored["anchors"]["head"]["claimed"])
 
 
 class RecorderChildTest(unittest.TestCase):

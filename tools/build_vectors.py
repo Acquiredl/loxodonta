@@ -624,7 +624,7 @@ def build(workdir):
     sidecar_row("anchor-complete", "anchors", "A completed proof of the "
                 "head and no block header given: the block is the "
                 "attestation's claim, and the line says it was not checked.",
-                0, [claimed("ANCHORED: entries 0..3", head), "VALID"])
+                0, [claimed("ANCHOR-CLAIMED: entries 0..3", head), "VALID"])
     chain_header = block_header(replayed_root(head))
     sidecar_row("anchor-complete-checked", "anchors", "The same proof with "
                 "the header of the block it claims: its merkle root is the "
@@ -681,7 +681,7 @@ def build(workdir):
     sidecar_row("anchor-kindless", "anchors", "A completed proof of entry "
                 "2's head written with no kind member, as the first rows "
                 "were: it reads as an anchor, whenever it was written.", 0,
-                [claimed("ANCHORED: entries 0..2", head_2), "VALID"])
+                [claimed("ANCHOR-CLAIMED: entries 0..2", head_2), "VALID"])
 
     sidecar("anchor-kind-null", "anchors",
             [anchor(other, completed_proof(), 3, kind=None)])
@@ -725,7 +725,7 @@ def build(workdir):
     sidecar_row("anchor-key-twice", "anchors", "A completed proof of the "
                 "head in a row that gives head twice, another chain's "
                 "first: a reader keeping the first would say ANCHOR-MISMATCH "
-                "and one keeping the last ANCHORED, so no reading of the "
+                "and one keeping the last ANCHOR-CLAIMED, so no reading of the "
                 "line is the row, and it is unreadable.", 3,
                 [not_a_record("anchor-key-twice")])
 
@@ -967,11 +967,15 @@ def build(workdir):
                 f"{header_hash(header)}, which its anchor calls Bitcoin block "
                 f"{PROOF_HEIGHT}", more=["--block-header", header.hex()])
     package_row("package-anchored-unchecked", "The same package with no "
-                "header given: the rung is earned, and the block is the "
-                "attestation's claim.", 0, "SELF-CONSISTENT + ANCHORED: every "
+                "header given: the block is the attestation's claim, which "
+                "a regenerated package makes at no cost, so no rung is "
+                "earned, and the limit of a package with no seal stands.",
+                0, "SELF-CONSISTENT: every "
                 "chain walks clean and every artifact matches the manifest, "
                 "and the manifest's anchor claims Bitcoin block "
-                f"{PROOF_HEIGHT}, a block not checked here",
+                f"{PROOF_HEIGHT}, a block not checked here; indistinguishable "
+                "from a wholesale regeneration until a block header checks "
+                "its manifest anchor's block",
                 target="package-anchored")
 
     manifest = {

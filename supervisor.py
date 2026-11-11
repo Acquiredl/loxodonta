@@ -421,7 +421,8 @@ def verify(log):
 # The words verify sets its exit by, gravest first, in the order its
 # exit ladder takes them (SPEC §6: 1 > 3 > 5 > 2; the refusal, 4, is
 # printed beside HEAD-MISMATCH alone, which outranks it). Every other line
-# (ANCHORED, ANCHOR-PENDING, NO-ANCHORS, a file's state) moves no exit
+# (ANCHORED, ANCHOR-CLAIMED, ANCHOR-PENDING, NO-ANCHORS, a file's state)
+# moves no exit
 # and is never the word, whatever order the sidecar put it in (#496).
 VERDICT_RANKS = (("BROKEN",),
                  ("HEAD-MISMATCH", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
@@ -1132,23 +1133,30 @@ def fortnight(days, now):
 # knob is the test suite's clock handle.
 UPGRADE_EVERY_SECONDS = env_number("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600)
 
-# verify's ANCHORED line as the scan meets it: the block an attestation
-# claims, not checked (ruling 3 on #299), since the scan runs verify
-# without --block-header and so never meets the checked sentence. The
+# verify's two lines for a completed proof, as the recorder's
+# `attestation_words` writes them: ANCHOR-CLAIMED, the block an
+# attestation claims and nobody checked (ruling 3 on #299), and
+# ANCHORED, the block a given header holds the root of. The two are kept
+# apart (ADR-0044): the scan runs verify without --block-header, so it
+# meets the claimed sentence and never the checked one, and a chain it
+# reads is ANCHOR-CLAIMED until something here can check a block. The
 # height is the attestation's word, which is all the panel shows it as.
-# The line is matched whole, word for word as the recorder's
-# `attestation_words` writes it (#349): a line that only starts the same
-# way is not the recorder's verdict, whatever it says after, so a
-# sidecar row whose text reached verify's output as a line of its own
-# could never read as an anchor. A change to that sentence changes the
-# pattern here, and the scan's anchor tests fail until it does. If the
-# scan ever passes --block-header, add the checked sentence beside it.
-ANCHORED_LINES = (
-    re.compile(r"ANCHORED: entries 0\.\.(\d+): the attestation claims "
-               r"Bitcoin block (\d+), and the block was not checked; that "
-               r"block's merkle root must read [0-9a-f]{64}, which "
-               r"--block-header with its header checks"),
-)
+# Each line is matched whole, word for word (#349): a line that only
+# starts the same way is not the recorder's verdict, whatever it says
+# after, so a sidecar row whose text reached verify's output as a line
+# of its own could never read as an anchor. A change to either sentence
+# changes its pattern here, and the scan's anchor tests fail until it
+# does.
+CLAIMED_LINE = re.compile(
+    r"ANCHOR-CLAIMED: entries 0\.\.(\d+): the attestation claims Bitcoin "
+    r"block (\d+), and the block was not checked; that block's merkle root "
+    r"must read [0-9a-f]{64}, which --block-header with its header checks")
+CHECKED_LINE = re.compile(
+    r"ANCHORED: entries 0\.\.(\d+) existed by the block whose header hashes "
+    r"to [0-9a-f]{64}, whose merkle root [0-9a-f]{64} is the one the proof "
+    r"replays to; the attestation calls it Bitcoin block (\d+), which is "
+    r"your header source's word, and the hash is what a second source can "
+    r"confirm")
 # verify's pending line, whole: the time and the calendar are the row's,
 # printed escaped, so neither holds a space an honest row would write,
 # or verify's words for a row that records neither (UNRECORDED).
@@ -1161,13 +1169,15 @@ PENDING_LINE = re.compile(
     r"cannot complete it; `loxodonta anchor --force` submits the head again)")
 
 
-def anchored_span(line):
-    """(entries up to, block height) when `line` is one of the ANCHORED
-    lines above, whole and word for word; None for any other line."""
-    for pattern in ANCHORED_LINES:
+def anchor_span(line):
+    """("anchored" or "claimed", entries up to, block height) when `line`
+    is one of the two lines above, whole and word for word; None for any
+    other line."""
+    for kind, pattern in (("anchored", CHECKED_LINE),
+                          ("claimed", CLAIMED_LINE)):
         found = pattern.fullmatch(line)
         if found:
-            return int(found.group(1)), int(found.group(2))
+            return kind, int(found.group(1)), int(found.group(2))
     return None
 
 
@@ -2335,17 +2345,18 @@ def head_published(log, entries):
 
 def assess_anchors(printed, entries):
     """The panel's data, read from verify's own words (the documented
-    verdict lines are the seam, ADR-0005): anchored spans with their
-    block heights, pending proofs with their submission times, and the
-    chain head with whether any anchor covers it. Ages are the reader's
-    to compute — the report carries timestamps, not clocks. `printed`
-    is what verify put on stdout, never its stderr (#504)."""
-    anchored = []
+    verdict lines are the seam, ADR-0005): anchored spans (a block
+    checked) and claimed spans (a block nobody checked) with their block
+    heights, pending proofs with their submission times, and the chain
+    head with whether a span of each kind covers it. Ages are the
+    reader's to compute — the report carries timestamps, not clocks.
+    `printed` is what verify put on stdout, never its stderr (#504)."""
+    spans = {"anchored": [], "claimed": []}
     pending = []
     for line in printed:
-        span = anchored_span(line)
+        span = anchor_span(line)
         if span:
-            anchored.append({"upto": span[0], "height": span[1]})
+            spans[span[0]].append({"upto": span[1], "height": span[2]})
         wait = PENDING_LINE.fullmatch(line)
         if wait:
             submitted, calendar = (None if said in UNRECORDED else said
@@ -2355,10 +2366,11 @@ def assess_anchors(printed, entries):
     head = None
     if entries:
         n = entries[-1].get("n")
-        head = {"n": n, "ts": entries[-1].get("ts"),
-                "anchored": isinstance(n, int)
-                and any(span["upto"] >= n for span in anchored)}
-    return {"anchored": anchored, "pending": pending, "head": head}
+        head = {"n": n, "ts": entries[-1].get("ts")}
+        for kind, found in spans.items():
+            head[kind] = isinstance(n, int) and any(span["upto"] >= n
+                                                    for span in found)
+    return {**spans, "pending": pending, "head": head}
 
 
 # --- Completeness -------------------------------------------------------------
@@ -4820,9 +4832,12 @@ def chain_row(look, log, entries, said):
         "verdict": verdict,
         "exit": exit_code,
         # VALID says the chain agrees with itself; ANCHORED says it
-        # agrees with a Bitcoin block. Different claims, kept apart,
-        # and only verify's own ANCHORED line earns this (#349).
+        # agrees with a Bitcoin block somebody checked, and
+        # ANCHOR-CLAIMED that an attestation names one nobody did.
+        # Different claims, kept apart, and only verify's own lines earn
+        # them (#349, ADR-0044).
         "anchored": bool(anchors["anchored"]),
+        "claimed": bool(anchors["claimed"]),
         "superseded": stood_down,
         "detail": detail,
         "anchors": anchors,
@@ -8046,7 +8061,8 @@ def witness_snapshot(report, unit, sessions):
             for row in report.get("completeness", {}).get("sessions", [])}
     names = {log.name for chains in sessions.values() for log in chains}
     verdicts = [{"log": Path(chain["log"]).name, "verdict": chain["verdict"],
-                 "entries": chain["entries"], "anchored": chain["anchored"]}
+                 "entries": chain["entries"], "anchored": chain["anchored"],
+                 "claimed": chain["claimed"]}
                 for repo in report.get("repos", [])
                 for sess in repo.get("sessions", [])
                 for chain in sess.get("chains", [])
@@ -9166,12 +9182,21 @@ def metrics_text(report, age_seconds):
     # publish memo is writer-reachable, so a fresh reading there is worth
     # nothing and a stale one is the reason to look. Both skip empty
     # chains. Beside them: the door wired that never took a head (#240).
+    # A head an attestation only claims a block for is unanchored here
+    # and counted beside it: the scan gives verify no block header, so it
+    # checks no block (ADR-0044).
+    heads = [chain["anchors"]["head"] for chain in chains
+             if (chain.get("anchors") or {}).get("head")]
     gauge("loxodonta_heads_unanchored",
-          "Chains whose head no anchor covers yet, from the spans verify "
-          "replayed on the last scan", "verdict",
-          [((), sum(1 for chain in chains
-                    if (chain.get("anchors") or {}).get("head")
-                    and not chain["anchors"]["head"].get("anchored")))])
+          "Chains whose head no anchor with a checked block covers yet, "
+          "from the spans verify replayed on the last scan", "verdict",
+          [((), sum(1 for head in heads if not head.get("anchored")))])
+    gauge("loxodonta_heads_anchor_claimed",
+          "Chains whose head an anchor covers only by its attestation's "
+          "claim, the block not checked, from the spans verify replayed on "
+          "the last scan", "verdict",
+          [((), sum(1 for head in heads
+                    if head.get("claimed") and not head.get("anchored")))])
     gauge("loxodonta_heads_unpublished",
           "Chains whose current head has no row in the publish memo "
           "beside them, chains with no head excluded", "testimony",
@@ -10146,6 +10171,8 @@ PAGE = """<!doctype html>
   .tier-broken .chip { color: var(--grave); border-color: var(--grave); }
   .tier-refused .chip { color: #8a6d00; border-color: #8a6d00; }
   .tier-anchored .chip { background: var(--quiet); color: #fff; }
+  .tier-claimed .chip { color: var(--quiet); border-color: var(--quiet);
+                        border-style: dashed; }
   .tier-valid .chip { color: var(--quiet); border-color: var(--quiet); }
   .tier-superseded { opacity: 0.55; }
   .tier-superseded .chip { color: inherit;
@@ -10463,21 +10490,26 @@ function tier(chain) {
   // (.out-of-scope/002), so the files-diverged verdict cannot reach
   // this page — anything unexpected falls to "refused", failing loud.
   if (chain.verdict === "VALID") {
-    return chain.anchored ? "anchored" : "valid";
+    if (chain.anchored) return "anchored";
+    return chain.claimed ? "claimed" : "valid";
   }
   return "refused";  // UNSUPPORTED-VERSION, NO-VERDICT
 }
 
-// What each rung is allowed to claim — VALID and ANCHORED deliberately
-// say different things, because they are different things.
+// What each rung is allowed to claim — VALID, ANCHOR-CLAIMED and
+// ANCHORED deliberately say different things, because they are
+// different things: ANCHORED is kept for a block somebody checked
+// (ADR-0044), and the scan checks none.
 const CLAIM = {
   regenerated: "not the recorded history — an anchor or head record " +
                "contradicts this chain",
   broken: "chain integrity failed — history was altered after the fact",
   refused: "no verdict — a chain nobody can judge still demands attention",
   valid: "intact against itself — tamper-evident, not yet anchored",
-  anchored: "intact and anchored — an attestation names a Bitcoin " +
-            "block, and its merkle root is yours to check",
+  claimed: "intact, and an attestation claims a Bitcoin block; " +
+           "nobody checked the block, and its merkle root is yours to check",
+  anchored: "intact and anchored; a block header given to verify holds " +
+            "the merkle root the proof replays to",
   superseded: "torn tail, already handled — recording continued in a " +
               "sibling chain; kept as quiet evidence",
 };
@@ -10492,7 +10524,8 @@ const MARK = { quiet: "●", damage: "▲", grave: "✕",
 const CHIP = {
   regenerated: c => c.verdict, broken: () => "BROKEN",
   refused: c => c.verdict,
-  valid: () => "VALID", anchored: () => "ANCHORED",
+  valid: () => "VALID", claimed: () => "ANCHOR-CLAIMED",
+  anchored: () => "ANCHORED",
   superseded: () => "BROKEN · superseded",
 };
 
@@ -10521,14 +10554,20 @@ function chainRow(chain) {
   drill.type = "button";
   drill.addEventListener("click", () => runDrill(chain.log));
   row.appendChild(drill);
-  // The line shown is one the scan read as an anchor, by its span; a
-  // line that only starts "ANCHORED" is not taken for one (#349).
-  const spans = (chain.anchors ? chain.anchors.anchored : [])
-    .map(span => "ANCHORED: entries 0.." + span.upto);
-  const anchoredLine = chain.detail.find(line => spans.some(span =>
-    line.startsWith(span + ": ")));
-  row.appendChild(el("p", "claim",
-    rung === "anchored" && anchoredLine ? anchoredLine : CLAIM[rung]));
+  // The line shown is one the scan read as an anchor of this rung, by
+  // its span; a line that only starts "ANCHORED" or "ANCHOR-CLAIMED" is
+  // not taken for one (#349).
+  const a = chain.anchors || {};
+  const starts = rung === "anchored"
+    ? (a.anchored || []).map(span =>
+        "ANCHORED: entries 0.." + span.upto + " existed by ")
+    : rung === "claimed"
+    ? (a.claimed || []).map(span =>
+        "ANCHOR-CLAIMED: entries 0.." + span.upto + ": ")
+    : [];
+  const anchorLine = chain.detail.find(line => starts.some(start =>
+    line.startsWith(start)));
+  row.appendChild(el("p", "claim", anchorLine || CLAIM[rung]));
   if (chain.detail.length) {
     const details = el("details");
     details.appendChild(el("summary", "", "what verify said"));
@@ -10817,7 +10856,7 @@ let lastRecall = null;
 
 function worstTier(chains) {
   const ladder = ["regenerated", "broken", "refused", "valid",
-                  "anchored", "superseded"];
+                  "claimed", "anchored", "superseded"];
   const rungs = chains.map(tier);
   for (const rung of ladder) {
     if (rungs.includes(rung)) return rung;
@@ -10911,6 +10950,8 @@ function renderTiles() {
     row.appendChild(el("span", "chip", CHIP[rung](face)));
     if (chains.some(c => c.anchored)) {
       row.appendChild(el("span", "badge", "anchored"));
+    } else if (chains.some(c => c.claimed)) {
+      row.appendChild(el("span", "badge", "anchor claimed"));
     } else if (chains.some(c =>
         (c.anchors && c.anchors.pending || []).length)) {
       row.appendChild(el("span", "badge", "anchor pending"));
@@ -11524,6 +11565,15 @@ function renderAnchors(report) {
           row.appendChild(el("span", "bare",
                              "covers entries 0.." + span.upto));
         }
+        // ANCHOR-CLAIMED: the height is the attestation's word and
+        // nobody checked the block (ADR-0044).
+        for (const span of a.claimed || []) {
+          row.appendChild(el("span", "height",
+                             "block " + span.height + " claimed"));
+          row.appendChild(el("span", "bare",
+                             "covers entries 0.." + span.upto +
+                             ", block not checked"));
+        }
         for (const proof of a.pending) {
           const old = Date.now() - Date.parse(proof.submitted)
                       > PENDING_STALE;
@@ -11532,7 +11582,9 @@ function renderAnchors(report) {
             "pending " + since(proof.submitted) + " via " +
             proof.calendar));
         }
-        if (a.head && !a.head.anchored) {
+        // A claimed head is not stale work: a proof came back, and its
+        // block is the recipient's to check.
+        if (a.head && !a.head.anchored && !a.head.claimed) {
           const old = a.head.ts &&
             Date.now() - Date.parse(a.head.ts) > BARE_STALE;
           row.appendChild(el("span", "bare" + (old ? " stale" : ""),
@@ -12508,8 +12560,10 @@ def main(argv):
     recall_common.add_argument(
         "--root", default=None,
         help="folder of repos for --all (default: the repo's parent)")
+    # No abbreviations: MANAGED_RUN reads `--managed` whole from the
+    # command at import, so the parser must not take `--manag` for it.
     digest = sub.add_parser(
-        "digest",
+        "digest", allow_abbrev=False,
         help="the session-start injection: this repo's recent history, "
              "budget-capped, testimony-labeled")
     digest.add_argument("--repo", default=None,
@@ -12625,7 +12679,8 @@ def main(argv):
                          help="seal the package: post the manifest's sha256 "
                               "to the OpenTimestamps calendars once and "
                               "ship the proof beside it, so verify-package "
-                              "can earn + ANCHORED (ADR-0026 ruling 4). "
+                              "given the block's header can earn + ANCHORED "
+                              "(ADR-0026 ruling 4, ADR-0044). "
                               "Nothing leaves the machine without this")
     package.add_argument("--calendar", action="append", default=None,
                          metavar="URL",

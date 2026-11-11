@@ -457,8 +457,14 @@ class HeadsTest(MetricsFixture):
             scrape.value("loxodonta_heads_unanchored"),
             sum(1 for c in chains if c["anchors"]["head"]
                 and not c["anchors"]["head"]["anchored"]))
-        self.assertEqual(scrape.value("loxodonta_heads_unanchored"), 2,
-                         "the bare chain and the published one")
+        # The scan gives verify no block header, so the anchored chain's
+        # block is claimed and nobody checked it: unanchored here, and
+        # counted on a gauge of its own (ADR-0044).
+        self.assertEqual(scrape.value("loxodonta_heads_unanchored"), 3,
+                         "the bare chain, the published one, and the one "
+                         "whose anchor only claims its block")
+        self.assertEqual(scrape.value("loxodonta_heads_anchor_claimed"), 1,
+                         "the anchored chain, its block not checked")
         self.assertEqual(
             scrape.value("loxodonta_heads_unpublished"),
             sum(1 for c in chains if c["head_published"] is False))

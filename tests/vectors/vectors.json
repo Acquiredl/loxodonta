@@ -454,7 +454,7 @@
       "exit": 0,
       "last_line": "VALID",
       "stdout": [
-        "ANCHORED: entries 0..3: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read a0592f67027757ad17f4b44d3ea1e19395807e8bf7be07fa8de69b5c347a72f1, which --block-header with its header checks",
+        "ANCHOR-CLAIMED: entries 0..3: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read a0592f67027757ad17f4b44d3ea1e19395807e8bf7be07fa8de69b5c347a72f1, which --block-header with its header checks",
         "VALID"
       ]
     },
@@ -548,7 +548,7 @@
       "exit": 0,
       "last_line": "VALID",
       "stdout": [
-        "ANCHORED: entries 0..2: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read b8d161dd366ecbf694607e39b08d90d9365f6c76eb7aad941b933196c7621f83, which --block-header with its header checks",
+        "ANCHOR-CLAIMED: entries 0..2: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read b8d161dd366ecbf694607e39b08d90d9365f6c76eb7aad941b933196c7621f83, which --block-header with its header checks",
         "VALID"
       ]
     },
@@ -602,7 +602,7 @@
     },
     {
       "name": "anchor-key-twice",
-      "about": "A completed proof of the head in a row that gives head twice, another chain's first: a reader keeping the first would say ANCHOR-MISMATCH and one keeping the last ANCHORED, so no reading of the line is the row, and it is unreadable.",
+      "about": "A completed proof of the head in a row that gives head twice, another chain's first: a reader keeping the first would say ANCHOR-MISMATCH and one keeping the last ANCHOR-CLAIMED, so no reading of the line is the row, and it is unreadable.",
       "args": [
         "verify",
         "--anchors",
@@ -901,13 +901,13 @@
     },
     {
       "name": "package-anchored-unchecked",
-      "about": "The same package with no header given: the rung is earned, and the block is the attestation's claim.",
+      "about": "The same package with no header given: the block is the attestation's claim, which a regenerated package makes at no cost, so no rung is earned, and the limit of a package with no seal stands.",
       "args": [
         "verify-package",
         "package-anchored"
       ],
       "exit": 0,
-      "last_line": "SELF-CONSISTENT + ANCHORED: every chain walks clean and every artifact matches the manifest, and the manifest's anchor claims Bitcoin block 850123, a block not checked here"
+      "last_line": "SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest, and the manifest's anchor claims Bitcoin block 850123, a block not checked here; indistinguishable from a wholesale regeneration until a block header checks its manifest anchor's block"
     }
   ]
 }
