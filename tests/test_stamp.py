@@ -1487,9 +1487,15 @@ class SessionEndStampTest(PublishBase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")   # quiet, every step of it
-        head, batch = self.receiver.received
+        head, batch, tokens, proofs = self.receiver.received
         self.assertEqual(head["content_type"], "application/json")
         self.assertEqual(batch["content_type"], "application/x-ndjson")
+        # The token and then the proof follow their steps to the chain's
+        # URL (ADR-0045 ruling 5).
+        self.assertEqual([(sent["content_type"], sent["stamps_seen"],
+                           sent["calendar_asks"]) for sent in (tokens, proofs)],
+                         [("application/x-loxodonta-sidecar", 1, 0),
+                          ("application/x-loxodonta-sidecar", 1, 1)])
         # Neither publish waited on the stamp or on the calendar.
         self.assertEqual([(sent["stamps_seen"], sent["calendar_asks"])
                           for sent in (head, batch)], [(0, 0), (0, 0)])
@@ -1503,8 +1509,9 @@ class SessionEndStampTest(PublishBase):
         (query,) = self.authority.received
         self.assertEqual((query["publishes_seen"], query["calendar_asks"]),
                          (2, 0))
-        # And the calendar last of all, of the same sealed head.
-        self.assertEqual(calendar.seen_before, [(2, 1)])
+        # And the calendar last of all, of the same sealed head, after
+        # the two publishes and the token's rows.
+        self.assertEqual(calendar.seen_before, [(3, 1)])
         self.assertEqual([d.hex() for d in calendar.submitted],
                          [sealed["entry_hash"]])
         self.assertEqual(self.body()["head"], sealed["entry_hash"])
