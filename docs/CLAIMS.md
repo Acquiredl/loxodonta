@@ -29,7 +29,7 @@ A vantage point is a place with a clear view that the watched party cannot get t
 
 | # | Condition | How it is set | Standing |
 |---|---|---|---|
-| 1 | The hook cannot be switched off by the agent, nor the recorder or the interpreter it runs changed, as far as the installer can see | `install-hook --managed`, run by an administrator with a Python installed for all users | ADR-0040 and ADR-0042. The switch measured on 2026-10-05 against a run with hooks switched off on its command line, and against a run under `--bare` (Claude Code 2.1.287, Windows; #259). The copy of the recorder not yet measured; the installer checks the interpreter's path and not each file of its library, and on Windows judges a path by its place, not its access list |
+| 1 | The hook cannot be switched off by the agent, nor the recorder or the interpreter it runs changed, nor what it is told set by a variable or by your own settings file, as far as the installer can see | `install-hook --managed`, run by an administrator with a Python installed for all users | ADR-0040 and ADR-0042. The switch measured on 2026-10-05 against a run with hooks switched off on its command line, and against a run under `--bare` (Claude Code 2.1.287, Windows; #259). The copy of the recorder not yet measured; the installer checks the interpreter's path and not each file of its library, and on Windows judges a path by its place, not its access list. What the hook is told (ADR-0043) not yet measured |
 | 2 | The agent holds no administrator rights | The operator's own job. It is about the account the agent runs as, never about the harness's permission mode | Outside the tool |
 | 3 | A copy leaves the machine | The `full` [profile](GLOSSARY.md#profile) with a [receiver](GLOSSARY.md#receiver) the writer cannot reach; `timestamped` gives the second promise only | Built |
 | 4 | Somebody reads it | `supervisor serve` on its cadence, and a check of the chain against the copy off the machine; on the receiver's machine, `supervisor scan --receiver DIR` | Built |
@@ -88,6 +88,7 @@ Stated here once, so that none of them is a discovery.
 - The harness's own program sits where its installer put it, under the operator's account on a per-user install. A harness changed there fires no hook, managed or not; what shows it is the count at the receiver, where events stop arriving or arrive for calls that left no receipt (ADR-0042).
 - On a machine whose organization delivers settings from a server or through device management, the managed file may be skipped without a warning (ADR-0040).
 - That a managed hook runs under `--bare` is measured on one version of the harness and not stated in its documentation, so a later version may differ (#259).
+- A managed hook finds the home folder through the environment, as the harness does, so a changed home moves the store with everything else the account owns. It sends through no proxy, so where the network requires one, its publishes, stamps and anchors do not leave (ADR-0043).
 
 **Limits of the witness on the agent's machine:**
 

@@ -257,3 +257,16 @@ the installer's own two files. Once the build lands, the sentence under
 rights can neither switch the recorder off nor change what it runs, and
 the line under *What it does not claim* about the recorder file goes.
 Until then both stand as written.
+
+## Addendum, 2026-11-10: the matcher is the managed install's own
+
+This ADR ruled nothing on the matcher. The installer started a managed
+file from the entries already wired, in the managed file or else in the
+operator's, so a matcher narrowed in the operator's file was copied
+into the file the writer cannot write. ADR-0043 ruling 5 ends that: a
+managed install wires the recorder on `*`, takes a narrower matcher
+only from its own `--matcher PATTERN`, and widens a narrowed managed
+file again on a run without the flag, saying so. A narrower matcher in
+the operator's file is named and not carried. Ruling 3 stands: the
+entries still leave the operator's file once the managed one is
+written.
