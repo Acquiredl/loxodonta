@@ -43,37 +43,55 @@ spends from that budget, at `full` only, and says what it buys.
 
 ## Decision
 
-1. **The receiver's answer to a batch says what it holds.** The 200
-   carries, beside `appended` and `dropped`, the `n` and the
-   `entry_hash` of the last entry the receiver holds for that chain.
-   The recorder sends from the entry after that one. The memo's chain
-   rows stay as a note of what left and when, and decide nothing. A
-   memo that names a later entry than the receiver holds is said, as
-   an attempt row.
+The rulings below are the second form of this decision. The first
+had the recorder ask the receiver what it holds and then choose what
+to send from its own files; its build (#600) showed that both halves
+can be steered by a writer that holds the URL and owns the files.
+The author ruled the reshape on 2026-11-11.
 
-2. **The receiver refuses a batch that would leave a hole.** A batch
-   whose first entry is past the one after the last it holds is
-   answered 409 with what it holds, nothing is appended, and the
-   sender goes again from there. An entry at or before the last one
-   held that is not the line held is appended as before: that
-   collision is what the copy exists to show (ADR-0031 ruling 4).
+1. **The receiver keeps a line only when it is an entry.** A line is
+   kept when it parses as an entry of SPEC section 2, its `n` is zero
+   or more, and its `entry_hash` recomputes from its own bytes by the
+   frozen rule (ADR-0036). A batch holding any other line is refused
+   whole, 400, and nothing is appended. Two entries at one `n` are
+   both entries and both kept: that collision is what the copy
+   exists to show (ADR-0031 ruling 4).
 
-3. **At `full`, each entry is sent when it is written.** The
-   installer writes the chain's URL onto the recording command as
-   well as the session-end one, and the hook posts the entries the
-   receiver does not hold before it returns. The send waits at most
-   one second, name lookup included. A send that fails, is refused or
-   runs out of time is never the hook's failure: the receipt is on
-   disk, the hook exits as it would have, and the entries go with the
-   next call, the session end or the keeper. Its outcome is written
-   to the memo as an attempt row only when it differs from the last
-   one written, so a receiver that is down leaves one row and not one
-   a call. Below `full`, and under `custom` without the chain's flag,
-   nothing changes and nothing is sent in the recording path.
+2. **The receiver refuses a hole, and its answer says whether what
+   it was sent connects.** A batch is refused, 409, with nothing
+   appended, when an entry in it has an `n` more than one past the
+   highest the receiver would then hold. Every answer to a batch,
+   the 200 and the 409, carries the highest `n` held and whether the
+   batch's first entry chains: its `prev` is the `entry_hash` of an
+   entry held at the `n` before it, or it is the genesis.
 
-4. **The session end and the keeper stay.** They send what the
-   per-entry sends left, by the same rule: from what the receiver
-   says it holds.
+3. **At `full`, each entry is sent when it is written, from the
+   hook's own hand.** The installer writes the chain's URL onto the
+   recording command as well as the session-end one, and the hook
+   posts the line it has just appended. To do that it reads neither
+   the chain nor the memo. An answer that the entry was kept and
+   chains ends the step, and nothing is written down. An answer of a
+   hole sends the entries after the highest held; an answer that the
+   entry does not chain sends the entry before it, and the one
+   before that, until one chains or the genesis is reached. Each is
+   kept as it lands, so the work is never done twice. The whole step
+   waits at most one second, name lookup included, and what it did
+   not reach goes with a later call, the session end or the keeper.
+   A send that fails, is refused or runs out of time is never the
+   hook's failure: the receipt is on disk and the hook exits as it
+   would have. Its outcome is written to the memo as an attempt row
+   only when it differs from the last row there, so a receiver that
+   is down leaves one row and not one a call; a memo whose last row
+   cannot be read gets the row. Below `full`, and under `custom`
+   without the chain's flag, nothing is sent in the recording path.
+
+4. **The session end and the keeper ask every time.** Each starts by
+   posting the chain's last entry and goes on from the answer, as
+   the hook does. The memo decides nothing for a receiver that
+   answers as ruling 2 says: its chain rows stay as a note of what
+   left and when. A remote that answers with no such statement is
+   followed from the memo as before, with a note written once, and
+   the limit of the memo stands for it.
 
 5. **Anchor and stamp rows travel.** After a step that adds or
    upgrades a row in a chain's anchors or stamps sidecar, the rows
@@ -82,12 +100,13 @@ spends from that budget, at `full` only, and says what it buys.
    appends them to a file beside its copy of the chain, dropping a
    row it already holds. Attempt rows do not travel. `verify
    --anchors` and `verify --stamps` then judge the receiver's files
-   as they judge the recorder's.
+   as they judge the recorder's. A send of rows that fails is written
+   down as every quiet step is (#240), in the sidecar it was sending.
 
 6. **Still no read endpoint.** Everything but a POST is refused, as
    before. What a POST is answered with is about the one chain it
-   named, to a sender that holds the URL: a number and a hash of
-   lines that sender, or an earlier one with the same URL, sent.
+   named, to a sender that holds the URL: a number, and whether the
+   entry that sender posted connects.
 
 7. **The docs say it** once built: `docs/RECEIVER.md` section 4 (the
    answer, the 409, the sidecar rows), `docs/HOOK.md` (the per-entry
@@ -115,6 +134,17 @@ It does not claim:
 - **Anything below `full`.**
 - **A receiver that lies.** Its answer is believed about what it
   holds.
+- **A clean copy against a writer that posts.** The writer holds the
+  URL and can post entries of its own making. They are kept beside
+  the recorder's, and the copy then reads `BROKEN` where they
+  collide. Nothing the recorder sent is lost by it, and the collision
+  is the finding.
+- **A remote that does not answer as the receiver does.** It is
+  followed from the memo, which is in the writer's reach.
+- **A note the writer wrote first.** An attempt row is written on a
+  change of outcome, so a row forged with the failure to come hides
+  the first real one. The receiver's reading is what shows a session
+  whose receipts stopped (ADR-0046).
 
 ### Measured
 
@@ -126,8 +156,10 @@ acceptance:
   receiver on the author's second machine.
 - The same with the receiver stopped: each call costs the cap and no
   more, and the memo gains one attempt row.
-- A memo row forged with a `last` far ahead: the next send goes from
-  what the receiver holds.
+- A memo row forged with a `last` far ahead, or at the chain's end:
+  the next send asks the receiver all the same.
+- A line of the chain overwritten after it was sent: the entries
+  written after it still arrive.
 - A chain rewritten from an entry already sent: the receiver's file
   no longer verifies from that entry.
 
@@ -149,7 +181,12 @@ acceptance:
   and a receiver that is down costs a second a call until it is back.
 - The recording command at `full` carries the URL, which is the
   credential, as the session-end command already does.
-- The receiver gains a refusal and a second kind of file.
+- The receiver gains two refusals and a second kind of file, and it
+  now computes an entry's hash, where it appended bytes and judged
+  nothing. It carries its own copy of that rule, as the supervisor
+  and the verifier do.
+- A line that is not an entry no longer reaches the receiver at all,
+  so a chain damaged on disk arrives only as far as it is whole.
 - Two earlier rulings are narrowed.
 
 **What we'll have to revisit if:**
@@ -162,6 +199,16 @@ acceptance:
 
 ## Alternatives considered
 
+- **The recorder asks what is held and sends from there.** The first
+  form of this decision, built in #600 and withdrawn. The recorder
+  still chose what to send by reading the memo and the chain, and
+  took the receiver's count on its word: a line overwritten in the
+  chain, a stray byte in the memo, a memo row at the chain's end, or
+  a line posted to the receiver with a number of the writer's
+  choosing each stopped the sends or skipped entries.
+- **The receiver appends whatever it is sent.** As before this ADR.
+  Rejected with the first form: an answer about lines nobody checked
+  says nothing a sender can act on.
 - **The keeper sends every few seconds.** No cost to a tool call.
   Rejected: the keeper is a process the writer's account can stop,
   and the hook is fired by the harness.
