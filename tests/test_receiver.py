@@ -388,7 +388,7 @@ class ContentTest(ReceiverFixture):
             # (ADR-0045 ruling 2).
             self.assertEqual(json.loads(response.read()),
                              {"appended": 3, "dropped": 0, "held_n": 2,
-                              "chains": True})
+                              "connects": True})
 
     def test_an_exact_duplicate_line_is_dropped(self):
         # A batch the sender retried after a lost acknowledgement: every

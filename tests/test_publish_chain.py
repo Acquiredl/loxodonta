@@ -179,9 +179,10 @@ class ChainReceiverHandler(FakeReceiverHandler):
         it (ADR-0045 ruling 2): 409 for an entry more than one past the
         highest n held, else the lines it does not hold appended; every
         answer saying the highest n held and whether the first entry
-        connects. (status, the answer)."""
+        connects, every entry down to its genesis held. (status, the
+        answer)."""
         held = self.server.__dict__.setdefault("held", {})
-        known = held.setdefault(self.headers.get("X-Loxodonta-Chain"), set())
+        known = held.setdefault(self.headers.get("X-Loxodonta-Chain"), {})
         batch = [json.loads(line) for line in raw.splitlines()]
         first = batch[0]
         top = max((n for n, _ in known), default=-1)
@@ -191,11 +192,13 @@ class ChainReceiverHandler(FakeReceiverHandler):
             reach = max(reach, entry["n"])
         if not hole:
             new = [e for e in batch if (e["n"], e["entry_hash"]) not in known]
-            known.update((e["n"], e["entry_hash"]) for e in new)
-        chains = (first["n"] == 0 and first["prev"] is None) \
-            or (first["n"] - 1, first["prev"]) in known
+            known.update(((e["n"], e["entry_hash"]), e["prev"]) for e in new)
+        n, prev = first["n"], first["prev"]
+        while n > 0 and (n - 1, prev) in known:
+            n, prev = n - 1, known[(n - 1, prev)]
+        connects = n == 0 and prev is None
         top = max((n for n, _ in known), default=-1)
-        said = {"held_n": top if top >= 0 else None, "chains": chains}
+        said = {"held_n": top if top >= 0 else None, "connects": connects}
         if hole:
             return 409, {"refused": "a hole", **said}
         return 200, {"appended": len(new), "dropped": len(batch) - len(new),
@@ -255,8 +258,11 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertEqual(judged.stdout.strip(), "VALID")
         # The memo: one chain row with the range, the head after the
         # last entry sent, the time, the event kind, and which remote
-        # took it by a fingerprint of the URL (#263); never the URL.
-        (row,) = memo_of(self.log)
+        # took it by a fingerprint of the URL (#263); never the URL. Then
+        # the attempt row every send that went writes, naming it alike.
+        row, sent = memo_of(self.log)
+        self.assertEqual((sent["kind"], sent["outcome"], sent["remote_id"]),
+                         ("attempt", "sent", remote_id(receiver.url)))
         last = json.loads(lines.splitlines()[-1])
         self.assertEqual(row, {"kind": "chain", "first": 0, "last": 2,
                                "head": last["entry_hash"], "ts": row["ts"],
@@ -334,8 +340,8 @@ class PublishChainCommandTest(unittest.TestCase):
 
     def test_a_remote_that_holds_the_end_is_asked_and_sent_nothing_new(self):
         # The last entry goes again, the remote drops it as a duplicate
-        # and says it connects: nothing to send, and the chain row is a
-        # note of what was asked (ADR-0045 ruling 4).
+        # and says it connects: nothing to send, and no chain row, since
+        # nothing left (ADR-0045 ruling 4).
         fake = serve_fake(self)
         make_chain(self.log, ["step 1"], epoch=1700000000)
         self.assertEqual(self.publish_chain(fake.url).returncode, 0)
@@ -347,7 +353,7 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertIn("entry 1", result.stdout)
         self.assertEqual(len(fake.received), 3)
         self.assertEqual([(r["first"], r["last"]) for r in chain_rows(self.log)],
-                         [(0, 1), (1, 1)])
+                         [(0, 1)])
 
     def test_a_lost_memo_changes_nothing_the_remote_is_asked(self):
         # The memo decides nothing for a remote that says what it holds
@@ -366,8 +372,7 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertEqual((self.data / self.log.name).read_bytes(), lines)
         judged = self.verify_receivers_file()
         self.assertEqual(judged.stdout.strip(), "VALID")
-        self.assertEqual([(r["first"], r["last"]) for r in chain_rows(self.log)],
-                         [(2, 2)])
+        self.assertEqual(chain_rows(self.log), [])
 
     def test_only_a_chain_row_naming_this_remote_moves_its_cursor(self):
         # ADR-0038: the cursor, read for a remote that does not say what
@@ -487,14 +492,10 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertEqual(judged.stdout.strip(), "VALID")
 
-    def test_an_entry_larger_than_the_cap_is_named_and_never_sent(self):
-        # The receiver refuses a body past its cap on the Content-Length
-        # and closes, which would reach the sender as a bare connection
-        # word and stall this chain on this line forever, since the
-        # cursor cannot pass what never landed. Refused here instead,
-        # by name. The send starts from the chain's last entry (ADR-0045
-        # ruling 4), so when that is the large one nothing goes: the
-        # entries before it left as they were written.
+    def test_an_entry_larger_than_the_cap_goes_in_a_batch_of_its_own(self):
+        # The cap bounds how many entries share a batch, never whether an
+        # entry goes: the large last entry goes alone, the entries before
+        # it after the hole the answer names, in batches under the cap.
         fake = serve_fake(self)
         make_chain(self.log, ["step 1", "x" * 150], epoch=1700000000)
         on_disk = self.log.read_bytes().splitlines(True)
@@ -504,18 +505,12 @@ class PublishChainCommandTest(unittest.TestCase):
         result = run_capped(cap, "publish", "--chain", "--log", self.log,
                             fake.url)
 
-        self.assertEqual(result.returncode, 69)
-        self.assertIn("entry 2 is larger than the receiver's cap",
-                      result.stderr)
-        self.assertEqual(chain_rows(self.log), [])
-        self.assertEqual(fake.received, [])
-        # And it stays refused rather than stalling on a socket word.
-        again = run_capped(cap, "publish", "--chain", "--log", self.log,
-                           fake.url)
-        self.assertEqual(again.returncode, 69)
-        self.assertIn("entry 2 is larger than the receiver's cap",
-                      again.stderr)
-        self.assertEqual(fake.received, [])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([sent["raw"] for sent in fake.received
+                          if sent["content_type"] == NDJSON],
+                         [on_disk[2], on_disk[0], on_disk[1], on_disk[2]])
+        self.assertEqual([(r["first"], r["last"]) for r in chain_rows(self.log)],
+                         [(0, 0), (1, 1), (2, 2)])
 
     def test_a_url_that_is_not_http_is_a_usage_error_and_nothing_moves(self):
         make_chain(self.log, ["step 1"], epoch=1700000000)
@@ -735,7 +730,8 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(chain_rows(self.chain()), [])
         (row,) = attempt_rows(self.chain())
-        self.assertEqual(set(row), {"kind", "step", "ts", "budget", "outcome"})
+        self.assertEqual(set(row), {"kind", "step", "ts", "budget", "outcome",
+                                    "remote_id"})
         self.assertEqual(row["step"], "publish-chain")
         self.assertEqual(row["budget"], 3.0)
         self.assertNotEqual(row["outcome"], "sent")
@@ -788,7 +784,8 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.assertEqual(len(self.receiver.received), 3)
         self.assertEqual(self.receiver.received[-1]["raw"],
                          self.chain_lines().splitlines(True)[-1])
-        self.assertEqual(len(chain_rows(self.chain())), 2)
+        self.assertEqual(len(chain_rows(self.chain())), 1,
+                         "the second appended nothing, so no chain row")
         self.assertEqual([a["outcome"] for a in attempt_rows(self.chain())],
                          ["sent", "sent"])
 
@@ -1263,7 +1260,7 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.assertEqual(batch["headers"]["x-loxodonta-range"], "0-2")
         self.assertEqual(batch["headers"]["x-loxodonta-session"], "sess-turn")
         self.assertEqual([row.get("kind") for row in memo_of(log)],
-                         ["head", "chain"])
+                         ["head", "chain", "attempt"])
         self.assertEqual(chain_rows(log)[0]["event"], "cadence")
 
         # The same tick again, inside the throttle window: nothing moves.
@@ -1485,7 +1482,7 @@ class PublishChainKeeperTest(unittest.TestCase):
         self.assertIn(chain["left"]["via"], ("published", "published-chain"))
         self.assertEqual(status["exit"], 0)
         self.assertEqual([row.get("kind") for row in memo_of(log)],
-                         ["head", "chain"])
+                         ["head", "chain", "attempt"])
 
 
 class InstallProfileFullTest(unittest.TestCase):
@@ -1902,7 +1899,7 @@ class FullProfileKeeperTest(unittest.TestCase):
         self.assertEqual(json.loads(head["raw"])["head"], chain_head(log))
         self.assertEqual(batch["raw"], log.read_bytes())
         self.assertEqual([row.get("kind") for row in memo_of(log)],
-                         ["head", "chain"])
+                         ["head", "chain", "attempt"])
         # The anchor keeper ran beside it, on the same default, with no
         # flag typed for either, and the proof went to the remote.
         self.assertEqual(self.calendar.submitted,
@@ -2388,8 +2385,14 @@ class ChangedRemoteKeeperTest(unittest.TestCase):
                   SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
 
         self.assertEqual([(row["first"], row["last"])
-                          for row in chain_rows(log)], [(0, 2), (2, 2)],
-                         "the second turn asked nothing")
+                          for row in chain_rows(log)], [(0, 2)],
+                         "nothing left on the first turn, and the second "
+                         "asked nothing")
+        turns = [row for row in memo_of(log) if row["kind"] == "attempt"]
+        self.assertEqual([row["remote_id"] for row in turns],
+                         [remote_id(self.first.url)] * 2,
+                         "by hand, then the first turn; the second asked "
+                         "nothing")
         grown = run_recorder("log", "--log", log, "--actor", "claude-code",
                              "--action", "step 3")
         self.assertEqual(grown.returncode, 0, grown.stderr)
@@ -2401,7 +2404,7 @@ class ChangedRemoteKeeperTest(unittest.TestCase):
         self.assertEqual(self.verdict("first", log), "VALID")
         self.assertEqual([(row["first"], row["last"])
                           for row in chain_rows(log)],
-                         [(0, 2), (2, 2), (3, 3)])
+                         [(0, 2), (3, 3)])
 
 
 class ChangedRemoteReadingTest(unittest.TestCase):

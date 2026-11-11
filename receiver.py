@@ -31,7 +31,8 @@ names included, is docs/RECEIVER.md. Stdlib only, like everything here.
 A chain batch is kept only when every line is an entry, its hash
 recomputed here, and is refused with 409 when it would leave a hole;
 every answer says the highest n held and whether the batch's first
-entry connects to an entry held (ADR-0045). A chain's anchors and
+entry connects, every entry down to its genesis held (ADR-0045),
+answered from memory and not from the file. A chain's anchors and
 stamps rows are kept beside its copy, a row already there dropped.
 
 The second door, `POST /<token>/v1/logs`, takes a harness's events about
@@ -42,6 +43,7 @@ about it (ADR-0041 rulings 2 and 3).
 """
 
 import argparse
+import collections
 import errno
 import hashlib
 import hmac
@@ -608,55 +610,110 @@ def chain_lines(body):
     return batch
 
 
-def holdings(path):
-    """Every (n, entry_hash) the chain file holds, a line that is not an
-    entry counting for nothing, read a line at a time since a file may
-    run to its cap: a file opened for bytes ends a line at `\\n` and
-    nowhere else, the rule of `split_lines`. Nothing for a file that is
-    not there yet. The slow path: the common case is answered from
-    memory (`Top`)."""
-    known = set()
+# What the receiver remembers of each chain file while it runs (ADR-0045
+# ruling 2). An entry connects when it is the genesis, or when its prev
+# is the hash of an entry held at the n before it that itself connects:
+# so an entry connects only when every entry down to its genesis is
+# held, and a gap anywhere below shows in the answer about every entry
+# above it. Kept per chain, keyed by entry hash (32 bytes, not the 64
+# characters of its hex): which held entries connect and which do not
+# yet, with the n of each, and for each entry that does not, the hash
+# its prev names. The memory is a cache: the file is the record, and a
+# chain forgotten is read again on its next touch.
+
+HASH_HEX = re.compile(r"[0-9a-f]{64}")
+
+# The most entries remembered across every chain: about 130 bytes an
+# entry that connects and 320 one that does not (docs/RECEIVER.md, *What
+# an answer costs the receiver*), so some 65 MB for chains that connect.
+# Past it, the chains touched longest ago are forgotten first; the chain
+# being answered is always kept, however long it is.
+REMEMBERED_ENTRIES = 500_000
+
+
+def hash_key(text):
+    """The 32 bytes a hex entry hash names, or None for a prev that is
+    null or is no entry hash at all, which no held entry can match."""
+    if isinstance(text, str) and HASH_HEX.fullmatch(text):
+        return bytes.fromhex(text)
+    return None
+
+
+class Held:
+    """One chain file as the receiver remembers it: `top` the highest n
+    held (-1 for none), `joined` and `loose` the entries held that
+    connect and that do not yet (hash to n), `waiting` for each hash a
+    loose entry's prev names, the loose entries naming it, and `size`
+    the file's size once the receiver last read or wrote it. The
+    receiver is the only writer of its files, so a size that is not the
+    one remembered (a file the operator moved off the box, say) means
+    the file is read and remembered again."""
+
+    def __init__(self, size=0):
+        self.top = -1
+        self.joined, self.loose, self.waiting = {}, {}, {}
+        self.size = size
+
+    def __len__(self):
+        return len(self.joined) + len(self.loose)
+
+    def holds(self, n, digest):
+        """Whether the entry with this n and hash is held."""
+        key = hash_key(digest)
+        return n in (self.joined.get(key), self.loose.get(key))
+
+    def connects(self, n, prev):
+        """Whether an entry at `n` naming `prev` connects: the genesis,
+        or a prev that is an entry held at n - 1 that connects."""
+        if n == 0 and prev is None:
+            return True
+        return self.joined.get(hash_key(prev), -2) == n - 1
+
+    def add(self, n, prev, digest):
+        """Remember an entry the file now holds. One that connects may
+        make entries already held above it connect, each in turn: an
+        entry that fills a gap joins every entry above it whose prev
+        names it, up to the next gap. Each entry joins at most once, so
+        the work over a chain's life is one step an entry."""
+        key = hash_key(digest)
+        if key in self.joined or key in self.loose:
+            return
+        self.top = max(self.top, n)
+        if not self.connects(n, prev):
+            self.loose[key] = n
+            below = hash_key(prev)
+            if below is not None:
+                self.waiting.setdefault(below, []).append(key)
+            return
+        self.joined[key] = n
+        rising = [key]
+        while rising:
+            below = rising.pop()
+            for above in self.waiting.pop(below, ()):
+                if self.loose.get(above) == self.joined[below] + 1:
+                    self.joined[above] = self.loose.pop(above)
+                    rising.append(above)
+
+
+def held_in(path):
+    """A chain file read whole into its memory (`Held`), a line that is
+    not an entry counting for nothing, read a line at a time since a
+    file may run to its cap: a file opened for bytes ends a line at
+    `\\n` and nowhere else, the rule of `split_lines`. Empty for a file
+    that is not there yet. The slow path, taken once a chain."""
+    held = Held()
     try:
         with open(path, "rb") as f:
             for raw in f:
                 for line in split_lines(raw):
                     entry, _ = entry_of(line)
                     if entry is not None:
-                        known.add((entry["n"], entry["entry_hash"]))
+                        held.add(entry["n"], entry["prev"],
+                                 entry["entry_hash"])
     except FileNotFoundError:
         pass
-    return known
-
-
-class Top:
-    """What the receiver remembers of one chain file while it runs: the
-    highest n it holds (-1 for none), the entry_hash of each entry it
-    holds at that n, and the file's size once the receiver last read or
-    wrote it. That is enough to answer the common case, one new entry,
-    or a run of them, starting just past the top, without reading the
-    file: nothing at those numbers is held, so nothing is a duplicate,
-    and whether the first connects asks only the entries at the top.
-    The receiver is the only writer of its files; a size that is not the
-    one remembered (a file the operator moved off the box, say) sends
-    the request down the slow path, which reads the file and remembers
-    again."""
-
-    def __init__(self, known, size):
-        self.n = max((n for n, _ in known), default=-1)
-        self.hashes = {digest for n, digest in known if n == self.n}
-        self.size = size
-
-    def takes(self, batch):
-        """Whether `batch` is the common case: its entries numbered one
-        after another from the one past the top."""
-        return all(n == self.n + 1 + at
-                   for at, (_, n, _, _) in enumerate(batch))
-
-    def chains(self, batch):
-        """Whether the batch's first entry connects: the genesis, or a
-        prev that is an entry held at the top."""
-        _, n, prev, _ = batch[0]
-        return (n == 0 and prev is None) or prev in self.hashes
+    held.size = size_of(path)
+    return held
 
 
 def hole_in(batch, top):
@@ -672,14 +729,7 @@ def hole_in(batch, top):
     return None
 
 
-def connects(batch, known):
-    """Whether the batch's first entry is the genesis, or its prev is
-    the entry_hash of an entry held at the n before it."""
-    _, n, prev, _ = batch[0]
-    return (n == 0 and prev is None) or (n - 1, prev) in known
-
-
-def new_lines(batch, known):
+def new_lines(batch, held):
     """The append rule that keeps the file a receipt log (ADR-0031
     ruling 4). A line whose n and entry_hash the file already holds is
     an exact duplicate, the sender's retry after a lost acknowledgement,
@@ -687,13 +737,14 @@ def new_lines(batch, known):
     is a regenerated chain arriving after the original, or an entry the
     URL's holder made, and is appended: that collision is what the copy
     exists to show, and verify reports it. Everything else is appended
-    in the order received. Returns the batch's lines that are to land."""
-    keep = []
-    for line, n, _, digest in batch:
-        if (n, digest) in known:
+    in the order received. Returns the batch's entries that are to
+    land, each as `chain_lines` gives it."""
+    keep, seen = [], set()
+    for line, n, prev, digest in batch:
+        if held.holds(n, digest) or (n, digest) in seen:
             continue
-        known.add((n, digest))  # the same line twice in one batch lands once
-        keep.append(line)
+        seen.add((n, digest))  # the same line twice in one batch lands once
+        keep.append((line, n, prev, digest))
     return keep
 
 
@@ -729,7 +780,7 @@ def sidecar_lines(body, sidecar):
 def known_lines(path):
     """Every line the sidecar copy already holds, byte for byte, as
     `split_lines` reads it, so a resent row is dropped: read a line at a
-    time, as `holdings` reads a chain, its `\\n` and a `\\r` before it
+    time, as `held_in` reads a chain, its `\\n` and a `\\r` before it
     taken off. Nothing when the file is not there yet."""
     known = set()
     try:
@@ -752,16 +803,35 @@ class Receiver(ThreadingHTTPServer):
     the fsync of the last line written, so two batches for one chain
     never interleave, and two requests never both fit under a cap that
     has room for one. One lock for every file, because the total cap is
-    a question about every file at once. `tops` is what it remembers of
-    each chain file it has touched (`Top`), read and written under the
-    same lock."""
+    a question about every file at once. `held` is what it remembers of
+    each chain file it has touched (`Held`), the one touched longest ago
+    first, read and written under the same lock."""
 
     daemon_threads = True
 
     def __init__(self, address, handler):
         super().__init__(address, handler)
         self.appending = threading.Lock()
-        self.tops = {}
+        self.held = collections.OrderedDict()
+
+    def chain_held(self, name, path):
+        """What is remembered of the chain file `name`, read from `path`
+        when it is not remembered or its size is not the one remembered.
+        Called holding `appending`."""
+        held = self.held.pop(name, None)
+        if held is None or held.size != size_of(path):
+            held = held_in(path)
+        self.held[name] = held
+        return held
+
+    def forget_past_bound(self):
+        """Forget the chains touched longest ago while more than
+        REMEMBERED_ENTRIES entries are remembered in all, never the one
+        touched last. Called holding `appending`."""
+        remembered = sum(len(held) for held in self.held.values())
+        while remembered > REMEMBERED_ENTRIES and len(self.held) > 1:
+            _, gone = self.held.popitem(last=False)
+            remembered -= len(gone)
 
     def server_bind(self):
         # The stdlib's server_bind looks up the bound host's fully
@@ -1002,54 +1072,49 @@ class Door(BaseHTTPRequestHandler):
         400 (ADR-0045 ruling 1); then a hole refused, 409 (ruling 2), or
         the new lines appended by the append rule. Every answer says the
         highest n held once it is through and whether the batch's first
-        entry connects. A batch that is the common case (`Top.takes`) is
-        judged from memory; anything else, and a chain not yet touched
-        since the receiver started, reads the file."""
+        entry connects. Judged from what is remembered of the chain
+        (`Held`); the file is read only on a chain's first touch since
+        the receiver started, or when its size is not the one
+        remembered."""
         try:
             batch = chain_lines(body)
         except ValueError as why:
             self.answer(400, str(why))
             return
         path = os.path.join(self.server.data, name)
-        tops = self.server.tops
-        lines, refused, hole = [], None, None
+        _, first_n, first_prev, _ = batch[0]
         with self.server.appending:
-            top = tops.get(name)
-            if top is not None and top.size == size_of(path) \
-                    and top.takes(batch):
-                chains = top.chains(batch)
-                lines = [line for line, _, _, _ in batch]
-                known = {(n, digest) for _, n, _, digest in batch}
-                if top.n >= 0:
-                    known |= {(top.n, digest) for digest in top.hashes}
-            else:
-                known = holdings(path)
-                hole = hole_in(batch, max((n for n, _ in known), default=-1))
-                if hole is None:
-                    lines = new_lines(batch, known)
-                chains = connects(batch, known)
-            refused = None if hole is not None else self.append(path, lines)
-            if refused:
-                tops.pop(name, None)   # read the file again next time
-            else:
-                tops[name] = Top(known, size_of(path))
-            held = tops[name].n if name in tops else None
-        held = None if held is None or held < 0 else held
+            held = self.server.chain_held(name, path)
+            hole = hole_in(batch, held.top)
+            refused = None
+            if hole is None:
+                landing = new_lines(batch, held)
+                refused = self.append(path, [line for line, _, _, _ in landing])
+                if refused:
+                    self.server.held.pop(name)   # read the file again next time
+                else:
+                    for _, n, prev, digest in landing:
+                        held.add(n, prev, digest)
+                    held.size = size_of(path)
+            connected = held.connects(first_n, first_prev)
+            top = None if held.top < 0 else held.top
+            self.server.forget_past_bound()
         if hole is not None:
             # Nothing appended (ADR-0045 ruling 2).
-            why = (f"entry {hole} is more than one past entry {held}, the "
+            why = (f"entry {hole} is more than one past entry {top}, the "
                    "highest this receiver holds of the chain"
-                   if held is not None else
+                   if top is not None else
                    f"entry {hole} is not the genesis, and this receiver "
                    "holds none of the chain")
-            self.answer(409, json.dumps({"refused": why, "held_n": held,
-                                         "chains": chains}),
+            self.answer(409, json.dumps({"refused": why, "held_n": top,
+                                         "connects": connected}),
                         kind="application/json", said=why)
         elif refused:
             self.answer(*refused)
         else:
-            self.ok({"appended": len(lines), "dropped": len(batch) - len(lines),
-                     "held_n": held, "chains": chains})
+            self.ok({"appended": len(landing),
+                     "dropped": len(batch) - len(landing),
+                     "held_n": top, "connects": connected})
 
     def keep_sidecar(self, body, name, sidecar):
         """A chain's anchors or stamps rows, kept beside this receiver's
