@@ -998,8 +998,11 @@ class ProofsTravelTest(unittest.TestCase):
 
         self.assertEqual(again.returncode, 0, again.stderr)
         kept = self.data / (CHAIN + ".anchors.jsonl")
-        evidence = [line for line in local.read_bytes().splitlines(True)
-                    if b'"attempt"' not in line]
+        # Every evidence row, once: two proofs written in one second are
+        # one row byte for byte, and the receiver keeps it once.
+        evidence = list(dict.fromkeys(
+            line for line in local.read_bytes().splitlines(True)
+            if b'"attempt"' not in line))
         self.assertEqual(kept.read_bytes().splitlines(True), evidence)
         self.assertTrue(proofs.splitlines(True)[0] in evidence)
         newest = [json.loads(line) for line in local.read_text("utf-8")

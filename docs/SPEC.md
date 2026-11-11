@@ -292,7 +292,7 @@ The fields of each kind, and their types as the recorder writes them. A field is
 | `first`, `last` | integer | The `n` of the first and the last entry in the batch. |
 | `head` | string | The `entry_hash` of entry `last`. |
 | `ts` | string | When the batch was acknowledged. |
-| `event` | string | `session-end`, `cadence`, or `receipt` for the recording hook's send (ADR-0045). |
+| `event` | string | `session-end` or `cadence`. |
 | `remote_id` | string | The first 16 hex characters of the SHA-256 of the remote's URL (#263). Absent from rows written before it was, which count for no remote. |
 
 **`attempt`**, in any sidecar (#240):
@@ -300,11 +300,12 @@ The fields of each kind, and their types as the recorder writes them. A field is
 | Field | Type | Meaning |
 |---|---|---|
 | `kind` | string | `attempt`. |
-| `step` | string | The step: `anchor`, `stamp`, `publish-head` or `publish-chain`. |
+| `step` | string | The step: `anchor`, `stamp`, `publish-head` or `publish-chain`, or `publish-rows` for a send of an anchors or stamps sidecar's rows, in that sidecar (ADR-0045). |
 | `ts` | string | When the step ended. |
 | `budget` | number | The seconds the step had, to one decimal; `0.0` for a step the session-end window closed on before it began. |
-| `outcome` | string | `submitted`, `granted` or `sent`, or the one line the step produced instead; a send of the chain adds, after `; `, each thing the remote's answer said against the memo (ADR-0045). |
+| `outcome` | string | `submitted`, `granted` or `sent`, or the one line the step produced instead. |
 | `event` | string | Only on the recording hook's send of the chain, `receipt`, which tells its rows from the session end's (ADR-0045). |
+| `note` | string | Only beside a send of the chain to a remote that took it and did not say what it holds (ADR-0045). |
 
 No memo row and no attempt row holds a URL: a webhook's or a receiver's URL is a credential (ADR-0025). The stamp row's `authority` is the one URL a sidecar holds, since it names whom the operator chose to trust and grants nothing (ADR-0032 ruling 4).
 
@@ -373,7 +374,7 @@ The rows of unknown kinds are named first (§9.2). Then each token and each unre
 
 ### 9.8 The memo
 
-The memo is bookkeeping, kept so that a head is posted once and a published chain resumes where its remote stopped, and for nothing else. No verifier judges it and no `verify` flag reads it. `supervisor package` never packs it, and one found in a package is unlisted (§10.5). Its rows are read by kind as §9.2 says, with `head` its evidence kind, so a kind-less row is a sent head. The recorder reads the `chain` rows as a hint for where a send to one remote starts: the integer `last` of the newest row whose `remote_id` is that remote's, or none, and then the send starts at genesis; the remote's answer says what it holds, and the send goes from there (docs/RECEIVER.md, ADR-0045). A line of the memo that is unreadable by §9.1's rules, a key given twice or `NaN` among them, is read past, which costs at worst a batch sent again and dropped by the receiver as a duplicate; a line holding a byte that is not UTF-8 stops the send rather than be guessed at, and so does a memo that is not a file (§9.1): `publish --chain` then says the memo could not be read and exits 69, and sends nothing. The supervisor's keeper reads the head rows and the attempt rows, to say when a head last left the machine and which step last failed (docs/TOUR-SUPERVISOR.md).
+The memo is bookkeeping, kept so that a head is posted once and a published chain resumes where a remote that does not say what it holds stopped, and for nothing else. No verifier judges it and no `verify` flag reads it. `supervisor package` never packs it, and one found in a package is unlisted (§10.5). Its rows are read by kind as §9.2 says, with `head` its evidence kind, so a kind-less row is a sent head. For the receiver the memo decides nothing: a send goes on from the receiver's answer (docs/RECEIVER.md, ADR-0045). The recorder reads the `chain` rows as the cursor for a remote that does not say what it holds: the greatest integer `last` among the rows whose `remote_id` is that remote's, or none, and then the send starts at genesis. A line of the memo that is unreadable by §9.1's rules, a key given twice or `NaN` among them, is read past, which costs at worst a batch sent again and dropped by the receiver as a duplicate; a line holding a byte that is not UTF-8 stops a send from the memo rather than be guessed at, and so does a memo that is not a file (§9.1): `publish --chain` then says the memo could not be read and exits 69. The supervisor's keeper reads the head rows and the attempt rows, to say when a head last left the machine and which step last failed (docs/TOUR-SUPERVISOR.md), and the chain rows, to send again a chain whose memo does not record its last entry as held.
 
 The conformance vectors hold the anchors and stamps sidecars: [`tests/vectors/`](../tests/vectors/README.md) has a pending proof, a completed one with and without its block's header, a mismatch, a proof that does not replay, a proof with a byte after its tree, an unreadable line, a row giving `head` twice, a row holding `NaN`, a row holding `1e999`, an attempt row alone, a kind-less row, `{"kind": null}`, an unknown kind and a misplaced `chain` row; and, needing no `openssl`, a kind-less stamp row whose granted reply holds a stand-in token, a rejection reply, a granted reply with a byte after it, an attempt row and an unknown kind, each with its exit and every line it prints.
 

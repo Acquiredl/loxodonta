@@ -2174,15 +2174,16 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     stops a repeated head and proves nothing, and it never stands the
     chain's send down for a chain that changed; a head is posted once,
     wherever it went (ADR-0025). Returns (attempted, note, failed)."""
-    if not (url or chain_url) or cadence is None or not entries \
-            or not upgrade_due(last_attempt, now):
+    if not (url or chain_url) or not upgrade_due(last_attempt, now):
         return False, None, False
     memo = Path(str(log) + ".published.jsonl")
     head = ripe_head(entries, now, cadence)
+    if not head:
+        return False, None, False
     attempted = False
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
-    if url and head and head not in sidecar_heads(memo, "memo"):
+    if url and head not in sidecar_heads(memo, "memo"):
         attempted = True
         note = publish_through_recorder(log, url, "head")
         if note:

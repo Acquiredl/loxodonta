@@ -154,10 +154,10 @@ the event boundary is the one that needs no daemon running.
 Ruling 1 kept the network out of the recording path, against a budget
 of about 135 ms a call. ADR-0045 ruling 3 narrows it: at `full`, and
 under `custom` with the chain's flag, the installer writes the chain's
-URL on the recording command too, and the hook sends the entries the
-receiver does not hold before it returns, waiting at most one second,
-name lookup included, after the receipt is on disk and the chain's
-lock let go. A send that fails is never the hook's failure, and prints
+URL on the recording command too, and the hook posts the lines it has
+just appended, and those the receiver's answer asks for, before it
+returns, waiting at most one second, name lookup included, after the
+receipt is on disk and the chain's lock let go. A send that fails is never the hook's failure, and prints
 nothing. Below `full`, and under `custom` without that flag, ruling 1
 stands as written: nothing is sent in the recording path. Anchoring
 every N receipts inside the hook stays rejected; the anchor's rows,

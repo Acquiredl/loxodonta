@@ -14,9 +14,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `install-hook --managed --matcher PATTERN` narrows the recorder's matcher in the managed file. Without it a managed install wires `*`, and a matcher narrowed in the operator's own settings file is named and not carried (ADR-0043).
 - A hook receipt ends with `[call=<id> input sha256=<hex> bytes=<n>]`: the harness's id for the call and a hash of its whole input, SPEC v0.1.6. `supervisor show` says whether the transcript's record of that call matches; listings fold the suffix (ADR-0047).
-- At `full`, each entry leaves as it is written: the recording command carries the chain's URL, and the hook sends what the receiver does not hold within one second, quietly, after the lock is let go (ADR-0045).
-- The receiver answers a chain batch with `held_n` and `held_hash`, what it holds, and refuses a batch that would leave a hole with 409; the recorder sends from there, the memo only a hint (ADR-0045).
-- A chain's anchor and stamp rows travel to its URL after the step that wrote them, and the receiver keeps them beside its copy, where `verify --anchors` and `--stamps` read them (ADR-0045).
+- At `full`, each entry leaves as it is written: the recording command carries the chain's URL, and the hook posts the lines it appended, from memory, within one second, quietly, after the lock is let go (ADR-0045).
+- The receiver keeps a chain's line only when it is an entry, its hash recomputed, refuses a hole with 409, and answers every batch with `held_n` and `chains`; each send goes on from that answer, the memo deciding nothing (ADR-0045).
+- A chain's anchor and stamp rows travel to its URL, and the receiver keeps them beside its copy, where `verify --anchors` and `--stamps` read them; a send that fails is an attempt row, step `publish-rows` (ADR-0045).
 
 ### Changed
 
@@ -26,6 +26,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The supervisor shows and counts a claimed block as `ANCHOR-CLAIMED`, with a `claimed` field per chain and the gauge `loxodonta_heads_anchor_claimed`; `loxodonta_heads_unanchored` now counts heads no checked block covers (ADR-0044).
 - A supervisor older than this recorder reads a receipt whose tool is named bare, with the suffix after it, as a tool of its own: upgrade the supervisor first, the receiver's included (ADR-0047).
 - A recorder older than this receiver reads its 409 as a failed send: upgrade the recorder with the receiver. Re-run `install-hook` at `full` to put the chain's URL on the recording command (ADR-0045).
+- The session end, the keeper and `publish --chain` start from the chain's last entry and ask the remote every time; the keeper sends a chain written to since its last turn, whatever the memo says (ADR-0045).
 
 ### Fixed
 

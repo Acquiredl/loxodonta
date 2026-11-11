@@ -215,17 +215,19 @@ one-switch version.
 
 ## Addendum, 2026-11-11: each entry leaves as it is written, and the receiver says what it holds
 
-ADR-0045 narrows rulings 2, 3 and 4. Ruling 2's send starts from the
-entry after the last one the remote says it holds: the receiver answers
-each batch with the `n` and the `entry_hash` of the last entry it holds
-of that chain, and the memo's chain rows are a hint for where to start
-and a note of what left, deciding nothing. Ruling 3's last sentence no
-longer holds at `full`: the recording hook sends each entry as it is
-written, under one second, and the session end and the keeper send what
-those sends left, by the same rule. Ruling 4's receiver gains a
-refusal, `409` for a batch that would leave a hole after what it holds,
-and a second kind of file, a chain's anchor and stamp rows kept beside
-its copy. It still refuses everything but a POST and has no read
-endpoint. *The tail since the last send*, under *What none of this
+ADR-0045 narrows rulings 2, 3 and 4. Ruling 2's send goes from the
+receiver's answer: every answer to a batch says the highest `n` held of
+that chain and whether the batch's first entry connects to an entry
+held, and the sender posts what it has in hand and goes on from there.
+The memo's chain rows are a note of what left, and decide nothing for
+a remote that answers so; one that does not is followed from the memo
+as before. Ruling 3's last sentence no longer holds at `full`: the
+recording hook posts each entry as it is written, under one second, and
+the session end and the keeper start from the chain's last entry, by
+the same rule. Ruling 4's receiver gains two refusals, `400` for a line
+that is not an entry, whose hash it now recomputes, and `409` for a
+batch that would leave a hole, and a second kind of file, a chain's
+anchor and stamp rows kept beside its copy. It still refuses everything
+but a POST and has no read endpoint. *The tail since the last send*, under *What none of this
 survives*, is at `full` about a second long while the receiver is
 reachable, and as long as a send is stopped.
