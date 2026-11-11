@@ -350,9 +350,12 @@ and exit 0: the hook must stay quiet, not nag.
 **Entry addresses** follow git's rules: 4–64 lowercase hex, any
 unambiguous prefix resolves, an ambiguous one is refused with
 candidates named. `show` re-hashes the fetched entry against its
-address — recall's pointers are self-verifying, and the one hash
-recall ever computes is still not a verdict: a mismatch prints a
-warning that names the real judge. `search` reaches the whole repo's
+address — recall's pointers are self-verifying, and a hash recall
+computes is still not a verdict: a mismatch prints a
+warning that names the real judge. For a receipt that names its call
+and hashes its input, `show` also hashes the transcript's record of
+that call and says whether it matches, differs, or is not there,
+testimony from a file in the writer's reach (ADR-0047). `search` reaches the whole repo's
 memory (`--all`: the whole store), counts every match, and caps only
 what it shows — no silent caps. `timeline` renders the rows around one
 address: how the moment unfolded.

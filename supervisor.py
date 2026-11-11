@@ -7146,8 +7146,10 @@ def call_testimony(log, action, witness):
 def cmd_show(args):
     """One full entry by address. The address is the fingerprint: the
     fetched entry is re-hashed against it, so recall's pointers are
-    self-verifying — the one place recall touches a hash, and still not
-    a verdict: a mismatch is a warning that names the real judge."""
+    self-verifying — still not a verdict: a mismatch is a warning that
+    names the real judge. A receipt that names its call and hashes its
+    input is held against the transcript's record of that call
+    (`call_testimony`, ADR-0047), testimony and never a verdict."""
     match, code = resolve_address(args)
     if match is None:
         return code

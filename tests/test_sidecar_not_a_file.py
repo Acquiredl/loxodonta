@@ -67,6 +67,7 @@ from test_package_anchor import SESSION, AnchoredStoreCase  # noqa: E402
 from test_publish import PublishBase  # noqa: E402
 from test_serve import OPENER, ServerFixture  # noqa: E402
 from test_stamp import start_authority  # noqa: E402
+from test_hook import suffix  # noqa: E402
 from test_supervisor import (chains_by_session,  # noqa: E402
                              install_witness_hook, make_chain, run_scan)
 
@@ -88,6 +89,10 @@ def kind(path):
 
 
 HOOKED = "sess-1234abcd"
+
+
+# The receipt fire_hook leaves for "echo kept", suffix and all (ADR-0047).
+KEPT = "Bash: echo kept" + suffix({"command": "echo kept"})
 
 
 def fire_hook(case, log_dir, command):
@@ -275,7 +280,7 @@ class WrittenChainNotAFileTest(unittest.TestCase):
         entries = [json.loads(line) for line
                    in sibling.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([e["action"] for e in entries],
-                         ["genesis", "Bash: echo kept"])
+                         ["genesis", KEPT])
         self.assertTrue(self.still_there(chain))
         self.assert_no_lock()
 
@@ -373,7 +378,7 @@ class UnopenableChainTest(unittest.TestCase):
         entries = [json.loads(line) for line
                    in sibling.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([e["action"] for e in entries],
-                         ["genesis", "Bash: echo kept"])
+                         ["genesis", KEPT])
         self.assertEqual(list(self.workdir.glob("*.lock")), [])
 
     @unittest.skipUnless(hasattr(socket, "AF_UNIX") and hasattr(os, "mkfifo"),

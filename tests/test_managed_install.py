@@ -38,6 +38,7 @@ from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
 
 from test_supervisor import (ago, chain_head, make_chain,  # noqa: E402
                              prime_memory, run_scan, write_transcript)
+from test_hook import suffix  # noqa: E402
 
 OURS = ("loxodonta.py", "supervisor.py")
 # The harness's own managed settings folder, as its documentation names
@@ -2150,9 +2151,10 @@ class SecondRecordNoteWitnessTest(ManagedBase):
         self.hook("step 0")
         self.hook("step 1")
         actions = [e["action"] for e in self.chain()]
-        self.assertEqual(actions, ["genesis", "Bash: step 0",
-                                   "second-record-cut: reason=telemetry-off",
-                                   "Bash: step 1"])
+        self.assertEqual(actions, [
+            "genesis", "Bash: step 0" + suffix({"command": "step 0"}),
+            "second-record-cut: reason=telemetry-off",
+            "Bash: step 1" + suffix({"command": "step 1"})])
         write_transcript(self.witness, self.project, self.SESSION,
                          event_times=[ago(6000), ago(5990)])
 

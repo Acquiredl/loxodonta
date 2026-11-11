@@ -13,6 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Added
 
 - `install-hook --managed --matcher PATTERN` narrows the recorder's matcher in the managed file. Without it a managed install wires `*`, and a matcher narrowed in the operator's own settings file is named and not carried (ADR-0043).
+- A hook receipt ends with `[call=<id> input sha256=<hex> bytes=<n>]`: the harness's id for the call and a hash of its whole input, SPEC v0.1.6. `supervisor show` says whether the transcript's record of that call matches (ADR-0047).
 
 ### Changed
 
@@ -25,6 +26,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `openssl`, `ssh-keygen`, `git`, `gh` and `explain`'s default `claude` run by the full path a walk of `PATH` finds, never from the working folder, so a file of that name where `verify` runs is never the program run (ADR-0043).
 - `hook` and `digest` refuse an abbreviated flag with exit 64, so `--manag` is never taken by the parser for `--managed` while the run reads the environment as an unmanaged one (ADR-0043).
+- A file the hook cannot fingerprint no longer loses the receipt: it is appended without that reference, its line says `(1 not fingerprinted)`, and the exit still names the failure (ADR-0047).
 
 ## [0.19.0] - 2026-10-25
 
