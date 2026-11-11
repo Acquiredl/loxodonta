@@ -4,10 +4,11 @@ they are written, and the receiver says what it holds.
 The receiver keeps a line only when it is an entry, its hash recomputed
 there; it refuses with 409 a batch that would leave a hole; and every
 answer to a batch says the highest n it holds and whether the batch's
-first entry connects. At `full` the recording hook posts the lines it
-has just appended, from memory, and goes on from the answer alone: a
-hole is filled from the entry after the highest held, an entry that does
-not connect is followed by the one before it. The session end, the
+first entry connects, every entry down to its genesis held. At `full`
+the recording hook posts the lines it has just appended, from memory,
+and goes on from the answer alone: a hole is filled from the entry after
+the highest held, and for an entry that does not connect the last that
+does is found by halving and the rest sent on from it. The session end, the
 keeper and `publish --chain` start from the chain's last entry and go on
 the same way, the memo deciding nothing. Every test drives the public
 CLI against the repo's own `receiver.py serve` on a loopback port, or a
@@ -38,14 +39,16 @@ from test_anchor import start_calendar  # noqa: E402
 from test_receiver import (NDJSON, ReceiverFixture, free_port,  # noqa: E402
                            make_chain, post, request, run_recorder)
 from test_stamp import start_authority  # noqa: E402
+from test_supervisor import ago  # noqa: E402
 from test_supervisor import make_chain as make_store_chain  # noqa: E402
-from test_supervisor import run_scan  # noqa: E402
+from test_supervisor import run_scan, write_attempt_row  # noqa: E402
 
 PUBLISH_TO = re.compile(r"^publish to (https?://\S+)$", re.M)
 SIDECAR = "application/x-loxodonta-sidecar"
 CHAIN = "receipts-sess-0045.jsonl"
 SESSION = "sess-as-written-0045"
 DOES_NOT_SAY = "the remote does not say what it holds"
+TIME_RAN_OUT = "the second ran out with entries still missing at the receiver"
 
 
 def lines_of(path):
@@ -229,12 +232,12 @@ class AnswerTest(ReceiverFixture):
         self.assertEqual(status, 200, answer)
         self.assertEqual(json.loads(answer),
                          {"appended": 2, "dropped": 0, "held_n": 1,
-                          "chains": True})
+                          "connects": True})
         # A resend of what it holds adds nothing and says the same.
         status, answer = self.send(b"".join(self.rows[:2]))
         self.assertEqual(json.loads(answer),
                          {"appended": 0, "dropped": 2, "held_n": 1,
-                          "chains": True})
+                          "connects": True})
 
     def test_a_hole_is_409_and_nothing_is_appended(self):
         self.send(b"".join(self.rows[:2]))
@@ -259,7 +262,7 @@ class AnswerTest(ReceiverFixture):
 
         self.assertEqual(status, 409, answer)
         said = json.loads(answer)
-        self.assertEqual((said["held_n"], said["chains"]), (None, False))
+        self.assertEqual((said["held_n"], said["connects"]), (None, False))
         self.assertEqual(self.stored(), ["token"])
 
     def test_an_entry_held_at_another_n_does_not_connect(self):
@@ -275,7 +278,7 @@ class AnswerTest(ReceiverFixture):
         self.assertEqual(status, 200, answer)
         self.assertEqual(json.loads(answer),
                          {"appended": 1, "dropped": 0, "held_n": 3,
-                          "chains": False})
+                          "connects": False})
 
     def test_a_regenerated_entry_at_an_old_n_is_appended_and_breaks_there(self):
         # At or below the highest held, a line that is not the one held
@@ -353,8 +356,9 @@ class OnlyEntriesTest(ReceiverFixture):
 
 
 class MemoryTest(ReceiverFixture):
-    """The cost at the receiver: one new entry on top of what it holds is
-    answered from memory, without reading the file it appends to."""
+    """The cost at the receiver: once a chain is read, an entry posted to
+    it, at the top or anywhere below, is answered from memory, without
+    reading the file it appends to."""
 
     def test_a_new_entry_on_a_large_file_does_not_read_the_file_again(self):
         count = 40000
@@ -369,7 +373,7 @@ class MemoryTest(ReceiverFixture):
                                   {"X-Loxodonta-Chain": CHAIN})
             took = time.monotonic() - started
             self.assertEqual(status, 200, answer)
-            self.assertEqual(json.loads(answer)["chains"], True)
+            self.assertEqual(json.loads(answer)["connects"], True)
             return took
 
         # The first touch reads the file; every one after it does not.
@@ -380,6 +384,43 @@ class MemoryTest(ReceiverFixture):
                         f"a warm answer took {max(warm):.3f} s, the cold one "
                         f"{cold:.3f} s")
         self.assertEqual((self.data / CHAIN).read_bytes(), b"".join(lines))
+
+    def test_a_chain_in_memory_is_answered_without_reading_its_file(self):
+        # Once the receiver has read a chain of 40,000 entries, its file
+        # is overwritten with as many bytes that hold no entry at all. A
+        # receiver that read the file again would answer that it holds
+        # nothing; one answering from memory answers as before, for a
+        # duplicate in the middle, a new entry in the middle, and the
+        # next entry at the top.
+        count = 40000
+        lines = forged_chain(count + 1).splitlines(True)
+        self.data.mkdir(parents=True)
+        (self.data / CHAIN).write_bytes(b"".join(lines[:count]))
+        proc = self.start()
+
+        def send(line):
+            status, answer = post(proc.url, line, NDJSON,
+                                  {"X-Loxodonta-Chain": CHAIN})
+            return status, json.loads(answer)
+
+        self.assertEqual(send(lines[count - 1])[1]["connects"], True)
+        size = (self.data / CHAIN).stat().st_size
+        (self.data / CHAIN).write_bytes(b"x" * (size - 1) + b"\n")
+        middle = json.loads(lines[20000])
+        other = hashed({key: value for key, value in middle.items()
+                        if key != "entry_hash"} | {"action": "said otherwise"})
+
+        self.assertEqual(send(lines[20000]),
+                         (200, {"appended": 0, "dropped": 1,
+                                "held_n": count - 1, "connects": True}))
+        self.assertEqual(send(line_of(other)),
+                         (200, {"appended": 1, "dropped": 0,
+                                "held_n": count - 1, "connects": True}))
+        self.assertEqual(send(lines[count]),
+                         (200, {"appended": 1, "dropped": 0,
+                                "held_n": count, "connects": True}))
+        self.assertTrue((self.data / CHAIN).read_bytes().endswith(
+            line_of(other) + lines[count]))
 
 
 class SidecarDoorTest(ReceiverFixture):
@@ -575,7 +616,7 @@ class AsWrittenTest(AsWrittenBase):
         self.assertEqual([r["outcome"] for r in entry_attempts(log)],
                          [down["outcome"], "sent"])
 
-    def test_an_entry_missing_below_the_top_is_walked_back_to(self):
+    def test_an_entry_missing_below_the_top_is_found_and_sent(self):
         port = free_port()
         receiver = start_receiver(self, self.data, port=port)
         for _ in range(3):
@@ -595,8 +636,8 @@ class AsWrittenTest(AsWrittenBase):
         done = self.call("--publish-chain", again.url)
 
         self.assertEqual(done.returncode, 0, done.stderr)
-        # Entry 4 did not connect, the hook sent entry 3 alone, and that
-        # one did: every line of the local chain is held.
+        # Entry 4 did not connect, and halving found entry 2 the last
+        # that did: entry 3 went, and every line of the local chain is held.
         held = (self.data / log.name).read_bytes().splitlines(True)
         for line in log.read_bytes().splitlines(True):
             self.assertIn(line, held)
@@ -902,6 +943,318 @@ class SaysNothingTest(AsWrittenBase):
         (chain,) = [c for repo in report["repos"] for s in repo["sessions"]
                     for c in s["chains"]]
         self.assertIsNone(chain["last_failed"])
+
+
+class Tally:
+    """The receiver's own log, one line per request on its stdout, read
+    as it comes: how many POSTs it answered. Lines arrive just after the
+    answer they log, so a count waits until none has come for a moment;
+    a line it misses only makes the count smaller, never larger."""
+
+    def __init__(self, proc):
+        self.lines = []
+        thread = threading.Thread(target=self.read, args=(proc.stdout,),
+                                  daemon=True)
+        thread.start()
+
+    def read(self, stream):
+        try:
+            for line in stream:
+                self.lines.append(line)
+        except (OSError, ValueError):
+            pass
+
+    def posts(self):
+        seen, quiet = -1, time.monotonic() + 10
+        while len(self.lines) != seen and time.monotonic() < quiet:
+            seen = len(self.lines)
+            time.sleep(0.3)
+        return sum(" POST " in line for line in self.lines)
+
+
+def ours_alone(case, ours, kept, folder):
+    """The lines of the receiver's file that are the recorder's own,
+    `ours`, in the chain's order, written to a file of their own: a
+    chain `verify` reads as VALID when every one arrived whole."""
+    lines = set(kept.read_bytes().splitlines(True))
+    mine = ours.read_bytes().splitlines(True)
+    case.assertEqual([line for line in mine if line not in lines], [],
+                     "every entry of the recorder's chain is at the receiver")
+    alone = folder / "ours-alone.jsonl"
+    alone.write_bytes(b"".join(line for line in mine if line in lines))
+    return run_recorder("verify", "--log", alone).stdout.strip()
+
+
+class ConnectsToGenesisTest(AsWrittenBase):
+    """ADR-0045 rulings 2 and 3 as reworded: an entry connects only when
+    every entry down to its genesis is held, so a gap anywhere below
+    shows in the answer to every entry above it; the recorder finds the
+    last of its entries that connects by halving and sends on from
+    there, and a step cut short is taken up by the next one."""
+
+    def drawer_chain(self, count):
+        """A chain of `count` entries in a drawer of its own, none of them
+        sent: (the flags that record into it, its path)."""
+        drawer = self.root / "drawer"
+        drawer.mkdir()
+        log = drawer / f"receipts-{SESSION}.jsonl"
+        log.write_bytes(forged_chain(count - 1))
+        return ("--log-dir", str(drawer)), log
+
+    def post_theirs(self, receiver, log, count):
+        """`count` valid entries of another chain, posted first under this
+        chain's name by whoever holds the URL."""
+        theirs = forged_chain(count - 1, action="Bash: theirs")
+        status, answer = post(receiver.url, theirs, NDJSON,
+                              {"X-Loxodonta-Chain": log.name})
+        self.assertEqual(status, 200, answer)
+
+    def every_step(self, flags, log, url, env):
+        """Three recording calls, a session end and `publish --chain`."""
+        for _ in range(3):
+            self.assertEqual(self.call(*flags, "--publish-chain", url,
+                                       env=env).returncode, 0)
+        ended = run(LOXODONTA, "hook", *flags, "--publish-chain", url,
+                    cwd=self.project, env=env, timeout=60,
+                    stdin=json.dumps({"session_id": SESSION,
+                                      "hook_event_name": "SessionEnd",
+                                      "reason": "prompt_input_exit"}))
+        self.assertEqual(ended.returncode, 0, ended.stderr)
+        by_hand = run(LOXODONTA, "publish", "--chain", "--log", str(log), url,
+                      env=env, timeout=120)
+        self.assertEqual(by_hand.returncode, 0, by_hand.stderr)
+
+    def test_entries_below_another_chains_entries_all_arrive(self):
+        # The reviewer's first case: 2000 entries not yet sent, and 2005
+        # of another chain posted first under this chain's name.
+        flags, log = self.drawer_chain(2000)
+        receiver = start_receiver(self, self.data)
+        self.post_theirs(receiver, log, 2005)
+
+        self.every_step(flags, log, receiver.url, self.env())
+
+        kept = self.data / log.name
+        self.assertEqual(ours_alone(self, log, kept, self.root), "VALID")
+        judged = run_recorder("verify", "--log", kept)
+        self.assertTrue(judged.stdout.startswith("BROKEN at entry 2005"),
+                        judged.stdout)
+        self.assertNotIn(TIME_RAN_OUT, [r["outcome"]
+                                        for r in entry_attempts(log)][-1:])
+
+    def test_a_backlog_in_small_batches_all_arrives(self):
+        # The reviewer's second: a backlog of 300, another chain's entries
+        # 0 to 200 posted first, and batches of 2000 bytes.
+        flags, log = self.drawer_chain(300)
+        receiver = start_receiver(self, self.data)
+        self.post_theirs(receiver, log, 201)
+
+        self.every_step(flags, log, receiver.url,
+                        self.env(LOXODONTA_CHAIN_BATCH_BYTES="2000"))
+
+        kept = self.data / log.name
+        self.assertEqual(ours_alone(self, log, kept, self.root), "VALID")
+        judged = run_recorder("verify", "--log", kept)
+        self.assertTrue(judged.stdout.startswith("BROKEN at entry 201"),
+                        judged.stdout)
+
+    def test_a_gap_in_the_middle_is_found_in_a_few_posts(self):
+        # The receiver holds 3000 entries but 1000 to 1009, the top among
+        # them: every entry above the gap answers that it does not connect.
+        flags, log = self.drawer_chain(3000)
+        lines = log.read_bytes().splitlines(True)
+        self.data.mkdir()
+        (self.data / log.name).write_bytes(b"".join(lines[:1000]
+                                                    + lines[1010:]))
+        receiver = start_receiver(self, self.data)
+        tally = Tally(receiver)
+        before = tally.posts()
+
+        started = time.monotonic()
+        ended = self.session_end(*flags, "--publish-chain", receiver.url)
+        took = time.monotonic() - started
+
+        self.assertEqual(ended.returncode, 0, ended.stderr)
+        kept = (self.data / log.name).read_bytes().splitlines(True)
+        self.assertEqual([line for line in log.read_bytes().splitlines(True)
+                          if line not in kept], [])
+        # The chain's last entry, a dozen halvings, and one batch.
+        posts = tally.posts() - before
+        self.assertLessEqual(posts, 20, f"{posts} posts")
+        rows = [r for r in memo_rows(log) if r.get("kind") == "attempt"]
+        self.assertEqual([r["outcome"] for r in rows], ["sent"],
+                         f"{posts} posts in {took:.2f} s")
+
+    def test_a_call_cut_off_mid_fill_is_finished_by_the_calls_after_it(self):
+        # One entry a batch, so a second carries a few hundred at most; no
+        # session end and no keeper: the recording calls alone finish it.
+        flags, log = self.drawer_chain(800)
+        receiver = start_receiver(self, self.data)
+        self.post_theirs(receiver, log, 801)
+        env = self.env(LOXODONTA_CHAIN_BATCH_BYTES="1")
+
+        self.assertEqual(self.call(*flags, "--publish-chain", receiver.url,
+                                   env=env).returncode, 0)
+        (cut,) = entry_attempts(log)
+        self.assertEqual(cut["outcome"], TIME_RAN_OUT)
+        for calls in range(60):
+            mine = log.read_bytes().splitlines(True)
+            kept = set((self.data / log.name).read_bytes().splitlines(True))
+            if all(line in kept for line in mine):
+                break
+            self.assertEqual(self.call(*flags, "--publish-chain",
+                                       receiver.url, env=env).returncode, 0)
+        # Every entry is held; the call after the one that sent the last
+        # of them is told its own entry connects.
+        self.assertEqual(self.call(*flags, "--publish-chain", receiver.url,
+                                   env=env).returncode, 0)
+
+        self.assertEqual(ours_alone(self, log, self.data / log.name,
+                                    self.root), "VALID")
+        self.assertEqual(entry_attempts(log)[-1]["outcome"], "sent",
+                         f"after {calls + 1} more calls")
+
+    def test_one_entry_past_the_cap_still_goes_alone(self):
+        # The cap bounds how many entries share a batch: a cap smaller
+        # than any entry sends each alone, and none is refused.
+        flags, log = self.drawer_chain(5)
+        receiver = start_receiver(self, self.data)
+
+        done = run(LOXODONTA, "publish", "--chain", "--log", str(log),
+                   receiver.url, timeout=120,
+                   env=self.env(LOXODONTA_CHAIN_BATCH_BYTES="50"))
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertHeld(log)
+        self.assertEqual([(r["first"], r["last"]) for r in memo_rows(log)
+                          if r["kind"] == "chain"],
+                         [(n, n) for n in range(5)])
+
+    def test_a_send_that_appends_nothing_writes_no_chain_row(self):
+        # Every entry left as it was written; `publish --chain` then finds
+        # the end held. No chain row says something left that did not,
+        # and the keeper, told the end left by the attempt row, asks once.
+        drawer = self.root / "repos" / "alpha" / "receipts"
+        flags = ("--log-dir", str(drawer))
+        receiver = start_receiver(self, self.data)
+        tally = Tally(receiver)
+        for _ in range(3):
+            self.call(*flags, "--publish-chain", receiver.url)
+        log = drawer / f"receipts-{SESSION}.jsonl"
+        self.assertHeld(log)
+
+        done = run_recorder("publish", "--chain", "--log", log, receiver.url)
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("nothing to send", done.stdout)
+        self.assertEqual([r for r in memo_rows(log) if r["kind"] == "chain"],
+                         [])
+        (row,) = [r for r in memo_rows(log) if r["kind"] == "attempt"]
+        self.assertEqual((row["outcome"], row["remote_id"]),
+                         ("sent", remote_id(receiver.url)))
+
+        home = temp_folder(self)
+        counts = []
+        for _ in range(3):
+            scan = run_scan(self.root / "repos", "--publish-every", "0s",
+                            "--publish-chain", receiver.url,
+                            env=isolated_env(
+                                home, SUPERVISOR_UPGRADE_EVERY_SECONDS="0"))
+            self.assertEqual(scan.returncode, 0, scan.stdout + scan.stderr)
+            counts.append(tally.posts())
+        # The first turn asks, since the keeper has no turn on record;
+        # the next two find the end left and ask nothing.
+        self.assertEqual(counts[1:], [counts[0]] * 2, counts)
+        self.assertEqual([r for r in memo_rows(log) if r["kind"] == "chain"],
+                         [])
+
+
+class AsWrittenReadingTest(unittest.TestCase):
+    """Where the wired recording command sends each entry as it is
+    written, the supervisor says so for a chain written since that
+    wiring whose last send did not fail, and does not read it as nothing
+    having left: the per-entry send writes no chain row (ADR-0045 ruling
+    3). Installed for real, in a home of the test's own; the chains are
+    written by the CLI, since what is read is the wiring and the memo."""
+
+    def setUp(self):
+        base = temp_folder(self)
+        self.root = base / "repos"
+        self.home = base / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        self.url = "https://shelf.example.test:8790/7qpsWUkU86ML-NOuaGjSa"
+
+    def install(self, *args):
+        done = run(LOXODONTA, "install-hook", *args, cwd=self.root.parent,
+                   env=isolated_env(self.home))
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def chain(self, session="sess-live", actor="claude-code"):
+        log = self.root / "alpha" / "receipts" / f"receipts-{session}.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        run(LOXODONTA, "init", "--log", str(log), check=True, timeout=60)
+        run(LOXODONTA, "log", "--log", str(log), "--actor", actor,
+            "--action", "Bash: ls", check=True, timeout=60)
+        return log
+
+    def scan(self):
+        done = run_scan(self.root, "--witness",
+                        str(self.home / ".claude" / "projects"),
+                        env=isolated_env(self.home))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        report = json.loads(done.stdout)
+        chains = {Path(c["log"]).name: c for repo in report["repos"]
+                  for s in repo["sessions"] for c in s["chains"]}
+        return chains, report["published"]
+
+    def test_a_live_full_session_reads_as_leaving_as_written(self):
+        older = self.chain("sess-older")
+        time.sleep(1.1)   # the install's second is after the older chain's
+        self.install("--profile", "full", "--remote", self.url)
+        log = self.chain()
+
+        chains, published = self.scan()
+
+        self.assertEqual(chains[log.name]["left"],
+                         {"ts": None, "via": None, "as_written": True})
+        self.assertIsNone(chains[log.name]["last_failed"])
+        # Written before the wiring: nothing says it ever left.
+        self.assertEqual(chains[older.name]["left"], {"ts": None, "via": None})
+        # The head goes at session end, and none has ended: the sentence
+        # names that route alone.
+        self.assertEqual((published["wired"], published["sent"]),
+                         (True, True))
+        self.assertIn("(--publish)", published["note"])
+
+    def test_a_failed_send_is_the_failed_step_it_is(self):
+        self.install("--profile", "full", "--remote", self.url)
+        log = self.chain()
+        write_attempt_row(log, "publish-chain", "no answer within 1 seconds",
+                          when=ago(0), budget=1.0)
+
+        chains, published = self.scan()
+
+        self.assertEqual(chains[log.name]["left"], {"ts": None, "via": None})
+        self.assertEqual(chains[log.name]["last_failed"]["step"],
+                         "publish-chain")
+        self.assertFalse(published["sent"])
+        self.assertIn("a sent chain", published["note"])
+
+    def test_below_full_nothing_is_claimed(self):
+        self.install("--profile", "timestamped")
+        log = self.chain()
+
+        chains, _ = self.scan()
+
+        self.assertEqual(chains[log.name]["left"], {"ts": None, "via": None})
+
+    def test_a_chain_another_harness_wrote_claims_nothing(self):
+        # Claude Code's recording command sends; Codex's is not wired.
+        self.install("--profile", "full", "--remote", self.url)
+        codex = self.chain("sess-codex", actor="codex")
+
+        chains, _ = self.scan()
+
+        self.assertEqual(chains[codex.name]["left"], {"ts": None, "via": None})
 
 
 # --- The proofs travel ------------------------------------------------------------

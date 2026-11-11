@@ -820,6 +820,25 @@ class DashboardLeftTest(ReceiverFixture):
         self.assertIn("last left", tiles)
         self.assertIn("last failed", tiles)
 
+    def test_the_tile_and_the_drawer_say_when_entries_leave_as_written(self):
+        # ADR-0045 ruling 3: a chain whose entries leave as each is
+        # written carries `left.as_written`, and the page says so in the
+        # recorder's own words where it would say nothing left, or when
+        # something last left.
+        make_chain(self.root / "alpha" / "receipts", "sess-live")
+        url = self.serve()
+
+        page = self.get(url, "/")
+
+        tiles = page[page.index("function renderTiles"):
+                     page.index("function renderSpark")]
+        self.assertIn("c.left.as_written", tiles)
+        self.assertIn("AS_WRITTEN", tiles)
+        self.assertIn("left.as_written", page[page.index("const left = "
+                                                         "chain.left"):])
+        self.assertIn("entries leave as each is written, by the recorder's "
+                      "own note", page)
+
 
 class HeadlessKeeperTest(ReceiverFixture):
     """`serve` turns its keepers on a clock of its own (#271). Both

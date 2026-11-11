@@ -217,8 +217,9 @@ one-switch version.
 
 ADR-0045 narrows rulings 2, 3 and 4. Ruling 2's send goes from the
 receiver's answer: every answer to a batch says the highest `n` held of
-that chain and whether the batch's first entry connects to an entry
-held, and the sender posts what it has in hand and goes on from there.
+that chain and whether the batch's first entry connects, every entry
+down to its genesis held, and the sender posts what it has in hand and
+goes on from there.
 The memo's chain rows are a note of what left, and decide nothing for
 a remote that answers so; one that does not is followed from the memo
 as before. Ruling 3's last sentence no longer holds at `full`: the

@@ -1920,17 +1920,33 @@ def remote_id(url):
 
 def memo_holds_end(log, url, entries):
     """Whether the publish memo records that the remote at `url` holds
-    the chain's last entry: a chain row naming that remote (#263) whose
-    `last` is the last entry's n and whose `head` is its entry_hash. For
-    scheduling only, and only ever to add a send: the memo is
-    writer-reachable, and a chain written to since the keeper's last
-    turn is sent whatever it says (ADR-0045 ruling 4)."""
+    the chain's last entry, and that its last send there did not fail:
+    the newest `publish-chain` attempt row naming that remote is not a
+    failure, and either a chain row naming that remote (#263) has the
+    last entry's n and entry_hash, or that attempt row is `sent` and no
+    older than the last entry. The second, because a send that finds the
+    end already held appends nothing and writes no chain row (ADR-0045
+    ruling 4). For scheduling only, and only ever to add a send: the
+    memo is writer-reachable, and a chain written to since the keeper's
+    last turn is sent whatever it says."""
     mine, end = remote_id(url), entries[-1]
-    return any(is_chain_record(record) and record.get("remote_id") == mine
-               and record.get("last") == end.get("n")
-               and record.get("head") == end.get("entry_hash")
-               for record in sidecar_records(Path(str(log)
-                                                  + ".published.jsonl")))
+    named, newest = False, None
+    for record in sidecar_records(Path(str(log) + ".published.jsonl")):
+        if record.get("remote_id") != mine:
+            continue
+        if is_chain_record(record):
+            named = named or (record.get("last") == end.get("n")
+                              and record.get("head") == end.get("entry_hash"))
+        elif row_kind("memo", record) == ATTEMPT_KIND \
+                and record.get("step") == "publish-chain":
+            newest = record
+    if newest is not None and newest.get("outcome") not in SENT_OUTCOMES:
+        return False
+    if named or newest is None:
+        return named
+    sent, written = row_when(newest), parse_when(end.get("ts"))
+    return (sent is not None and written is not None
+            and written.tzinfo is not None and sent >= written)
 
 
 def rows_unsent(log):
@@ -2168,7 +2184,8 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     for the entries, `loxodonta publish --chain` asks the remote and
     sends what it does not hold (ADR-0031 ruling 3, ADR-0045 ruling 4),
     for a chain written to since the keeper's last turn on it, one whose
-    memo does not record that remote holding its last entry, and one
+    memo does not record that remote holding its last entry or records
+    its last send there failing (`memo_holds_end`), and one
     whose anchor or stamp rows did not land the last time they were
     sent; at most once per throttle window. The memo is testimony: it
     stops a repeated head and proves nothing, and it never stands the
@@ -2727,12 +2744,13 @@ def sessionend_commands(witness):
             for command in sessionend_commands_in(settings_file)]
 
 
-def sessionend_commands_in(settings_file):
+def sessionend_commands_in(settings_file, event="SessionEnd"):
     """The recorder's SessionEnd command lines in one hooks file, in
-    the shape Claude Code's settings and Codex's hooks.json share."""
+    the shape Claude Code's settings and Codex's hooks.json share, or
+    those of another hook `event`."""
     settings = read_settings(settings_file)
     try:
-        rules = settings["hooks"]["SessionEnd"]
+        rules = settings["hooks"][event]
     except (KeyError, TypeError):
         return []
     commands = []
@@ -2800,7 +2818,61 @@ def chain_landed(log, remote):
                    Path(str(log) + ".published.jsonl")))
 
 
-def published_reading(witness, logs):
+def sends_as_written(witness):
+    """For each harness whose wired recording command sends each entry
+    as it is written, the time from which that is so: {harness: when}.
+    It sends when the recorder's PostToolUse command carries
+    `--publish-chain`, as a `full` install writes it (ADR-0045 ruling
+    3): Claude Code's read from the settings beside the witness layout
+    and its managed file, Codex's from its hooks file, the files the
+    profile is followed from, for the flag alone, never the URL. It is
+    so from that harness's newest install in the coverage marker
+    (ADR-0030); a harness the marker does not date is left out, since a
+    chain written before the wiring was never sent that way."""
+    def carries(commands):
+        return any(re.search(r"(?:^|\s)--publish-chain(?=\s|=|$)", command)
+                   for command in commands)
+    wired = {"claude-code": carries(
+                 command for settings_file in managed_first(witness)
+                 for command in sessionend_commands_in(settings_file,
+                                                       "PostToolUse")),
+             "codex": carries(sessionend_commands_in(codex_hooks_file(),
+                                                     "PostToolUse"))}
+    dated = {}
+    for harness, epoch in marker_harnesses().items():
+        since = parse_when(epoch["since"])
+        if wired.get(harness) and since is not None \
+                and since.tzinfo is not None:
+            dated[harness] = since
+    return dated
+
+
+def leaves_as_written(log, entries, sending):
+    """Whether this chain's entries leave as each is written, by the
+    recorder's own note: the harness that wrote its newest receipt sends
+    each entry (`sends_as_written`'s `sending`), the chain's newest
+    entry was written since that wiring, and the newest `publish-chain`
+    attempt row beside it is not a failure. The per-entry send writes no
+    chain row, so without this a live session at `full` reads as if
+    nothing had left. What arrived is the receiver's scan to say
+    (docs/RECEIVER.md section 7); this is testimony, like the memo it
+    reads."""
+    actor = next((entry.get("actor") for entry in reversed(entries)
+                  if entry.get("actor") != "receipts"), None)
+    since = sending.get(actor)
+    written = parse_when(entries[-1].get("ts")) if entries else None
+    if since is None or written is None or written.tzinfo is None \
+            or written < since:
+        return False
+    newest = None
+    for record in sidecar_records(Path(str(log) + ".published.jsonl")):
+        if row_kind("memo", record) == ATTEMPT_KIND \
+                and record.get("step") == "publish-chain":
+            newest = record
+    return newest is None or newest.get("outcome") in SENT_OUTCOMES
+
+
+def published_reading(witness, logs, written=()):
     """#240 part 3: whether the wired SessionEnd command publishes,
     whether any chain here holds a row saying something was sent, and
     the one sentence for wired and nothing ever sent, since a receiver
@@ -2808,13 +2880,15 @@ def published_reading(witness, logs):
     reads the memos. Sent is per route (#248): a chain wired beside a
     head that has left reads as never sent until a batch lands. The
     chain route is also per remote (#263): only a batch the wired
-    remote took counts. A head counts wherever it went (ADR-0025).
-    Never the URL, and never the exit."""
+    remote took counts, or a chain in `written`, whose entries leave as
+    each is written (`leaves_as_written`). A head counts wherever it
+    went (ADR-0025). Never the URL, and never the exit."""
     routes = sessionend_publishes(witness)
     remote = sessionend_chain_remote(witness)
     landed = {"head": any(sidecar_heads(Path(str(log) + ".published.jsonl"),
                                         "memo") for log in logs),
-              "chain": any(chain_landed(log, remote) for log in logs)}
+              "chain": bool(written)
+              or any(chain_landed(log, remote) for log in logs)}
     wired = any(routes.values())
     sent = any(landed.values())
     silent = [route for route in ("head", "chain")
@@ -4742,6 +4816,16 @@ class Look:
         self.tick, self.remember = tick, remember
         self.show_before_memory = show_before_memory
         self.baseline_path, self.daybook = memory_paths(root, store, receiver)
+        self.sending = None
+
+    def sends_as_written(self):
+        """`sends_as_written` for this look's witness, asked once; none
+        over a receiver's folder, where nothing of the agent's machine is
+        read."""
+        if self.sending is None:
+            self.sending = {} if self.receiver \
+                else sends_as_written(self.witness)
+        return self.sending
 
     def chains(self, closed=None):
         """Every chain the census counts: the store's drawers, a
@@ -4984,6 +5068,8 @@ def chain_row(look, log, entries, said):
         # a head went out of, and keeps its shape.
         "head_published": head_published(log, entries),
     }
+    if leaves_as_written(log, entries, look.sends_as_written()):
+        row["left"]["as_written"] = True
     row["anchors"].update(said["anchors"])
     row["left"].update(said["left"])
     return row, verdict, stood_down
@@ -5245,14 +5331,16 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     remembered, blind = memory["chains"], memory["blind"]
     census, unfiled, closed = take_census(look, remembered)
     repos, families, to_remember = {}, {}, {}
-    events, awakened = [], {}
+    events, awakened, written = [], {}, []
     worst = damaged = 0
     fresh = 0  # alarms this look found, or whose change moved
     for place in census:
-        repo, session, relpath, _ = place
+        repo, session, relpath, log = place
         reading = read_chain(look, place, memory, now, stamp)
         repos.setdefault(repo, {}).setdefault(session, []).append(
             reading.row)
+        if reading.row["left"].get("as_written"):
+            written.append(log)
         worst = max(worst, reading.exit)
         damaged += reading.broken
         memory["keeper"].update(reading.moved)
@@ -5332,7 +5420,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if note or memory["skipped"]:
         baseline["note"] = "; ".join(
             words for words in (note, memory["skipped"]) if words)
-    recorder, published = machine_readings(look, census)
+    recorder, published = machine_readings(look, census, written)
     report_note = empty_note(look, repos, closed_rows)
     return {
         **({"note": report_note} if report_note else {}),
@@ -5427,7 +5515,7 @@ def memory_notes(look, skipped):
     return notes
 
 
-def machine_readings(look, census):
+def machine_readings(look, census, written=()):
     """(recorder, published): which recorder runs, and whether
     publishing is wired and any head left by that door. Those are the
     on-machine reading's; at the receiver, where nothing of the agent's
@@ -5441,7 +5529,8 @@ def machine_readings(look, census):
                  "note": "what landed here is the census above; what is "
                          "wired to send it is read on the agent's machine"})
     return (recorder_notice(look.witness),
-            published_reading(look.witness, [place[3] for place in census]))
+            published_reading(look.witness, [place[3] for place in census],
+                              written))
 
 
 def empty_note(look, repos, closed_rows):
@@ -9391,7 +9480,8 @@ def metrics_text(report, age_seconds):
     gauge("loxodonta_publishing_wired_nothing_sent",
           "1 when publishing is wired on the session-end command and "
           "nothing has left by either route (no chain holds a sent head, "
-          "and none holds a batch the wired remote took), else 0",
+          "none holds a batch the wired remote took, and none sends its "
+          "entries as each is written), else 0",
           "testimony",
           [((), 1 if published.get("wired") and not published.get("sent")
             else 0)])
@@ -11157,10 +11247,12 @@ function renderTiles() {
       .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0];
     const left = newest(chains.map(c => c.left));
     const failed = newest(chains.map(c => c.last_failed));
+    const asWritten = chains.some(c => c.left && c.left.as_written);
     tile.appendChild(el("span", "meta",
-      (left ? whatLeft(left.via) + " last left " + since(left.ts) +
-              " ago (" + left.via + ")"
-            : "no head has left this machine") +
+      (asWritten ? AS_WRITTEN
+       : left ? whatLeft(left.via) + " last left " + since(left.ts) +
+                " ago (" + left.via + ")"
+       : "no head has left this machine") +
       (failed ? " · last failed: " + failed.step + " " + since(failed.ts) +
                 " ago, " + failed.outcome
               : "")));
@@ -11726,6 +11818,12 @@ function since(ts) {
 
 // What left by a given door (#248): the chain route sends the
 // entries themselves, the head and the anchor send a fingerprint.
+// The per-entry send writes no chain row (ADR-0045 ruling 3): what the
+// recorder's wiring and its last note say, and the receiver's scan says
+// what arrived.
+const AS_WRITTEN =
+  "entries leave as each is written, by the recorder's own note";
+
 function whatLeft(via) {
   return via === "published-chain" ? "entries" : "a head";
 }
@@ -11782,7 +11880,9 @@ function renderAnchors(report) {
         // are writer-reachable); a stale one is the reason to look.
         const left = chain.left;
         if (left) {
-          if (left.ts) {
+          if (left.as_written) {
+            row.appendChild(el("span", "bare", AS_WRITTEN));
+          } else if (left.ts) {
             const old = Date.now() - Date.parse(left.ts) > BARE_STALE;
             row.appendChild(el("span", "bare" + (old ? " stale" : ""),
               whatLeft(left.via) + " last left " + since(left.ts) +

@@ -523,6 +523,35 @@ class HeadsTest(MetricsFixture):
         self.assertEqual(
             scrape.value("loxodonta_publishing_wired_nothing_sent"), 1)
 
+    def test_entries_that_leave_as_written_are_not_nothing_sent(self):
+        # ADR-0045 ruling 3: the recording command sends each entry and
+        # writes no chain row, so a live session at `full` has left
+        # something by the chain route; a failed send is the failure.
+        install_witness_hook(
+            self.witness, sessionend=True,
+            command="python loxodonta.py hook --publish-chain "
+                    "https://receipts.example.test/hook")
+        # The install's own record of when it wired that (ADR-0030): a
+        # chain written before it was never sent as written.
+        self.home.mkdir(parents=True, exist_ok=True)
+        (self.home / "coverage.json").write_text(json.dumps({"epochs": [
+            {"since": ago(600), "harness": "claude-code",
+             "profile": "custom"}]}), encoding="utf-8")
+        log = make_chain(self.root / "alpha" / "receipts", "sess-live")
+        self.serve(extra_env={"SUPERVISOR_SCAN_TTL_SECONDS": "0"})
+
+        _, _, live = self.scrape()
+        write_attempt_row(log, "publish-chain", "no answer within 1 seconds",
+                          when=ago(30), budget=1.0)
+        _, _, failed = self.scrape()
+
+        self.assertEqual(
+            live.value("loxodonta_publishing_wired_nothing_sent"), 0)
+        self.assertEqual(
+            failed.value("loxodonta_publishing_wired_nothing_sent"), 1)
+        self.assertEqual(failed.value("loxodonta_last_attempt_failed",
+                                      step="publish-chain"), 1)
+
 
 class LastAttemptFailedTest(MetricsFixture):
     """`loxodonta_last_attempt_failed{step}`: one gauge per session-end
