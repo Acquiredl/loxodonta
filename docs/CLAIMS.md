@@ -66,7 +66,7 @@ The full setup does not make the record complete. Whether anything is missing is
 | The store wiped | gone | gone, and a copy of the anchor's proof kept off the machine says a chain existed | survives at the remote as of the last send |
 | The tail since the last send rewritten | does not show | does not show | does not show: the rewritten tail reaches the remote as the only version |
 
-The hook sends at session end, and the keeper sends a chain only once it has sat unchanged past its cadence, so every entry of a live session is in that tail. (GLOSSARY, *Profile*; TOPOLOGY.md; HOOK.md.)
+At `full` the hook sends each entry as it is written, so with the receiver reachable that tail is about a second long; a send that failed, or that the writer stopped by the network or the process, leaves its entries in the tail until the next call, the session end or the keeper sends them (ADR-0045). (GLOSSARY, *Profile*; TOPOLOGY.md; HOOK.md.)
 
 ## Where the promises stop
 

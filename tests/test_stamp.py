@@ -1487,12 +1487,23 @@ class SessionEndStampTest(PublishBase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")   # quiet, every step of it
-        head, batch = self.receiver.received
+        # The chain's last entry goes first (ADR-0045 ruling 4); this
+        # fake says nothing of what it holds, so the chain follows from
+        # the memo, from genesis.
+        head, probe, batch, tokens, proofs = self.receiver.received
         self.assertEqual(head["content_type"], "application/json")
+        self.assertEqual(probe["content_type"], "application/x-ndjson")
         self.assertEqual(batch["content_type"], "application/x-ndjson")
+        # The token and then the proof follow their steps to the chain's
+        # URL (ADR-0045 ruling 5).
+        self.assertEqual([(sent["content_type"], sent["stamps_seen"],
+                           sent["calendar_asks"]) for sent in (tokens, proofs)],
+                         [("application/x-loxodonta-sidecar", 1, 0),
+                          ("application/x-loxodonta-sidecar", 1, 1)])
         # Neither publish waited on the stamp or on the calendar.
         self.assertEqual([(sent["stamps_seen"], sent["calendar_asks"])
-                          for sent in (head, batch)], [(0, 0), (0, 0)])
+                          for sent in (head, probe, batch)],
+                         [(0, 0), (0, 0), (0, 0)])
         # The batch ends in the seal, so the commitment came first, and
         # what the remote holds is the chain as it sits on disk.
         sealed = json.loads(batch["chain_tail"])
@@ -1502,9 +1513,10 @@ class SessionEndStampTest(PublishBase):
         # The query came after both publishes and before any digest.
         (query,) = self.authority.received
         self.assertEqual((query["publishes_seen"], query["calendar_asks"]),
-                         (2, 0))
-        # And the calendar last of all, of the same sealed head.
-        self.assertEqual(calendar.seen_before, [(2, 1)])
+                         (3, 0))
+        # And the calendar last of all, of the same sealed head, after
+        # the two publishes and the token's rows.
+        self.assertEqual(calendar.seen_before, [(4, 1)])
         self.assertEqual([d.hex() for d in calendar.submitted],
                          [sealed["entry_hash"]])
         self.assertEqual(self.body()["head"], sealed["entry_hash"])

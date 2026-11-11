@@ -175,11 +175,14 @@ class TheSendTest(ManagedCommandBase):
                 self.assertEqual(len(self.receiver.received), arrived)
 
     def test_under_the_word_a_send_carries_its_default_batch(self):
-        # LOXODONTA_CHAIN_BATCH_BYTES=1, smaller than any entry: the
-        # plain hook sends no batch, every entry being over that cap; the
-        # managed hook sends the chain in one batch under the default.
+        # LOXODONTA_CHAIN_BATCH_BYTES=1, smaller than any entry, to a
+        # remote that does not say what it holds: the plain hook sends the
+        # chain's last entry, which goes whatever the cap, and then from
+        # the memo nothing, every entry being over that cap; the managed
+        # hook sends under the default, the chain's last entry and then
+        # the chain in one batch (ADR-0045 ruling 4).
         env = {**self.env, "LOXODONTA_CHAIN_BATCH_BYTES": "1"}
-        for flags, sent in ((("--managed",), 1), ((), 0)):
+        for flags, sent in ((("--managed",), 2), ((), 1)):
             with self.subTest(flags=flags):
                 self.receiver.received.clear()
                 for _ in range(3):

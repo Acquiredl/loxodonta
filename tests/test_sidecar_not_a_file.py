@@ -735,7 +735,11 @@ class WrittenNotAFileTest(StoreCase):
         self.assertIn(self.WHY, result.stderr)
         self.assertEqual(len(receiver.received), 1)
 
-    def test_publish_chain_sends_nothing_without_the_memo(self):
+    def test_publish_chain_sends_nothing_from_a_memo_it_cannot_read(self):
+        # The chain's last entry goes first, whatever the memo is
+        # (ADR-0045 ruling 4); this remote says nothing of what it holds,
+        # so the rest would go from the memo, and a memo that cannot be
+        # read sends nothing more.
         receiver = serve_posts(self)
         url = f"http://127.0.0.1:{receiver.server_address[1]}/chain"
         self.folder(".published.jsonl")
@@ -745,7 +749,7 @@ class WrittenNotAFileTest(StoreCase):
         self.assertEqual(result.returncode, 69, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("the memo could not be read", result.stderr)
-        self.assertEqual(receiver.received, [])
+        self.assertEqual(receiver.received, ["/chain"])
 
 
 @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
@@ -1080,8 +1084,12 @@ class ScannedNotAFileTest(unittest.TestCase):
         (chain,) = sessions[("alpha", "sess-aaaa")]
         note = chain["left"]["note"]
         self.assertIn("the memo could not be written", note)
-        self.assertIn("the memo could not be read", note)
-        self.assertEqual(len(receiver.received), 1, "the head went once")
+        # The chain's last entry is asked about whatever the memo is
+        # (ADR-0045 ruling 4); this remote says nothing of what it holds,
+        # so the send from the memo stops there, and the turn says so.
+        self.assertIn("the entries stay unsent", note)
+        self.assertEqual(len(receiver.received), 2,
+                         "the head went once, and the chain's last entry")
 
 
 @unittest.skipUnless(hasattr(os, "mkfifo"), "no named pipes here")
