@@ -6125,6 +6125,12 @@ FIXTURE_SESSION = "3253bacd-3ba1-4907-a5dd-c7e1a5d9f403"
 FIXTURE_DAY = "2026-10-07"   # the day the fixture's requests arrived
 FIXTURE_RECEIPTS = ("Bash: git status", "Bash: false", "Bash: false",
                     "Bash: rm -rf /tmp/x")
+# The harness's ids for the fixture's calls, as its events name them: the
+# two that ran, each with a tool_result, and the one refused, which has
+# only a tool_decision (ADR-0046 ruling 3).
+FIXTURE_CALLS = ("toolu_000000000000000000000001",
+                 "toolu_000000000000000000000002",
+                 "toolu_000000000000000000000003")
 
 
 def receiver_folder(base, events=True, day=FIXTURE_DAY, drop=()):
@@ -6268,31 +6274,110 @@ class ReceiverReadingTest(unittest.TestCase):
         # included, whose line has no colon before the suffix.
         digest = "0" * 64
         chain_copy(self.data, FIXTURE_SESSION, actions=(
-            f"Bash [call=toolu_1 input sha256={digest} bytes=2]",
-            "Bash: false [call=toolu_2 input=unhashed]"))
+            f"Bash [call={FIXTURE_CALLS[0]} input sha256={digest} bytes=2]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]"))
 
         row = self.rows(self.report())[FIXTURE_SESSION]
 
         self.assertEqual(row["state"], "ENDED-CLEAN")
         self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 2}})
 
+    def test_a_call_with_no_receipt_is_named_by_its_id_under_a_surplus(self):
+        # ADR-0046 ruling 3: both records name their calls, so they are
+        # joined on the id. Three receipts for two calls read as a
+        # surplus by count; by id, the second call has none, and the
+        # receipts for the refused call and for a call the harness never
+        # reported pay for nothing.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: rm -rf /tmp/x [call={FIXTURE_CALLS[2]} input=unhashed]",
+            "Bash: true [call=toolu_never_reported input=unhashed]"))
+
+        report = self.report(expect=6)
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["paired_by"], "call id")
+        self.assertEqual(row["deficit"], 1)
+        self.assertEqual(row["missing_calls"],
+                         {"count": 1, "calls": [FIXTURE_CALLS[1]]})
+        self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 3}})
+        self.assertTrue(row["raises"])
+
+    def test_a_receipt_naming_no_call_never_pays_one_the_harness_named(self):
+        # Ruling 3: a receipt with no id is paired by count among its own
+        # kind, so it stands for no call the events name by id.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            "Bash: false"))
+
+        row = self.rows(self.report(expect=6))[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["paired_by"], "call id")
+        self.assertEqual(row["missing_calls"]["calls"], [FIXTURE_CALLS[1]])
+
+    def test_two_receipts_of_one_call_pay_it_once_and_read_as_surplus(self):
+        # The fixture's session as a recorder with the suffix writes it:
+        # two receipts for the failed call and one for the refused call
+        # (#476). Joined on the id, every call is paid, and the extra
+        # receipts are the surplus #476 makes, no alarm.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]",
+            f"Bash: rm -rf /tmp/x [call={FIXTURE_CALLS[2]} input=unhashed]"))
+
+        report = self.report()
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "ENDED-SURPLUS")
+        self.assertEqual(row["paired_by"], "call id")
+        self.assertEqual((row["deficit"], row["tools"]), (0, 2))
+        self.assertNotIn("missing_calls", row)
+        self.assertNotIn("raises", row)
+
+    def test_the_default_settle_window_is_one_hour(self):
+        # ADR-0046 ruling 4: half an hour after the copy last grew the
+        # session is still PENDING; two hours after, it is judged.
+        copy = chain_copy(self.data, FIXTURE_SESSION,
+                          actions=FIXTURE_RECEIPTS[:1], settled=False)
+        half = time.time() - 1800
+        os.utime(copy, (half, half))
+        pending = self.report(settle=None)
+        two = time.time() - 7200
+        os.utime(copy, (two, two))
+
+        judged = self.report(settle=None, expect=6)
+
+        self.assertEqual(self.rows(pending)[FIXTURE_SESSION]["state"],
+                         "PENDING")
+        self.assertEqual(self.rows(judged)[FIXTURE_SESSION]["state"],
+                         "ENDED-DEFICIT")
+
     def test_a_receipt_short_in_the_copy_is_a_deficit_naming_its_tool(self):
         chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
 
-        report = self.report()
+        report = self.report(expect=6)
 
         row = self.rows(report)[FIXTURE_SESSION]
         self.assertEqual(row["state"], "ENDED-DEFICIT")
         self.assertEqual(row["deficit"], 1)
         self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 1}})
-        # An ended deficit is evidence here as on the agent's machine:
-        # nothing at the receiver is live, so nothing raises the exit.
-        self.assertEqual(report["exit"], 0)
+        # ADR-0046 ruling 2: at the receiver a settled deficit is a
+        # finding, and exits as a live deficit does until acknowledged.
+        self.assertTrue(row["raises"])
+        self.assertIn("raises the exit", row["words"])
+        self.assertEqual(report["exit"], 6)
+        # No receipt names a call, so the count by tool judged it, and
+        # the row says so (ruling 3).
+        self.assertEqual(row["paired_by"], "count by tool")
+        self.assertNotIn("missing_calls", row)
 
     def test_events_with_no_copy_at_all_are_a_deficit_tool_by_tool(self):
         # The chain never reached the receiver: every reported call is
         # unpaid, by name.
-        row = self.rows(self.report())[FIXTURE_SESSION]
+        row = self.rows(self.report(expect=6))[FIXTURE_SESSION]
 
         self.assertEqual(row["state"], "ENDED-DEFICIT")
         self.assertEqual((row["tools"], row["receipts"], row["deficit"]),
@@ -6304,10 +6389,10 @@ class ReceiverReadingTest(unittest.TestCase):
         # and carries the hook's note that its second record was cut.
         chain_copy(self.data, "cut-session-1111", notes=(
             "second-record-cut: reason=telemetry-off",))
-        deficit = self.report()  # exit as a deficit: the same number
+        deficit = self.report(expect=6)  # exit as a deficit: the same number
         chain_copy(self.data, FIXTURE_SESSION)
 
-        report = self.report()
+        report = self.report(expect=6)
 
         row = self.rows(report)["cut-session-1111"]
         self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
@@ -6328,7 +6413,7 @@ class ReceiverReadingTest(unittest.TestCase):
             "second-record-cut: reason=telemetry-off\nFORGED: all clean "
             + "x" * 500,))
 
-        row = self.rows(self.report())["cut-session-2222"]
+        row = self.rows(self.report(expect=6))["cut-session-2222"]
 
         quoted = row["second_record_cut"]
         self.assertTrue(quoted.startswith(
@@ -6341,7 +6426,7 @@ class ReceiverReadingTest(unittest.TestCase):
         lay_events(self.data, drop=(29, 30))
         chain_copy(self.data, FIXTURE_SESSION)
 
-        row = self.rows(self.report())[FIXTURE_SESSION]
+        row = self.rows(self.report(expect=6))[FIXTURE_SESSION]
 
         self.assertEqual(row["state"], "SECOND-RECORD-GAP")
         self.assertEqual(row["gap"], {"count": 2, "numbers": [29, 30]})
@@ -6351,20 +6436,20 @@ class ReceiverReadingTest(unittest.TestCase):
         lay_events(self.data, drop=(29,))
         chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
 
-        row = self.rows(self.report())[FIXTURE_SESSION]
+        row = self.rows(self.report(expect=6))[FIXTURE_SESSION]
 
         self.assertEqual(row["state"], "ENDED-DEFICIT")
         self.assertEqual(row["gap"], {"count": 1, "numbers": [29]})
 
     def test_a_session_inside_the_settle_window_is_pending_until_the_knob(self):
-        # The copy arrived just now: inside the seven-hour window it is
+        # The copy arrived just now: inside the one-hour window it is
         # listed with its counts and judged not at all; the knob settles
         # it on the next look.
         chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1],
                    settled=False)
 
         pending = self.report(settle=None)
-        judged = self.report(settle="0")
+        judged = self.report(settle="0", expect=6)
 
         row = self.rows(pending)[FIXTURE_SESSION]
         self.assertEqual(row["state"], "PENDING")
@@ -6420,7 +6505,7 @@ class ReceiverReadingTest(unittest.TestCase):
         copy = chain_copy(self.data, "epoch-session-0000")
         os.utime(copy, (0, 0))
 
-        row = self.rows(self.report())["epoch-session-0000"]
+        row = self.rows(self.report(expect=6))["epoch-session-0000"]
 
         self.assertNotIn("last_heard", row)
 
@@ -6500,7 +6585,7 @@ class ReceiverReadingTest(unittest.TestCase):
         chain_copy(self.data, "between-session-0000", epoch=between)
         chain_copy(self.data, FIXTURE_SESSION)
 
-        report = self.report()
+        report = self.report(expect=6)
 
         watch = report["completeness"]
         second = watch["second_record"]
@@ -6540,7 +6625,7 @@ class ReceiverReadingTest(unittest.TestCase):
         chain_copy(self.data, "middle-session-0000", epoch=middle)
         chain_copy(self.data, FIXTURE_SESSION)
 
-        report = self.report()
+        report = self.report(expect=6)
 
         watch = report["completeness"]
         second = watch["second_record"]
@@ -6591,7 +6676,7 @@ class ReceiverReadingTest(unittest.TestCase):
                                     tzinfo=datetime.timezone.utc).timestamp())
         chain_copy(data, "old-session-0000", epoch=old)
 
-        report = self.report(data=data)
+        report = self.report(data=data, expect=6)
 
         watch = report["completeness"]
         self.assertIn("no events file the receiver holds could be read, so "
@@ -6617,7 +6702,7 @@ class ReceiverReadingTest(unittest.TestCase):
         data = receiver_folder(self.base / "bare", events=False)
         chain_copy(data, FIXTURE_SESSION)
 
-        report = self.report(data=data)
+        report = self.report(data=data, expect=6)
 
         watch = report["completeness"]
         self.assertIn("the receiver holds no events file", watch["note"])
@@ -6634,7 +6719,7 @@ class ReceiverReadingTest(unittest.TestCase):
                                     tzinfo=datetime.timezone.utc).timestamp())
         chain_copy(self.data, "old-session-0000", epoch=old)
 
-        listed = self.report("--before-memory")
+        listed = self.report("--before-memory", expect=6)
 
         (row,) = listed["completeness"]["before_memory"]["sessions"]
         self.assertEqual(row["state"], "BEFORE-MEMORY")
@@ -6664,7 +6749,9 @@ class ReceiverReadingTest(unittest.TestCase):
                     "logs": {"resourceLogs": [{"scopeLogs": [
                         {"logRecords": [record]}]}]}}) + "\n")
 
-        report = self.report()
+        # A gap raises the exit and a surplus does not (ADR-0046), so
+        # the exit is read and not asked for.
+        report = json.loads(self.scan().stdout)
 
         self.assertIn(self.rows(report)[FIXTURE_SESSION]["state"],
                       ("ENDED-SURPLUS", "SECOND-RECORD-GAP"))

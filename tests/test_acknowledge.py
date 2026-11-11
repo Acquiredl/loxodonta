@@ -32,9 +32,10 @@ from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
                      temp_folder)
 
 from test_anchor import FakeCalendar
-from test_supervisor import (BASELINE_NAME, FIXTURE_SESSION,
-                             FakeCalendarHandler, ago, chain_copy,
-                             receiver_folder, write_pending_anchor)
+from test_supervisor import (BASELINE_NAME, FIXTURE_DAY, FIXTURE_RECEIPTS,
+                             FIXTURE_SESSION, FakeCalendarHandler, ago,
+                             chain_copy, receiver_folder,
+                             write_pending_anchor)
 
 
 BOUND = 180  # seconds any one process may take before the test fails
@@ -1260,6 +1261,128 @@ class ReceiverAcknowledgeTest(unittest.TestCase):
                             .read_text(encoding="utf-8"))
         self.assertEqual(list(memory["chains"]), [self.relpath])
         self.look(0)
+
+    def accept(self, state, session=FIXTURE_SESSION):
+        return self.run_supervisor("acknowledge", "--receiver",
+                                   str(self.data), "--session", session,
+                                   state)
+
+    def session_row(self, report):
+        (row,) = [row for row in report["completeness"]["sessions"]
+                  if row["session"] == FIXTURE_SESSION]
+        return row
+
+    def report_one_more_call(self):
+        """One more call of the fixture's session, as the harness would
+        report it, received long ago so the session stays settled."""
+        record = {"attributes": [
+            {"key": "session.id", "value": {"stringValue": FIXTURE_SESSION}},
+            {"key": "event.name", "value": {"stringValue": "tool_result"}},
+            {"key": "event.sequence", "value": {"intValue": 51}},
+            {"key": "tool_name", "value": {"stringValue": "Bash"}}]}
+        events = self.data / f"events-{FIXTURE_DAY}.jsonl"
+        with open(events, "a", encoding="utf-8") as kept:
+            kept.write(json.dumps({
+                "received": "2026-10-07T02:30:00Z", "from": "127.0.0.1",
+                "logs": {"resourceLogs": [{"scopeLogs": [
+                    {"logRecords": [record]}]}]}}) + "\n")
+
+    def test_a_settled_deficit_raises_until_acknowledged_in_the_folder(self):
+        # ADR-0046 ruling 2: at every scan until accepted, and then
+        # listed with its acknowledgement and raising nothing.
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        first = self.look(6)
+        second = self.look(6)
+        for report in (first, second):
+            row = self.session_row(report)
+            self.assertEqual(row["state"], "ENDED-DEFICIT")
+            self.assertTrue(row["raises"])
+
+        accepted = self.accept("ENDED-DEFICIT")
+
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+        self.assertIn("acknowledged: session", accepted.stdout)
+        report = self.look(0)
+        row = self.session_row(report)
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertNotIn("raises", row)
+        self.assertTrue(row["acknowledged"]["holds"])
+        self.assertEqual(row["acknowledged"]["state"], "ENDED-DEFICIT")
+        (record,) = report["baseline"]["acknowledged"]
+        self.assertEqual((record["session"], record["state"]),
+                         (FIXTURE_SESSION, "ENDED-DEFICIT"))
+        self.assertEqual(record["counts"], {
+            "tools": 2, "receipts": 1, "gap": 0,
+            "by_tool": {"Bash": {"owed": 2, "receipts": 1}}})
+        memory = json.loads((self.data / "supervisor" / "baseline.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(memory["acknowledged"], [record])
+        self.assertFalse(os.path.exists(self.home / ".loxodonta"))
+
+    def test_a_session_whose_counts_change_after_acceptance_raises_again(self):
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        self.look(6)
+        self.assertEqual(self.accept("ENDED-DEFICIT").returncode, 0)
+        self.look(0)
+        self.report_one_more_call()
+
+        report = self.look(6)
+
+        row = self.session_row(report)
+        self.assertEqual((row["state"], row["tools"]), ("ENDED-DEFICIT", 3))
+        self.assertTrue(row["raises"])
+        self.assertFalse(row["acknowledged"]["holds"])
+        self.assertIn("finding again", row["acknowledged"]["words"])
+        # Accepted again, as the scan now reports it.
+        self.assertEqual(self.accept("ENDED-DEFICIT").returncode, 0)
+        self.look(0)
+
+    def test_an_acknowledgement_of_a_state_the_session_is_not_in_is_refused(self):
+        # setUp's copy holds four receipts for two calls: ENDED-SURPLUS,
+        # which raises nothing.
+        self.look(0)
+        shelf = self.data / "supervisor" / "baseline.json"
+        before = shelf.read_bytes()
+
+        wrong = self.accept("ENDED-DEFICIT")
+        quiet = self.accept("ENDED-SURPLUS")
+        nobody = self.accept("ENDED-DEFICIT", session="no-such-session")
+
+        self.assertEqual(wrong.returncode, 64, wrong.stderr)
+        self.assertIn("reads ENDED-SURPLUS now, not ENDED-DEFICIT",
+                      wrong.stderr)
+        self.assertEqual(quiet.returncode, 64, quiet.stderr)
+        self.assertIn("not a state that raises the exit", quiet.stderr)
+        self.assertEqual(nobody.returncode, 64, nobody.stderr)
+        self.assertIn("no session", nobody.stderr)
+        self.assertEqual(shelf.read_bytes(), before)
+
+    def test_a_session_already_accepted_as_it_stands_is_refused(self):
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        self.look(6)
+        self.assertEqual(self.accept("ENDED-DEFICIT").returncode, 0)
+
+        again = self.accept("ENDED-DEFICIT")
+
+        self.assertEqual(again.returncode, 64, again.stderr)
+        self.assertIn("nothing to acknowledge", again.stderr)
+
+    def test_a_session_is_acknowledged_only_at_a_receiver(self):
+        # Ruling 1 and Tripwire's lesson: on the agent's machine an ended
+        # deficit raises nothing, and an acceptance there would sit in
+        # the writer's reach.
+        home = self.run_supervisor("acknowledge", "--session",
+                                   FIXTURE_SESSION, "ENDED-DEFICIT")
+        beside = self.run_supervisor("acknowledge", "--receiver",
+                                     str(self.data), "--session",
+                                     FIXTURE_SESSION, "ENDED-DEFICIT",
+                                     "--baseline")
+
+        self.assertEqual(home.returncode, 64, home.stderr)
+        self.assertIn("give --receiver DIR", home.stderr)
+        self.assertEqual(beside.returncode, 64, beside.stderr)
+        self.assertFalse(os.path.exists(self.home / ".loxodonta"))
 
     def test_receiver_with_root_is_a_usage_error(self):
         result = self.run_supervisor("acknowledge", "--receiver",
