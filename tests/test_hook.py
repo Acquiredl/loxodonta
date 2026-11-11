@@ -47,6 +47,16 @@ def run_hook(payload, cwd, *args, extra_env=None, timeout=120):
                    timeout=timeout)
 
 
+def suffix(tool_input, call=None):
+    """The suffix ADR-0047 pins for a call, computed here from its input
+    by SPEC section 4's rules: keys sorted, no whitespace, UTF-8."""
+    form = json.dumps(tool_input, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+    fields = ([f"call={call}"] if call else []) + [
+        f"input sha256={hashlib.sha256(form).hexdigest()} bytes={len(form)}"]
+    return " [" + " ".join(fields) + "]"
+
+
 def payload(session="sess-1234abcd", tool="Write", tool_input=None):
     return {
         "session_id": session,
@@ -142,8 +152,13 @@ class HookTest(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         was, fell = (self.entries("sess-completed")[1],
                      self.entries("sess-failed")[1])
-        self.assertEqual((fell["actor"], fell["action"], fell["files"]),
-                         (was["actor"], was["action"], was["files"]))
+        # The failed call's payload names its call; the completed one's
+        # names none, so its suffix holds the input alone (ADR-0047).
+        self.assertEqual(
+            (fell["actor"], fell["action"], fell["files"]),
+            (was["actor"], was["action"].replace(
+                " [input ", " [call=toolu_01failed input ", 1),
+             was["files"]))
         self.assertNotIn("secret-looking-output",
                          self.session_log("sess-failed").read_text(
                              encoding="utf-8"))
@@ -165,6 +180,10 @@ class HookTest(unittest.TestCase):
         run_hook(payload(tool=tool, tool_input={key: value}),
                  cwd=self.workdir)
         action = self.entries()[1]["action"]
+        # The suffix follows the cut and its count (ADR-0047).
+        tail = suffix({key: value})
+        self.assertTrue(action.endswith(tail), action)
+        action = action[:-len(tail)]
         match = re.fullmatch(re.escape(tool) + r": (.*)… \(\+(\d+)\)",
                              action, re.DOTALL)
         self.assertIsNotNone(match, f"not a cut line with a count: {action!r}")
@@ -205,7 +224,8 @@ class HookTest(unittest.TestCase):
         command = "echo " + "a" * 95  # 100 characters
         run_hook(payload(tool="Bash", tool_input={"command": command}),
                  cwd=self.workdir)
-        self.assertEqual(self.entries()[1]["action"], f"Bash: {command}")
+        self.assertEqual(self.entries()[1]["action"],
+                         f"Bash: {command}" + suffix({"command": command}))
 
     def test_a_cut_command_says_how_many_characters_it_dropped(self):
         kept, dropped = self.cut_action("Bash", "a" * 3000)
@@ -230,7 +250,8 @@ class HookTest(unittest.TestCase):
         command = "echo" + " " * 2000 + "hi" + " " * 2000
         run_hook(payload(tool="Bash", tool_input={"command": command}),
                  cwd=self.workdir)
-        self.assertEqual(self.entries()[1]["action"], "Bash: echo hi")
+        self.assertEqual(self.entries()[1]["action"],
+                         "Bash: echo hi" + suffix({"command": command}))
 
     def test_a_read_of_a_long_path_is_cut_by_the_same_rule(self):
         path = "src/" + "deep/" * 80 + "file.py"  # 411 characters, no spaces
@@ -382,7 +403,9 @@ class HookTest(unittest.TestCase):
 
         action = self.entries()[1]["action"]
         self.assertNotIn("\n", action)
-        self.assertLess(len(action), 200)
+        tail = suffix({"command": long_command})
+        self.assertTrue(action.endswith(tail), action)
+        self.assertLess(len(action) - len(tail), 200)
         self.assertIn("echo xxxx", action)
 
     def test_non_ascii_in_payload_is_recorded_verbatim(self):
@@ -417,8 +440,10 @@ class HookTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+        # A lone surrogate has no canonical form, so the input is named
+        # and not hashed (ADR-0047 ruling 3).
         self.assertEqual(self.entries()[1]["action"],
-                         "Bash: echo " + escape + " hi")
+                         "Bash: echo " + escape + " hi [input=unhashed]")
         # The chain keeps receipting after the escaped call, and walks.
         run_hook(payload(tool="Bash", tool_input={"command": "ls"}),
                  cwd=self.workdir)
@@ -1155,6 +1180,7 @@ TELEMETRY_VARIABLES = ("CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_LOGS_EXPORTER",
 IN_FORCE = {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_LOGS_EXPORTER": "otlp",
             "OTEL_EXPORTER_OTLP_ENDPOINT": PINNED}
 NOTE = "second-record-cut: reason="
+STEP = "Bash: step" + suffix({"command": "step"})
 
 
 class SecondRecordCutTest(unittest.TestCase):
@@ -1210,9 +1236,9 @@ class SecondRecordCutTest(unittest.TestCase):
 
         entries = self.entries()
         self.assertEqual([e["action"] for e in entries],
-                         ["genesis", "Bash: step",
+                         ["genesis", STEP,
                           "second-record-cut: reason=telemetry-off",
-                          "Bash: step", "Bash: step"])
+                          STEP, STEP])
         note = entries[2]
         self.assertEqual(note["actor"], "receipts")
         self.assertEqual(note["files"], [])
@@ -1503,3 +1529,243 @@ class ClockOverrideTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.entries()[1]["ts"].startswith("20"))
         self.assertNotEqual(self.entries()[1]["ts"], "2025-08-24T01:46:40Z")
+
+
+class ReceiptSuffixTest(unittest.TestCase):
+    """ADR-0047: a hook receipt names its call and commits to its whole
+    input, in one bracketed group at the end of the action line. Each
+    case is a payload in and the exact line out."""
+
+    # The canonical form of INPUT, written out by hand from SPEC section
+    # 4's rules: keys sorted, no whitespace, UTF-8, so the e with an
+    # acute accent is two bytes.
+    INPUT = {"description": "Say café", "command": "echo hi"}
+    FORM = '{"command":"echo hi","description":"Say café"}'.encode()
+    DIGEST = hashlib.sha256(FORM).hexdigest()
+
+    def setUp(self):
+        self.workdir = temp_folder(self)
+
+    def actions(self, session="sess-1234abcd"):
+        log = self.workdir / f"receipts-{session}.jsonl"
+        return [json.loads(line)["action"]
+                for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def hook(self, body, code=0):
+        result = run_hook(body, cwd=self.workdir)
+        self.assertEqual(result.returncode, code, result.stderr)
+        return result
+
+    def call(self, tool="Bash", tool_input=None, call=None, **extra):
+        body = payload(tool=tool, tool_input=tool_input)
+        if call is not None:
+            body["tool_use_id"] = call
+        body.update(extra)
+        return body
+
+    def test_a_call_id_and_an_input_end_the_line_in_the_pinned_suffix(self):
+        self.hook(self.call(tool_input=self.INPUT, call="toolu_01AbC-9"))
+
+        self.assertEqual(len(self.FORM), 47)  # 46 characters, 47 bytes
+        self.assertEqual(
+            self.actions()[1],
+            f"Bash: echo hi [call=toolu_01AbC-9 input sha256={self.DIGEST} "
+            f"bytes={len(self.FORM)}]")
+        verify = run(LOXODONTA, "verify", "--log",
+                     "receipts-sess-1234abcd.jsonl", cwd=self.workdir)
+        self.assertEqual((verify.returncode, verify.stdout.strip()),
+                         (0, "VALID"), verify.stderr)
+
+    def test_the_released_verifier_reads_a_suffixed_chain_valid(self):
+        # A verifier that knows nothing of the suffix reads the line as
+        # text (ADR-0047 ruling 6).
+        from test_package_anchor import released_verifier
+        self.hook(self.call(tool_input=self.INPUT, call="toolu_01AbC"))
+        self.hook(self.call(tool="TodoWrite", tool_input={"n": 1.5}))
+        released = released_verifier(self, self.workdir)
+
+        verify = run(released, "verify", "--log",
+                     "receipts-sess-1234abcd.jsonl", cwd=self.workdir,
+                     isolated=True)
+
+        self.assertEqual((verify.returncode, verify.stdout.strip()),
+                         (0, "VALID"), verify.stderr)
+
+    def test_a_cut_command_keeps_its_cut_and_count_before_the_suffix(self):
+        command = "a" * 600
+        self.hook(self.call(tool_input={"command": command}, call="toolu_1"))
+
+        form = ('{"command":"' + command + '"}').encode()
+        self.assertEqual(
+            self.actions()[1],
+            "Bash: " + "a" * 160 + "… (+440) [call=toolu_1 input "
+            f"sha256={hashlib.sha256(form).hexdigest()} bytes=614]")
+
+    def test_a_payload_with_no_id_writes_the_input_field_alone(self):
+        self.hook(self.call(tool_input=self.INPUT))
+
+        self.assertEqual(self.actions()[1],
+                         f"Bash: echo hi [input sha256={self.DIGEST} "
+                         f"bytes={len(self.FORM)}]")
+
+    def test_an_id_that_fails_the_test_is_left_out(self):
+        bad = ("toolu 01", "t" * 129, "toolu_01]", "toolu_é01", "", 7,
+               None)
+        for session, call in enumerate(bad):
+            with self.subTest(call=call):
+                body = self.call(tool_input=self.INPUT)
+                body["tool_use_id"] = call
+                body["session_id"] = f"sess-{session}"
+                self.hook(body)
+                self.assertEqual(self.actions(f"sess-{session}")[1],
+                                 f"Bash: echo hi [input sha256={self.DIGEST} "
+                                 f"bytes={len(self.FORM)}]")
+
+    def test_an_id_of_200_characters_is_left_out_and_128_is_kept(self):
+        self.hook(self.call(tool_input={}, call="x" * 200,
+                            session_id="sess-long"))
+        self.hook(self.call(tool_input={}, call="x" * 128,
+                            session_id="sess-edge"))
+
+        empty = hashlib.sha256(b"{}").hexdigest()
+        self.assertEqual(self.actions("sess-long")[1],
+                         f"Bash [input sha256={empty} bytes=2]")
+        self.assertEqual(self.actions("sess-edge")[1],
+                         f"Bash [call={'x' * 128} input sha256={empty} "
+                         "bytes=2]")
+
+    def test_an_input_with_a_fraction_is_named_unhashed(self):
+        for session, tool_input in enumerate((
+                {"command": "sleep", "seconds": 1.5},
+                {"command": "sleep", "steps": [1, {"at": 2.0}]})):
+            with self.subTest(tool_input=tool_input):
+                self.hook(self.call(tool_input=tool_input, call="toolu_1",
+                                    session_id=f"sess-{session}"))
+                self.assertEqual(self.actions(f"sess-{session}")[1],
+                                 "Bash: sleep [call=toolu_1 input=unhashed]")
+
+    def test_integers_booleans_and_null_are_hashed(self):
+        tool_input = {"limit": 2, "replace_all": False, "offset": None}
+        self.hook(self.call(tool="Grep", tool_input=tool_input))
+
+        form = b'{"limit":2,"offset":null,"replace_all":false}'
+        self.assertEqual(self.actions()[1],
+                         f"Grep [input sha256={hashlib.sha256(form).hexdigest()}"
+                         f" bytes={len(form)}]")
+
+    def test_an_input_with_no_summary_key_writes_the_name_then_the_suffix(self):
+        tool_input = {"todos": [{"content": "ship it", "status": "pending"}]}
+        self.hook(self.call(tool="TodoWrite", tool_input=tool_input,
+                            call="toolu_9"))
+
+        form = b'{"todos":[{"content":"ship it","status":"pending"}]}'
+        self.assertEqual(self.actions()[1],
+                         "TodoWrite [call=toolu_9 input "
+                         f"sha256={hashlib.sha256(form).hexdigest()} "
+                         f"bytes={len(form)}]")
+
+    def test_a_payload_with_no_input_leaves_the_input_field_out(self):
+        body = self.call(call="toolu_2")
+        del body["tool_input"]
+        self.hook(body)
+        bare = self.call(session_id="sess-bare")
+        del bare["tool_input"]
+        self.hook(bare)
+
+        self.assertEqual(self.actions()[1], "Bash [call=toolu_2]")
+        self.assertEqual(self.actions("sess-bare")[1], "Bash")
+
+    def test_bookkeeping_entries_carry_no_suffix(self):
+        transcript = self.workdir / "t.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        for _ in range(25):
+            self.hook(self.call(tool_input={"command": "ls"}, call="toolu_3",
+                                transcript_path=str(transcript)))
+        transcript.write_text("{}\n{}\n", encoding="utf-8")
+        self.hook({"session_id": "sess-1234abcd",
+                   "hook_event_name": "SessionEnd",
+                   "transcript_path": str(transcript)})
+
+        commitments = [a for a in self.actions()
+                       if a.startswith("transcript-commitment:")]
+        self.assertEqual(len(commitments), 2)
+        for line in commitments:
+            self.assertRegex(line, r"^transcript-commitment: bytes=\d+ "
+                                   r"sha256=[0-9a-f]{64}$")
+
+    def test_run_and_log_write_no_suffix(self):
+        log = self.workdir / "receipts.jsonl"
+        run(LOXODONTA, "init", "--log", str(log), check=True)
+        logged = run(LOXODONTA, "log", "--log", str(log), "--actor", "me",
+                     "--action", "Bash: echo hi")
+        ran = run(LOXODONTA, "run", "--log", str(log), "--actor", "me", "--",
+                  sys.executable, "-c", "pass")
+        self.assertEqual((logged.returncode, ran.returncode), (0, 0),
+                         logged.stderr + ran.stderr)
+
+        actions = [json.loads(line)["action"]
+                   for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(actions[1], "Bash: echo hi")
+        self.assertTrue(actions[2].startswith("run: "), actions[2])
+        self.assertTrue(actions[2].endswith(" -c pass (exit 0)"), actions[2])
+
+    def locked(self, path):
+        """Hold `path` so the hook cannot read it, for as long as the test
+        runs: a byte-range lock on Windows, no read permission on POSIX."""
+        if sys.platform == "win32":
+            import msvcrt
+            size = path.stat().st_size
+            held = open(path, "r+b")
+            self.addCleanup(held.close)
+            msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, size)
+            self.addCleanup(msvcrt.locking, held.fileno(), msvcrt.LK_UNLCK,
+                            size)
+            return
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file with no read permission")
+        os.chmod(path, 0)
+        self.addCleanup(os.chmod, path, 0o644)
+
+    def test_a_file_that_cannot_be_fingerprinted_still_leaves_its_receipt(self):
+        # ADR-0047 ruling 4: the receipt is appended without the
+        # reference, the line says so before the suffix, and the exit
+        # still says what failed (66, a file that cannot be read).
+        notes = self.workdir / "notes.md"
+        notes.write_text("hello\n", encoding="utf-8")
+        tool_input = {"file_path": "notes.md", "content": "hello\n"}
+        self.locked(notes)
+
+        result = self.hook(self.call(tool="Write", tool_input=tool_input,
+                                     call="toolu_4"), code=66)
+
+        self.assertTrue(result.stderr.startswith("error: "), result.stderr)
+        form = b'{"content":"hello\\n","file_path":"notes.md"}'
+        log = self.workdir / "receipts-sess-1234abcd.jsonl"
+        entry = json.loads(log.read_text(encoding="utf-8").splitlines()[1])
+        self.assertEqual(entry["action"],
+                         "Write: notes.md (1 not fingerprinted) [call=toolu_4 "
+                         f"input sha256={hashlib.sha256(form).hexdigest()} "
+                         f"bytes={len(form)}]")
+        self.assertEqual(entry["files"], [])
+        verify = run(LOXODONTA, "verify", "--log", str(log))
+        self.assertEqual((verify.returncode, verify.stdout.strip()),
+                         (0, "VALID"), verify.stderr)
+
+    @unittest.skipIf(sys.platform == "win32",
+                     "Windows cannot name a file with a colon in it")
+    def test_a_path_the_spelling_rule_refuses_still_leaves_its_receipt(self):
+        # SPEC section 3 refuses a stored path whose second character is
+        # a colon, so this reference is the command spoken wrong, 64, as
+        # it was when the receipt was lost with it.
+        (self.workdir / "a:b.txt").write_text("x\n", encoding="utf-8")
+
+        result = self.hook(self.call(tool="Read",
+                                     tool_input={"file_path": "a:b.txt"}),
+                           code=64)
+
+        self.assertIn("a drive", result.stderr)
+        form = b'{"file_path":"a:b.txt"}'
+        self.assertEqual(self.actions()[1],
+                         "Read: a:b.txt (1 not fingerprinted) [input "
+                         f"sha256={hashlib.sha256(form).hexdigest()} "
+                         f"bytes={len(form)}]")
