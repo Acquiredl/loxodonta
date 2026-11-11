@@ -204,6 +204,14 @@ Original: `loxodonta.py`. Copies: `receiver.py`.
 
 The recorder sends a batch of the chain under this content type, and the receiver takes a batch only under it (ADR-0031).
 
+### A receipt's suffix
+
+Names: `canonical_bytes`, `CALL_ID_CHARACTERS`, `CALL_ID_LONGEST`, `UNHASHED_INPUT`, `is_call_id`, `holds_fraction`, `input_form`, `split_suffix`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+The hook writes the call's id and a hash of the call's input in SPEC section 4's canonical form at the end of its action line, and the supervisor reads that suffix, setting it aside to name the tool and, in `show`, hashing the transcript's record of the call by the same form to compare (ADR-0047).
+
 ## Same name, not a twin
 
 These names are defined in more than one file, and each file means its own thing by it. The check leaves them unjudged.

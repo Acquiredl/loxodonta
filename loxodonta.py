@@ -5458,6 +5458,108 @@ JOINERS = frozenset({"\u200d", "\ufe0e", "\ufe0f"}
                     | {chr(c) for c in range(0x1F3FB, 0x1F400)})
 
 
+# The suffix a hook receipt ends with (ADR-0047, SPEC \u00a72.3): after the
+# action line, one space and one bracketed group, nothing after it,
+# `[call=<id> input sha256=<64 hex> bytes=<n>]`. `call` is left out when
+# the payload names no id that passes `is_call_id`; `input` reads
+# `input=unhashed` when SPEC \u00a74 has no form for the input, and is left
+# out when the payload has none; a group with no field is not written.
+CALL_ID_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+CALL_ID_LONGEST = 128
+UNHASHED_INPUT = "input=unhashed"
+# A receipt left without a reference it could not make says so before
+# the suffix, ` (<n> not fingerprinted)` (ADR-0047 ruling 4).
+UNFINGERPRINTED = "not fingerprinted"
+
+
+def is_call_id(text):
+    """Whether `text` may stand as a call's id in the suffix: ASCII
+    letters, digits, `_` and `-` only, 1 to 128 of them (ADR-0047
+    ruling 2), so it can never end the group or open another."""
+    return (isinstance(text, str) and 0 < len(text) <= CALL_ID_LONGEST
+            and set(text) <= CALL_ID_CHARACTERS)
+
+
+def holds_fraction(value):
+    """Whether a JSON value holds a number with a fraction anywhere in
+    it, which SPEC \u00a74 rule 4 gives no canonical form. Walked without
+    recursion: the payload may nest as deep as the JSON reader took."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, float):
+            return True
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+def input_form(value):
+    """A call's input in SPEC \u00a74's canonical form, written by the one
+    writer entries are hashed with, or None where \u00a74 has no form for
+    it: a number with a fraction, or anything that writer refuses (a
+    lone surrogate, which has no UTF-8; nesting past the recursion
+    limit). Every such input reads `input=unhashed` (ADR-0047 ruling 3)."""
+    if holds_fraction(value):
+        return None
+    try:
+        return canonical_bytes(value)
+    except (ValueError, RecursionError):
+        # UnicodeEncodeError is a ValueError.
+        return None
+
+
+def receipt_suffix(payload):
+    """The suffix for a hook payload, with its leading space, or "" when
+    it has no field to hold (ADR-0047 rulings 1 to 3)."""
+    fields = []
+    if is_call_id(payload.get("tool_use_id")):
+        fields.append(f"call={payload['tool_use_id']}")
+    if payload.get("tool_input") is not None:
+        form = input_form(payload["tool_input"])
+        fields.append(UNHASHED_INPUT if form is None else
+                      f"input sha256={hashlib.sha256(form).hexdigest()} "
+                      f"bytes={len(form)}")
+    return f" [{' '.join(fields)}]" if fields else ""
+
+
+def split_suffix(action):
+    """An action line as (the text before its suffix, the suffix's
+    fields), or (the line, None) when it ends in no group of the pinned
+    grammar. Only the last group is read, and only when nothing follows
+    it (ADR-0047 ruling 1). The fields are a dict holding `call`,
+    `sha256` and `bytes`, or `unhashed`, as the group gave them. A line
+    from before the suffix that happens to end in such a group is the
+    writer's text, read the same way."""
+    action = str(action)
+    at = action.rfind(" [")
+    if at < 0 or not action.endswith("]"):
+        return action, None
+    words = action[at + 2:-1].split(" ")
+    fields = {}
+    if words[0].startswith("call=") and is_call_id(words[0][5:]):
+        fields["call"] = words.pop(0)[5:]
+    if words == [UNHASHED_INPUT]:
+        fields["unhashed"] = True
+    elif len(words) == 3 and words[0] == "input" \
+            and words[1].startswith("sha256=") \
+            and words[2].startswith("bytes="):
+        digest, size = words[1][7:], words[2][6:]
+        if len(digest) != 64 or not set(digest) <= set("0123456789abcdef") \
+                or not size or not set(size) <= set("0123456789") \
+                or size != str(int(size)):
+            return action, None
+        fields["sha256"], fields["bytes"] = digest, int(size)
+    elif words:
+        return action, None
+    if not fields:
+        return action, None
+    return action[:at], fields
+
+
 def main_repo_root(project):
     """The durable home of a project's chains: for a git worktree, the
     repository it belongs to, since routine hygiene deletes a worktree
@@ -5811,10 +5913,22 @@ def cmd_hook(args):
     if problem:
         print(f"warning: {problem} — the files are fingerprinted against "
               f"{base}", file=sys.stderr)
-    files, code = build_references(
-        log, file_paths, base=base if problem else named)
-    if files is None:
-        return code
+    # A reference that cannot be made never loses the receipt (ADR-0047
+    # ruling 4): it is left out, the line says how many were, and the
+    # exit still names the first failure, as build_references printed it.
+    files, unmade, failed = [], 0, 0
+    for path in file_paths:
+        made, code = build_references(
+            log, [path], base=base if problem else named)
+        if made is None:
+            unmade += 1
+            failed = failed or code
+        else:
+            files += made
+    files.sort(key=lambda ref: ref["path"])  # by path bytes (SPEC §3)
+    if unmade:
+        action += f" ({unmade} {UNFINGERPRINTED})"
+    action += receipt_suffix(payload)
     # One lock for the receipt, any due transcript commitment and the
     # second-record note: a racing sibling process between them could
     # steal the cadence boundary, and a commitment that sometimes
@@ -5829,7 +5943,7 @@ def cmd_hook(args):
                     # The pin is Claude Code's: another harness reads no
                     # managed settings and has no second record to cut.
                     note_second_record_cut(log)
-            return code
+            return code or failed
     except LockTimeout:
         return locked_out(log)
 
