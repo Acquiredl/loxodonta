@@ -62,19 +62,25 @@ The author ruled the reshape on 2026-11-11.
    appended, when an entry in it has an `n` more than one past the
    highest the receiver would then hold. Every answer to a batch,
    the 200 and the 409, carries the highest `n` held and whether the
-   batch's first entry chains: its `prev` is the `entry_hash` of an
-   entry held at the `n` before it, or it is the genesis.
+   batch's first entry connects: it is a genesis, or its `prev` is
+   the `entry_hash` of an entry held at the `n` before it that
+   itself connects. So an entry connects only when every entry
+   between it and its genesis is held, and a gap anywhere below
+   shows in the answer to every entry above it.
 
 3. **At `full`, each entry is sent when it is written, from the
    hook's own hand.** The installer writes the chain's URL onto the
    recording command as well as the session-end one, and the hook
    posts the line it has just appended. To do that it reads neither
    the chain nor the memo. An answer that the entry was kept and
-   chains ends the step, and nothing is written down. An answer of a
-   hole sends the entries after the highest held; an answer that the
-   entry does not chain sends the entry before it, and the one
-   before that, until one chains or the genesis is reached. Each is
-   kept as it lands, so the work is never done twice. The whole step
+   connects ends the step, and nothing is written down. An answer of
+   a hole sends the entries after the highest held. An answer that
+   the entry does not connect means entries below it are missing:
+   the recorder finds the last of its own entries that does connect,
+   by posting one entry at a time and halving the stretch between
+   one that connects and one that does not, and sends on from the
+   entry after it. An entry posted in that search is kept, and one
+   already held is dropped, so nothing is sent in vain. The whole step
    waits at most one second, name lookup included, and what it did
    not reach goes with a later call, the session end or the keeper.
    A send that fails, is refused or runs out of time is never the
@@ -206,6 +212,13 @@ acceptance:
   chain, a stray byte in the memo, a memo row at the chain's end, or
   a line posted to the receiver with a number of the writer's
   choosing each stopped the sends or skipped entries.
+- **An entry connects when the one before it is held.** The second
+  form as first built. An entry held above a gap answered for every
+  entry after it, so a search for the gap that ran out of its second
+  was never taken up again, and the entries below stayed missing.
+  Connecting now runs back to the genesis.
+- **Walk back one entry at a time.** Same build. About three entries
+  a second on a long chain; halving finds the place in a dozen posts.
 - **The receiver appends whatever it is sent.** As before this ADR.
   Rejected with the first form: an answer about lines nobody checked
   says nothing a sender can act on.
