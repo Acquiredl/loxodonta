@@ -1113,6 +1113,27 @@ class ConnectsToGenesisTest(AsWrittenBase):
         self.assertEqual(entry_attempts(log)[-1]["outcome"], "sent",
                          f"after {calls + 1} more calls")
 
+    def test_a_fill_that_stops_at_a_damaged_line_says_so_in_the_memo(self):
+        # Entries 0 to 5, line 3 overwritten, and a receiver holding 0 and
+        # 1. The hook's entry 6 is a hole; the fill sends entry 2 and stops
+        # at line 3, and the attempt row names the line: never `sent`.
+        flags, log = self.drawer_chain(6)
+        lines = log.read_bytes().splitlines(True)
+        self.data.mkdir()
+        (self.data / log.name).write_bytes(b"".join(lines[:2]))
+        lines[3] = b"this line was an entry\n"
+        log.write_bytes(b"".join(lines))
+        receiver = start_receiver(self, self.data)
+
+        done = self.call(*flags, "--publish-chain", receiver.url)
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual([e["n"] for e in lines_of(self.data / log.name)],
+                         [0, 1, 2])
+        (row,) = entry_attempts(log)
+        self.assertIn("line 3 of the chain is not an entry", row["outcome"])
+
     def test_one_entry_past_the_cap_still_goes_alone(self):
         # The cap bounds how many entries share a batch: a cap smaller
         # than any entry sends each alone, and none is refused.

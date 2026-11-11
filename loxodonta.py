@@ -4813,7 +4813,7 @@ def deliver(log, url, session, start, budget, steady=False):
     deadline = time.monotonic() + budget
     cap = chain_batch_cap()
     batches, held = [], None
-    chain, target = None, start[-1][0]
+    chain, target, stopped = None, start[-1][0], None
     batch, ahead = next_batch(start, cap)
     # Among this chain's entries, those that connect at the receiver are
     # a prefix: an entry connects only when the one before it is held and
@@ -4856,7 +4856,9 @@ def deliver(log, url, session, start, budget, steady=False):
             batch, ahead = next_batch(ahead, cap)
             continue
         if answer.took and bad is None:
-            return Delivery("sent", batches, True, held)
+            # A fill that ended at a line that is not its entry left the
+            # entries above that line behind: never `sent`.
+            return Delivery(stopped or "sent", batches, True, held)
         try:
             chain = chain if chain is not None else chain_on_disk(log)
         except OSError:
