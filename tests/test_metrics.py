@@ -527,6 +527,9 @@ class HeadsTest(MetricsFixture):
         # ADR-0045 ruling 3: the recording command sends each entry and
         # writes no chain row, so a live session at `full` has left
         # something by the chain route; a failed send is the failure.
+        # The sends before it landed and wrote nothing, so the memo cannot
+        # say they left: the gauge reads 1 and its help says it counts
+        # what is written down, never that nothing left.
         install_witness_hook(
             self.witness, sessionend=True,
             command="python loxodonta.py hook --publish-chain "
@@ -549,6 +552,11 @@ class HeadsTest(MetricsFixture):
             live.value("loxodonta_publishing_wired_nothing_sent"), 0)
         self.assertEqual(
             failed.value("loxodonta_publishing_wired_nothing_sent"), 1)
+        said = failed.help["loxodonta_publishing_wired_nothing_sent"]
+        self.assertIn("nothing is written down as having left", said)
+        self.assertIn("entries that left before a failed send are not "
+                      "counted", said)
+        self.assertNotIn("nothing has left", said)
         self.assertEqual(failed.value("loxodonta_last_attempt_failed",
                                       step="publish-chain"), 1)
 

@@ -9476,12 +9476,19 @@ def metrics_text(report, age_seconds):
           "beside them, chains with no head excluded", "testimony",
           [((), sum(1 for chain in chains
                     if chain.get("head_published") is False))])
+    # A per-entry send that lands writes nothing (ADR-0045 ruling 3), and
+    # the first failed one writes its row whether or not sends landed
+    # before it: the memo cannot tell the two apart, so this says what is
+    # written down and not what left.
     published = report.get("published") or {}
     gauge("loxodonta_publishing_wired_nothing_sent",
           "1 when publishing is wired on the session-end command and "
-          "nothing has left by either route (no chain holds a sent head, "
-          "none holds a batch the wired remote took, and none sends its "
-          "entries as each is written), else 0",
+          "nothing is written down as having left by either route (no "
+          "chain holds a sent head, none holds a batch the wired remote "
+          "took, and none sends its entries as each is written with a "
+          "newest send that did not fail), else 0. An entry sent as "
+          "written writes no row when it lands, so entries that left "
+          "before a failed send are not counted",
           "testimony",
           [((), 1 if published.get("wired") and not published.get("sent")
             else 0)])
