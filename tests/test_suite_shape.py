@@ -830,7 +830,7 @@ ALLOWED_OPENS = {
     ("receiver.py", "current_token"): (1, RECEIVER_DATA),
     ("receiver.py", "ends_mid_line"): (1, RECEIVER_DATA),
     ("receiver.py", "append_durably"): (1, RECEIVER_DATA),
-    ("receiver.py", "holdings"): (1, RECEIVER_DATA),
+    ("receiver.py", "held_in"): (1, RECEIVER_DATA),
     ("receiver.py", "known_lines"): (1, RECEIVER_DATA),
 }
 
