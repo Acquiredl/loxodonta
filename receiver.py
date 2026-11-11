@@ -28,6 +28,12 @@ on this box reads those files with the recorder;
 nothing here serves them back over the wire. The wire contract, header
 names included, is docs/RECEIVER.md. Stdlib only, like everything here.
 
+A chain batch is answered with what the receiver then holds of that
+chain, the n and the hash of its last entry, and one that would leave a
+hole after it is refused with 409 and the same answer (ADR-0045). A
+chain's anchors and stamps rows are kept beside its copy the same way,
+a row already there dropped.
+
 The second door, `POST /<token>/v1/logs`, takes a harness's events about
 its tool calls as one JSON object, drops every `user.*` and
 `organization.*` attribute at every level, and keeps each request as one
@@ -76,6 +82,23 @@ HEAD_TYPE = "application/json"
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 CHAIN_TYPE = "application/x-ndjson"
 CHAIN_HEADER = "X-Loxodonta-Chain"
+
+# The rows of a chain's anchors or stamps sidecar (ADR-0045 ruling 5),
+# newline-delimited as they sit beside the chain, under the chain header
+# and one more naming the sidecar. Kept beside this receiver's copy of
+# the chain, as `<chain file>.anchors.jsonl` or `.stamps.jsonl`, so the
+# recorder's `verify --anchors` and `--stamps` read them where they read
+# its own. Only a sidecar's evidence rows travel, never its attempt rows.
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+SIDECAR_TYPE = "application/x-loxodonta-sidecar"
+SIDECAR_HEADER = "X-Loxodonta-Sidecar"
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+ANCHOR_KIND = "anchor"
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+STAMP_KIND = "stamp"
+# The sidecars a batch may name, each with the one kind of row it takes
+# (ADR-0038: a row with no kind is its sidecar's evidence row).
+SIDECAR_ROWS = {"anchors": ANCHOR_KIND, "stamps": STAMP_KIND}
 
 # The second door (ADR-0041 rulings 2 and 3): a harness's own events
 # about its tool calls, posted at the token's path plus the logs suffix
@@ -387,23 +410,56 @@ def chain_lines(body):
     return batch
 
 
-def known_pairs(path):
+def holdings(path):
     """Every (n, entry_hash) the chain file already holds, so a resent
-    line is known and a rewritten one is not. A file that is not there
-    yet knows nothing. Read a line at a time, since a file may run to
-    its cap: a file opened for bytes ends a line at `\\n` and nowhere
-    else, the rule of `split_lines`, and the `\\n` itself, with any
-    `\\r` before it, is whitespace to the JSON reader in `receipt_of`."""
-    known = set()
+    line is known and a rewritten one is not, and the last entry it
+    holds: the highest n, with the hash of the last line carrying it,
+    or None for a file that holds no entry (ADR-0045 ruling 1). Not
+    simply the last line: a line of a lower n appended after it, a
+    regenerated entry or one posted by whoever holds the URL, would send
+    an honest sender back over entries this file holds, and a resend of
+    those, dropped as duplicates, would never move it on. A file that is
+    not there yet knows nothing. Read a line at a time, since a file may
+    run to its cap: a file opened for bytes ends a line at `\\n` and nowhere else, the rule of
+    `split_lines`, and the `\\n` itself, with any `\\r` before it, is
+    whitespace to the JSON reader in `receipt_of`."""
+    known, held = set(), None
     try:
         with open(path, "rb") as f:
             for line in f:
                 receipt = receipt_of(line)
                 if receipt is not None:
                     known.add(receipt)
+                    held = later(held, receipt)
     except FileNotFoundError:
         pass
-    return known
+    return known, held
+
+
+def later(held, receipt):
+    """The last entry held once `receipt` is held too: the higher n, and
+    on the same n the line that came later."""
+    return receipt if held is None or receipt[0] >= held[0] else held
+
+
+def statement(held):
+    """What the receiver says it holds of one chain, in every answer to
+    a batch (ADR-0045 ruling 1): the n and the entry_hash of the last
+    entry `holdings` names, both null when it holds none. The sender
+    sends from the entry after it. It is an answer to a POST about the
+    chain that POST named, never a route of its own (ruling 6)."""
+    return {"held_n": held[0] if held else None,
+            "held_hash": held[1] if held else None}
+
+
+def leaves_a_hole(batch, held):
+    """True when the batch's first entry is past the one after the last
+    entry held, the first entry of a file that holds none being 0
+    (ADR-0045 ruling 2): appended, it would leave a hole the file could
+    never verify across. Only the first entry is asked, since the sender
+    sends a chain's lines in order."""
+    first = batch[0][1]
+    return first > (held[0] + 1 if held else 0)
 
 
 def new_lines(batch, known):
@@ -413,14 +469,108 @@ def new_lines(batch, known):
     and is dropped. A line whose n the file holds with a different hash
     is a regenerated chain arriving after the original, and is appended:
     that collision is what the copy exists to show, and verify reports
-    it. Everything else is appended in the order received."""
+    it. Everything else is appended in the order received. Returns the
+    batch's (line, n, entry_hash) that are to land."""
     keep = []
     for line, n, digest in batch:
         if (n, digest) in known:
             continue
         known.add((n, digest))  # the same line twice in one batch lands once
-        keep.append(line)
+        keep.append((line, n, digest))
     return keep
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+class KeyGivenTwice(ValueError):
+    """A JSON object that names one key twice. A last-wins reader (this
+    one) and a first-wins reader see two different lines, and a hash that
+    holds under one reading says nothing under the other; no reading of
+    such a line is an entry (SPEC §6 step 1)."""
+
+    def __init__(self, key):
+        super().__init__(key)
+        self.key = key
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def object_with_each_key_once(pairs):
+    """The dict of a JSON object's pairs, refusing a key given twice at
+    any depth (json's object_pairs_hook is called for every object)."""
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise KeyGivenTwice(key)
+        seen[key] = value
+    return seen
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+class NotStrictJson(ValueError):
+    """A spelling Python's JSON reader takes and a strict parser refuses,
+    so a line or a manifest holding one says something to this reader
+    and nothing to another (#365)."""
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def not_json(word):
+    """Refuse `NaN`, `Infinity` or `-Infinity` (json's parse_constant
+    hook): words Python's JSON reader takes as numbers and JSON does not
+    have."""
+    raise NotStrictJson(f"{word}, which is not JSON")
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def finite_float(text):
+    """The number `text` spells (json's parse_float hook), refused when
+    it is not finite: Python reads `1e999` as infinity, where a strict
+    parser refuses it as it refuses `Infinity`."""
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise NotStrictJson(f"{text}, a number past what JSON holds")
+    return value
+
+
+
+def sidecar_lines(body, sidecar):
+    """A sidecar batch as its lines, each as `split_lines` reads it. Every
+    line must be one JSON object a strict parser takes (a key given
+    once, no NaN, Infinity or 1e999, the recorder's own sidecar reader)
+    whose kind is the sidecar's evidence kind or absent (ADR-0038). A
+    batch with no lines, or with any other line, an attempt row among
+    them, raises ValueError naming the line: refused whole, nothing of
+    it written. Nothing else about a row is judged here; that is
+    `verify --anchors` and `--stamps`."""
+    lines = split_lines(body)
+    if not lines:
+        raise ValueError("the batch holds no lines")
+    kind = SIDECAR_ROWS[sidecar]
+    for number, line in enumerate(lines, 1):
+        try:
+            row = json.loads(line.decode("utf-8"),
+                             object_pairs_hook=object_with_each_key_once,
+                             parse_constant=not_json,
+                             parse_float=finite_float)
+        except (ValueError, RecursionError):
+            row = None
+        if not isinstance(row, dict) or row.get("kind", kind) != kind:
+            raise ValueError(f"line {number} is not a row of kind {kind}")
+    return lines
+
+
+def known_lines(path):
+    """Every line the sidecar copy already holds, byte for byte, as
+    `split_lines` reads it, so a resent row is dropped: read a line at a
+    time, as `holdings` reads a chain, its `\\n` and a `\\r` before it
+    taken off. Nothing when the file is not there yet."""
+    known = set()
+    try:
+        with open(path, "rb") as f:
+            for line in f:
+                line = line[:-1] if line.endswith(b"\n") else line
+                known.add(line[:-1] if line.endswith(b"\r") else line)
+    except FileNotFoundError:
+        pass
+    return known
 
 
 # --- The door ------------------------------------------------------------------
@@ -596,9 +746,10 @@ class Door(BaseHTTPRequestHandler):
             if kind != EVENTS_TYPE:
                 self.refuse_unread(415, f"events are {EVENTS_TYPE}")
                 return
-        elif kind not in (HEAD_TYPE, CHAIN_TYPE):
+        elif kind not in (HEAD_TYPE, CHAIN_TYPE, SIDECAR_TYPE):
             self.refuse_unread(415, f"a head is {HEAD_TYPE}, a chain batch "
-                                    f"is {CHAIN_TYPE}")
+                                    f"is {CHAIN_TYPE}, a sidecar's rows are "
+                                    f"{SIDECAR_TYPE}")
             return
         # A body is taken as it is, at either door: nothing here
         # decompresses, so an encoded body would be kept as garbage or
@@ -610,12 +761,18 @@ class Door(BaseHTTPRequestHandler):
         # The chain's name is judged before the body is read: a batch
         # for a file this receiver would not write is only drained
         # (`refuse_unread`), never parsed or kept.
-        name = None
-        if kind == CHAIN_TYPE:
+        name = sidecar = None
+        if kind in (CHAIN_TYPE, SIDECAR_TYPE):
             name = self.headers.get(CHAIN_HEADER) or ""
             if not CHAIN_NAME.fullmatch(name):
                 self.refuse_unread(400, f"{CHAIN_HEADER} must be a receipt "
                                         "file name, receipts-<session>.jsonl")
+                return
+        if kind == SIDECAR_TYPE:
+            sidecar = self.headers.get(SIDECAR_HEADER) or ""
+            if sidecar not in SIDECAR_ROWS:
+                self.refuse_unread(400, f"{SIDECAR_HEADER} must be "
+                                        "anchors or stamps")
                 return
         length = self.declared_length()
         if length is None:
@@ -628,6 +785,8 @@ class Door(BaseHTTPRequestHandler):
             self.keep_events(body)
         elif kind == HEAD_TYPE:
             self.keep_head(body)
+        elif kind == SIDECAR_TYPE:
+            self.keep_sidecar(body, name, sidecar)
         else:
             self.keep_batch(body, name)
 
@@ -673,13 +832,54 @@ class Door(BaseHTTPRequestHandler):
             self.answer(400, str(why))
             return
         path = os.path.join(self.server.data, name)
+        kept, refused = [], None
         with self.server.appending:
-            lines = new_lines(batch, known_pairs(path))
-            refused = self.append(path, lines)
+            known, held = holdings(path)
+            hole = leaves_a_hole(batch, held)
+            if not hole:
+                kept = new_lines(batch, known)
+                refused = self.append(path, [line for line, _, _ in kept])
+                if not refused:
+                    for _, n, digest in kept:
+                        held = later(held, (n, digest))
+        if hole:
+            # Nothing appended, and the sender told where to go again
+            # from (ADR-0045 ruling 2).
+            why = (f"the batch starts at entry {batch[0][1]}, and this "
+                   "receiver holds " + (f"through entry {held[0]}" if held
+                                        else "no entry") + " of the chain")
+            self.answer(409, json.dumps({"refused": why, **statement(held)}),
+                        kind="application/json", said=why)
+        elif refused:
+            self.answer(*refused)
+        else:
+            self.ok({"appended": len(kept), "dropped": len(batch) - len(kept),
+                     **statement(held)})
+
+    def keep_sidecar(self, body, name, sidecar):
+        """A chain's anchors or stamps rows, kept beside this receiver's
+        copy of the chain, dropping a row the file already holds byte for
+        byte: the sender sends every evidence row each time, and the file
+        only adds (ADR-0045 ruling 5). The same lock, caps and fsync as
+        a batch."""
+        try:
+            lines = sidecar_lines(body, sidecar)
+        except ValueError as why:
+            self.answer(400, str(why))
+            return
+        path = os.path.join(self.server.data, f"{name}.{sidecar}.jsonl")
+        with self.server.appending:
+            known = known_lines(path)
+            kept = []
+            for line in lines:
+                if line not in known:
+                    known.add(line)
+                    kept.append(line)
+            refused = self.append(path, kept)
         if refused:
             self.answer(*refused)
         else:
-            self.ok({"appended": len(lines), "dropped": len(batch) - len(lines)})
+            self.ok({"appended": len(kept), "dropped": len(lines) - len(kept)})
 
     def append(self, path, lines):
         """Put the lines on disk: None once they are there (nothing to

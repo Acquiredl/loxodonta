@@ -86,6 +86,14 @@ def post(url, body, content_type, headers=None, timeout=30):
         return refused.code, refused.read()
 
 
+def counted(answer):
+    """A chain batch's answer without what the receiver says it holds:
+    the counts alone, for the tests about what landed (ADR-0045 ruling
+    1 is tests/test_as_written.py's)."""
+    said = json.loads(answer)
+    return {key: said[key] for key in ("appended", "dropped")}
+
+
 def request(method, url):
     """One bodiless request of any verb; (status, headers, body)."""
     try:
@@ -345,7 +353,7 @@ class ContentTest(ReceiverFixture):
     def test_an_ndjson_post_lands_in_the_file_the_chain_header_names(self):
         status, answer = self.send_chain(self.lines)
         self.assertEqual(status, 200, answer)
-        self.assertEqual(json.loads(answer), {"appended": 3, "dropped": 0})
+        self.assertEqual(counted(answer), {"appended": 3, "dropped": 0})
         self.assertEqual((self.data / CHAIN).read_bytes(), self.lines)
         # The sibling name is a receipt file name too (GLOSSARY: sibling chain).
         status, _ = self.send_chain(self.lines, "receipts-sess-0001-002.jsonl")
@@ -374,8 +382,12 @@ class ContentTest(ReceiverFixture):
             self.assertEqual(response.status, 200)
             self.assertEqual(response.headers.get("Content-Type"),
                              "application/json")
+            # Beside the counts, what it now holds of the chain
+            # (ADR-0045 ruling 1).
+            last = json.loads(self.lines.splitlines()[-1])
             self.assertEqual(json.loads(response.read()),
-                             {"appended": 3, "dropped": 0})
+                             {"appended": 3, "dropped": 0, "held_n": 2,
+                              "held_hash": last["entry_hash"]})
 
     def test_an_exact_duplicate_line_is_dropped(self):
         # A batch the sender retried after a lost acknowledgement: every
@@ -383,7 +395,7 @@ class ContentTest(ReceiverFixture):
         self.send_chain(self.lines)
         status, answer = self.send_chain(self.lines)
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(answer), {"appended": 0, "dropped": 3})
+        self.assertEqual(counted(answer), {"appended": 0, "dropped": 3})
         self.assertEqual((self.data / CHAIN).read_bytes(), self.lines)
         # And a resend that overlaps only partly lands only the new tail
         # (the chain grows through the CLI, as the sender's would).
@@ -391,7 +403,7 @@ class ContentTest(ReceiverFixture):
                      "--action", "step 3", epoch=1700000000)
         grown = self.log.read_bytes()
         status, answer = self.send_chain(grown)
-        self.assertEqual(json.loads(answer), {"appended": 1, "dropped": 3})
+        self.assertEqual(counted(answer), {"appended": 1, "dropped": 3})
         self.assertEqual((self.data / CHAIN).read_bytes(), grown)
 
     def test_a_torn_tail_never_glues_the_next_batch_onto_it(self):
@@ -405,7 +417,7 @@ class ContentTest(ReceiverFixture):
         kept.write_bytes(whole[:-20])            # mid-line, no newline
         status, answer = self.send_chain(self.lines)
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(answer), {"appended": 1, "dropped": 2})
+        self.assertEqual(counted(answer), {"appended": 1, "dropped": 2})
         lines = kept.read_bytes().split(b"\n")
         self.assertEqual(lines[:2], self.lines.split(b"\n")[:2])
         self.assertEqual(lines[2], whole[:-20].split(b"\n")[2])   # torn, alone
@@ -421,7 +433,7 @@ class ContentTest(ReceiverFixture):
         regenerated = make_chain(other, ["step 1", "step 2"], epoch=1700009999)
         status, answer = self.send_chain(regenerated)
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(answer), {"appended": 3, "dropped": 0})
+        self.assertEqual(counted(answer), {"appended": 3, "dropped": 0})
         self.assertEqual((self.data / CHAIN).read_bytes(),
                          self.lines + regenerated)
         stored = [json.loads(l) for l in
@@ -1072,10 +1084,12 @@ class CapTest(ReceiverFixture):
         # refused: the sender's retry still gets its 2xx.
         status, answer = self.send(proc, first)
         self.assertEqual(status, 200, answer)
-        self.assertEqual(json.loads(answer), {"appended": 0, "dropped": 600})
+        self.assertEqual(counted(answer), {"appended": 0, "dropped": 600})
 
         # Another chain has a cap of its own.
-        status, _ = self.send(proc, filler(600, 600), "receipts-other.jsonl")
+        # (From its genesis: a first batch that starts later is a hole,
+        # 409, ADR-0045 ruling 2.)
+        status, _ = self.send(proc, filler(0, 600), "receipts-other.jsonl")
         self.assertEqual(status, 200)
         self.assertEqual((self.data / CHAIN).read_bytes(), kept)
 
