@@ -91,11 +91,15 @@ The author ruled the reshape on 2026-11-11.
    cannot be read gets the row. Below `full`, and under `custom`
    without the chain's flag, nothing is sent in the recording path.
 
-4. **The session end and the keeper ask every time.** Each starts by
-   posting the chain's last entry and goes on from the answer, as
-   the hook does. The memo decides nothing for a receiver that
-   answers as ruling 2 says: its chain rows stay as a note of what
-   left and when. A remote that answers with no such statement is
+4. **The session end asks every time, and the keeper asks when it
+   has cause.** Each starts by posting the chain's last entry and
+   goes on from the answer, as the hook does. The memo decides
+   nothing at the session end for a receiver that answers as ruling
+   2 says: its chain rows stay as a note of what left and when. The
+   keeper stands down for a chain that has not changed since its
+   last turn and whose end the memo names as held, so that an idle
+   chain costs nothing; both of those lie in the writer's reach, and
+   the limit is listed below. A remote that answers with no such statement is
    followed from the memo as before, with a note written once, and
    the limit of the memo stands for it.
 
@@ -147,6 +151,10 @@ It does not claim:
   is the finding.
 - **A remote that does not answer as the receiver does.** It is
   followed from the memo, which is in the writer's reach.
+- **A keeper the writer has stood down.** For a session that never
+  ends, a writer that forges a memo row naming the chain's end and
+  sets the chain file's time back keeps the keeper from asking. The
+  recording call and the session end ask all the same.
 - **A note the writer wrote first.** An attempt row is written on a
   change of outcome, so a row forged with the failure to come hides
   the first real one. The receiver's reading is what shows a session
@@ -163,7 +171,8 @@ acceptance:
 - The same with the receiver stopped: each call costs the cap and no
   more, and the memo gains one attempt row.
 - A memo row forged with a `last` far ahead, or at the chain's end:
-  the next send asks the receiver all the same.
+  the next recording call and the session end ask the receiver all
+  the same.
 - A line of the chain overwritten after it was sent: the entries
   written after it still arrive.
 - A chain rewritten from an entry already sent: the receiver's file
