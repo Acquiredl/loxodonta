@@ -65,8 +65,10 @@ part is this tool's own.
 
 4. **A fingerprint that fails never loses the receipt.** The receipt
    is appended without the reference that could not be made, and its
-   action line says so in pinned words before the suffix. The hook's
-   exit says what failed, as before.
+   action line says so in pinned words before the suffix. The hook
+   exits as for any receipt written, so exit 0 still means the receipt
+   is on the chain, and it names each reference it could not make in a
+   warning.
 
 5. **`supervisor show` reads the commitment.** For a receipt that
    carries an input hash and a call id, it says whether the
@@ -88,6 +90,13 @@ part is this tool's own.
    lines, the amendment note), `docs/HOOK.md`, the glossary's
    *Receipt* entry if it describes the action line, and the tours
    where they show one.
+
+### Measured
+
+Not yet. One run on the author's machine, over a real session:
+`supervisor show` reads `matches` for each tool the session used,
+including a call whose input a `PreToolUse` hook rewrote. If it does
+not, this decision is revisited.
 
 ### What it claims, and what it does not
 
@@ -122,8 +131,10 @@ It does not claim:
 
 - Each hook receipt is about a hundred bytes longer, roughly a third
   more chain.
-- The spec pins a third action-line grammar, and every tool that
-  prints an action line shows the suffix.
+- The spec pins a third action-line grammar. The listings a person
+  scans (`report`, the digest, `timeline`, `search`, the dashboard's
+  search) fold the suffix; `show`, every JSON output and every file
+  keep the line whole.
 - An input with a fraction in it is named and not hashed.
 
 **What we'll have to revisit if:**

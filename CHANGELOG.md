@@ -13,7 +13,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Added
 
 - `install-hook --managed --matcher PATTERN` narrows the recorder's matcher in the managed file. Without it a managed install wires `*`, and a matcher narrowed in the operator's own settings file is named and not carried (ADR-0043).
-- A hook receipt ends with `[call=<id> input sha256=<hex> bytes=<n>]`: the harness's id for the call and a hash of its whole input, SPEC v0.1.6. `supervisor show` says whether the transcript's record of that call matches (ADR-0047).
+- A hook receipt ends with `[call=<id> input sha256=<hex> bytes=<n>]`: the harness's id for the call and a hash of its whole input, SPEC v0.1.6. `supervisor show` says whether the transcript's record of that call matches; listings fold the suffix (ADR-0047).
 
 ### Changed
 
@@ -21,12 +21,13 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/CLAIMS.md`, `docs/RECEIVER.md`, `docs/TOPOLOGY.md` and `README.md` agree with each other and with the code at v0.19.0: the count at the receiver is built and not a promise, and limits they left unsaid are stated.
 - `verify --anchors` and `verify-package` print `ANCHORED` only for a block a given `--block-header` checked; a block nobody checked is `ANCHOR-CLAIMED` and earns a package no rung. A script reading `ANCHORED` to mean a completed proof now reads two words (ADR-0044).
 - The supervisor shows and counts a claimed block as `ANCHOR-CLAIMED`, with a `claimed` field per chain and the gauge `loxodonta_heads_anchor_claimed`; `loxodonta_heads_unanchored` now counts heads no checked block covers (ADR-0044).
+- A supervisor older than this recorder reads a receipt whose tool is named bare, with the suffix after it, as a tool of its own: upgrade the supervisor first, the receiver's included (ADR-0047).
 
 ### Fixed
 
 - `openssl`, `ssh-keygen`, `git`, `gh` and `explain`'s default `claude` run by the full path a walk of `PATH` finds, never from the working folder, so a file of that name where `verify` runs is never the program run (ADR-0043).
 - `hook` and `digest` refuse an abbreviated flag with exit 64, so `--manag` is never taken by the parser for `--managed` while the run reads the environment as an unmanaged one (ADR-0043).
-- A file the hook cannot fingerprint no longer loses the receipt: it is appended without that reference, its line says `(1 not fingerprinted)`, and the exit still names the failure (ADR-0047).
+- A file the hook cannot fingerprint no longer loses the receipt: it is appended without that reference, its line says `(1 not fingerprinted)`, a warning names the file, and the hook exits 0 (ADR-0047).
 
 ## [0.19.0] - 2026-10-25
 

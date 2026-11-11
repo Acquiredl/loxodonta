@@ -1570,6 +1570,21 @@ class SearchTest(ServerFixture):
         self.assertEqual({h["repo"] for h in both["hits"]},
                          {"alpha", "beta"})
 
+    def test_a_hit_keeps_the_line_whole_and_lists_it_folded(self):
+        # ADR-0047: the JSON keeps the line whole; `listed` is what the
+        # page shows, the suffix folded.
+        alpha = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        log_entry(alpha, "Bash: deploy the albatross [call=toolu_1 "
+                         "input=unhashed]")
+        self.serve()
+
+        (hit,) = self.search(q="albatross")["hits"]
+
+        self.assertEqual(
+            (hit["action"], hit["listed"]),
+            ("Bash: deploy the albatross [call=toolu_1 input=unhashed]",
+             "Bash: deploy the albatross"))
+
     def test_search_is_case_insensitive(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         log_entry(log, "Write: Notes.md")

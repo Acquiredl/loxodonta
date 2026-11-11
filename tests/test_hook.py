@@ -1582,6 +1582,9 @@ class ReceiptSuffixTest(unittest.TestCase):
         from test_package_anchor import released_verifier
         self.hook(self.call(tool_input=self.INPUT, call="toolu_01AbC"))
         self.hook(self.call(tool="TodoWrite", tool_input={"n": 1.5}))
+        self.assertEqual(self.actions()[1:], [
+            f"Bash: echo hi [call=toolu_01AbC input sha256={self.DIGEST} "
+            f"bytes={len(self.FORM)}]", "TodoWrite [input=unhashed]"])
         released = released_verifier(self, self.workdir)
 
         verify = run(released, "verify", "--log",
@@ -1726,19 +1729,28 @@ class ReceiptSuffixTest(unittest.TestCase):
         os.chmod(path, 0)
         self.addCleanup(os.chmod, path, 0o644)
 
+    def warnings(self, result):
+        """The hook's stderr lines, which must all be warnings: a receipt
+        written is exit 0 and never an `error:` line (ADR-0047)."""
+        lines = result.stderr.splitlines()
+        self.assertTrue(all(line.startswith("warning: ") for line in lines),
+                        result.stderr)
+        return lines
+
     def test_a_file_that_cannot_be_fingerprinted_still_leaves_its_receipt(self):
         # ADR-0047 ruling 4: the receipt is appended without the
-        # reference, the line says so before the suffix, and the exit
-        # still says what failed (66, a file that cannot be read).
+        # reference, the line says so before the suffix, a warning names
+        # the file, and the exit is the receipt's: 0, it is on the chain.
         notes = self.workdir / "notes.md"
         notes.write_text("hello\n", encoding="utf-8")
         tool_input = {"file_path": "notes.md", "content": "hello\n"}
         self.locked(notes)
 
         result = self.hook(self.call(tool="Write", tool_input=tool_input,
-                                     call="toolu_4"), code=66)
+                                     call="toolu_4"))
 
-        self.assertTrue(result.stderr.startswith("error: "), result.stderr)
+        (warning,) = self.warnings(result)
+        self.assertIn("notes.md", warning)
         form = b'{"content":"hello\\n","file_path":"notes.md"}'
         log = self.workdir / "receipts-sess-1234abcd.jsonl"
         entry = json.loads(log.read_text(encoding="utf-8").splitlines()[1])
@@ -1751,19 +1763,57 @@ class ReceiptSuffixTest(unittest.TestCase):
         self.assertEqual((verify.returncode, verify.stdout.strip()),
                          (0, "VALID"), verify.stderr)
 
+    def test_of_two_files_the_one_that_can_be_read_is_fingerprinted(self):
+        good = self.workdir / "good.ipynb"
+        good.write_text("{}\n", encoding="utf-8")
+        held = self.workdir / "held.md"
+        held.write_text("hello\n", encoding="utf-8")
+        tool_input = {"file_path": "held.md", "notebook_path": "good.ipynb"}
+        self.locked(held)
+
+        result = self.hook(self.call(tool="Edit", tool_input=tool_input))
+
+        (warning,) = self.warnings(result)
+        self.assertIn("held.md", warning)
+        self.assertNotIn("good.ipynb", warning)
+        form = b'{"file_path":"held.md","notebook_path":"good.ipynb"}'
+        log = self.workdir / "receipts-sess-1234abcd.jsonl"
+        entry = json.loads(log.read_text(encoding="utf-8").splitlines()[1])
+        self.assertEqual(entry["action"],
+                         "Edit: held.md (1 not fingerprinted) [input "
+                         f"sha256={hashlib.sha256(form).hexdigest()} "
+                         f"bytes={len(form)}]")
+        self.assertEqual(entry["files"], [{
+            "path": "good.ipynb",
+            "sha256": hashlib.sha256(good.read_bytes()).hexdigest()}])
+
+    def test_report_folds_the_suffix_and_the_chain_keeps_it(self):
+        # A listing for a person leaves the suffix out; the line in the
+        # chain is whole (ADR-0047).
+        self.hook(self.call(tool_input=self.INPUT, call="toolu_5"))
+
+        report = run(LOXODONTA, "report", "--log",
+                     "receipts-sess-1234abcd.jsonl", cwd=self.workdir)
+
+        self.assertEqual(report.returncode, 0, report.stderr)
+        (row,) = [line for line in report.stdout.splitlines()
+                  if "claude-code:" in line]
+        self.assertTrue(row.endswith("  claude-code: Bash: echo hi"), row)
+        self.assertTrue(self.actions()[1].endswith(" bytes=47]"))
+
     @unittest.skipIf(sys.platform == "win32",
                      "Windows cannot name a file with a colon in it")
     def test_a_path_the_spelling_rule_refuses_still_leaves_its_receipt(self):
         # SPEC section 3 refuses a stored path whose second character is
-        # a colon, so this reference is the command spoken wrong, 64, as
-        # it was when the receipt was lost with it.
+        # a colon: the reference is left out and named in a warning, and
+        # the receipt is written, exit 0.
         (self.workdir / "a:b.txt").write_text("x\n", encoding="utf-8")
 
         result = self.hook(self.call(tool="Read",
-                                     tool_input={"file_path": "a:b.txt"}),
-                           code=64)
+                                     tool_input={"file_path": "a:b.txt"}))
 
-        self.assertIn("a drive", result.stderr)
+        (warning,) = self.warnings(result)
+        self.assertIn("a drive", warning)
         form = b'{"file_path":"a:b.txt"}'
         self.assertEqual(self.actions()[1],
                          "Read: a:b.txt (1 not fingerprinted) [input "

@@ -5152,7 +5152,7 @@ def timeline_lines(entries, breaks, warns):
         if entry is not None:
             out.append(f"  {n:>4}  {visible(entry.get('ts'))}  "
                        f"{visible(entry.get('actor'))}: "
-                       f"{visible(entry.get('action'))}")
+                       f"{visible(listed_action(entry.get('action')))}")
             for ref in entry.get("files", []):
                 out.append(f"        - {visible(ref['path'])} "
                            f"({visible(ref['sha256'][:12])}…)")
@@ -5482,8 +5482,12 @@ def is_call_id(text):
 
 
 def holds_fraction(value):
-    """Whether a JSON value holds a number with a fraction anywhere in
-    it, which SPEC \u00a74 rule 4 gives no canonical form. Walked without
+    """Whether a JSON value holds, anywhere in it, a number that is not
+    an integer in the JSON it was read from: one written with a fraction
+    or an exponent (`1.5`, `1.0`, `2e5`), or `NaN` or `Infinity`, which
+    Python's reader takes as numbers. Each is a float here, and SPEC \u00a74
+    rule 4 gives none a canonical form; booleans and `null` are not
+    numbers here and are hashed as JSON writes them. Walked without
     recursion: the payload may nest as deep as the JSON reader took."""
     stack = [value]
     while stack:
@@ -5500,9 +5504,10 @@ def holds_fraction(value):
 def input_form(value):
     """A call's input in SPEC \u00a74's canonical form, written by the one
     writer entries are hashed with, or None where \u00a74 has no form for
-    it: a number with a fraction, or anything that writer refuses (a
-    lone surrogate, which has no UTF-8; nesting past the recursion
-    limit). Every such input reads `input=unhashed` (ADR-0047 ruling 3)."""
+    it: a number that is not an integer (`holds_fraction`), or anything
+    that writer refuses (a lone surrogate, which has no UTF-8; nesting
+    past the recursion limit). Every such input reads `input=unhashed`
+    (ADR-0047 ruling 3, SPEC \u00a72.3)."""
     if holds_fraction(value):
         return None
     try:
@@ -5558,6 +5563,14 @@ def split_suffix(action):
     if not fields:
         return action, None
     return action[:at], fields
+
+
+def listed_action(action):
+    """An action line as a listing shows it, without its suffix: the
+    suffix is for a reader that checks, and a listing for a person
+    scanning (ADR-0047). A whole line is in the chain, in `show` and in
+    every JSON output."""
+    return split_suffix(action)[0]
 
 
 def main_repo_root(project):
@@ -5914,20 +5927,20 @@ def cmd_hook(args):
         print(f"warning: {problem} — the files are fingerprinted against "
               f"{base}", file=sys.stderr)
     # A reference that cannot be made never loses the receipt (ADR-0047
-    # ruling 4): it is left out, the line says how many were, and the
-    # exit still names the first failure, as build_references printed it.
-    files, unmade, failed = [], 0, 0
+    # ruling 4): it is left out, the line says how many were, and each is
+    # named in a warning once the receipt is written. The exit stays the
+    # receipt's, so exit 0 still means the receipt is on the chain.
+    files, unmade = [], []
     for path in file_paths:
-        made, code = build_references(
-            log, [path], base=base if problem else named)
-        if made is None:
-            unmade += 1
-            failed = failed or code
-        else:
-            files += made
+        try:
+            files.append(file_reference(base if problem else named, path))
+        except (ValueError, FileNotFoundError) as e:
+            unmade.append(visible(str(e)))  # file_reference's words name it
+        except OSError as e:
+            unmade.append(f"{visible(path)}: {visible(e.strerror or str(e))}")
     files.sort(key=lambda ref: ref["path"])  # by path bytes (SPEC §3)
     if unmade:
-        action += f" ({unmade} {UNFINGERPRINTED})"
+        action += f" ({len(unmade)} {UNFINGERPRINTED})"
     action += receipt_suffix(payload)
     # One lock for the receipt, any due transcript commitment and the
     # second-record note: a racing sibling process between them could
@@ -5943,7 +5956,10 @@ def cmd_hook(args):
                     # The pin is Claude Code's: another harness reads no
                     # managed settings and has no second record to cut.
                     note_second_record_cut(log)
-            return code or failed
+                for why in unmade:
+                    print(f"warning: {why}; the receipt is written without "
+                          "its fingerprint (ADR-0047)", file=sys.stderr)
+            return code
     except LockTimeout:
         return locked_out(log)
 
