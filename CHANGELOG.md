@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/CLAIMS.md`, `docs/RECEIVER.md`, `docs/TOPOLOGY.md` and `README.md` agree with each other and with the code at v0.19.0: the count at the receiver is built and not a promise, and limits they left unsaid are stated.
+
 ## [0.19.0] - 2026-10-25
 
 ### Added
