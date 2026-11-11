@@ -531,7 +531,7 @@ class SessionEndAnchorTest(unittest.TestCase):
         self.assertGreaterEqual(len(self.server.polled), 1, "no upgrade tried")
         verify = run(LOXODONTA, "verify", "--anchors", "--log",
                               str(self.chain), cwd=self.workdir)
-        self.assertIn("ANCHORED", verify.stdout)
+        self.assertIn("ANCHOR-CLAIMED: entries", verify.stdout)
 
 
 class AnchorTest(StoreCase):
@@ -749,10 +749,13 @@ class AnchorTest(StoreCase):
         # With no block header given, the attestation's height is its own
         # claim: a regenerated chain can carry a made-up one, so the line
         # says the block was not checked and never that the entries
-        # existed by it (ruling 3 on #299).
-        self.assertIn(f"ANCHORED: entries 0..1: the attestation claims "
+        # existed by it (ruling 3 on #299), and its word is
+        # ANCHOR-CLAIMED, never ANCHORED, with the exit unmoved (ADR-0044).
+        self.assertIn(f"ANCHOR-CLAIMED: entries 0..1: the attestation claims "
                       f"Bitcoin block {self.HEIGHT}, and the block was not "
                       "checked", result.stdout)
+        self.assertEqual([line for line in result.stdout.splitlines()
+                          if line.startswith("ANCHORED")], [], result.stdout)
         self.assertNotIn("existed by", result.stdout)
         self.assertIn("--block-header", result.stdout)
         self.assertIn(
@@ -1686,6 +1689,7 @@ class AnchorDedupeTest(StoreCase):
         self.assertIn(f"ANCHOR-PENDING: head {self.head[:12]}…",
                       judged.stdout)
         self.assertNotIn("ANCHORED", judged.stdout)
+        self.assertNotIn("ANCHOR-CLAIMED", judged.stdout)
 
     def test_the_limit_a_pending_proof_copied_from_another_head_stops_it(self):
         # A calendar's own pending proof, moved to the next head: it
@@ -1706,6 +1710,7 @@ class AnchorDedupeTest(StoreCase):
         self.assertIn(f"ANCHOR-PENDING: head {self.head[:12]}…",
                       judged.stdout)
         self.assertNotIn("ANCHORED", judged.stdout)
+        self.assertNotIn("ANCHOR-CLAIMED", judged.stdout)
 
     def test_the_limit_a_completed_proof_copied_from_another_head(self):
         # A completed proof moved to the next head replays too, but to a
@@ -1730,8 +1735,8 @@ class AnchorDedupeTest(StoreCase):
         self.assertIn("already anchored", result.stdout)
         self.assertEqual(len(self.server.submitted), 1)
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
-        self.assertIn("ANCHORED: entries 0..2: the attestation claims Bitcoin "
-                      "block 850000, and the block was not checked",
+        self.assertIn("ANCHOR-CLAIMED: entries 0..2: the attestation claims "
+                      "Bitcoin block 850000, and the block was not checked",
                       judged.stdout)
         self.assertIn("HEADER-UNMATCHED", judged.stdout)
         self.assertNotIn("existed by the block", judged.stdout)
@@ -1813,11 +1818,11 @@ class AnchorFieldEscapeTest(StoreCase):
                 (unanswered,) = [line for line in result.stdout.splitlines()
                                  if line.startswith("ANCHOR-UNANSWERED")]
                 self.assertIn(SHOWN, unanswered)
-                anchored = [line for line in result.stdout.splitlines()
-                            if line.startswith("ANCHORED")]
-                self.assertEqual(len(anchored), 1)
-                self.assertTrue(anchored[0].startswith(
-                    "ANCHORED: entries 0..1: "), anchored)
+                claimed = [line for line in result.stdout.splitlines()
+                           if line.startswith("ANCHOR-CLAIMED")]
+                self.assertEqual(len(claimed), 1)
+                self.assertTrue(claimed[0].startswith(
+                    "ANCHOR-CLAIMED: entries 0..1: "), claimed)
 
     def test_a_head_that_appears_nowhere_prints_escaped(self):
         self.write_sidecar(self.pending_row(head=HOSTILE_HEAD))

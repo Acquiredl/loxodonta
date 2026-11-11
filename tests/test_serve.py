@@ -66,7 +66,8 @@ def ots_varint(n):
 def write_completed_anchor(log, height=850000):
     """A minimal but genuine OTS timestamp: one sha256 op, then a Bitcoin
     attestation — enough for `verify --anchors` to replay offline and
-    report ANCHORED, with no network and no calendar (ANCHORING.md §4)."""
+    report ANCHOR-CLAIMED, with no network and no calendar (ANCHORING.md
+    §4)."""
     # Both ends of every pipe in this file pinned to UTF-8 (PYTHONIOENCODING
     # for the child, encoding= for the parent) — `text=True` alone decodes
     # with the locale codec, cp1252 on Windows, and disagrees with a
@@ -934,6 +935,29 @@ class ServeTest(ServerFixture):
         served.pop("scanned"), printed.pop("scanned")
         self.assertEqual(served, printed)
 
+    def test_a_claimed_anchor_is_served_as_claimed_never_anchored(self):
+        # The scan gives verify no block header, so a completed proof is
+        # a block nobody checked: the chain the page reads is claimed and
+        # not anchored, with verify's ANCHOR-CLAIMED line as its claim
+        # (ADR-0044 ruling 4).
+        claimed = make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        write_completed_anchor(claimed)
+        self.serve()
+
+        report = json.loads(self.get("/api/status")[2])
+
+        (chain,) = [c for repo in report["repos"] for s in repo["sessions"]
+                    for c in s["chains"]]
+        self.assertTrue(chain["claimed"], chain["detail"])
+        self.assertFalse(chain["anchored"], chain["detail"])
+        self.assertEqual(chain["anchors"]["anchored"], [])
+        self.assertEqual(chain["anchors"]["claimed"],
+                         [{"upto": 2, "height": 850000}])
+        self.assertTrue(any(line.startswith("ANCHOR-CLAIMED: entries 0..2: ")
+                            for line in chain["detail"]), chain["detail"])
+        self.assertFalse(any(line.startswith("ANCHORED")
+                             for line in chain["detail"]), chain["detail"])
+
     def test_front_page_is_inline_html_with_no_outside_dependencies(self):
         self.serve()
 
@@ -952,14 +976,16 @@ class ServeTest(ServerFixture):
             "http://www.w3.org/2000/svg", ""), "no external references")
 
     def test_front_page_renders_tiers_as_distinct_claims(self):
-        # The strings the band is built from: VALID and ANCHORED are
-        # different claims, the exit-3 tier reads gravest, and superseded
-        # damage is quiet evidence rather than a live alarm.
+        # The strings the band is built from: VALID, ANCHOR-CLAIMED and
+        # ANCHORED are different claims, the exit-3 tier reads gravest,
+        # and superseded damage is quiet evidence rather than a live
+        # alarm.
         self.serve()
 
         _, _, page = self.get("/")
 
         self.assertIn("ANCHORED", page)
+        self.assertIn('claimed: () => "ANCHOR-CLAIMED"', page)
         self.assertIn("VALID", page)
         self.assertIn("not the recorded history", page)
         self.assertIn("superseded", page)
@@ -1389,7 +1415,7 @@ class RecallTest(ServerFixture):
         self.assertIn("what was attempted", report["testimony"])
         (story,) = report["sessions"]
         self.assertEqual(story["entries"], 3, "the readable receipts remain")
-        for verdict_word in ("VALID", "BROKEN", "ANCHORED"):
+        for verdict_word in ("VALID", "BROKEN", "ANCHORED", "ANCHOR-CLAIMED"):
             self.assertNotIn(verdict_word, body)
 
 
@@ -1435,7 +1461,7 @@ class ActivityTest(ServerFixture):
 
         self.assertIn("testimony", report)
         blob = json.dumps(report)
-        for verdict in ("VALID", "BROKEN", "ANCHORED"):
+        for verdict in ("VALID", "BROKEN", "ANCHORED", "ANCHOR-CLAIMED"):
             self.assertNotIn(verdict, blob,
                              "activity counts what was attempted, "
                              "never what verify decided")
@@ -1584,7 +1610,7 @@ class SearchTest(ServerFixture):
 
         report = json.loads(body)
         self.assertIn("what was attempted", report["testimony"])
-        for verdict_word in ("VALID", "BROKEN", "ANCHORED"):
+        for verdict_word in ("VALID", "BROKEN", "ANCHORED", "ANCHOR-CLAIMED"):
             self.assertNotIn(verdict_word, body)
 
     def test_front_page_carries_the_search_box(self):

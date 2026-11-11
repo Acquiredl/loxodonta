@@ -789,21 +789,27 @@ def headers_by_root(headers):
     return {header_root(header): header for header in headers or ()}
 
 
-def attestation_words(subject, height, root, headers, used):
+def attestation_words(prefix, subject, height, root, headers, used):
     """What a completed proof shows about `subject`, said no further than
     it was checked. Without a header holding its root, the attestation's
-    height is its own claim; with one, the entries existed by the block
-    that header is, named by its hash. `used` collects the roots a header
-    matched, so the headers that matched nothing can be named after."""
+    height is its own claim and the line's word is ANCHOR-CLAIMED; with
+    one, the entries existed by the block that header is, named by its
+    hash, and only then is the word ANCHORED. A writer can end a proof in
+    any height it likes at no cost, so the word that says a block holds
+    the root is kept for a block somebody compared. `prefix` comes before
+    the word on the line. `used` collects the roots a header matched, so
+    the headers that matched nothing can be named after."""
     shown = root[::-1].hex()
     header = headers.get(root)
     if header is None:
-        return (f"{subject}: the attestation claims Bitcoin block {height}, "
+        return (f"{prefix}ANCHOR-CLAIMED: {subject}: the attestation claims "
+                f"Bitcoin block {height}, "
                 "and the block was not checked; that block's merkle root "
                 f"must read {shown}, which --block-header with its header "
                 "checks")
     used.add(root)
-    return (f"{subject} existed by the block whose header hashes to "
+    return (f"{prefix}ANCHORED: {subject} existed by the block whose header "
+            "hashes to "
             f"{header_hash(header)}, whose merkle root {shown} is the one "
             "the proof replays to; the attestation calls it Bitcoin block "
             f"{height}, which is your header source's word, and the hash is "
@@ -1179,8 +1185,9 @@ def check_anchors(log, entries, headers, used, packaged=False):
         place = row_place(number, name)
         if kind == "bitcoin":
             height, root = detail
-            subject = f"ANCHORED: entries 0..{hash_to_n[record['head']]}"
-            print(attestation_words(subject, height, root, headers, used))
+            subject = f"entries 0..{hash_to_n[record['head']]}"
+            print(attestation_words("", subject, height, root, headers,
+                                    used))
         elif kind == "pending":
             if (record["head"], record.get("calendar")) in completed:
                 continue  # this submission's own upgraded record supersedes it
@@ -2297,7 +2304,7 @@ def judge_manifest_anchor(folder, headers, used):
                     pending.append(record)
                     continue
                 _, block, root = verdict
-                print(attestation_words("seal anchor: ANCHORED: the manifest",
+                print(attestation_words("seal anchor: ", "the manifest",
                                         block, root, headers, used))
                 header = headers.get(root)
                 claimed.append((block, header_hash(header) if header else None))
@@ -2637,8 +2644,9 @@ def ceiling_lines(manifest, earned):
                     f"{block} lets you check against a second source")
     elif height is not None:
         # The proof completes to an attestation, and nothing checked the
-        # block it names (ruling 3 on #299): a claim, said as one.
-        rungs += " + ANCHORED"
+        # block it names (ruling 3 on #299): a claim, said as one, and no
+        # rung, since a regenerated package names any block it likes at
+        # no cost.
         given += (f", and the manifest's anchor claims Bitcoin block "
                   f"{height}, a block not checked here")
         trusted += (f", and it existed by Bitcoin block {height} if the "

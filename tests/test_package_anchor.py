@@ -165,8 +165,8 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertIn("anchored", result.stdout)
         self.assertIn("--upgrade --manifest", result.stdout)
 
-    CHAIN_DETAIL = ("ANCHORED: entries 0..2: the attestation claims Bitcoin "
-                    "block 850000, and the block was not checked")
+    CHAIN_DETAIL = ("ANCHOR-CLAIMED: entries 0..2: the attestation claims "
+                    "Bitcoin block 850000, and the block was not checked")
 
     def test_a_pending_manifest_anchor_leaves_the_rung_unearned_with_a_note(self):
         # The proof names the calendar and no block yet: the verdict
@@ -194,11 +194,12 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
         self.assertNotIn("no seal is declared", lines[-2])
 
-    def test_a_completed_manifest_anchor_earns_the_rung(self):
+    def test_a_completed_manifest_anchor_with_no_header_earns_no_rung(self):
         # Upgraded through the existing upgrade path, pointed at the
         # manifest, once the calendar has the Bitcoin attestation; the
         # verifier then prints the block and the merkle root for the
-        # recipient to confirm (ADR-0003) and adds + ANCHORED.
+        # recipient to confirm (ADR-0003), as ANCHOR-CLAIMED, and adds no
+        # rung: a regenerated package names any block it likes (ADR-0044).
         folder = self.anchored_folder()
         digest = self.manifest_digest(folder)
         self.server.mode = "complete"
@@ -221,21 +222,22 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertEqual(judged.returncode, 0, out + judged.stderr)
         lines = out.strip().splitlines()
         seal = next((l for l in lines
-                     if l.startswith("seal anchor: ANCHORED")), None)
+                     if l.startswith("seal anchor: ANCHOR-CLAIMED")), None)
         self.assertIsNotNone(seal, out)
+        self.assertNotIn("seal anchor: ANCHORED", out)
         # No header was given, so the block is the attestation's claim,
         # and neither the seal line nor the verdict says the manifest
         # existed by it (ruling 3 on #299).
         self.assertTrue(seal.startswith(
-            "seal anchor: ANCHORED: the manifest: the attestation claims "
+            "seal anchor: ANCHOR-CLAIMED: the manifest: the attestation claims "
             f"Bitcoin block {self.server.height}, and the block was not "
             "checked"), seal)
         self.assertIn(expected_merkle_root(digest, self.server.nonce,
                                            self.server.prefix,
                                            self.server.suffix), seal)
         self.assertNotIn("ANCHOR-PENDING: the manifest", out)
-        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + ANCHORED:"),
-                        lines[-1])
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT: "), lines[-1])
+        self.assertNotIn("ANCHORED", lines[-1])
         self.assertIn(f"claims Bitcoin block {self.server.height}, a block "
                       "not checked here", lines[-1])
         self.assertNotIn("existed by", lines[-1])
@@ -318,10 +320,9 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertIn(GENESIS_HASH, lines[note])
         # After every anchor line it speaks for, before the verdict.
         seal = next(i for i, l in enumerate(lines)
-                    if l.startswith("seal anchor: ANCHORED"))
+                    if l.startswith("seal anchor: ANCHOR-CLAIMED"))
         self.assertGreater(note, seal)
-        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + ANCHORED:"),
-                        lines[-1])
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT: "), lines[-1])
         self.assertIn("a block not checked here", lines[-1])
 
     def test_a_malformed_header_is_a_usage_error(self):
@@ -351,7 +352,12 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
         self.assertEqual(lags.polled, [], "the lagging calendar was re-asked")
 
-        judged = self.verify_package(folder)
+        # The header of the block the settled proof claims, so the rung
+        # can be earned at all (ADR-0044).
+        root = replayed_root(self.manifest_digest(folder), self.server.nonce,
+                             self.server.prefix, self.server.suffix)
+        judged = self.verify_package(folder, "--block-header",
+                                     block_header(root).hex())
 
         out = judged.stdout
         self.assertEqual(judged.returncode, 0, out + judged.stderr)
@@ -941,12 +947,21 @@ class ReleasedVerifierTest(AnchoredStoreCase):
         now = self.verify_package(folder)
         then = run(released, "verify-package", str(folder),
                    cwd=str(self.work), isolated=True)
-        then_out = then.stdout
+        # The released verifier predates ADR-0044: its word for a block
+        # nobody checked is ANCHORED, and its verdict earns the rung for
+        # one. That is the one difference, said here word for word.
+        then_lines = [
+            line.replace("ANCHORED: ", "ANCHOR-CLAIMED: ", 1)
+            if "the attestation claims Bitcoin block" in line
+            else line.replace("SELF-CONSISTENT + ANCHORED: ",
+                              "SELF-CONSISTENT: ", 1)
+            for line in then.stdout.splitlines()]
 
         self.assertEqual(now.returncode, 0, now.stdout + now.stderr)
         self.assertTrue(now.stdout.splitlines()[-1]
-                        .startswith("SELF-CONSISTENT + ANCHORED:"), now.stdout)
-        self.assertEqual((then.returncode, then_out.splitlines()),
+                        .startswith("SELF-CONSISTENT: "), now.stdout)
+        self.assertNotEqual(then_lines, then.stdout.splitlines())
+        self.assertEqual((then.returncode, then_lines),
                          (now.returncode, now.stdout.splitlines()))
 
 
