@@ -1923,9 +1923,13 @@ def remote_id(url):
 # writer-reachable and proves nothing.
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def chain_cursor(log, url):
-    """The last entry number the remote at `url` acknowledged, from the
-    memo's chain rows that name it (#263); -1 when none does, so the
-    send starts at genesis. A row that names no remote predates remote
+    """Where a send to the remote at `url` starts: the `last` of the
+    newest memo chain row that names it (#263), or -1 when none does, so
+    the send starts at genesis. A hint and no more (ADR-0045 ruling 1):
+    the memo lies beside the chain, and the remote's answer to the send
+    says what it holds. The newest row and not the highest, so a row
+    written past the chain's end is followed by the row the next send
+    writes, and is not read again. A row that names no remote predates remote
     ids and counts for none: that chain goes once more from genesis, and
     the receiver drops each line as an exact duplicate. A row of any
     other kind, a head, a note or a kind unknown here, counts for none
@@ -1966,7 +1970,7 @@ def chain_cursor(log, url):
             continue
         if is_chain_record(record) and isinstance(record.get("last"), int) \
                 and record.get("remote_id") == mine:
-            cursor = max(cursor, record["last"])
+            cursor = record["last"]
     return cursor
 
 
@@ -1984,7 +1988,7 @@ def ripe_head(entries, now, cadence):
 
 
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
-                 authority=None):
+                 authority=None, chain_url=None):
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
     --upgrade` (the record's own calendar; judgment stays with verify),
@@ -1996,17 +2000,20 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     head they already hold with exit 0 and ask nobody, which is neither
     a failure nor a departure. `failed` stays the anchor's; a refused
     stamp is already written down in the stamps sidecar by the verb
-    itself. Returns (attempted, note, failed)."""
+    itself. With `chain_url`, the chain's URL, each verb that adds or
+    upgrades a row also sends the sidecar's rows there (ADR-0045 ruling
+    5). Returns (attempted, note, failed)."""
     sidecar = Path(str(log) + ".anchors.jsonl")
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
+    travel = ["--publish-chain", chain_url] if chain_url else []
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
     if os.path.isfile(sidecar):
-        finished = run_verb(["anchor", "--upgrade", f"--log={log}"])
+        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *travel])
         attempted = True
         if finished is None:
             notes.append("upgrading did not finish in time; the proofs stay "
@@ -2026,7 +2033,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
         if head:
-            command = ["anchor", f"--log={log}"]
+            command = ["anchor", f"--log={log}", *travel]
             for calendar in calendars:
                 command += ["--calendar", calendar]
             finished = run_verb(command)
@@ -2053,7 +2060,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append(recorder_exit_note("anchor this head", finished))
         if head and authority:
             finished = run_verb(["stamp", f"--log={log}", "--authority",
-                                 authority])
+                                 authority, *travel])
             attempted = True
             if finished is None:
                 notes.append("stamping did not finish in time; whether the "
@@ -2166,9 +2173,11 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     throttle and only when the operator opted in with a cadence and a
     URL: a head aged past the cadence and not yet in the publish memo is
     posted once through `loxodonta publish`; then, when a URL was named
-    for the entries, the lines after that remote's cursor (#263) go
-    through `loxodonta publish --chain` (ADR-0031 ruling 3), at most
-    once each per throttle window. The memo is testimony: it stops a
+    for the entries and the memo's newest row for that remote (#263)
+    does not name the chain's last entry, `loxodonta publish --chain`
+    sends what the remote says it does not hold (ADR-0031 ruling 3,
+    ADR-0045 ruling 4), at most once per throttle window. The memo is
+    testimony: it stops a
     repeat and proves nothing; a head is posted once, wherever it went
     (ADR-0025). Returns (attempted, note, failed)."""
     if not (url or chain_url) or not upgrade_due(last_attempt, now):
@@ -2189,7 +2198,10 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     behind = False
     if chain_url and isinstance(entries[-1].get("n"), int):
         try:
-            behind = entries[-1]["n"] > chain_cursor(str(log), chain_url)
+            # Not only behind: a memo row past the chain's end is a hint
+            # the receiver's answer corrects, so the send goes and asks
+            # (ADR-0045 ruling 4).
+            behind = entries[-1]["n"] != chain_cursor(str(log), chain_url)
         except (OSError, ValueError):
             # The recorder's answer too: with no cursor there is no
             # send, since -1 would send the whole chain again (#344).
@@ -4924,7 +4936,8 @@ def keepers_turn(look, place, entries, memory, now, stamp):
     torn = (memory["chains"].get(relpath) or {}).get("superseded") is True
     attempted, note, failed = keep_anchors(
         log, keeper.get(relpath), now, entries,
-        None if torn else look.anchor_every, look.calendars, look.authority)
+        None if torn else look.anchor_every, look.calendars, look.authority,
+        look.publish_chain)
     if attempted:
         moved[relpath] = stamp
     if note:

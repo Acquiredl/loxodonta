@@ -149,8 +149,7 @@ TWINS = (
     Twin("Reading a sidecar",
          ("read_log", "sidecar_path", "published_path", "IS_A_FOLDER",
           "NOT_REGULAR", "open_regular", "file_problem",
-          "KeyGivenTwice", "object_with_each_key_once", "NotStrictJson",
-          "not_json", "finite_float", "read_sidecar_records"),
+          "read_sidecar_records"),
          ORIGINAL, SUPERVISOR,
          "Where each sidecar lives beside its chain, and how its lines "
          "are read: a line that is not a JSON object, past the digit or "
@@ -160,9 +159,17 @@ TWINS = (
          "file, a folder or a pipe in its place. The recorder judges by "
          "it; the supervisor's scan and keeper report and schedule by it "
          "(#299, #331, #344, #364, #365)."),
+    Twin("A strict JSON reading",
+         ("KeyGivenTwice", "object_with_each_key_once", "NotStrictJson",
+          "not_json", "finite_float"),
+         ORIGINAL, BOTH,
+         "A line a strict JSON parser refuses (a key given twice, NaN, "
+         "Infinity or 1e999) is no row: the recorder and the supervisor "
+         "read every sidecar line by it, and the receiver refuses a "
+         "sidecar batch holding one, so the receiver keeps no row the "
+         "recorder's `verify` would not read (#365, ADR-0045)."),
     Twin("What a sidecar row is",
-         ("ATTEMPT_KIND", "CHAIN_KIND", "ANCHOR_KIND", "STAMP_KIND",
-          "HEAD_KIND",
+         ("ATTEMPT_KIND", "CHAIN_KIND", "HEAD_KIND",
           "SIDECAR_KINDS", "UNREADABLE_ROW", "UNKNOWN_ROW", "row_kind",
           "is_chain_record"),
          ORIGINAL, SUPERVISOR,
@@ -173,6 +180,12 @@ TWINS = (
          "token or a sent head that `verify` or `publish` would not, and "
          "every judge and scheduler skips an `attempt` row alike (#240, "
          "#344)."),
+    Twin("A sidecar's evidence kinds", ("ANCHOR_KIND", "STAMP_KIND"),
+         ORIGINAL, BOTH,
+         "The kind of a proof row and of a token row (ADR-0038): the "
+         "recorder writes and judges them by it, the supervisor counts "
+         "them by it, and the receiver takes a sidecar batch only of "
+         "rows of that kind, or of none (ADR-0045 ruling 5)."),
     Twin("An anchor row's shape",
          ("JSON_TYPE_WORDS", "json_type", "anchor_row_problem"),
          ORIGINAL, SUPERVISOR,
@@ -196,9 +209,10 @@ TWINS = (
     Twin("Where the chain route left off", ("chain_cursor",),
          ORIGINAL, SUPERVISOR,
          "The keeper runs the recorder's `publish --chain` only when the "
-         "recorder's cursor for that remote is behind the chain's end, so "
-         "both read the memo alike, and a memo neither can read leaves a "
-         "note rather than a send from genesis (#263, #344)."),
+         "memo's newest row for that remote does not name the chain's "
+         "last entry, so both read the memo alike, and a memo neither can "
+         "read leaves a note rather than a send from genesis (#263, #344). "
+         "A hint, which the receiver's answer corrects (ADR-0045)."),
     Twin("Naming a remote", ("remote_id",), ORIGINAL, SUPERVISOR,
          "The recorder writes a fingerprint of the receiver's URL into the "
          "publish memo, and the supervisor's keeper compares against it "
@@ -233,6 +247,11 @@ TWINS = (
     Twin("A chain batch's content type", ("CHAIN_TYPE",), ORIGINAL, RECEIVER,
          "The recorder sends a batch of the chain under this content type, "
          "and the receiver takes a batch only under it (ADR-0031)."),
+    Twin("A sidecar batch's content type", ("SIDECAR_TYPE",), ORIGINAL,
+         RECEIVER,
+         "The recorder sends a chain's anchor and stamp rows under this "
+         "content type, and the receiver keeps them beside its copy of the "
+         "chain only under it (ADR-0045 ruling 5)."),
     Twin("A receipt's suffix",
          ("canonical_bytes", "CALL_ID_CHARACTERS", "CALL_ID_LONGEST",
           "UNHASHED_INPUT", "is_call_id", "holds_fraction", "input_form",

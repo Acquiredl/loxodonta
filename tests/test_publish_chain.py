@@ -33,7 +33,7 @@ from support import (LOXODONTA, RECEIVER, SUPERVISOR, clean_env,  # noqa: E402
 
 from test_anchor import FakeCalendar, FakeCalendarHandler
 from test_publish import FakeReceiver, FakeReceiverHandler, PublishBase
-from test_receiver import make_chain, post, run_recorder
+from test_receiver import counted, make_chain, post, run_recorder
 from test_supervisor import (ago, chain_head, chains_by_session,
                              install_witness_hook,
                              make_chain as make_store_chain, run_scan,
@@ -41,6 +41,7 @@ from test_supervisor import (ago, chain_head, chains_by_session,
 
 
 NDJSON = "application/x-ndjson"
+SIDECAR_TYPE = "application/x-loxodonta-sidecar"
 # What a quick session-end step writes when the window has closed on
 # it (#262): the recorder's words, pinned here as the operator reads
 # them in the sidecar.
@@ -162,7 +163,21 @@ class ChainReceiverHandler(FakeReceiverHandler):
         else:
             time.sleep(self.server.delay)
         status = getattr(self.server, "status", 200)
-        body = (b'{"appended": 1, "dropped": 0}' if status == 200
+        said = {"appended": 1, "dropped": 0}
+        if status == 200 and kind == NDJSON \
+                and getattr(self.server, "says_what_it_holds", True):
+            # What the receiver says it holds of the chain (ADR-0045
+            # ruling 1), so this fake stands in for receiver.py: the
+            # highest n it took, and the hash of the last line with it.
+            held = getattr(self.server, "held", {})
+            self.server.held = held
+            name = self.headers.get("X-Loxodonta-Chain")
+            for line in raw.splitlines():
+                entry = json.loads(line)
+                if name not in held or entry["n"] >= held[name][0]:
+                    held[name] = (entry["n"], entry["entry_hash"])
+            said.update(held_n=held[name][0], held_hash=held[name][1])
+        body = (json.dumps(said).encode("utf-8") if status == 200
                 else b"refused\n")
         self.send_response(status)
         self.send_header("Content-Length", str(len(body)))
@@ -215,7 +230,8 @@ class PublishChainCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         self.assertRegex(result.stdout.strip(),
-                         r"^published chain entries 0-2 \(head [0-9a-f]{12}…\)$")
+                         r"^published chain entries 0-2 \(head [0-9a-f]{12}…\)"
+                         r"; the remote says it holds through entry 2$")
         self.assertEqual((self.data / self.log.name).read_bytes(), lines)
         judged = self.verify_receivers_file()
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
@@ -527,7 +543,7 @@ class PublishChainCommandTest(unittest.TestCase):
         status, answer = post(receiver.url, lines, NDJSON,
                               {"X-Loxodonta-Chain": self.log.name})
         self.assertEqual(status, 200, answer)
-        self.assertEqual(json.loads(answer), {"appended": 0, "dropped": 3})
+        self.assertEqual(counted(answer), {"appended": 0, "dropped": 3})
 
     def test_windows_line_endings_arrive_as_newlines_and_verify_there(self):
         # SPEC section 1: a carriage return before the newline belongs to
@@ -602,10 +618,17 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "logged entry 2")
         self.assertEqual(result.stderr, "")
-        head, batch = self.receiver.received
+        head, batch, rows = self.receiver.received
         self.assertEqual(head["content_type"], "application/json")
         self.assertEqual(batch["content_type"], NDJSON)
         self.assertEqual(batch["calendar_asks"], 0)
+        # The proof the anchor wrote travels after it, to the chain's
+        # URL, under the chain's name (ADR-0045 ruling 5).
+        self.assertEqual(rows["content_type"], SIDECAR_TYPE)
+        self.assertEqual(rows["calendar_asks"], 1)
+        self.assertEqual(rows["headers"],
+                         {"x-loxodonta-chain": self.chain().name,
+                          "x-loxodonta-sidecar": "anchors"})
         sealed = json.loads(batch["chain_tail"])
         self.assertTrue(sealed["action"].startswith("transcript-commitment:"))
         self.assertEqual(batch["raw"], self.chain_lines())
@@ -652,7 +675,7 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.assertEqual(result.stderr, "")
         self.assertLess(elapsed, 12)
         self.assertEqual([s["content_type"] for s in self.receiver.received],
-                         ["application/json", NDJSON])
+                         ["application/json", NDJSON, SIDECAR_TYPE])
         self.assertEqual([d.hex() for d in calendar.submitted], [self.head()])
         self.assertEqual(len(head_rows(self.chain())), 1)
         self.assertEqual(chain_rows(self.chain()), [])
@@ -1018,8 +1041,12 @@ class InstallPublishChainTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         [end] = self.commands("SessionEnd")
         self.assertTrue(end.endswith(f' --publish-chain "{self.URL}"'), end)
-        # No network call in the recording path (ADR-0024 ruling 1).
-        self.assertNotIn("--publish", json.dumps(self.commands("PostToolUse")))
+        # The recording command sends each entry as it is written
+        # (ADR-0045 ruling 3, which narrows ADR-0024 ruling 1), and
+        # nothing else leaves from it.
+        (record,) = self.commands("PostToolUse")
+        self.assertTrue(record.endswith(f' hook --publish-chain "{self.URL}"'),
+                        record)
         # The installer states the choice, URL included.
         self.assertIn("publishes the chain to " + self.URL, result.stdout)
         self.assertIn("profile custom", result.stdout)
@@ -1469,8 +1496,12 @@ class InstallProfileFullTest(unittest.TestCase):
         self.assertTrue(
             end.endswith(f' --anchor --publish "{self.URL}"'
                          f' --publish-chain "{self.URL}"'), end)
-        # No network call in the recording path (ADR-0024 ruling 1).
-        self.assertNotIn("--publish", json.dumps(self.commands("PostToolUse")))
+        # The recording command sends each entry as it is written
+        # (ADR-0045 ruling 3), and carries neither the head nor the
+        # anchor.
+        (record,) = self.commands("PostToolUse")
+        self.assertTrue(record.endswith(f' hook --publish-chain "{self.URL}"'),
+                        record)
         # The installer reads all three choices back, in the mechanisms'
         # own words, and the tier in one line.
         self.assertIn("anchors at session end", result.stdout)
@@ -1790,8 +1821,17 @@ class FullProfileKeeperTest(unittest.TestCase):
             return json.loads(answer.read().decode("utf-8"))
 
     def kinds(self, server=None):
+        """What reached the remote, the head and the chain's batches;
+        the anchor's rows, which the anchor keeper's turn sends there
+        too (ADR-0045 ruling 5), are `rows_sent`'s."""
         return [sent["content_type"]
-                for sent in (server or self.receiver).received]
+                for sent in (server or self.receiver).received
+                if sent["content_type"] != SIDECAR_TYPE]
+
+    def rows_sent(self):
+        return [sent["headers"].get("x-loxodonta-sidecar")
+                for sent in self.receiver.received
+                if sent["content_type"] == SIDECAR_TYPE]
 
     def test_a_full_marker_sends_both_routes_on_the_six_hour_default(self):
         self.install("--profile", "full", "--remote", self.receiver.url)
@@ -1805,15 +1845,17 @@ class FullProfileKeeperTest(unittest.TestCase):
         self.assertIn("publish head and chain every 6h "
                       "(profile full, claude-code)", self.said)
         self.assertEqual(self.kinds(), ["application/json", NDJSON])
-        self.assertEqual(json.loads(self.receiver.received[0]["raw"])["head"],
-                         chain_head(log))
-        self.assertEqual(self.receiver.received[1]["raw"], log.read_bytes())
+        head, batch = [sent for sent in self.receiver.received
+                       if sent["content_type"] != SIDECAR_TYPE]
+        self.assertEqual(json.loads(head["raw"])["head"], chain_head(log))
+        self.assertEqual(batch["raw"], log.read_bytes())
         self.assertEqual([row.get("kind") for row in memo_of(log)],
                          ["head", "chain"])
         # The anchor keeper ran beside it, on the same default, with no
-        # flag typed for either.
+        # flag typed for either, and the proof went to the remote.
         self.assertEqual(self.calendar.submitted,
                          [bytes.fromhex(chain_head(log))])
+        self.assertIn("anchors", self.rows_sent())
 
     def test_explicit_flags_override_the_cadence_and_the_target(self):
         elsewhere = serve_fake(self)
@@ -1882,7 +1924,7 @@ class FullProfileKeeperTest(unittest.TestCase):
         self.assertIn("publish head and chain every 6h (profile full, codex)",
                       self.said)
         sent = len(self.receiver.received)
-        self.assertEqual(sent, 2)
+        self.assertEqual(len(self.kinds()), 2)
 
         self.uninstall("--codex")
         self.serve()

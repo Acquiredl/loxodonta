@@ -110,19 +110,35 @@ The supervisor writes a package and the recorder, and the verifier cut from it, 
 
 ### Reading a sidecar
 
-Names: `read_log`, `sidecar_path`, `published_path`, `IS_A_FOLDER`, `NOT_REGULAR`, `open_regular`, `file_problem`, `KeyGivenTwice`, `object_with_each_key_once`, `NotStrictJson`, `not_json`, `finite_float`, `read_sidecar_records`.
+Names: `read_log`, `sidecar_path`, `published_path`, `IS_A_FOLDER`, `NOT_REGULAR`, `open_regular`, `file_problem`, `read_sidecar_records`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 Where each sidecar lives beside its chain, and how its lines are read: a line that is not a JSON object, past the digit or recursion limit, or not UTF-8, or that a strict parser refuses (a key given twice, NaN, Infinity or 1e999), reads as unreadable and never stops the reader, and so does a sidecar that is not a file, a folder or a pipe in its place. The recorder judges by it; the supervisor's scan and keeper report and schedule by it (#299, #331, #344, #364, #365).
 
+### A strict JSON reading
+
+Names: `KeyGivenTwice`, `object_with_each_key_once`, `NotStrictJson`, `not_json`, `finite_float`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+A line a strict JSON parser refuses (a key given twice, NaN, Infinity or 1e999) is no row: the recorder and the supervisor read every sidecar line by it, and the receiver refuses a sidecar batch holding one, so the receiver keeps no row the recorder's `verify` would not read (#365, ADR-0045).
+
 ### What a sidecar row is
 
-Names: `ATTEMPT_KIND`, `CHAIN_KIND`, `ANCHOR_KIND`, `STAMP_KIND`, `HEAD_KIND`, `SIDECAR_KINDS`, `UNREADABLE_ROW`, `UNKNOWN_ROW`, `row_kind`, `is_chain_record`.
+Names: `ATTEMPT_KIND`, `CHAIN_KIND`, `HEAD_KIND`, `SIDECAR_KINDS`, `UNREADABLE_ROW`, `UNKNOWN_ROW`, `row_kind`, `is_chain_record`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 A row names its kind, a row with none reads as its sidecar's evidence, and a kind unknown there counts for nothing (ADR-0038). The recorder's judges and the supervisor's scan and keeper ask the one answer, so the scan never counts a proof, a token or a sent head that `verify` or `publish` would not, and every judge and scheduler skips an `attempt` row alike (#240, #344).
+
+### A sidecar's evidence kinds
+
+Names: `ANCHOR_KIND`, `STAMP_KIND`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+The kind of a proof row and of a token row (ADR-0038): the recorder writes and judges them by it, the supervisor counts them by it, and the receiver takes a sidecar batch only of rows of that kind, or of none (ADR-0045 ruling 5).
 
 ### An anchor row's shape
 
@@ -146,7 +162,7 @@ Names: `chain_cursor`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-The keeper runs the recorder's `publish --chain` only when the recorder's cursor for that remote is behind the chain's end, so both read the memo alike, and a memo neither can read leaves a note rather than a send from genesis (#263, #344).
+The keeper runs the recorder's `publish --chain` only when the memo's newest row for that remote does not name the chain's last entry, so both read the memo alike, and a memo neither can read leaves a note rather than a send from genesis (#263, #344). A hint, which the receiver's answer corrects (ADR-0045).
 
 ### Naming a remote
 
@@ -203,6 +219,14 @@ Names: `CHAIN_TYPE`.
 Original: `loxodonta.py`. Copies: `receiver.py`.
 
 The recorder sends a batch of the chain under this content type, and the receiver takes a batch only under it (ADR-0031).
+
+### A sidecar batch's content type
+
+Names: `SIDECAR_TYPE`.
+
+Original: `loxodonta.py`. Copies: `receiver.py`.
+
+The recorder sends a chain's anchor and stamp rows under this content type, and the receiver keeps them beside its copy of the chain only under it (ADR-0045 ruling 5).
 
 ### A receipt's suffix
 
