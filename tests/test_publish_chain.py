@@ -2406,6 +2406,30 @@ class ChangedRemoteKeeperTest(unittest.TestCase):
                           for row in chain_rows(log)],
                          [(0, 2), (3, 3)])
 
+    def test_an_entry_written_in_the_second_of_the_last_send_still_goes(self):
+        # The memo's rows and the chain's entries are kept to the second.
+        # Here the keeper's send and the entry after it share one second,
+        # and the chain's modification time is set back before the turn,
+        # as a run inside one second leaves them on a fast machine. The
+        # keeper still sends the entry: the send's row names the end it
+        # found held, and the chain's end is another.
+        log = make_store_chain(self.root / "alpha" / "receipts", "sess-tie")
+        second = str(int(time.time()))
+        self.tick("--publish-chain", self.first.url, SOURCE_DATE_EPOCH=second)
+        self.assertEqual(self.copy("first", log), log.read_bytes())
+        grown = run(LOXODONTA, "log", "--log", str(log), "--actor",
+                    "claude-code", "--action", "step 3", timeout=60,
+                    env=clean_env(SOURCE_DATE_EPOCH=second))
+        self.assertEqual(grown.returncode, 0, grown.stderr)
+        before = time.time() - 3600
+        os.utime(log, (before, before))
+
+        self.tick("--publish-chain", self.first.url, SOURCE_DATE_EPOCH=second,
+                  SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+
+        self.assertEqual(self.copy("first", log), log.read_bytes())
+        self.assertEqual(self.verdict("first", log), "VALID")
+
 
 class ChangedRemoteReadingTest(unittest.TestCase):
     """The scan's wired-in-name-only reading counts the chain route as

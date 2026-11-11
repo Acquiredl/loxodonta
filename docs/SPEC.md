@@ -307,6 +307,8 @@ The fields of each kind, and their types as the recorder writes them. A field is
 | `event` | string | Only on the recording hook's send of the chain, `receipt`, which tells its rows from the session end's (ADR-0045). |
 | `remote_id` | string | Only on a send of the chain, the remote's fingerprint as on a `chain` row (ADR-0045). |
 | `note` | string | Only beside a send of the chain to a remote that took it and did not say what it holds (ADR-0045). |
+| `last` | integer | Only on a send of the chain by the session end or `publish --chain` that ended `sent`: the `n` of the chain's last entry, which the send found held (ADR-0045). |
+| `head` | string | Beside `last`: that entry's `entry_hash`. |
 
 No memo row and no attempt row holds a URL: a webhook's or a receiver's URL is a credential (ADR-0025). The stamp row's `authority` is the one URL a sidecar holds, since it names whom the operator chose to trust and grants nothing (ADR-0032 ruling 4).
 

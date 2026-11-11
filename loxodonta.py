@@ -3858,15 +3858,17 @@ STEP_PUBLISH_CHAIN = "publish-chain"
 
 
 def append_attempt_record(sidecar, step, budget, outcome, event=None,
-                          note=None, url=None):
+                          note=None, url=None, end=None):
     """One attempt row in `sidecar`: the step, the time, the budget in
     seconds, the outcome, the event when one tells the step apart from
     its session-end run (the per-entry send's `receipt`), a note when
     the step went and has something to say beside its outcome, as a
-    remote that does not say what it holds, and for the chain's send the
-    fingerprint of the remote it went to, never the URL (ADR-0045).
-    Never raises: the row is the note after the step, and an exit hook
-    that fails over its own bookkeeping is noise."""
+    remote that does not say what it holds, for the chain's send the
+    fingerprint of the remote it went to, never the URL, and for one
+    that ended with the chain's last entry held, `end`, that entry's
+    (n, entry_hash) as `last` and `head` (ADR-0045). Never raises: the
+    row is the note after the step, and an exit hook that fails over its
+    own bookkeeping is noise."""
     row = {"kind": ATTEMPT_KIND, "step": step, "ts": now_ts(),
            "budget": round(budget, 1), "outcome": outcome}
     if event is not None:
@@ -3875,6 +3877,8 @@ def append_attempt_record(sidecar, step, budget, outcome, event=None,
         row["note"] = note
     if url is not None:
         row["remote_id"] = remote_id(url)
+    if end is not None:
+        row["last"], row["head"] = end
     try:
         append_sidecar_record(sidecar, row)
     except OSError:
@@ -5102,7 +5106,8 @@ def session_end_publish_chain(log, url, session, timeout, window=None):
         append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN,
                               timeout, failure or "sent",
                               note=None if sent.memo is None else DOES_NOT_SAY,
-                              url=url)
+                              url=url,
+                              end=None if failure else start[:2])
     else:
         note_unsaid(log, timeout, url)
 
@@ -5169,9 +5174,11 @@ def publish_chain_command(args):
     else:
         # Every send that went is written down, as the session end's is:
         # with the end held and nothing appended there is no chain row, and
-        # this row is how the keeper knows the end left (ADR-0045 ruling 4).
+        # this row, naming the end, is how the keeper knows it left
+        # (ADR-0045 ruling 4).
         append_attempt_record(published_path(args.log), STEP_PUBLISH_CHAIN,
-                              PUBLISH_TIMEOUT, "sent", url=args.url)
+                              PUBLISH_TIMEOUT, "sent", url=args.url,
+                              end=start[:2])
     # The proofs beside the chain travel after it (ADR-0045 ruling 5),
     # every evidence row each time, the receiver dropping what it holds.
     for sidecar in SIDECARS_THAT_TRAVEL:

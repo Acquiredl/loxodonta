@@ -1922,13 +1922,15 @@ def memo_holds_end(log, url, entries):
     """Whether the publish memo records that the remote at `url` holds
     the chain's last entry, and that its last send there did not fail:
     the newest `publish-chain` attempt row naming that remote is not a
-    failure, and either a chain row naming that remote (#263) has the
-    last entry's n and entry_hash, or that attempt row is `sent` and no
-    older than the last entry. The second, because a send that finds the
-    end already held appends nothing and writes no chain row (ADR-0045
-    ruling 4). For scheduling only, and only ever to add a send: the
-    memo is writer-reachable, and a chain written to since the keeper's
-    last turn is sent whatever it says."""
+    failure, and the last entry's n and entry_hash are those of a chain
+    row naming that remote (#263) or of that attempt row's `last` and
+    `head`. The second, because a send that finds the end already held
+    appends nothing and writes no chain row (ADR-0045 ruling 4). The
+    entry is matched and never a time: rows and entries are kept to the
+    second, and an entry written in the second of the send would read as
+    held. For scheduling only, and only ever to add a send: the memo is
+    writer-reachable, and a chain written to since the keeper's last
+    turn is sent whatever it says."""
     mine, end = remote_id(url), entries[-1]
     named, newest = False, None
     for record in sidecar_records(Path(str(log) + ".published.jsonl")):
@@ -1944,9 +1946,8 @@ def memo_holds_end(log, url, entries):
         return False
     if named or newest is None:
         return named
-    sent, written = row_when(newest), parse_when(end.get("ts"))
-    return (sent is not None and written is not None
-            and written.tzinfo is not None and sent >= written)
+    return (newest.get("last") == end.get("n")
+            and newest.get("head") == end.get("entry_hash"))
 
 
 def rows_unsent(log):
