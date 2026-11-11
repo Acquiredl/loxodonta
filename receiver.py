@@ -36,6 +36,7 @@ about it (ADR-0041 rulings 2 and 3).
 """
 
 import argparse
+import errno
 import hmac
 import io
 import json
@@ -812,6 +813,40 @@ GIT_TIMEOUT = 10
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def helper_path(name):
+    """The full path of the helper program `name` (openssl, ssh-keygen,
+    git), found by walking PATH: only entries that are absolute paths,
+    never an empty one, a relative one or the working directory, so a
+    file of that name in the folder a check is run from is never the
+    program that runs. On Windows, where a bare name is looked for in
+    the working directory before PATH, an entry with no drive letter
+    or server is read against the working directory's drive, so it
+    counts as relative there, and each name is tried with the PATHEXT
+    extensions. Raises FileNotFoundError when none is found, as running
+    an absent program does, so a missing helper is said as it always
+    was."""
+    try:
+        here = os.path.normcase(os.getcwd())
+    except OSError:
+        here = None
+    windows = sys.platform == "win32"
+    endings = [""]
+    if windows:
+        endings = [ending for ending in os.environ.get(
+            "PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if ending]
+    for folder in os.get_exec_path():
+        absolute = os.path.isabs(folder) and (
+            not windows or os.path.splitdrive(folder)[0] != "")
+        if not absolute or os.path.normcase(os.path.normpath(folder)) == here:
+            continue
+        for ending in endings:
+            found = os.path.join(folder, name + ending)
+            if os.path.isfile(found) and os.access(found, os.X_OK):
+                return found
+    raise FileNotFoundError(errno.ENOENT, "not found on PATH", name)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
@@ -820,7 +855,7 @@ def checkout_commit(home):
     to fetch a newer one."""
     try:
         asked = subprocess.run(
-            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
+            [helper_path("git"), "-C", home, "rev-parse", "--short", "HEAD"],
             # Never a pipe on stderr: a program git starts inherits it,
             # and on Windows the timeout then waits for that program.
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
