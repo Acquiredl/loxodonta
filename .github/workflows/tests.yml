@@ -41,14 +41,18 @@ jobs:
   # windows on a loaded machine.
   suite:
     name: ${{ matrix.target.os }} / py${{ matrix.target.python }} / shard ${{ matrix.shard }}
-    runs-on: ${{ matrix.target.os }}
+    # `os` is the name the job reports under, which branch protection
+    # requires; `runner` is the image it runs on when the two differ.
+    # py3.9 is pinned to ubuntu-24.04: ubuntu-latest became 26.04 in
+    # 2026-11, and setup-python has no 3.9 for it.
+    runs-on: ${{ matrix.target.runner || matrix.target.os }}
     strategy:
       fail-fast: false
       matrix:
         target: >-
           ${{ fromJSON(github.event_name == 'pull_request' && github.base_ref == 'dev'
-          && '[{"os": "ubuntu-latest", "python": "3.9"}]'
-          || '[{"os": "ubuntu-latest", "python": "3.9"},
+          && '[{"os": "ubuntu-latest", "python": "3.9", "runner": "ubuntu-24.04"}]'
+          || '[{"os": "ubuntu-latest", "python": "3.9", "runner": "ubuntu-24.04"},
           {"os": "ubuntu-latest", "python": "3.11"},
           {"os": "ubuntu-latest", "python": "3.13"},
           {"os": "windows-latest", "python": "3.13"},
