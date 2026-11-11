@@ -10,6 +10,7 @@ receiver's chain file verifies VALID, and a regenerated chain's batch
 lands beside the entries it replaced and verifies BROKEN there.
 """
 
+import hashlib
 import http.client
 import json
 import os
@@ -382,12 +383,12 @@ class ContentTest(ReceiverFixture):
             self.assertEqual(response.status, 200)
             self.assertEqual(response.headers.get("Content-Type"),
                              "application/json")
-            # Beside the counts, what it now holds of the chain
-            # (ADR-0045 ruling 1).
-            last = json.loads(self.lines.splitlines()[-1])
+            # Beside the counts, the highest n it now holds of the
+            # chain and whether the batch's first entry connects
+            # (ADR-0045 ruling 2).
             self.assertEqual(json.loads(response.read()),
                              {"appended": 3, "dropped": 0, "held_n": 2,
-                              "held_hash": last["entry_hash"]})
+                              "chains": True})
 
     def test_an_exact_duplicate_line_is_dropped(self):
         # A batch the sender retried after a lost acknowledgement: every
@@ -1047,13 +1048,23 @@ class DeadlineTest(ReceiverFixture):
 
 
 def filler(first, count):
-    """`count` lines shaped like entries from n=`first`, about 1.1 KB
-    each: enough of them to reach a cap. Shape is all the receiver
-    judges, so they need not be a chain."""
-    return b"".join(
-        json.dumps({"n": n, "entry_hash": "%064x" % n, "pad": "x" * 1000}
-                   ).encode("utf-8") + b"\n"
-        for n in range(first, first + count))
+    """`count` entries of one chain from n=`first`, about 1.1 KB each:
+    enough of them to reach a cap. Each is an entry, its hash computed
+    by SPEC section 4, since the receiver keeps nothing else (ADR-0045
+    ruling 1)."""
+    lines, prev = [], None
+    for n in range(first + count):
+        entry = {"n": n, "ts": "2026-11-11T00:00:00Z", "actor": "filler",
+                 "action": "x" * 860, "files": [], "prev": prev}
+        if n == 0:
+            entry["v"] = "0.1"
+        prev = hashlib.sha256(json.dumps(
+            entry, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False).encode("utf-8")).hexdigest()
+        entry["entry_hash"] = prev
+        lines.append(json.dumps(entry, sort_keys=True).encode("utf-8")
+                     + b"\n")
+    return b"".join(lines[first:])
 
 
 class CapTest(ReceiverFixture):

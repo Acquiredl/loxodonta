@@ -81,10 +81,11 @@ TWINS = (
          "by it."),
     Twin("Escaping receipt text",
          ("NAMED_ESCAPES", "STEERING_CATEGORIES", "visible"),
-         ORIGINAL, SUPERVISOR,
+         ORIGINAL, BOTH,
          "The recorder shows receipt text in report, explain and verify's "
-         "messages, the supervisor on every recall surface, and both must "
-         "make the same hidden characters visible (#295)."),
+         "messages, the supervisor on every recall surface, and the "
+         "receiver in the reason it gives for a line it refuses, and all "
+         "must make the same hidden characters visible (#295)."),
     Twin("Which hook entries are the recorder's",
          ("RECORDER_NAMES", "DIGEST_NAMES", "WIRED_VERB", "command_words",
           "file_name", "is_interpreter", "owned_script",
@@ -206,17 +207,11 @@ TWINS = (
          "a departure, so none of them counts a row the others would not "
          "(#366, #370). A shape and status reader, not proof replay: "
          "judging stays with verify."),
-    Twin("Where the chain route left off", ("chain_cursor",),
-         ORIGINAL, SUPERVISOR,
-         "The keeper runs the recorder's `publish --chain` only when the "
-         "memo's newest row for that remote does not name the chain's "
-         "last entry, so both read the memo alike, and a memo neither can "
-         "read leaves a note rather than a send from genesis (#263, #344). "
-         "A hint, which the receiver's answer corrects (ADR-0045)."),
     Twin("Naming a remote", ("remote_id",), ORIGINAL, SUPERVISOR,
          "The recorder writes a fingerprint of the receiver's URL into the "
          "publish memo, and the supervisor's keeper compares against it "
-         "to find where the chain route left off (#263)."),
+         "to find whether the memo says that remote holds the chain's "
+         "last entry (#263, ADR-0045)."),
     Twin("A URL the tools send to",
          ("PUBLISH_SCHEMES", "SHELL_HAZARDS", "publish_url"),
          ORIGINAL, SUPERVISOR,
@@ -252,8 +247,24 @@ TWINS = (
          "The recorder sends a chain's anchor and stamp rows under this "
          "content type, and the receiver keeps them beside its copy of the "
          "chain only under it (ADR-0045 ruling 5)."),
+    Twin("Canonical form", ("canonical_bytes",), ORIGINAL, BOTH,
+         "SPEC section 4's bytes, frozen across format versions "
+         "(ADR-0036): the recorder hashes entries by them, the supervisor "
+         "hashes a call's input by them to compare with a receipt's "
+         "suffix (ADR-0047), and the receiver recomputes the hash of "
+         "every line it is sent (ADR-0045 ruling 1)."),
+    Twin("What an entry is",
+         ("ENTRY_FIELDS", "GENESIS_FIELDS", "entry_hash",
+          "path_leaving_base", "shape_problem", "entry_of"),
+         ORIGINAL, RECEIVER,
+         "The receiver keeps a line only when it is an entry: SPEC "
+         "section 2's fields of their types, an n of 0 or more, and an "
+         "entry_hash that recomputes from the line (ADR-0045 ruling 1). "
+         "The recorder asks the same of a line of its own chain before it "
+         "sends it, so it never sends a line the receiver refuses, and "
+         "names the line it stopped at instead."),
     Twin("A receipt's suffix",
-         ("canonical_bytes", "CALL_ID_CHARACTERS", "CALL_ID_LONGEST",
+         ("CALL_ID_CHARACTERS", "CALL_ID_LONGEST",
           "UNHASHED_INPUT", "is_call_id", "holds_fraction", "input_form",
           "split_suffix", "listed_action"),
          ORIGINAL, SUPERVISOR,

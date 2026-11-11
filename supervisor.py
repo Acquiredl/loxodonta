@@ -1918,60 +1918,52 @@ def remote_id(url):
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
-# The keeper sends the chain only when this cursor, the recorder's own,
-# is behind the chain's end. For scheduling only: the memo is
-# writer-reachable and proves nothing.
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def chain_cursor(log, url):
-    """Where a send to the remote at `url` starts: the `last` of the
-    newest memo chain row that names it (#263), or -1 when none does, so
-    the send starts at genesis. A hint and no more (ADR-0045 ruling 1):
-    the memo lies beside the chain, and the remote's answer to the send
-    says what it holds. The newest row and not the highest, so a row
-    written past the chain's end is followed by the row the next send
-    writes, and is not read again. A row that names no remote predates remote
-    ids and counts for none: that chain goes once more from genesis, and
-    the receiver drops each line as an exact duplicate. A row of any
-    other kind, a head, a note or a kind unknown here, counts for none
-    either (ADR-0038). A torn memo line is read past (a resend the
-    receiver drops, never a stuck keeper), and so is a line past the
-    digit or recursion limit, which no reader here takes apart either;
-    a memo that cannot be read at all is raised, not guessed at, since
-    -1 would send the whole chain again at every session end. The two
-    differ on purpose (#344): a line past a limit is still text in the
-    memo's format, one line this parser declines, while a byte that is
-    not UTF-8 means the file is not text in that format at all, so the
-    memo holding it is the unreadable one, as it was before #299."""
+def memo_holds_end(log, url, entries):
+    """Whether the publish memo records that the remote at `url` holds
+    the chain's last entry: a chain row naming that remote (#263) whose
+    `last` is the last entry's n and whose `head` is its entry_hash. For
+    scheduling only, and only ever to add a send: the memo is
+    writer-reachable, and a chain written to since the keeper's last
+    turn is sent whatever it says (ADR-0045 ruling 4)."""
+    mine, end = remote_id(url), entries[-1]
+    return any(is_chain_record(record) and record.get("remote_id") == mine
+               and record.get("last") == end.get("n")
+               and record.get("head") == end.get("entry_hash")
+               for record in sidecar_records(Path(str(log)
+                                                  + ".published.jsonl")))
+
+
+def rows_unsent(log):
+    """Whether the newest send of the chain's anchor or stamp rows, as
+    the recorder wrote it down in that sidecar (step `publish-rows`,
+    ADR-0045 ruling 5), did not land, so the keeper's turn sends them
+    again."""
+    for suffix, sidecar in ((".anchors.jsonl", "anchors"),
+                            (".stamps.jsonl", "stamps")):
+        newest = None
+        for record in sidecar_records(Path(str(log) + suffix)):
+            if row_kind(sidecar, record) == ATTEMPT_KIND \
+                    and record.get("step") == "publish-rows":
+                newest = record
+        if newest is not None and newest.get("outcome") not in SENT_OUTCOMES:
+            return True
+    return False
+
+
+def written_since(log, last_attempt):
+    """Whether the chain file changed since the keeper's last turn on it:
+    no turn remembered, or a modification time past the second that turn
+    is remembered by, since the turn's time is kept to the second and
+    began before its send. The time is the file system's, which the
+    writer can set, and it only ever adds a send."""
+    attempted = parse_when(last_attempt)
+    if attempted is None or attempted.tzinfo is None:
+        return True
     try:
-        # A folder or a pipe where the memo belongs (#364) is a memo
-        # that cannot be read, raised as such, and never waited on.
-        lines = read_log(published_path(log))
-    except FileNotFoundError:
-        return -1
-    mine = remote_id(url)
-    cursor = -1
-    for line in lines:
-        # A byte that is not UTF-8 arrives from `read_log` as a lone
-        # surrogate. The memo holding it cannot be read, and is raised
-        # as such (UnicodeEncodeError is a ValueError), as it was before
-        # `read_log` read such bytes at all (#299).
-        line.encode("utf-8")
-        try:
-            # Read as every sidecar row is read (#365): a row a strict
-            # parser refuses is no chain row.
-            record = json.loads(line,
-                                object_pairs_hook=object_with_each_key_once,
-                                parse_constant=not_json,
-                                parse_float=finite_float)
-        except (ValueError, RecursionError):
-            # One appended line must not stop the chain route at every
-            # session end and keeper turn (#331, #344): at worst a chain
-            # row is missed and a batch the receiver drops goes again.
-            continue
-        if is_chain_record(record) and isinstance(record.get("last"), int) \
-                and record.get("remote_id") == mine:
-            cursor = record["last"]
-    return cursor
+        changed = datetime.fromtimestamp(os.stat(log).st_mtime, timezone.utc)
+    except (OSError, ValueError, OverflowError):
+        return True
+    return changed >= attempted + timedelta(seconds=1)
 
 
 def ripe_head(entries, now, cadence):
@@ -2173,43 +2165,32 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     throttle and only when the operator opted in with a cadence and a
     URL: a head aged past the cadence and not yet in the publish memo is
     posted once through `loxodonta publish`; then, when a URL was named
-    for the entries and the memo's newest row for that remote (#263)
-    does not name the chain's last entry, `loxodonta publish --chain`
-    sends what the remote says it does not hold (ADR-0031 ruling 3,
-    ADR-0045 ruling 4), at most once per throttle window. The memo is
-    testimony: it stops a
-    repeat and proves nothing; a head is posted once, wherever it went
-    (ADR-0025). Returns (attempted, note, failed)."""
-    if not (url or chain_url) or not upgrade_due(last_attempt, now):
+    for the entries, `loxodonta publish --chain` asks the remote and
+    sends what it does not hold (ADR-0031 ruling 3, ADR-0045 ruling 4),
+    for a chain written to since the keeper's last turn on it, one whose
+    memo does not record that remote holding its last entry, and one
+    whose anchor or stamp rows did not land the last time they were
+    sent; at most once per throttle window. The memo is testimony: it
+    stops a repeated head and proves nothing, and it never stands the
+    chain's send down for a chain that changed; a head is posted once,
+    wherever it went (ADR-0025). Returns (attempted, note, failed)."""
+    if not (url or chain_url) or cadence is None or not entries \
+            or not upgrade_due(last_attempt, now):
         return False, None, False
     memo = Path(str(log) + ".published.jsonl")
     head = ripe_head(entries, now, cadence)
-    if not head:
-        return False, None, False
     attempted = False
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
-    if url and head not in sidecar_heads(memo, "memo"):
+    if url and head and head not in sidecar_heads(memo, "memo"):
         attempted = True
         note = publish_through_recorder(log, url, "head")
         if note:
             notes.append(note)
             failed = True
-    behind = False
-    if chain_url and isinstance(entries[-1].get("n"), int):
-        try:
-            # Not only behind: a memo row past the chain's end is a hint
-            # the receiver's answer corrects, so the send goes and asks
-            # (ADR-0045 ruling 4).
-            behind = entries[-1]["n"] != chain_cursor(str(log), chain_url)
-        except (OSError, ValueError):
-            # The recorder's answer too: with no cursor there is no
-            # send, since -1 would send the whole chain again (#344).
-            notes.append("publishing the chain skipped — the memo could "
-                         "not be read, so where the remote left off is "
-                         "unknown; the entries stay unsent until it can be")
-            failed = True
-    if behind:
+    if chain_url and (written_since(log, last_attempt)
+                      or not memo_holds_end(log, chain_url, entries)
+                      or rows_unsent(log)):
         attempted = True
         note = publish_through_recorder(log, chain_url, "chain")
         if note:
@@ -2804,12 +2785,11 @@ def sessionend_chain_remote(witness):
 
 def chain_landed(log, remote):
     """Whether the memo beside `log` holds a chain row for a batch the
-    remote at `remote` acknowledged, naming it as the recorder's cursor
-    does (#263); with no `remote` wired, any chain row counts. Read row
-    by row, so a line that cannot be read counts for nothing and never
-    hides a row that can. This is a reading for the report, not the
-    keeper's schedule: `chain_cursor` still raises on such a memo, since
-    a send guessed from it could resend the whole chain."""
+    remote at `remote` acknowledged, naming it by its fingerprint
+    (#263); with no `remote` wired, any chain row counts. Read row by
+    row, so a line that cannot be read counts for nothing and never
+    hides a row that can. A reading for the report, and testimony like
+    the memo it reads."""
     mine = remote_id(remote) if remote is not None else None
     return any(is_chain_record(record)
                and isinstance(record.get("last"), int)
@@ -9257,9 +9237,11 @@ KNOWN_CONSUMPTION = ("RUNNING-HOT", "ENDED-HOT")
 # Every session-end step the recorder writes an attempt row for, in the
 # order the hook runs them apart from the anchor, which stays first for
 # the label order the first release already documented (#245, #248,
-# #250). A step missing here would never be served at zero, and a
-# panel would meet a missing series the first time it failed.
-KNOWN_STEPS = ("anchor", "publish-head", "publish-chain", "stamp")
+# #250), and the send of a chain's anchor and stamp rows after them
+# (ADR-0045 ruling 5). A step missing here would never be served at
+# zero, and a panel would meet a missing series the first time it failed.
+KNOWN_STEPS = ("anchor", "publish-head", "publish-chain", "stamp",
+               "publish-rows")
 
 
 def tallied(values, known):

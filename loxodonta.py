@@ -3519,8 +3519,10 @@ def referenced_paths(lines):
     return paths
 
 
-def append_locked(log, actor, action, files):
-    """The critical section of `append_entry` — callers must hold the lock."""
+def append_locked(log, actor, action, files, written=None):
+    """The critical section of `append_entry` — callers must hold the lock.
+    The line written goes onto `written`, when a list is given, as
+    (n, entry_hash, line): the hook sends it from there (ADR-0045)."""
     try:
         lines = read_log(log)
     except FileNotFoundError:
@@ -3571,6 +3573,9 @@ def append_locked(log, actor, action, files):
         write_line_to_disk(log, "a", entry_line(entry))
     except OSError as e:
         return unwritable_log(log, e)
+    if written is not None:
+        written.append((entry["n"], entry["entry_hash"],
+                        entry_line(entry).encode("utf-8")))
     print(f"logged entry {entry['n']}")
     return 0
 
@@ -3852,16 +3857,21 @@ STEP_PUBLISH_HEAD = "publish-head"
 STEP_PUBLISH_CHAIN = "publish-chain"
 
 
-def append_attempt_record(sidecar, step, budget, outcome, event=None):
+def append_attempt_record(sidecar, step, budget, outcome, event=None,
+                          note=None):
     """One attempt row in `sidecar`: the step, the time, the budget in
-    seconds, the outcome, and the event when one tells the step apart
-    from its session-end run (the per-entry send's `receipt`, ADR-0045).
-    Never raises: the row is the note after the step, and an exit hook
-    that fails over its own bookkeeping is noise."""
+    seconds, the outcome, the event when one tells the step apart from
+    its session-end run (the per-entry send's `receipt`), and a note
+    when the step went and has something to say beside its outcome, as
+    a remote that does not say what it holds (ADR-0045). Never raises:
+    the row is the note after the step, and an exit hook that fails over
+    its own bookkeeping is noise."""
     row = {"kind": ATTEMPT_KIND, "step": step, "ts": now_ts(),
            "budget": round(budget, 1), "outcome": outcome}
     if event is not None:
         row["event"] = event
+    if note is not None:
+        row["note"] = note
     try:
         append_sidecar_record(sidecar, row)
     except OSError:
@@ -4348,14 +4358,19 @@ def chain_session(log):
 # cursor is per remote (#263), kept in the publish memo as rows of kind
 # `chain`: the first send to a remote starts at genesis, because a
 # receiver's file that starts mid-chain can never verify, and each later
-# send starts after the last entry that remote acknowledged. The memo
-# lies beside the chain, so since ADR-0045 its rows are a hint: the
-# receiver answers each batch with what it holds, refuses one that would
-# leave a hole, and the send goes from there. A row that names no
-# remote, from before rows named one, counts for none. Metadata rides in
-# headers, so the receiver appends chain bytes and nothing else. Batches
-# stay under the receiver's cap; whatever a budget cuts off is the next
-# call's, the session end's or the keeper's.
+# send starts after the last entry that remote acknowledged. A row that
+# names no remote, from before rows named one, counts for none. Metadata
+# rides in headers, so the receiver appends chain bytes and nothing
+# else. Batches stay under the receiver's cap; whatever a budget cuts
+# off is the keeper's next turn, from the cursor.
+#
+# That is how a remote that does not say what it holds is followed. The
+# receiver says (ADR-0045): every answer to a batch carries the highest
+# n it holds and whether the batch's first entry connects to an entry it
+# holds, and a batch that would leave a hole is refused with 409. To it
+# the recorder sends what it has in hand, the entry just written or the
+# chain's last, and goes on from the answer alone (`deliver`): the memo
+# lies beside the chain, in the writer's reach, and decides nothing.
 
 CHAIN_TYPE = "application/x-ndjson"
 # Bytes per batch: the receiver's cap (docs/RECEIVER.md section 4),
@@ -4423,13 +4438,10 @@ def remote_id(url):
 
 
 def chain_cursor(log, url):
-    """Where a send to the remote at `url` starts: the `last` of the
-    newest memo chain row that names it (#263), or -1 when none does, so
-    the send starts at genesis. A hint and no more (ADR-0045 ruling 1):
-    the memo lies beside the chain, and the remote's answer to the send
-    says what it holds. The newest row and not the highest, so a row
-    written past the chain's end is followed by the row the next send
-    writes, and is not read again. A row that names no remote predates remote
+    """The last entry number the remote at `url` acknowledged, from the
+    memo's chain rows that name it (#263); -1 when none does, so the
+    send starts at genesis. Read only for a remote that does not say
+    what it holds (ADR-0045 ruling 4). A row that names no remote predates remote
     ids and counts for none: that chain goes once more from genesis, and
     the receiver drops each line as an exact duplicate. A row of any
     other kind, a head, a note or a kind unknown here, counts for none
@@ -4470,7 +4482,7 @@ def chain_cursor(log, url):
             continue
         if is_chain_record(record) and isinstance(record.get("last"), int) \
                 and record.get("remote_id") == mine:
-            cursor = record["last"]
+            cursor = max(cursor, record["last"])
     return cursor
 
 
@@ -4531,6 +4543,108 @@ def append_chain_record(log, first, last, head, event, url):
                            "remote_id": remote_id(url)})
 
 
+def publish_from_memo(log, url, session, timeout, event):
+    """Send the chain's entries after `url`'s cursor in the memo to
+    `url` (from genesis to a remote that has acknowledged nothing,
+    #263), one bounded POST per batch, `timeout` seconds in all: no
+    batch begins once they are spent or waits past them (#262). The
+    send for a remote that does not say what it holds, as every send
+    went before ADR-0045. Returns (sent, failure): the (first, last,
+    head) of the range the remote acknowledged in this call, or None; the line the
+    bounded POST gave for the batch that did not land, or None. Both
+    None: nothing was after the cursor. Never raises, never prints."""
+    try:
+        entries = entries_on_disk(log)
+    except OSError:
+        return None, None
+    try:
+        cursor = chain_cursor(log, url)
+    except (OSError, ValueError):
+        # A memo that exists and cannot be read — a directory in its
+        # place, a permission, bytes that are not UTF-8 — must not turn
+        # the quiet session-end path into a traceback and a failed
+        # hook. Without the cursor there is no send: say so, and the
+        # attempt row carries it (the head route guards its read the
+        # same way).
+        return None, "the memo could not be read"
+    cap = chain_batch_cap()
+    deadline = time.monotonic() + timeout
+    sent = None
+    while True:
+        too_big = oversized_entry(entries, cursor, cap)
+        if too_big is not None:
+            return sent, f"entry {too_big} is larger than the receiver's cap"
+        batch = chain_batch(entries, cursor, cap)
+        if batch is None:
+            return sent, None
+        body, first, last, head = batch
+        wait = step_wait(timeout, deadline)
+        if not wait:
+            return sent, (f"the budget of {timeout:g} seconds ran out "
+                          f"before entry {first}")
+        failure = post_bounded(
+            url, body, wait, CHAIN_TYPE,
+            chain_headers(log, session, first, last, head))
+        if failure:
+            return sent, failure
+        try:
+            append_chain_record(log, first, last, head, event, url)
+        except OSError:
+            # Sent and not written down: the next send carries these
+            # lines again and the receiver drops them as duplicates.
+            return sent, "the memo could not be written"
+        sent = (sent[0] if sent else first, last, head)
+        cursor = last
+
+
+# --- What the receiver keeps, and what it says (ADR-0045) ---------------------
+
+def entry_of(line):
+    """(entry, None) when `line`, one line's bytes as `split_lines` gives
+    them, is an entry the receiver keeps (ADR-0045 ruling 1), else
+    (None, why). It is one when it is one JSON object a strict parser
+    takes, each key given once and no NaN, Infinity or 1e999 (#365);
+    holds SPEC section 2's fields, `v` on the genesis and only there,
+    each of its type (`shape_problem`); has an `n` of 0 or more and a
+    `prev` that is null on the genesis and only there; and has an
+    `entry_hash` that recomputes from the line's own content by SPEC
+    section 4, the rule frozen across format versions (ADR-0036). The
+    recorder asks it of a line of its own chain before sending the line,
+    and the receiver of every line it is sent, by the same text."""
+    try:
+        entry = json.loads(line.decode("utf-8"),
+                           object_pairs_hook=object_with_each_key_once,
+                           parse_constant=not_json, parse_float=finite_float)
+    except KeyGivenTwice as twice:
+        return None, f"key '{visible(twice.key)}' given twice"
+    except UnicodeDecodeError:
+        return None, "it is not UTF-8"
+    except (ValueError, RecursionError):
+        return None, "it is not JSON"
+    if not isinstance(entry, dict):
+        return None, "it is not a JSON object"
+    wrong = shape_problem(entry)
+    if wrong is not None:
+        return None, wrong
+    if entry["n"] < 0:
+        return None, "n is below 0"
+    fields = GENESIS_FIELDS if entry["n"] == 0 else ENTRY_FIELDS
+    if set(entry) != fields:
+        odd = ", ".join(visible(key) for key in sorted(set(entry) ^ fields))
+        return None, f"its fields are not an entry's: {odd}"
+    if (entry["n"] == 0) != (entry["prev"] is None):
+        return None, ("the genesis names a prev" if entry["n"] == 0
+                      else "prev is null past the genesis")
+    try:
+        recomputed = entry_hash({key: value for key, value in entry.items()
+                                 if key != "entry_hash"})
+    except (UnicodeEncodeError, RecursionError):
+        return None, "it has no canonical form"
+    if recomputed != entry["entry_hash"]:
+        return None, "entry_hash does not recompute from the line"
+    return entry, None
+
+
 def read_answer(response):
     """The body of a remote's answer, at most MAX_REPLY_BYTES of it, or
     b"" when it does not come: the status line has already said whether
@@ -4542,257 +4656,420 @@ def read_answer(response):
         return b""
 
 
-def post_batch(url, body, timeout, headers):
-    """One chain batch, and the remote's answer to it: (the answer's
-    bytes, None) on a 2xx; (the answer's bytes, the line) on a 409,
-    whose body says what the remote holds (ADR-0045 ruling 2); else
-    (None, the line `post_failure` gives). Never raises."""
+# A remote's answer to one chain batch: `took` for a 2xx; `says` when it
+# says what it holds, `held` the highest n it holds (None for none) and
+# `chains` whether the batch's first entry connects to an entry it holds
+# or is the genesis (docs/RECEIVER.md section 4); `appended` how many
+# lines it added; `failure` the line for a POST that did not land, a 409
+# that says what is held being no failure but the answer of a hole.
+Answer = collections.namedtuple("Answer",
+                                "took says held chains appended failure")
+
+
+def answer_of(took, body):
+    """`body`, a remote's answer to a batch, read for what it says it
+    holds: `held_n`, a whole number or null, and `chains`, true or false.
+    A body that does not say both, as those types, says nothing."""
+    try:
+        said = json.loads(body.decode("utf-8"))
+    except (ValueError, RecursionError):
+        said = None
+    if not isinstance(said, dict):
+        said = {}
+    held, chains = said.get("held_n"), said.get("chains")
+    says = ("held_n" in said and isinstance(chains, bool)
+            and (held is None or (isinstance(held, int)
+                                  and not isinstance(held, bool)
+                                  and held >= 0)))
+    appended = said.get("appended")
+    if isinstance(appended, bool) or not isinstance(appended, int):
+        appended = 0
+    if not says:
+        held, chains = None, False
+    return Answer(took, says, held, chains, appended, None)
+
+
+def post_batch(url, body, timeout, headers, budget):
+    """One chain batch, and the remote's answer to it (`Answer`), never
+    raising. A 409 that says what the remote holds is the answer of a
+    hole (ADR-0045 ruling 2); any other refusal, and a POST that did not
+    land, is a failure, in `post_failure`'s line with `budget` as the
+    seconds a timeout names."""
     try:
         request = urllib.request.Request(
             url, data=body,
             headers={"Content-Type": CHAIN_TYPE, "User-Agent": "loxodonta",
                      **headers})
         with opener(NoRedirect).open(request, timeout=timeout) as response:
-            return read_answer(response), None
+            return answer_of(True, read_answer(response))
     except urllib.error.HTTPError as e:
-        return (read_answer(e) if e.code == 409 else None,
-                post_failure(e, timeout))
+        if e.code == 409:
+            hole = answer_of(False, read_answer(e))
+            if hole.says:
+                return hole
+        return Answer(False, False, None, False, 0, post_failure(e, budget))
     except Exception as e:  # noqa: BLE001 - what failed is reported, not raised
-        return None, post_failure(e, timeout)
+        return Answer(False, False, None, False, 0, post_failure(e, budget))
 
 
-def held_of(answer):
-    """What the remote's answer says it holds of the chain (ADR-0045
-    ruling 1, docs/RECEIVER.md section 4), as (said, held): `said` False
-    when the answer says nothing of it, as a remote that is not the
-    receiver may not; `held` the (n, entry_hash) of the last entry it
-    holds, or None when it holds none."""
-    try:
-        said = json.loads(answer.decode("utf-8"))
-    except (AttributeError, ValueError, RecursionError):
-        return False, None
-    if not isinstance(said, dict) or "held_n" not in said \
-            or "held_hash" not in said:
-        return False, None
-    n, digest = said["held_n"], said["held_hash"]
-    if n is None and digest is None:
-        return True, None
-    if isinstance(n, bool) or not isinstance(n, int) or n < 0 \
-            or not isinstance(digest, str):
-        return False, None
-    return True, (n, digest)
+def chain_on_disk(log):
+    """The chain's lines as `split_lines` reads them, for a send that
+    must go past what it holds in hand; OSError when the file cannot be
+    read."""
+    with open_regular(log) as f:
+        return split_lines(f.read())
 
 
-def holds_words(held):
-    """What a remote said it holds, in the words a note uses."""
-    return f"through entry {held[0]}" if held else "none of this chain"
+def entry_at(chain, i):
+    """((i, entry_hash, line), None) when line `i` of `chain` is entry
+    `i`, else (None, why): a line that is not an entry, or an entry
+    whose `n` is not its place, ends a send in that direction, since
+    the receiver would refuse the one and the other is not the entry
+    the answer asked for."""
+    if i < 0 or i >= len(chain):
+        return None, f"the chain has no line {i}"
+    entry, why = entry_of(chain[i])
+    if entry is None:
+        return None, f"line {i} of the chain is not an entry ({why})"
+    if entry["n"] != i:
+        return None, f"line {i} of the chain holds entry {entry['n']}"
+    return (i, entry["entry_hash"], chain[i] + b"\n"), None
 
 
-# What one send of the chain did: `sent` the (first, last) range the
-# remote acknowledged in it, or None; `failure` the line for the batch
-# that did not land, or None; `notes` the plain sentences an attempt row
-# carries beside the outcome; `said` whether the remote said what it
-# holds; `held` what it last said, as `held_of` reads it.
-ChainSend = collections.namedtuple("ChainSend",
-                                   "sent failure notes said held")
+def entries_from(chain, i, last=None):
+    """The entries from line `i` of `chain` through line `last` (the
+    chain's end when None), as `entry_at` gives them, up to the first
+    line that is not its entry: (entries, why it stopped, or None)."""
+    entries = []
+    end = len(chain) if last is None else last + 1
+    for at in range(i, end):
+        entry, why = entry_at(chain, at)
+        if entry is None:
+            return entries, why
+        entries.append(entry)
+    return entries, None
 
 
-def publish_chain(log, url, session, timeout, event, last_too=False):
-    """Send the entries of `log` the remote at `url` does not hold, one
-    bounded POST per batch, `timeout` seconds in all: no batch begins
-    once they are spent or waits past them (#262). The memo's chain rows
-    are a hint for where to start (chain_cursor); the remote's answer
-    decides (ADR-0045 ruling 1). The send starts after the hint, and at
-    the chain's last entry when the hint names it or one past it and
-    `last_too` asks for that, or when the hint is past the chain's end,
-    so the remote is asked even then. A 409 says what the remote holds,
-    and the send goes again from the entry after it, inside the same
-    budget; a 2xx that says it holds more than was sent moves the send
-    on past it. A memo that named a later entry than the remote holds,
-    a remote that holds less than it just took or more than this chain
-    has, and a remote that does not say, are each a note. Returns a
-    ChainSend. Never raises, never prints."""
-    try:
-        entries = entries_on_disk(log)
-    except OSError:
-        return ChainSend(None, None, [], False, None)
-    try:
-        hint = chain_cursor(log, url)
-    except (OSError, ValueError):
-        # A memo that exists and cannot be read — a directory in its
-        # place, a permission, bytes that are not UTF-8 — must not turn
-        # the quiet session-end path into a traceback and a failed
-        # hook. Without the hint there is no send: say so, and the
-        # attempt row carries it (the head route guards its read the
-        # same way).
-        return ChainSend(None, "the memo could not be read", [], False, None)
-    if not entries:
-        return ChainSend(None, None, [], False, None)
-    end = entries[-1][0]
-    cursor = hint
-    if hint > end or (last_too and hint == end):
-        cursor = end - 1
+def next_batch(entries, cap):
+    """The entries a batch takes from the front of `entries` while its
+    body stays under the cap, the first whatever its size, and the rest:
+    (batch, rest)."""
+    size, count = 0, 0
+    for _, _, line in entries:
+        if count and size + len(line) > cap:
+            break
+        size += len(line)
+        count += 1
+    return entries[:count], entries[count:]
+
+
+# What one delivery did: `outcome` `sent`, or the line saying why it
+# stopped; `batches` the (first, last, head, appended) of each batch the
+# remote took; `says` False once an answer did not say what the remote
+# holds; `held` the highest n the last answer said it holds.
+Delivery = collections.namedtuple("Delivery", "outcome batches says held")
+
+# The words the per-entry send's delivery ends with when its second runs
+# out: one wording, whichever answer it was waiting on, so a row compared
+# with the last changes only when the outcome does.
+TIME_RAN_OUT = "the second ran out before the receiver's copy connected"
+DOES_NOT_SAY = "the remote does not say what it holds"
+
+
+def deliver(log, url, session, start, budget, steady=False):
+    """Post `start`, entries in hand as (n, entry_hash, line), to the
+    remote at `url`, and go on from its answer (ADR-0045 rulings 3 and
+    4), `budget` seconds in all, name lookup included:
+
+    - kept, and the first entry posted connects: done;
+    - a 409, a hole: the entries after the highest n held go, in order,
+      in batches under the receiver's cap;
+    - kept, and the first entry posted does not connect: the entry
+      before it goes alone, then the one before that, until an answer
+      says it connects or the genesis has gone. Each lands and stays,
+      so no later call does the same work again.
+
+    The chain is read on those last two alone, and the memo never, and
+    a hole is filled up to the last entry of `start` and no further. A
+    line that is not its entry ends the send there and the outcome names
+    the line. An answer that does not say what the remote holds ends the
+    send with `says` False: what follows is the caller's. `steady` asks
+    for an outcome whose words are the same on every call that ends the
+    same way, the per-entry send's, which is compared with the last row
+    written. Returns a Delivery. Never raises, never prints."""
+    deadline = time.monotonic() + budget
     cap = chain_batch_cap()
-    deadline = time.monotonic() + timeout
-    sent, said, held, notes = None, False, None, []
+    batches, held = [], None
+    chain, ahead, stopped = None, [], None
+    batch, target = start, start[-1][0]
     while True:
-        too_big = oversized_entry(entries, cursor, cap)
+        too_big = next((n for n, _, line in batch if len(line) > cap), None)
         if too_big is not None:
-            return ChainSend(sent, f"entry {too_big} is larger than the "
-                                   "receiver's cap", notes, said, held)
-        batch = chain_batch(entries, cursor, cap)
-        if batch is None:
-            return ChainSend(sent, None, notes, said, held)
-        body, first, last, head = batch
-        wait = step_wait(timeout, deadline)
+            return Delivery(f"entry {too_big} is larger than the receiver's "
+                            "cap", batches, True, held)
+        first, last, head = batch[0][0], batch[-1][0], batch[-1][1]
+        wait = step_wait(budget, deadline)
         if not wait:
-            return ChainSend(sent, f"the budget of {timeout:g} seconds ran "
-                                   f"out before entry {first}",
-                             notes, said, held)
-        answer, failure = bounded(
-            lambda: post_batch(url, body, wait,
-                               chain_headers(log, session, first, last, head)),
-            wait, (None, no_answer(wait)))
-        answered, now_held = held_of(answer)
-        if answered:
-            held_n = now_held[0] if now_held else -1
-            if not said and hint > held_n:
-                notes.append(f"the memo named entry {hint} as sent there, "
-                             f"and the remote holds {holds_words(now_held)}")
-            said, held = True, now_held
-        if failure:
-            if answer is not None and answered and held_n + 1 < first:
-                cursor = held_n  # a 409: again from the entry after it
-                continue
-            return ChainSend(sent, failure, notes, said, held)
+            return Delivery(TIME_RAN_OUT if steady else
+                            f"the budget of {budget:g} seconds ran out "
+                            f"before entry {first}", batches, True, held)
+        body = b"".join(line for _, _, line in batch)
+        headers = chain_headers(log, session, first, last, head)
+        words = budget if steady else wait
+        answer = bounded(
+            lambda: post_batch(url, body, wait, headers, words), wait,
+            Answer(False, False, None, False, 0, no_answer(words)))
+        if answer.failure:
+            return Delivery(answer.failure, batches, True, held)
+        if not answer.says:
+            batches.append((first, last, head, answer.appended))
+            return Delivery("sent", batches, False, held)
+        held = answer.held
+        if answer.took:
+            batches.append((first, last, head, answer.appended))
+        if answer.took and answer.chains:
+            if not ahead:
+                return Delivery(stopped or "sent", batches, True, held)
+            batch, ahead = next_batch(ahead, cap)
+            continue
+        if answer.took and first == 0:
+            return Delivery("sent", batches, True, held)
         try:
-            append_chain_record(log, first, last, head, event, url)
+            chain = chain if chain is not None else chain_on_disk(log)
         except OSError:
-            # Sent and not written down: the next send carries these
-            # lines again and the receiver drops them as duplicates.
-            return ChainSend(sent, "the memo could not be written", notes,
-                             said, held)
-        sent = (sent[0] if sent else first, last)
-        cursor = last
-        if not answered:
-            if "the remote did not say what it holds" not in notes:
-                notes.append("the remote did not say what it holds")
-        elif held_n < last:
-            notes.append(f"the remote took entries {first}-{last} and says "
-                         f"it holds only through entry {held_n}")
-        elif held_n > end:
-            notes.append(f"the remote says it holds entry {held_n}, past "
-                         "the end of this chain")
-        else:
-            cursor = held_n
+            return Delivery("the chain could not be read", batches, True,
+                            held)
+        if answer.took:
+            entry, why = entry_at(chain, first - 1)
+            if entry is None:
+                return Delivery(why, batches, True, held)
+            batch = [entry]
+            continue
+        ahead, stopped = entries_from(chain, 0 if held is None else held + 1,
+                                      target)
+        if not ahead:
+            return Delivery(stopped or "the chain holds no entry after "
+                                       "those the receiver holds",
+                            batches, True, held)
+        batch, ahead = next_batch(ahead, cap)
 
 
-def chain_unsent(log, url):
-    """Whether anything sits after `url`'s cursor in the memo, so a
-    chain step the window closed on can tell a step it skipped from one
-    it never owed. A memo that cannot be read counts as owing: the step
-    did not run, and the row should say why."""
+# --- The memo's notes, only when they change (ADR-0045 ruling 3) -----------
+# A step that runs on every tool call, or on every keeper turn, writes
+# its attempt row only when its outcome differs from the one written
+# before, so a receiver that is down leaves one row and not one a call.
+
+LAST_ROW_BYTES = 64 * 1024   # how far back from a sidecar's end its last row is read
+
+
+def last_row(path):
+    """The last row of the sidecar at `path`, read from the end of the
+    file and never further back than LAST_ROW_BYTES, so a long memo
+    costs nothing more than a short one. None when there is no file or
+    it holds nothing; ValueError when its last line cannot be read as a
+    row, as every sidecar row is read (#365), or runs past those bytes;
+    an OSError when what is there cannot be read as a file."""
     try:
-        cursor = chain_cursor(log, url)
-        return any(n > cursor for n, _, _ in entries_on_disk(log))
-    except (OSError, ValueError):
-        return True
+        with open_regular(path) as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - LAST_ROW_BYTES))
+            tail = f.read()
+    except FileNotFoundError:
+        return None
+    lines = split_lines(tail)
+    if not lines:
+        return None
+    if len(lines) == 1 and size > LAST_ROW_BYTES:
+        raise ValueError("the last row is longer than the bytes read")
+    row = json.loads(lines[-1].decode("utf-8"),
+                     object_pairs_hook=object_with_each_key_once,
+                     parse_constant=not_json, parse_float=finite_float)
+    if not isinstance(row, dict):
+        raise ValueError("the last line is not a row")
+    return row
 
 
-def session_end_publish_chain(log, url, session, timeout, window=None):
-    """The hook's chain send: quiet, best-effort, under the head's
-    budget rule and inside what the head left of the session-end window
-    (#262), and written down in the memo as an attempt row of step
-    `publish-chain` (#240): `sent`, or the one line the bounded POST
-    produced, or the window closed before it began. A chain with
-    nothing after the cursor was not a step and leaves no row."""
-    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
-        return  # the installer refuses these; a hand-edited file skips
-    timeout = step_wait(timeout, window)
-    if not timeout:
-        if chain_unsent(log, url):
-            append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN,
-                                  0.0, WINDOW_CLOSED)
+def said_before(rows, sidecar, step, event):
+    """What the newest attempt row of `step` (and `event`, when it is
+    given) among `rows` said, as (outcome, note); ("sent", None), nothing
+    to say, when none of them is one."""
+    said = ("sent", None)
+    for row in rows:
+        if isinstance(row, dict) and row_kind(sidecar, row) == ATTEMPT_KIND \
+                and row.get("step") == step \
+                and (event is None or row.get("event") == event):
+            said = (row.get("outcome"), row.get("note"))
+    return said
+
+
+def note_on_change(path, sidecar, step, budget, outcome, note=None,
+                   event=None, rows=None):
+    """Write the attempt row of `step` in the sidecar at `path` when
+    (outcome, note) differs from what the one before it said: among
+    `rows` when the caller read the sidecar whole, else in its last row
+    alone (`last_row`). A last row that cannot be read gets the new row.
+    Never raises."""
+    before = None   # a last row that cannot be read gets the new row
+    try:
+        if rows is None:
+            last = last_row(path)
+            rows = [] if last is None else [last]
+        before = said_before(rows, sidecar, step, event)
+    except (OSError, ValueError, RecursionError):
+        pass
+    if before == (outcome, note):
         return
-    done = publish_chain(log, url, session, timeout, "session-end")
-    if done.sent is None and done.failure is None and not done.notes:
-        return
-    append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN, timeout,
-                          outcome_of(done))
+    append_attempt_record(path, step, budget, outcome, event=event,
+                          note=note)
 
 
-def outcome_of(done):
-    """The outcome an attempt row carries for a send of the chain: `sent`
-    or the failure's line, then each note, so a row that says more than
-    `sent` is one the supervisor reads as a step that did not go
-    cleanly."""
-    return "; ".join([done.failure or "sent"] + done.notes)
+def note_unsaid(log, budget):
+    """The note that the remote took the chain and did not say what it
+    holds (ADR-0045 ruling 4), written once, on change: an attempt row
+    whose outcome is `sent`, so no reader counts it a failed step, and
+    only when the newest row of the chain's send in the memo, read
+    whole, does not already say the same."""
+    note_on_change(published_path(log), "memo", STEP_PUBLISH_CHAIN, budget,
+                   "sent", DOES_NOT_SAY,
+                   rows=read_sidecar_records(published_path(log)) or [])
 
 
 # --- Each entry as it is written (ADR-0045 ruling 3) --------------------------
 # At `full`, and under `custom` with the chain's flag, the installer puts
-# the chain's URL on the recording command too, and the hook sends what
-# the receiver does not hold once the receipt is on disk and the lock is
+# the chain's URL on the recording command too, and the hook posts the
+# lines it has just appended once the receipt is on disk and the lock is
 # let go: an entry is out of the writer's reach about a second after it
-# is written. The send is never the hook's failure, prints nothing, and
-# writes its outcome down only when it changes, so a receiver that is
-# down leaves one row and not one a call.
+# is written. The send is never the hook's failure and prints nothing.
 
 ENTRY_SEND_CAP = 1.0   # seconds for the whole step, name lookup included
-EVENT_RECEIPT = "receipt"   # the event of this step's chain and attempt rows
+EVENT_RECEIPT = "receipt"   # the event of this step's attempt rows
 
 
-def last_entry_outcome(log):
-    """The outcome of the newest attempt row the per-entry send wrote
-    beside `log` (step `publish-chain`, event `receipt`), or `sent` when
-    there is none, so a session whose sends all land writes no attempt
-    row at all. Read as every sidecar row is read (#365)."""
-    outcome = "sent"
-    for record in read_sidecar_records(published_path(log)) or []:
-        if row_kind("memo", record) == ATTEMPT_KIND \
-                and record.get("step") == STEP_PUBLISH_CHAIN \
-                and record.get("event") == EVENT_RECEIPT:
-            outcome = record.get("outcome")
-    return outcome
-
-
-def send_as_written(log, url, session):
-    """The recording hook's send (ADR-0045 ruling 3): the entries the
-    remote at `url` does not hold, the receipt just written always among
-    them, under ENTRY_SEND_CAP in all. Its outcome is written to the memo
-    as an attempt row of step `publish-chain` and event `receipt` only
-    when it differs from the last such row's. Never raises, never
-    prints: the receipt is already on the chain, and the hook exits as
-    it would have."""
+def send_as_written(log, url, session, written):
+    """The recording hook's send (ADR-0045 ruling 3): `written`, the
+    lines this call appended, from memory, and on from the answer
+    (`deliver`), under ENTRY_SEND_CAP in all. It reads neither the chain
+    nor the memo to begin, and writes no chain row: its outcome goes to
+    the memo as an attempt row of step `publish-chain` and event
+    `receipt` only when it differs from what the memo's last row says.
+    Never raises, never prints: the receipt is already on the chain, and
+    the hook exits as it would have."""
     try:
         if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
             return  # the installer refuses these; a hand-edited file skips
-        done = publish_chain(log, url, session, ENTRY_SEND_CAP,
-                             EVENT_RECEIPT, last_too=True)
-        if done.sent is None and done.failure is None and not done.notes:
-            return
-        outcome = outcome_of(done)
-        if outcome != last_entry_outcome(log):
-            append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN,
-                                  ENTRY_SEND_CAP, outcome, EVENT_RECEIPT)
+        done = deliver(log, url, session, written, ENTRY_SEND_CAP,
+                       steady=True)
+        note_on_change(published_path(log), "memo", STEP_PUBLISH_CHAIN,
+                       ENTRY_SEND_CAP, done.outcome,
+                       None if done.says else DOES_NOT_SAY, EVENT_RECEIPT)
     except Exception:  # noqa: BLE001 - a hook that fails over a send is noise
         return
 
 
-def damaged_tail_after(log, entries):
-    """The `n` of the last entry before a damaged tail, or None when the
-    file ends cleanly: anything on disk past the last complete entry is
-    the tear. Said out loud by the command, because an operator sending
-    a chain by hand should not learn from a byte count that part of it
-    is gone. Counted in lines by `split_lines`, the rule
-    `entries_on_disk` reads by, so a chain with Windows line endings
-    ends cleanly too."""
+# --- The chain's end, and the send that starts from it (ADR-0045 ruling 4) ---
+
+def chain_end(log):
+    """The chain's last entry as (n, entry_hash, line), read from the end
+    of the file, and the `n` of the entry before a damaged last line, or
+    None when the file ends cleanly: (last, torn). When neither of the
+    last two lines is an entry, the chain is read from its start and its
+    last is the last entry of its whole run from genesis, the run a
+    send could carry. (None, None) for a chain that holds no entry;
+    OSError when the file cannot be read."""
+    with open_regular(log) as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        reach = LAST_ROW_BYTES
+        while True:
+            f.seek(max(0, size - reach))
+            tail = f.read()
+            lines = split_lines(tail)
+            whole = size <= reach
+            if not whole:
+                lines = lines[1:]   # the first may begin before the window
+            if whole or len(lines) >= 2 or reach >= chain_batch_cap():
+                break
+            reach *= 2
+    for back, line in enumerate(reversed(lines[-2:])):
+        entry, _ = entry_of(line)
+        if entry is not None:
+            last = (entry["n"], entry["entry_hash"], line + b"\n")
+            return last, (entry["n"] if back else None)
+    run, _ = entries_from(chain_on_disk(log), 0)
+    if not run:
+        return None, None
+    return run[-1], run[-1][0]
+
+
+# What the session end's, the keeper's and `publish --chain`'s send did:
+# the delivery, and for a remote that does not say what it holds the
+# (sent, failure) of the send from the memo that followed it.
+ChainSend = collections.namedtuple("ChainSend", "done memo")
+
+
+def send_chain(log, url, session, timeout, event, start):
+    """The send of the session end, the keeper and `publish --chain`
+    (ADR-0045 ruling 4): `start`, the chain's last entry, posted, and on
+    from the answer as the hook goes on (`deliver`). For a remote that
+    says what it holds, a chain row for each batch it took is written to
+    the memo as a note of what left and when; the memo decides nothing.
+    A remote that took the entry and did not say is followed from the
+    memo as before ADR-0045 (`publish_from_memo`), in what is left of
+    `timeout`. Returns a ChainSend. Never raises, never prints."""
+    deadline = time.monotonic() + timeout
+    done = deliver(log, url, session, [start], timeout)
+    if not done.says:
+        wait = step_wait(timeout, deadline)
+        memo = (publish_from_memo(log, url, session, wait, event) if wait
+                else (None, f"the budget of {timeout:g} seconds ran out"))
+        return ChainSend(done, memo)
+    for first, last, head, _ in done.batches:
+        try:
+            append_chain_record(log, first, last, head, event, url)
+        except OSError:
+            break   # a note that could not be written; the send stands
+    return ChainSend(done, None)
+
+
+def chain_failure(sent):
+    """The line a ChainSend ended on, or None when it went: the
+    delivery's, or for a remote that does not say, the memo send's."""
+    if sent.done.outcome != "sent":
+        return sent.done.outcome
+    return sent.memo[1] if sent.memo is not None else None
+
+
+def session_end_publish_chain(log, url, session, timeout, window=None):
+    """The hook's chain send at session end: quiet, best-effort, under
+    the head's budget rule and inside what the head left of the
+    session-end window (#262), and written down in the memo as an
+    attempt row of step `publish-chain` (#240): `sent`, or the one line
+    the send ended on, or the window closed before it began. It starts
+    from the chain's last entry and asks the receiver every time
+    (ADR-0045 ruling 4), so every session end is a step; a remote that
+    does not say what it holds leaves its note once, on change."""
+    if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
+        return  # the installer refuses these; a hand-edited file skips
+    timeout = step_wait(timeout, window)
+    if not timeout:
+        append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN,
+                              0.0, WINDOW_CLOSED)
+        return
     try:
-        with open_regular(log) as f:
-            lines = split_lines(f.read())
+        start, _ = chain_end(log)
     except OSError:
-        return None
-    return entries[-1][0] if len(lines) > len(entries) else None
+        return
+    if start is None:
+        return
+    sent = send_chain(log, url, session, timeout, "session-end", start)
+    failure = chain_failure(sent)
+    if failure or sent.memo is None:
+        append_attempt_record(published_path(log), STEP_PUBLISH_CHAIN,
+                              timeout, failure or "sent",
+                              note=None if sent.memo is None else DOES_NOT_SAY)
+    else:
+        note_unsaid(log, timeout)
 
 
 def publish_chain_command(args):
@@ -4801,48 +5078,58 @@ def publish_chain_command(args):
     published, or that nothing was left to send, or why the batch was
     refused, and whether the file ends in damage. A damaged tail is not
     a refusal here, as it is for the head (the head after a tear is not
-    the chain's): the intact prefix is exactly what a remote that can
-    only add should be holding, and the line says where the tear is.
-    Exit 69 when a batch did not land (ADR-0037)."""
+    the chain's): the intact entries are exactly what a remote that can
+    only add should be holding, and the line says where the tear is. It
+    starts from the chain's last entry and goes on from the remote's
+    answer (`send_chain`, ADR-0045 ruling 4). Exit 69 when a batch did
+    not land (ADR-0037)."""
     try:
-        entries = entries_on_disk(args.log)
+        start, torn = chain_end(args.log)
     except FileNotFoundError:
         return missing_log(args.log)
     except OSError as e:
         return unreadable_log(args.log, e)
-    if not entries:
+    if start is None:
         print(f"error: {visible(args.log)} holds no entry — run `loxodonta init` "
               "first", file=sys.stderr)
         return EX_NOINPUT
-    torn = damaged_tail_after(args.log, entries)
     damage = f"; the tail after {torn} is damaged" if torn is not None else ""
-    done = publish_chain(args.log, args.url, chain_session(args.log),
-                         PUBLISH_TIMEOUT, "cadence")
-    holds = (f"; the remote says it holds {holds_words(done.held)}"
-             if done.said else "")
-    if done.sent:
-        first, last = done.sent
-        head = next(digest for n, digest, _ in entries if n == last)
-        print(f"published chain entries {first}-{last} "
-              f"(head {head[:12]}…){holds}{damage}")
-    elif done.failure is None:
-        print(f"nothing to send: the remote has every entry through entry "
-              f"{chain_cursor(args.log, args.url)}{damage}")
-    for note in done.notes:
-        print(f"note: {note}")
-    if done.failure or done.notes:
+    sent = send_chain(args.log, args.url, chain_session(args.log),
+                      PUBLISH_TIMEOUT, "cadence", start)
+    if sent.memo is not None:
+        went = sent.memo[0]
+        if went:
+            print(f"published chain entries {went[0]}-{went[1]} "
+                  f"(head {went[2][:12]}…){damage}")
+        elif sent.memo[1] is None:
+            print(f"nothing to send: the remote has every entry through entry "
+                  f"{chain_cursor(args.log, args.url)}{damage}")
+    else:
+        took = [(first, last, head) for first, last, head, appended
+                in sent.done.batches if appended]
+        holds = f"; the remote says it holds through entry {sent.done.held}"
+        if took:
+            last, head = max((last, head) for _, last, head in took)
+            print(f"published chain entries {min(t[0] for t in took)}-{last} "
+                  f"(head {head[:12]}…){holds}{damage}")
+        elif sent.done.outcome == "sent":
+            print(f"nothing to send{holds}{damage}")
+    failure = chain_failure(sent)
+    unsaid = None if sent.memo is None else DOES_NOT_SAY
+    if failure:
         # The same note the head route leaves, under this route's own
-        # step: a batch the keeper could not send, or an answer that
-        # disagreed with the memo, is written down where the memo
-        # already carries the session end's attempts. A partial send
-        # keeps its chain rows and gains this one, the shape the
+        # step: a batch the keeper could not send is written down where
+        # the memo already carries the session end's attempts. A partial
+        # send keeps its chain rows and gains this one, the shape the
         # session-end half already has.
         append_attempt_record(published_path(args.log), STEP_PUBLISH_CHAIN,
-                              PUBLISH_TIMEOUT, outcome_of(done))
-    if done.failure:
-        print(f"error: the chain was not published: {done.failure}",
+                              PUBLISH_TIMEOUT, failure, note=unsaid)
+        print(f"error: the chain was not published: {failure}",
               file=sys.stderr)
         return EX_UNAVAILABLE
+    if unsaid:
+        print(f"note: {unsaid}, so the memo said where to send from")
+        note_unsaid(args.log, PUBLISH_TIMEOUT)
     # The proofs beside the chain travel after it (ADR-0045 ruling 5),
     # every evidence row each time, the receiver dropping what it holds.
     for sidecar in SIDECARS_THAT_TRAVEL:
@@ -4861,6 +5148,8 @@ def publish_chain_command(args):
 
 SIDECAR_TYPE = "application/x-loxodonta-sidecar"
 SIDECARS_THAT_TRAVEL = ("anchors", "stamps")
+STEP_PUBLISH_ROWS = "publish-rows"   # the step a send of those rows writes down
+ROWS_LATE = "no answer in the time the step had"
 
 
 def evidence_lines(log, sidecar):
@@ -4894,11 +5183,15 @@ def send_rows(log, url, sidecar, timeout):
     """Post the evidence rows of `log`'s `sidecar` to the remote at `url`,
     to be kept beside its copy of the chain: one bounded POST, name
     lookup included, the chain's file name in the header a batch uses.
-    Returns (how many rows went, or None; the line for a send that did
-    not land, or None). Both None: there was no row to send. Never
-    raises, never prints."""
+    A send that does not land is written down in that sidecar as an
+    attempt row of its own step, and so is the first that lands after
+    one did not: on change, as the per-entry send's rows are. Returns
+    (how many rows went, or None; the line for a send that did not
+    land, or None). Both None: there was no row to send. Never raises,
+    never prints."""
     if urllib.parse.urlsplit(url).scheme not in PUBLISH_SCHEMES:
         return None, None  # the installer refuses these; a hand-edited file skips
+    path = sidecar_path(log, f".{sidecar}.jsonl")
     try:
         rows = evidence_lines(log, sidecar)
     except OSError:
@@ -4907,10 +5200,15 @@ def send_rows(log, url, sidecar, timeout):
         return None, None
     body = b"".join(rows)
     if len(body) > chain_batch_cap():
-        return None, f"the {sidecar} rows are larger than the receiver's cap"
-    failure = post_bounded(url, body, timeout, SIDECAR_TYPE,
-                           {"X-Loxodonta-Chain": os.path.basename(log),
-                            "X-Loxodonta-Sidecar": sidecar})
+        failure = f"the {sidecar} rows are larger than the receiver's cap"
+    else:
+        failure = post_bounded(url, body, timeout, SIDECAR_TYPE,
+                               {"X-Loxodonta-Chain": os.path.basename(log),
+                                "X-Loxodonta-Sidecar": sidecar})
+    if failure == no_answer(timeout):
+        failure = ROWS_LATE   # one wording, whatever the time the step had
+    note_on_change(path, sidecar, STEP_PUBLISH_ROWS, timeout,
+                   failure or "sent", rows=read_sidecar_records(path) or [])
     return (None, failure) if failure else (len(rows), None)
 
 
@@ -5145,22 +5443,21 @@ def stamp_head(log, url, timeout=SESSION_END_PUBLISH, window=None):
     never past the session-end `window` (#262), and write down how it
     went. Never raises, never prints: an exit hook
     that complains is noise nobody can act on. A head that already has
-    a token is not asked for again and leaves no row, like the anchor.
-    True when a token row was written."""
+    a token is not asked for again and leaves no row, like the anchor."""
     try:
         last = tail_entry(read_log(log))
     except OSError:
-        return False
+        return
     if last is None:
-        return False  # a damaged tail cannot be stamped
+        return  # a damaged tail cannot be stamped
     head, n = last["entry_hash"], last["n"]
     if head in stamped_heads(log):
-        return False
+        return
     timeout = step_wait(timeout, window)
     if not timeout:
         append_attempt_record(stamps_path(log), STEP_STAMP, 0.0,
                               WINDOW_CLOSED)
-        return False
+        return
     reply, failure = ask_authority(url, head, timeout)
     if reply is not None:
         try:
@@ -5177,7 +5474,6 @@ def stamp_head(log, url, timeout=SESSION_END_PUBLISH, window=None):
     # write produced.
     append_attempt_record(stamps_path(log), STEP_STAMP, timeout,
                           failure or "granted")
-    return failure is None
 
 
 def cmd_stamp(args):
@@ -5641,7 +5937,7 @@ def transcript_commitment_action(transcript_path):
             f"sha256={hashlib.sha256(data).hexdigest()}")
 
 
-def commit_transcript_due(log, transcript_path):
+def commit_transcript_due(log, transcript_path, written=None):
     """Append a transcript commitment when the tail lands on a cadence
     boundary. Called with the chain lock held, right after a hook
     receipt. Every failure path is a silent skip, never fatal: a hook
@@ -5656,7 +5952,7 @@ def commit_transcript_due(log, transcript_path):
         return
     action = transcript_commitment_action(transcript_path)
     if action is not None:
-        append_locked(log, "receipts", action, [])
+        append_locked(log, "receipts", action, [], written)
 
 
 # The hook's note that the second record is cut (ADR-0041 ruling 8),
@@ -5712,7 +6008,7 @@ def holds_cut_note(lines):
     return False
 
 
-def note_second_record_cut(log):
+def note_second_record_cut(log, written=None):
     """Append the note that this session's second record is cut, once
     per chain (ADR-0041 ruling 8): when the installer's pin is there
     and reads as one, and the hook's own environment, which is the
@@ -5733,7 +6029,7 @@ def note_second_record_cut(log):
     except OSError:
         return
     if not holds_cut_note(lines):
-        append_locked(log, "receipts", CUT_NOTE + reason, [])
+        append_locked(log, "receipts", CUT_NOTE + reason, [], written)
 
 
 def one_line(text, limit=160):
@@ -6147,13 +6443,17 @@ def cmd_hook(args):
             session_end_publish_chain(log, args.publish_chain, session,
                                       timeout=bound, window=window)
         if args.stamp:
-            stamped = stamp_head(log, args.stamp, timeout=bound, window=window)
-            if stamped and args.publish_chain:
-                # The token travels to the chain's URL, inside the same
-                # window as the steps before it (ADR-0045 ruling 5).
+            stamp_head(log, args.stamp, timeout=bound, window=window)
+        if args.publish_chain:
+            # Every proof and token beside the chain goes to the chain's
+            # URL at every session end, inside the same window as the
+            # steps before it, so rows a send left behind go again; the
+            # receiver drops the rows it holds (ADR-0045 ruling 5).
+            for sidecar in SIDECARS_THAT_TRAVEL:
                 wait = step_wait(bound, window)
-                if wait:
-                    send_rows(log, args.publish_chain, "stamps", wait)
+                if not wait:
+                    break
+                send_rows(log, args.publish_chain, sidecar, wait)
         if args.anchor:
             changed = session_end_anchor(log, args.calendar or DEFAULT_CALENDARS,
                                          budget=deadline - time.monotonic())
@@ -6273,25 +6573,28 @@ def cmd_hook(args):
     # steal the cadence boundary, and a commitment that sometimes
     # silently misses its window is the kind of flake an operator
     # learns to shrug at.
+    written = []   # the lines this call appends, sent from here (ADR-0045)
     try:
         with ChainLock(log):
-            code = append_locked(log, args.actor, action, files)
+            code = append_locked(log, args.actor, action, files, written)
             if code == 0:
-                commit_transcript_due(log, payload.get("transcript_path"))
+                commit_transcript_due(log, payload.get("transcript_path"),
+                                      written)
                 if args.actor == CLAUDE_CODE_ACTOR:
                     # The pin is Claude Code's: another harness reads no
                     # managed settings and has no second record to cut.
-                    note_second_record_cut(log)
+                    note_second_record_cut(log, written)
                 for why in unmade:
                     print(f"warning: {why}; the receipt is written without "
                           "its fingerprint (ADR-0047)", file=sys.stderr)
     except LockTimeout:
         return locked_out(log)
-    if code == 0 and args.publish_chain:
-        # Each entry as it is written (ADR-0045 ruling 3), once the lock
-        # is let go: the chain's lock is never held across a network
-        # call, and the send never changes the exit.
-        send_as_written(log, args.publish_chain, session)
+    if code == 0 and args.publish_chain and written:
+        # Each entry as it is written (ADR-0045 ruling 3), from the lines
+        # in hand, once the lock is let go: the chain's lock is never
+        # held across a network call, and the send never changes the
+        # exit.
+        send_as_written(log, args.publish_chain, session, written)
     return code
 
 
