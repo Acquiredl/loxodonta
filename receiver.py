@@ -1037,9 +1037,11 @@ class Door(BaseHTTPRequestHandler):
         held = None if held is None or held < 0 else held
         if hole is not None:
             # Nothing appended (ADR-0045 ruling 2).
-            why = (f"entry {hole} is past the entry after the highest this "
-                   "receiver holds of the chain"
-                   + (f", {held}" if held is not None else ", which holds none"))
+            why = (f"entry {hole} is more than one past entry {held}, the "
+                   "highest this receiver holds of the chain"
+                   if held is not None else
+                   f"entry {hole} is not the genesis, and this receiver "
+                   "holds none of the chain")
             self.answer(409, json.dumps({"refused": why, "held_n": held,
                                          "chains": chains}),
                         kind="application/json", said=why)

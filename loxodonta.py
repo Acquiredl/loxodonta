@@ -4441,13 +4441,14 @@ def chain_cursor(log, url):
     """The last entry number the remote at `url` acknowledged, from the
     memo's chain rows that name it (#263); -1 when none does, so the
     send starts at genesis. Read only for a remote that does not say
-    what it holds (ADR-0045 ruling 4). A row that names no remote predates remote
-    ids and counts for none: that chain goes once more from genesis, and
-    the receiver drops each line as an exact duplicate. A row of any
-    other kind, a head, a note or a kind unknown here, counts for none
-    either (ADR-0038). A torn memo line is read past (a resend the
-    receiver drops, never a stuck keeper), and so is a line past the
-    digit or recursion limit, which no reader here takes apart either;
+    what it holds (ADR-0045 ruling 4). A row that names no remote
+    predates remote ids and counts for none: that chain goes once more
+    from genesis, and the receiver drops each line as an exact
+    duplicate. A row of any other kind, a head, a note or a kind unknown
+    here, counts for none either (ADR-0038). A torn memo line is read
+    past (a resend the receiver drops, never a stuck keeper), and so is
+    a line past the digit or recursion limit, which no reader here takes
+    apart either;
     a memo that cannot be read at all is raised, not guessed at, since
     -1 would send the whole chain again at every session end. The two
     differ on purpose (#344): a line past a limit is still text in the
@@ -4550,9 +4551,10 @@ def publish_from_memo(log, url, session, timeout, event):
     batch begins once they are spent or waits past them (#262). The
     send for a remote that does not say what it holds, as every send
     went before ADR-0045. Returns (sent, failure): the (first, last,
-    head) of the range the remote acknowledged in this call, or None; the line the
-    bounded POST gave for the batch that did not land, or None. Both
-    None: nothing was after the cursor. Never raises, never prints."""
+    head) of the range the remote acknowledged in this call, or None;
+    the line the bounded POST gave for the batch that did not land, or
+    None. Both None: nothing was after the cursor. Never raises, never
+    prints."""
     try:
         entries = entries_on_disk(log)
     except OSError:
@@ -4859,7 +4861,7 @@ def deliver(log, url, session, start, budget, steady=False):
 # its attempt row only when its outcome differs from the one written
 # before, so a receiver that is down leaves one row and not one a call.
 
-LAST_ROW_BYTES = 64 * 1024   # how far back from a sidecar's end its last row is read
+LAST_ROW_BYTES = 64 * 1024   # how far back from a sidecar's end a row is read
 
 
 def last_row(path):

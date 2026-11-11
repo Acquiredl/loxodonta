@@ -355,9 +355,11 @@ class PublishKeeperTest(ReceiverFixture):
         self.assertEqual([row.get("kind") for row in memo_of(log)],
                          ["chain", "attempt"], "a chain row and no head row")
         # This fake answers as a webhook would, saying nothing of what it
-        # holds, so the send follows the memo and says so (ADR-0045).
-        self.assertEqual(memo_of(log)[-1]["outcome"],
-                         "sent; the remote did not say what it holds")
+        # holds, so the send follows the memo and says so once, in a row
+        # that is no failed step (ADR-0045 ruling 4).
+        self.assertEqual((memo_of(log)[-1]["outcome"],
+                          memo_of(log)[-1]["note"]),
+                         ("sent", "the remote does not say what it holds"))
 
 
 class LeftReadingTest(ReceiverFixture):
