@@ -2334,7 +2334,7 @@ def judge_manifest_anchor(folder, headers, used):
                       "manifest.json>` submits the manifest again")
         print(f"seal anchor: ANCHOR-PENDING: the manifest was submitted "
               f"{ts} via {calendar} — {advice}; the rung is not earned until "
-              "the proof completes")
+              "the proof completes and a block header checks its block")
     checked = [c for c in claimed if c[1] is not None]
     height, block = min(checked or claimed, key=lambda c: c[0],
                         default=(None, None))
@@ -2680,16 +2680,23 @@ def ceiling_lines(manifest, earned):
     else:
         unsaid.append("which key packed it")
     why = limit = ""
+    alike = ("a regeneration re-signed with that key" if key
+             else "a wholesale regeneration")
     if height is None:
         if not seals:
             why = ", since no seal is declared"
         elif "anchor" in seals:
-            why = " until its manifest anchor completes"
+            why = (" until its manifest anchor completes and a block header "
+                   "checks its block")
         else:
             why = ", since no anchor is declared"
-        alike = ("a regeneration re-signed with that key" if key
-                 else "a wholesale regeneration")
         limit = f"; indistinguishable from {alike}{why}"
+    elif block is None:
+        # A claimed block is what a regeneration earns for nothing
+        # (ADR-0044), so the verdict keeps the unsealed limit; the trust
+        # line already says how to check the block, and keeps its words.
+        limit = (f"; indistinguishable from {alike} until a block header "
+                 "checks its manifest anchor's block")
     for note in earned["unjudged"]:
         limit += f"; {note}"
     unjudged = "".join(f" {n[0].upper()}{n[1:]}." for n in earned["unjudged"])

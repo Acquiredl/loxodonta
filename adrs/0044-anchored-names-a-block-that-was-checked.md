@@ -57,6 +57,10 @@ prints `stamp not judged` and never `STAMPED` (ADR-0032).
    an attestation and no header the verdict gains no rung. The line of
    residual trust keeps what it says today for that case, so the
    recipient still reads which block is claimed and how to check it.
+   The verdict then carries the limit a package with no seal carries,
+   and says what would lift it: a block header that checks the
+   manifest anchor's block. A pending anchor's words name both steps,
+   the proof completing and a header checking its block.
 
 3. **No exit code moves.** `ANCHOR-CLAIMED` is a note, as `ANCHORED`
    is: exit codes here mean a finding against the log (ADR-0037), and

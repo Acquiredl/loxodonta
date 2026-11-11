@@ -184,12 +184,18 @@ class SealedPackageTest(AnchoredStoreCase):
                      if l.startswith("seal anchor: ANCHOR-PENDING")), None)
         self.assertIsNotNone(note, out)
         self.assertIn("--upgrade --manifest", note)
+        # Both steps that earn the rung are named (ADR-0044 ruling 2).
+        self.assertTrue(note.endswith(
+            "the rung is not earned until the proof completes and a block "
+            "header checks its block"), note)
         self.assertIn(self.CHAIN_DETAIL, out)
         self.assertNotIn("unlisted:", out)
         self.assertTrue(lines[-1].startswith("SELF-CONSISTENT:"), lines[-1])
         self.assertNotIn("ANCHORED", lines[-1])
-        self.assertIn("indistinguishable from a wholesale regeneration",
-                      lines[-1])
+        self.assertTrue(lines[-1].endswith(
+            "indistinguishable from a wholesale regeneration until its "
+            "manifest anchor completes and a block header checks its block"),
+            lines[-1])
         self.assertNotIn("no seal is declared", lines[-1])
         self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
         self.assertNotIn("no seal is declared", lines[-2])
@@ -241,9 +247,18 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertIn(f"claims Bitcoin block {self.server.height}, a block "
                       "not checked here", lines[-1])
         self.assertNotIn("existed by", lines[-1])
-        self.assertNotIn("indistinguishable", lines[-1])
+        # A claimed block is what a regeneration earns for nothing, so the
+        # verdict keeps the limit of a package with no seal, and names what
+        # lifts it; the residual trust keeps its words (ADR-0044 ruling 2).
+        self.assertTrue(lines[-1].endswith(
+            f"claims Bitcoin block {self.server.height}, a block not checked "
+            "here; indistinguishable from a wholesale regeneration until a "
+            "block header checks its manifest anchor's block"), lines[-1])
         self.assertTrue(lines[-2].startswith("residual trust"), lines[-2])
         self.assertIn(f"block {self.server.height}", lines[-2])
+        self.assertNotIn("indistinguishable", lines[-2])
+        self.assertTrue(lines[-2].endswith("rests on the issuer's word "
+                                           "alone."), lines[-2])
         # The chain's own anchor is still detail, at its own block.
         self.assertIn(self.CHAIN_DETAIL, out)
 
@@ -332,6 +347,38 @@ class SealedPackageTest(AnchoredStoreCase):
 
         self.assertEqual(judged.returncode, 64, judged.stdout + judged.stderr)
         self.assertIn("160 hex characters", judged.stderr)
+
+    def test_one_checked_anchor_among_claimed_ones_earns_the_rung(self):
+        # Two completed proofs of the manifest, each to its own root: the
+        # calendar's, upgraded, and test_anchor's one-sha256 row beside
+        # it. The recipient gives the header of the calendar's block, so
+        # that anchor is ANCHORED and the other ANCHOR-CLAIMED, and the
+        # checked one earns the rung with no limit left (ADR-0044).
+        folder, root = self.upgraded_folder()
+        with open(folder / SIDECAR, "a", encoding="utf-8",
+                  newline="\n") as sidecar:
+            sidecar.write(completed_row(self.manifest_digest(folder)) + "\n")
+        header = block_header(root)
+
+        judged = self.verify_package(folder, "--block-header", header.hex())
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        lines = out.strip().splitlines()
+        seals = [l for l in lines if l.startswith("seal anchor: ")]
+        self.assertEqual(len(seals), 2, out)
+        self.assertEqual(sum(l.startswith("seal anchor: ANCHORED: the "
+                                          "manifest existed by") for l in seals),
+                         1, seals)
+        self.assertEqual(sum(l.startswith("seal anchor: ANCHOR-CLAIMED: the "
+                                          "manifest: ") for l in seals),
+                         1, seals)
+        self.assertTrue(lines[-1].startswith("SELF-CONSISTENT + ANCHORED:"),
+                        lines[-1])
+        self.assertIn("the manifest existed by the block whose header hashes "
+                      f"to {header_hash(header)}", lines[-1])
+        self.assertNotIn("indistinguishable", lines[-1])
+        self.assertNotIn("HEADER-UNMATCHED", out)
 
     def test_a_manifest_settled_by_one_calendar_stops_advising_the_other(self):
         # #199 reaches the seal too: the anchor's claim is about the
@@ -949,12 +996,17 @@ class ReleasedVerifierTest(AnchoredStoreCase):
                    cwd=str(self.work), isolated=True)
         # The released verifier predates ADR-0044: its word for a block
         # nobody checked is ANCHORED, and its verdict earns the rung for
-        # one. That is the one difference, said here word for word.
+        # one, with no limit. That is the one difference, said here word
+        # for word.
+        limit = ("; indistinguishable from a wholesale regeneration until "
+                 "a block header checks its manifest anchor's block")
         then_lines = [
             line.replace("ANCHORED: ", "ANCHOR-CLAIMED: ", 1)
             if "the attestation claims Bitcoin block" in line
             else line.replace("SELF-CONSISTENT + ANCHORED: ",
-                              "SELF-CONSISTENT: ", 1)
+                              "SELF-CONSISTENT: ", 1) + limit
+            if line.startswith("SELF-CONSISTENT + ANCHORED: ")
+            else line
             for line in then.stdout.splitlines()]
 
         self.assertEqual(now.returncode, 0, now.stdout + now.stderr)

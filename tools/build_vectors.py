@@ -969,10 +969,13 @@ def build(workdir):
     package_row("package-anchored-unchecked", "The same package with no "
                 "header given: the block is the attestation's claim, which "
                 "a regenerated package makes at no cost, so no rung is "
-                "earned.", 0, "SELF-CONSISTENT: every "
+                "earned, and the limit of a package with no seal stands.",
+                0, "SELF-CONSISTENT: every "
                 "chain walks clean and every artifact matches the manifest, "
                 "and the manifest's anchor claims Bitcoin block "
-                f"{PROOF_HEIGHT}, a block not checked here",
+                f"{PROOF_HEIGHT}, a block not checked here; indistinguishable "
+                "from a wholesale regeneration until a block header checks "
+                "its manifest anchor's block",
                 target="package-anchored")
 
     manifest = {
