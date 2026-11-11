@@ -8018,8 +8018,10 @@ def main(argv=None):
                                    "`supervisor package --stamp` drives "
                                    "this)")
     stamp_parser.set_defaults(func=cmd_stamp)
+    # No abbreviations: MANAGED_RUN reads `--managed` whole from the
+    # command at import, so the parser must not take `--manag` for it.
     hook_parser = sub.add_parser(
-        "hook",
+        "hook", allow_abbrev=False,
         help="append one entry from a Claude Code PostToolUse payload on stdin")
     hook_parser.add_argument("--log-dir", default=None, metavar="DIR",
                              help="directory for per-session receipt logs "

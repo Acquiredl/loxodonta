@@ -12560,8 +12560,10 @@ def main(argv):
     recall_common.add_argument(
         "--root", default=None,
         help="folder of repos for --all (default: the repo's parent)")
+    # No abbreviations: MANAGED_RUN reads `--managed` whole from the
+    # command at import, so the parser must not take `--manag` for it.
     digest = sub.add_parser(
-        "digest",
+        "digest", allow_abbrev=False,
         help="the session-start injection: this repo's recent history, "
              "budget-capped, testimony-labeled")
     digest.add_argument("--repo", default=None,

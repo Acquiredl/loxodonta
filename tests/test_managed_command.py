@@ -225,5 +225,28 @@ class TheDigestTest(ManagedCommandBase):
         self.assertEqual(managed.returncode, 0, managed.stderr)
 
 
+class TheWordIsWholeTest(ManagedCommandBase):
+    """The word is read from the command at import, before the parser, so
+    the parser takes it whole or not at all: an abbreviation argparse
+    would expand is refused, and the run does nothing."""
+
+    def test_the_hook_refuses_an_abbreviated_word_and_writes_nothing(self):
+        done = self.hook("PostToolUse", "--manag")
+
+        self.assertEqual(done.returncode, 64, done.stdout + done.stderr)
+        self.assertIn("--manag", done.stderr)
+        self.assertEqual(self.chains_under(self.home / ".loxodonta"), [])
+        self.assertEqual(self.chains_under(self.elsewhere), [])
+
+    def test_the_digest_refuses_an_abbreviated_word_and_says_nothing(self):
+        self.assertEqual(self.hook("PostToolUse").returncode, 0)
+
+        done = run(SUPERVISOR, "digest", "--manag", env=self.env, timeout=60)
+
+        self.assertEqual(done.returncode, 64, done.stdout + done.stderr)
+        self.assertIn("--manag", done.stderr)
+        self.assertEqual(done.stdout, "")
+
+
 if __name__ == "__main__":
     unittest.main()
