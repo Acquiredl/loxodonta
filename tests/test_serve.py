@@ -1951,6 +1951,30 @@ class ReceiverServeTest(ServerFixture):
                         strip["why"].index("1 chain(s) fail verification"))
         self.assertEqual(strip["why"].count("(scan exit 6)"), 1)
 
+    def test_a_session_still_arriving_stands_until_it_settles(self):
+        # #617: a session still arriving with a call overdue raises the
+        # exit and cannot be accepted (ADR-0046 ruling 6), so the strip
+        # says it stands until its receipts arrive or it settles, and
+        # names no acknowledgement for it.
+        self.env["SUPERVISOR_SETTLE_SECONDS"] = "3600"
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        post_event(self.data, 51, "api_request", received_ago(0))
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 6)
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["raises"]),
+                         ("PENDING-OVERDUE", True))
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["state"], "CALLS OVERDUE AT THE RECEIVER")
+        self.assertIn("until the receipts arrive or the session settles",
+                      strip["why"])
+        self.assertNotIn("acknowledge", strip["why"])
+
     def test_the_startup_line_says_no_keeper_runs_at_the_far_end(self):
         # #487 item 12.
         self.assertIsNotNone(self.serve_receiver())

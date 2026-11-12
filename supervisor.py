@@ -5755,9 +5755,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # On the agent's machine only a live alarm raises the exit: an ended
     # deficit is evidence, and a siren that never stops sounding trains
     # the operator to ignore the band (the dogfood's lesson). At the
-    # receiver a settled disagreement raises it too, until it is
-    # acknowledged there, since nothing else reads it unprompted
-    # (ADR-0046 ruling 2).
+    # receiver a settled disagreement raises it too, until it is accepted
+    # there, since nothing else reads it unprompted (ADR-0046 ruling 2);
+    # and so does a session still arriving with a call or a counter
+    # number overdue, which cannot be accepted, until the receipts arrive
+    # or it settles (ruling 6).
     alarms = sum(s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")
                  or s.get("raises", False)
                  for s in completeness["sessions"])
@@ -12113,7 +12115,9 @@ function render(report) {
                                   "SECOND-RECORD-ABSENT",
                                   "SECOND-RECORD-GAP"]);
   // At a receiver a settled disagreement raises the exit until it is
-  // acknowledged there (ADR-0046), and is drawn as live as it counts.
+  // accepted there (ADR-0046), and a session still arriving with a call
+  // or a counter number overdue raises it until the receipts arrive or
+  // it settles (ruling 6); each is drawn as live as it counts.
   const raising = s => LIVE.includes(s.state) || Boolean(s.raises);
   const watchRow = s => {
     const live = raising(s);
@@ -13400,11 +13404,13 @@ def main(argv=None):
                            "as the witness, every tool owing a receipt, "
                            "the memory in DIR/supervisor. A session is "
                            "judged once nothing of it has arrived for "
-                           "SUPERVISOR_SETTLE_SECONDS (1 hour), and a "
+                           "SUPERVISOR_SETTLE_SECONDS (1 hour). A settled "
                            "session short of receipts, or of events, "
                            "raises the exit until `acknowledge --receiver "
-                           "DIR --session` accepts it (ADR-0046). Not "
-                           "with --root")
+                           "DIR --session` accepts it; one still arriving "
+                           "with a call or a counter number overdue raises "
+                           "it until the receipts arrive or it settles "
+                           "(ADR-0046). Not with --root")
     scan.add_argument("--json", action="store_true",
                       help="compact machine output (default pretty-prints)")
     scan.add_argument("--before-memory", action="store_true",

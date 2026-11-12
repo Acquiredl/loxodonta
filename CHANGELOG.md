@@ -33,6 +33,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `supervisor serve` says nothing on its log when a client leaves before its reply is read: the request's thread printed a traceback there (#589).
 - The scan no longer says the remote "has never taken" a send it took: where the memo shows earlier sends taken and the newest failed, the publishing note says the remote missed the newest (#614).
 - A reading over a receiver's folder no longer labels its memory, day book, saved views or acknowledged changes writer-reachable: they are kept at the receiver, out of the writer's reach. The agent's machine keeps its labels (#615).
+- The help of `scan --receiver` no longer says every session short of receipts raises the exit until acknowledged: a settled one stands until accepted, and one still arriving with a call overdue until the receipts arrive or it settles (#617).
 
 ## [0.20.0] - 2026-11-12
 
