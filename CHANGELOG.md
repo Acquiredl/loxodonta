@@ -25,6 +25,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The dashboard's verdict strip names every condition one look found, the worst first: a broken chain no longer hides a finding at the receiver no one has accepted, nor a live alarm a broken chain (#612).
 - The recorder notice hashes the recorder against its committed blob, so an edit `git status` hides (assume-unchanged, skip-worktree, ignored and never committed) reads as uncommitted changes; autocrlf line endings do not (#621).
 - The recorder notice reads the checkout's commits as made, never through `git replace`: a replaced HEAD whose tree holds an edited recorder no longer reads as clean (#621).
+- `verify` on a chain whose only line is torn says `no entry intact`, where it printed `entries 0..-1 intact`. The verdict and the exit are unchanged (#589).
 
 ## [0.20.0] - 2026-11-12
 

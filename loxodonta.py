@@ -398,8 +398,9 @@ def walk(lines, field_rules=True):
             if n == len(lines) - 1:
                 # The one honest damage signature: a crash mid-append can
                 # truncate the final line and nothing else (SPEC §6).
+                intact = f"entries 0..{n - 1} intact" if n else "no entry intact"
                 breaks.append((n, f"BROKEN: torn tail at line {n} (crash-"
-                                  f"truncated append; entries 0..{n - 1} intact)"))
+                                  f"truncated append; {intact})"))
             else:
                 breaks.append((n, f"BROKEN at entry {n}: line is not valid JSON"))
             entries.append(None)

@@ -1297,6 +1297,22 @@ class TornTailTest(ReceiptsCliTest):
         self.assertIn("intact", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_a_torn_genesis_says_no_entry_is_intact(self):
+        # #589: the count was printed as a range, "entries 0..-1 intact",
+        # which names nothing. The verdict word and the exit stay.
+        genesis = self.log_path.read_text(encoding="utf-8").splitlines()[0]
+        self.log_path.write_text(genesis[:40], encoding="utf-8")
+
+        for tool in (LOXODONTA, VERIFIER):
+            with self.subTest(tool=tool.name):
+                result = run(tool, "verify", cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 1,
+                                 result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip().splitlines()[-1],
+                                 "BROKEN: torn tail at line 0 (crash-"
+                                 "truncated append; no entry intact)")
+
     def test_torn_middle_line_is_ordinary_broken(self):
         self.truncate_line(2)
 
