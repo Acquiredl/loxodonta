@@ -6717,6 +6717,37 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
+    def test_a_thousand_lines_are_read_a_line_at_a_time_and_the_same(self):
+        # #616: the reading holds a line, never the whole file, and the
+        # one rule every reader keeps holds on the way through: a CRLF
+        # ending belongs to the ending, the torn tail a crash leaves is
+        # still a line, and a byte that is not UTF-8 is one unparsed
+        # line, not a broken scan. The bulk pushes the read past one
+        # chunk, so a line cut across two chunks is still one line.
+        chain_copy(self.data, FIXTURE_SESSION)
+        bulk = json.dumps({
+            "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+                {"attributes": [{"key": "event.name",
+                                 "value": {"stringValue":
+                                           "tool_decision"}}]}]}]}]}})
+        path = self.data / "events-2026-10-08.jsonl"
+        with open(path, "wb") as events:
+            line = bulk.encode() + b"\n"
+            events.write(line * 2000)
+            events.write(bulk.encode() + b"\r\n")
+            events.write(b"\r\n")
+            events.write(b"\xff not json\n")
+            events.write(bulk.encode())
+
+        report = self.report()
+
+        second = report["completeness"]["second_record"]
+        self.assertEqual((second["unparsed"], second["sessionless"]),
+                         (2, 2002))
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
     def test_an_object_not_in_the_line_shape_is_counted_too(self):
         chain_copy(self.data, FIXTURE_SESSION)
         with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",

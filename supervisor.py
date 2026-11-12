@@ -4263,6 +4263,33 @@ def log_records(logs):
                 yield record
 
 
+def iter_event_lines(f, errors="replace"):
+    """An events file's lines as text, one at a time: read_lines holds a
+    whole file in memory to split it, and a receiver's folder grows
+    without a bound, so a scan held the largest day's bytes at once
+    (#616). The bytes arrive in chunks and are cut by the one rule
+    split_lines keeps (SPEC §1, #299): only `\\n` ends a line, a `\\r`
+    just before the `\\n` belongs to the ending, and the bytes after the
+    last `\\n`, when there are any, are the torn tail a crash leaves. A
+    byte that is not UTF-8 reads as U+FFFD, as read_lines reads."""
+    pending = b""
+    while True:
+        chunk = f.read(1 << 16)
+        if not chunk:
+            break
+        chunk = pending + chunk
+        end = chunk.rfind(b"\n")
+        if end == -1:
+            pending = chunk
+            continue
+        pending = chunk[end + 1:]
+        for line in chunk[:end].split(b"\n"):
+            yield (line[:-1] if line.endswith(b"\r")
+                   else line).decode("utf-8", errors)
+    if pending:
+        yield pending.decode("utf-8", errors)
+
+
 def read_events(root, closed=None):
     """The second record a receiver holds, read as read_witness reads a
     transcript (ADR-0041 ruling 4): per session the same dict, so
@@ -4305,68 +4332,72 @@ def read_events(root, closed=None):
     days = [events_day(path) for path in files]  # held, readable or not
     for path in files:
         try:
-            lines = read_lines(path)
+            f = open_regular(path)
         except OSError as error:
             unread.append(f"{path.name} ({error.strerror or error})")
             continue
-        for line in lines:
-            try:
-                arrival = json.loads(line)
-            except (ValueError, RecursionError):
-                arrival = None
-            if not isinstance(arrival, dict) \
-                    or not isinstance(arrival.get("logs"), dict):
-                unparsed += 1
-                continue
-            received = arrival.get("received")
-            when = parse_when(received) if isinstance(received, str) else None
-            if when is not None and when.tzinfo is None:
-                when = when.replace(tzinfo=timezone.utc)
-            sender = arrival.get("from")
-            if when is not None and isinstance(sender, str):
-                heard = addresses.get(sender)
-                if heard is None or when > heard[0]:
-                    addresses[sender] = (when, received)
-            for record in log_records(arrival.get("logs")):
-                attributes = (event_attributes(record)
-                              if isinstance(record, dict) else {})
-                session = attributes.get("session.id")
-                if not isinstance(session, str) or not session:
-                    sessionless += 1
+        try:
+            for line in iter_event_lines(f):
+                try:
+                    arrival = json.loads(line)
+                except (ValueError, RecursionError):
+                    arrival = None
+                if not isinstance(arrival, dict) \
+                        or not isinstance(arrival.get("logs"), dict):
+                    unparsed += 1
                     continue
-                seen = sessions.setdefault(session, {
-                    "owed": [], "may_owe": {}, "witnessed": set(),
-                    "latest": None, "first": None, "worded": 0,
-                    "unworded": 0, "closed": [], "sequences": set(),
-                    "results": [], "arrived": {}})
-                if when is not None and (seen["latest"] is None
-                                         or when > seen["latest"]):
-                    seen["latest"] = when
-                sequence = attributes.get("event.sequence")
-                if isinstance(sequence, int) \
-                        and not isinstance(sequence, bool):
-                    seen["sequences"].add(sequence)
-                    if when is not None and (
-                            sequence not in seen["arrived"]
-                            or when < seen["arrived"][sequence]):
-                        seen["arrived"][sequence] = when
-                name = attributes.get("event.name")
-                tool = attributes.get("tool_name")
-                tool = tool if isinstance(tool, str) else None
-                if name == TOOL_DECISION and tool is not None:
-                    seen["witnessed"].add(tool)
-                elif name == TOOL_RESULT:
-                    stamp = attributes.get("event.timestamp")
-                    stamp = stamp if isinstance(stamp, str) else None
-                    call = attributes.get("tool_use_id")
-                    seen["witnessed"].add(tool)
-                    seen["owed"].append((stamp, tool))
-                    seen["results"].append(
-                        (stamp, tool, call if is_call_id(call) else None,
-                         when))
-                    if stamp is not None and (seen["first"] is None
-                                              or stamp < seen["first"]):
-                        seen["first"] = stamp
+                received = arrival.get("received")
+                when = (parse_when(received)
+                        if isinstance(received, str) else None)
+                if when is not None and when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                sender = arrival.get("from")
+                if when is not None and isinstance(sender, str):
+                    heard = addresses.get(sender)
+                    if heard is None or when > heard[0]:
+                        addresses[sender] = (when, received)
+                for record in log_records(arrival.get("logs")):
+                    attributes = (event_attributes(record)
+                                  if isinstance(record, dict) else {})
+                    session = attributes.get("session.id")
+                    if not isinstance(session, str) or not session:
+                        sessionless += 1
+                        continue
+                    seen = sessions.setdefault(session, {
+                        "owed": [], "may_owe": {}, "witnessed": set(),
+                        "latest": None, "first": None, "worded": 0,
+                        "unworded": 0, "closed": [], "sequences": set(),
+                        "results": [], "arrived": {}})
+                    if when is not None and (seen["latest"] is None
+                                             or when > seen["latest"]):
+                        seen["latest"] = when
+                    sequence = attributes.get("event.sequence")
+                    if isinstance(sequence, int) \
+                            and not isinstance(sequence, bool):
+                        seen["sequences"].add(sequence)
+                        if when is not None and (
+                                sequence not in seen["arrived"]
+                                or when < seen["arrived"][sequence]):
+                            seen["arrived"][sequence] = when
+                    name = attributes.get("event.name")
+                    tool = attributes.get("tool_name")
+                    tool = tool if isinstance(tool, str) else None
+                    if name == TOOL_DECISION and tool is not None:
+                        seen["witnessed"].add(tool)
+                    elif name == TOOL_RESULT:
+                        stamp = attributes.get("event.timestamp")
+                        stamp = stamp if isinstance(stamp, str) else None
+                        call = attributes.get("tool_use_id")
+                        seen["witnessed"].add(tool)
+                        seen["owed"].append((stamp, tool))
+                        seen["results"].append(
+                            (stamp, tool,
+                             call if is_call_id(call) else None, when))
+                        if stamp is not None and (seen["first"] is None
+                                                  or stamp < seen["first"]):
+                            seen["first"] = stamp
+        finally:
+            f.close()
     for seen in sessions.values():
         seen["owed"].sort(key=lambda call: call[0] or "")
         seen["results"].sort(key=lambda call: call[0] or "")
