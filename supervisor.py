@@ -7180,6 +7180,15 @@ def clip(text, width=ACTION_WIDTH):
     return text if len(text) <= width else text[:width - 3] + "..."
 
 
+def clip_folded(head, fields, width=ACTION_WIDTH):
+    """A row's action as `split_suffix` gave it, `clip`ped: a folded one
+    is cut before its `FOLDED_MARK`, so the mark the listing's note names
+    always ends the row, inside the width (#619)."""
+    if fields is None:
+        return clip(head, width)
+    return f"{clip(head, width - len(FOLDED_MARK) - 1)} {FOLDED_MARK}"
+
+
 def hhmm(ts):
     return visible(ts[11:16] + "Z") if isinstance(ts, str) and len(ts) >= 16 \
         else visible(ts)
@@ -7253,14 +7262,14 @@ def run_action(unit):
     `14x Read, last: supervisor.py`. The newest detail is shown
     because it is what the session did most recently; the rest is one
     `timeline` away. The digest is a listing, so the suffix is folded
-    (ADR-0047)."""
+    (ADR-0047) and the row clipped and marked (`clip_folded`)."""
     rows = unit["rows"]
-    action = listed_action(rows[-1]["entry"].get("action", ""))
-    if len(rows) == 1:
-        return action
-    label, _, rest = action.partition(":")
-    prefix = f"{len(rows)}x {label.strip()}"
-    return f"{prefix}, last: {rest.strip()}" if rest.strip() else prefix
+    action, fields = split_suffix(rows[-1]["entry"].get("action", ""))
+    if len(rows) > 1:
+        label, _, rest = action.partition(":")
+        prefix = f"{len(rows)}x {label.strip()}"
+        action = f"{prefix}, last: {rest.strip()}" if rest.strip() else prefix
+    return clip_folded(action, fields)
 
 
 def scan_testimony(repo):
@@ -7439,7 +7448,7 @@ def cmd_digest(args):
             entry = row["entry"]
             line = (f"{address_of(entry)}  {hhmm(row['ts'])}  "
                     f"{clip(entry.get('actor', '?'), 16)}  "
-                    f"{clip(run_action(unit))}")
+                    f"{run_action(unit)}")
             if entry.get("entry_hash") == family["final"]:
                 line += "   <- last recorded action"
             lines.append(line)
@@ -7526,7 +7535,8 @@ def match_address(prefix, logs, where,
         for log, entry in matches[:20]:
             print(f"  {address_of(entry)}  {visible(entry.get('ts', ''))}  "
                   f"session {visible(session_of(log)[:8])}  "
-                  f"{clip(listed_action(entry.get('action', '')), 60)}", file=sys.stderr)
+                  f"{clip_folded(*split_suffix(entry.get('action', '')), 60)}",
+                  file=sys.stderr)
         return None, 1
     return matches[0], 0
 
@@ -7664,7 +7674,7 @@ def cmd_search_cli(args):
         print(f"{address_of(entry)}  {visible(ts[:10])} {hhmm(ts)}  "
               f"{visible(repo_name)}/{visible(session[:8])}  "
               f"{clip(entry.get('actor', ''), 16)}  "
-              f"{clip(listed_action(entry.get('action', '')))}")
+              f"{clip_folded(*split_suffix(entry.get('action', '')))}")
     if any(split_suffix(hit[3].get("action", ""))[1] for hit in shown):
         print(FOLDED_NOTE)
     return 0
@@ -7690,7 +7700,7 @@ def cmd_timeline(args):
         mark = "   <- here" if e is entries[idx] else ""
         print(f"{address_of(e)}  {hhmm(str(e.get('ts', '')))}  "
               f"{clip(e.get('actor', ''), 16)}  "
-              f"{clip(listed_action(e.get('action', '')))}{mark}")
+              f"{clip_folded(*split_suffix(e.get('action', '')))}{mark}")
     if any(split_suffix(e.get("action", ""))[1] for e in entries[lo:hi]):
         print(FOLDED_NOTE)
     return 0

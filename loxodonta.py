@@ -5819,10 +5819,8 @@ def timeline_lines(entries, breaks, warns):
     for n, message in breaks + warns:
         flags.setdefault(n, []).append(message)
     out = []
-    folded = False
     for n, entry in enumerate(entries):
         if entry is not None:
-            folded = folded or split_suffix(entry.get("action"))[1] is not None
             out.append(f"  {n:>4}  {visible(entry.get('ts'))}  "
                        f"{visible(entry.get('actor'))}: "
                        f"{visible(listed_action(entry.get('action')))}")
@@ -5831,10 +5829,6 @@ def timeline_lines(entries, breaks, warns):
                            f"({visible(ref['sha256'][:12])}…)")
         for message in flags.get(n, []):
             out.append(f"        !! {visible(message)}")
-    if folded:
-        out += ["", f"a line ending {FOLDED_MARK} is listed without its "
-                "last group, the call's id and input hash; the chain holds "
-                "the line whole"]
     return out
 
 
@@ -5857,6 +5851,14 @@ def cmd_report(args):
     print()
     for line in timeline_lines(entries, breaks, warns):
         print(line)
+    # Printed here and not in the timeline: explain hands the timeline to
+    # a model as the observed agent's words, and this line is the tool's.
+    if any(entry is not None and split_suffix(entry.get("action"))[1]
+           for entry in entries):
+        print()
+        print(f"a line ending {FOLDED_MARK} is listed without its last "
+              "group, the call's id and input hash; the chain holds the "
+              "line whole")
     if breaks:
         print()
         print("chain integrity: BROKEN — this timeline is testimony only "
