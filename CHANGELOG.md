@@ -21,6 +21,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/CLAIMS.md` says the holder of the receiver's URL can add receipts as well as events: a hand-written receipt carrying a missing call's id pays that call at the receiver.
 - At the receiver, a receipt first seen more than `SUPERVISOR_LATE_RECEIPT_SECONDS` (one hour) after a settled look named its call missing pays nothing: the session keeps its finding until acknowledged, and the row says why (#620).
 - At the receiver, a chain copy carrying the hook's `second-record-cut:` note is never counted as before the second record's memory, whatever dates its entries carry: it reads `SECOND-RECORD-ABSENT` and raises (#486).
+- `anchor --upgrade` asks only the default calendars and each `--calendar` given; a row naming another address is named, skipped and never asked, so upgrading a handed sidecar sends nothing where its issuer chose. The keeper passes its `--calendar` (#415).
 
 ### Fixed
 
@@ -43,6 +44,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - At the receiver, a receipt pays a call only when it names the tool the event names for that id: one naming another tool pays nothing, and the row, dashboard included, names the id and both tools (#620).
 - At the receiver, a second receipt carrying a call id already paid, as a failed call's two hooks leave, is no longer surplus: the row counts it apart, and it pays no second call under the count by tool (#476).
 - At the receiver, one event posted for a session whose events name no completed call no longer turns its receipts into a surplus, exit 0: the session reads `SECOND-RECORD-ABSENT` and raises, and the row says why (#620).
+- A transcript holding lines, not one of them readable, reads `UNWITNESSED` naming the file and why, as one that cannot be opened does: it counted as a session that ran no tools, so a live alarm read `QUIET` (#473).
 
 ## [0.20.0] - 2026-11-12
 
