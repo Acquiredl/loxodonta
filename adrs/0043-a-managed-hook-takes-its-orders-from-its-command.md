@@ -1,6 +1,6 @@
 # ADR-0043: A managed hook takes its orders from its command, never from the environment
 
-**Status:** proposed 2026-11-10. Ruled by the author on that date after a design review of the whole tool: the two open choices (ruling 5 and ruling 6) answered one at a time, the restatement waived. Nothing is measured yet: accepted once the build lands and the runs under *Measured* are made.
+**Status:** proposed 2026-11-10. Ruled by the author on that date after a design review of the whole tool: the two open choices (ruling 5 and ruling 6) answered one at a time, the restatement waived. Built (#596) and not measured yet: accepted once the runs under *Measured* are made.
 **Deciders:** Acquiredl
 
 ## Context

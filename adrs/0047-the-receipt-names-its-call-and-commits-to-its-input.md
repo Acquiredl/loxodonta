@@ -1,6 +1,6 @@
 # ADR-0047: The receipt names its call and commits to its whole input
 
-**Status:** proposed 2026-11-11. Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its four choices. Nothing is built yet: accepted once the build lands.
+**Status:** accepted 2026-11-11, built (#599). Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its four choices.
 **Deciders:** Acquiredl
 
 ## Context
