@@ -22,6 +22,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
 - A row appended to a sidecar whose last line is torn starts on a line of its own: it was glued onto the torn line, and both were unreadable. The torn line stays as it lies (#610).
 - The recorder notice hashes the recorder against its committed blob, so an edit `git status` hides (assume-unchanged, skip-worktree, ignored and never committed) reads as uncommitted changes; autocrlf line endings do not (#621).
+- The recorder notice reads the checkout's commits as made, never through `git replace`: a replaced HEAD whose tree holds an edited recorder no longer reads as clean (#621).
 
 ## [0.20.0] - 2026-11-12
 

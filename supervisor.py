@@ -3242,14 +3242,17 @@ def git_say(home, *question, refused=None):
     GIT_TIMEOUT. Never fetches, never writes. The folder is named by the
     harness settings, so its git config and hooks are the writer's to
     plant (#572): fsmonitor is turned off, and no optional lock is taken,
-    so `status` writes no index and starts no post-index-change hook. A
-    clean filter its attributes name still runs on `status`; the timeout
-    bounds it."""
+    so `status` writes no index and starts no post-index-change hook.
+    Replace refs are the writer's too, and would let HEAD name the real
+    commit while its tree is theirs (#621): the commits are read as
+    made. A clean filter its attributes name still runs on `status`;
+    the timeout bounds it."""
     try:
         answered = subprocess.run(
             # Empty, not false: before git 2.36 the value was a command,
             # and `false` names one.
-            [helper_path("git"), "--no-optional-locks", "-c",
+            [helper_path("git"), "--no-optional-locks",
+             "--no-replace-objects", "-c",
              "core.fsmonitor=",
              "-C", str(home), *question],
             # Never a pipe on stderr: a program git starts inherits it,
@@ -3371,8 +3374,12 @@ def recorder_committed(script, held):
         return False, error.strerror or str(error)
     if len(body) > RECORDER_READ_LIMIT:
         return False, larger
-    return held in (blob_id(body, len(held)),
-                    blob_id(body.replace(b"\r\n", b"\n"), len(held))), None
+    if blob_id(body, len(held)) == held:
+        return True, None
+    # A CRLF left after one pass was CR CR LF, which no checkout writes
+    # and which would otherwise fold back to a CRLF the blob holds.
+    lf = body.replace(b"\r\n", b"\n")
+    return b"\r\n" not in lf and blob_id(lf, len(held)) == held, None
 
 
 def recorder_versioned(script, notice):
@@ -3449,8 +3456,7 @@ def recorder_words(notice, problem=None, hidden=False):
     elif notice["dirty"]:
         said.append("the recorder has uncommitted changes — the file "
                     "being executed is not the file that was reviewed"
-                    + (", and git has been told not to show them"
-                       if hidden else ""))
+                    + (", though `git status` shows none" if hidden else ""))
     if notice["behind"]:
         said.append(f"the checkout is {notice['behind']} commit(s) behind "
                     f"{notice['upstream']} as of the last fetch"
