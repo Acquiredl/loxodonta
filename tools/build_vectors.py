@@ -126,7 +126,7 @@ SINCE = {
     "0.1.5": "files-unsorted",
     "0.1.7": """tail-forked tail-forked-head entry-hash-not-hex
         entry-hash-not-hex-head tail-no-n tail-no-n-head tail-n-float
-        tail-n-float-head""",
+        tail-n-float-head tail-n-true tail-n-true-head""",
 }
 SINCE = {name: revision for revision, names in SINCE.items()
          for name in names.split()}
@@ -485,6 +485,14 @@ def build(workdir):
     row("tail-n-float-head", "head", "No head: the final line's n is a "
         "float, not an integer, though it equals 3 (SPEC section 6, "
         "v0.1.7).", 1, "", log="tail-n-float")
+    # On line 1, where a language that takes true for 1 would match it.
+    chain("tail-n-true", base[:1] + [stored(sealed({**e[1], "n": True}))])
+    row("tail-n-true", "verify", "Entry 1's n is true, a boolean, on line "
+        "1, with a hash that holds for it.", 1,
+        "BROKEN at entry 1: n is not an integer")
+    row("tail-n-true-head", "head", "No head: the final line's n is a "
+        "boolean, not an integer, though true equals 1 in some languages "
+        "(SPEC section 6, v0.1.7).", 1, "", log="tail-n-true")
 
     # The last-wins reading of this line is entry 3 exactly, hash and
     # all; a first-wins reader sees an action that says the tests failed.

@@ -274,6 +274,30 @@
       "last_line": ""
     },
     {
+      "name": "tail-n-true",
+      "about": "Entry 1's n is true, a boolean, on line 1, with a hash that holds for it.",
+      "args": [
+        "verify",
+        "--log",
+        "tail-n-true.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": "BROKEN at entry 1: n is not an integer"
+    },
+    {
+      "name": "tail-n-true-head",
+      "about": "No head: the final line's n is a boolean, not an integer, though true equals 1 in some languages (SPEC section 6, v0.1.7).",
+      "args": [
+        "head",
+        "--log",
+        "tail-n-true.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": ""
+    },
+    {
       "name": "key-given-twice",
       "about": "Entry 3 names action twice; its hash holds for the last of the two.",
       "args": [

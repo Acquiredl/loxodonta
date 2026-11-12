@@ -148,11 +148,29 @@ def unreadable_log(path, error):
 def tail_entry(lines):
     """The chain's final entry, or None if the tail is damaged: torn (a
     line left partial by a crash or an overlapping append, or holding a
-    byte that is not UTF-8) or forked (a well-formed entry whose `n` is
-    not its line number, left by a lock taken from a paused holder).
-    Neither can be built on: a new entry laid over a fork would bury an
-    innocent race under later receipts until it read as tampering in
-    the middle of the file, so damage stays at the tail (SPEC §6, §8)."""
+    byte that is not UTF-8), forked (a well-formed entry whose `n` is
+    not its line number, left by a lock taken from a paused holder), or
+    ending in an `entry_hash` that is no chain head. None can be built
+    on: a new entry laid over a fork would bury an innocent race under
+    later receipts until it read as tampering in the middle of the file,
+    so damage stays at the tail (SPEC §6, §8)."""
+    last = tail_line(lines)
+    if last is None or not is_chain_head(last["entry_hash"]):
+        return None
+    return last
+
+
+def is_chain_head(value):
+    """A SHA256 in lowercase hex and nothing else: the only form an
+    entry_hash takes, so any other is BROKEN to the walk (SPEC §6)."""
+    return (isinstance(value, str) and len(value) == 64
+            and all(c in "0123456789abcdef" for c in value))
+
+
+def tail_line(lines):
+    """The final line as an entry whose `n` is its line number, whatever
+    its `entry_hash` holds, or None: `tail_entry` without the head's
+    form, so `head` can name that refusal on its own."""
     if not lines:
         return None
     try:
@@ -1842,7 +1860,7 @@ def cmd_head(args):
     if not lines:
         print(f"error: {visible(args.log)} is empty — no chain head to print", file=sys.stderr)
         return EX_NOINPUT
-    last = tail_entry(lines)
+    last = tail_line(lines)
     if last is None:
         # `verify`, not `loxodonta verify`: the recorder and verifier.py
         # both have it.
@@ -1851,11 +1869,10 @@ def cmd_head(args):
               "to record)", file=sys.stderr)
         return 1
     head = last["entry_hash"]
-    # A head is a SHA256 in lowercase hex and nothing else, so anything
-    # else is refused unprinted: the line is the writer's text, and the
-    # walk calls it BROKEN, since no such value matches a canonical form.
-    if not (isinstance(head, str) and len(head) == 64
-            and all(c in "0123456789abcdef" for c in head)):
+    # Anything but a head is refused unprinted: the line is the writer's
+    # text, and the walk calls it BROKEN, since no such value matches a
+    # canonical form.
+    if not is_chain_head(head):
         print(f"error: {visible(args.log)} ends in an entry whose entry_hash is not "
               "a chain head — run `verify` on it for the verdict",
               file=sys.stderr)
