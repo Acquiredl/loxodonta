@@ -4731,6 +4731,7 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
     classify() as a session that ended, ENDED-DEFICIT tool by tool or by
     the call's id, or
     SECOND-RECORD-ABSENT when receipts arrived and no events did, or
+    none naming a completed call, or
     SECOND-RECORD-GAP when its counter has holes and no deficit, else
     ENDED-SURPLUS or ENDED-CLEAN. A surplus is expected while #476
     stands and is no alarm. A session whose chain copy's newest entry
@@ -4877,13 +4878,24 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
             state = "PENDING-OVERDUE" if due else "PENDING"
             if due:
                 row.update(due)
-        elif seen is None:
+        elif seen is None or (not seen["results"]
+                              and family.get("receipts", 0)):
+            # Events naming no completed call are no second record for
+            # receipts: one event posted through the URL, a refusal or a
+            # request, would read every receipt as surplus (found with
+            # #620).
             state = "SECOND-RECORD-ABSENT"
+            if seen is not None:
+                row["note"] = ("events arrived for this session, but none "
+                               "names a completed call (a tool_result), so "
+                               "its receipts have no second record to be "
+                               "counted against")
             if unread:
                 # The ruling's "with that note beside it": the words say
                 # its events never arrived, and the note beside them says
                 # a file went unread (#559 ruling 3).
-                row["note"] = unread
+                row["note"] = "; ".join(filter(None, (row.get("note"),
+                                                      unread)))
         else:
             state = classify(len(owed), deficit, pairing["surplus"], True,
                              True, None, False)

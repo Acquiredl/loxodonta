@@ -31,6 +31,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The dashboard no longer says "every receipt accounted for" while a session is short of receipts: the quiet strip names findings accepted at the receiver, deficits kept as evidence and sessions behind inside the grace window, with their counts (#613).
 - At the receiver, a receipt pays a call only when it names the tool the harness's event names for that id: one naming another tool pays nothing, and the row says which id and which two tools (#620).
 - At the receiver, a second receipt carrying a call id already paid, as a failed call's two hooks leave, is no longer surplus: the row counts it apart, and it pays no second call under the count by tool (#476).
+- At the receiver, one event posted for a session whose events name no completed call no longer turns its receipts into a surplus, exit 0: the session reads `SECOND-RECORD-ABSENT` and raises, and the row says why (#620).
 
 ## [0.20.0] - 2026-11-12
 

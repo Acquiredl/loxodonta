@@ -7114,6 +7114,25 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
+    def test_one_posted_event_naming_no_completed_call_ends_no_finding(self):
+        # The holder of the URL posts one tool_decision naming a session
+        # that has receipts and no events. Its receipts are read against
+        # no completed call: the second record is still absent for them.
+        data = receiver_folder(self.base / "decided", events=False)
+        chain_copy(data, "decided-session-0001")
+        absent = self.rows(self.report(expect=6, data=data))[
+            "decided-session-0001"]
+        post_event(data, 0, "tool_decision", received_ago(7200),
+                   tool="Bash", session="decided-session-0001")
+
+        row = self.rows(self.report(expect=6, data=data))[
+            "decided-session-0001"]
+
+        self.assertEqual(absent["state"], "SECOND-RECORD-ABSENT")
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertTrue(row["raises"])
+        self.assertIn("none names a completed call", row["note"])
+
     def test_a_copy_carrying_the_cut_note_is_never_before_memory(self):
         # #486 item 11: a run with the telemetry cut and its timestamps
         # pinned to 1970 dates its chain before the oldest events file.
