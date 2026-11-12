@@ -3115,7 +3115,7 @@ def reader_gone(error):
 
 
 def run_main(main):
-    """Run a command line to its exit code, as both files' entry point.
+    """Run a command line to its exit code, as every tool's entry point.
     Two endings are not the command's own (ADR-0037). A reader that hung
     up gets a quiet 141, what a shell reports for that: never 0 (VALID)
     or 1 (BROKEN), since the unread lines were never judged. A crash

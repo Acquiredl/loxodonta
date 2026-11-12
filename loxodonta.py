@@ -3108,7 +3108,7 @@ def reader_gone(error):
 
 
 def run_main(main):
-    """Run a command line to its exit code, as both files' entry point.
+    """Run a command line to its exit code, as every tool's entry point.
     Two endings are not the command's own (ADR-0037). A reader that hung
     up gets a quiet 141, what a shell reports for that: never 0 (VALID)
     or 1 (BROKEN), since the unread lines were never judged. A crash
@@ -3188,6 +3188,35 @@ def environment(name, default=None):
     if MANAGED_RUN and name not in MANAGED_READS:
         return default
     return os.environ.get(name, default)
+
+
+# The supervisor and the receiver read every number from their
+# environment by this rule. The recorder's own two knobs, the lock's
+# timeout and the batch cap, are read when used and fall back to their
+# defaults instead (#589); the original lives here as every twin's does.
+def number_setting(name, raw, kind=int, waited=False):
+    """The number the text `raw` of environment variable `name` says,
+    read as `kind` (int or float). A value that is not such a number,
+    or is negative or infinite, is refused by name: one line on stderr
+    and exit 64, never a traceback (#487). When the number is a wait,
+    one past threading.TIMEOUT_MAX is refused the same way, since no
+    wait can take it (#589); a number only compared has no such
+    bound."""
+    try:
+        value = kind(raw)
+    except ValueError:
+        value = None
+    if value is None or not 0 <= value < float("inf"):
+        print(f"error: {name}={ascii(raw)} is not a "
+              f"{'whole' if kind is int else 'finite'} number 0 or more",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
+    if waited and value > threading.TIMEOUT_MAX:
+        print(f"error: {name}={ascii(raw)} is more seconds than a wait "
+              f"can take (at most {int(threading.TIMEOUT_MAX)} here)",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
+    return value
 
 
 # --- Writing a line -----------------------------------------------------------

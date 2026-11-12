@@ -23,6 +23,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A row appended to a sidecar whose last line is torn starts on a line of its own: it was glued onto the torn line, and both were unreadable. The torn line stays as it lies (#610).
 - `docs/TOUR.md` says where the hook puts a chain today: the store's drawer for the project, read from `CLAUDE_PROJECT_DIR` or the payload's `cwd`, and fingerprints files under the project, not the log's folder (#611).
 - The dashboard's verdict strip names every condition one look found, the worst first: a broken chain no longer hides a finding at the receiver no one has accepted, nor a live alarm a broken chain (#612).
+- An uncaught exception in the supervisor exits 70 with its traceback, as in the recorder, never 1, which `supervisor verify` and the scan's ladder say for `BROKEN`; a reader that hangs up on it gets a quiet 141 (#449).
+- The receiver refuses a `RECEIVER_DEADLINE_SECONDS` or `RECEIVER_TIMEOUT_SECONDS` it cannot use by name, exit 64, before it starts: it died at import with a traceback. A crash in it exits 70, never 1 (#589).
+- A number of seconds the supervisor or the receiver waits on, such as `SUPERVISOR_KEEPER_TICK_SECONDS=1e10`, is refused by name with 64 when no wait can take it: the keeper's first turn raised `OverflowError` (#589).
+- `supervisor serve` says nothing on its log when a client leaves before its reply is read: the request's thread printed a traceback there (#589).
 
 ## [0.20.0] - 2026-11-12
 

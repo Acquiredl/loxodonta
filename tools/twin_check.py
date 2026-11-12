@@ -125,13 +125,21 @@ TWINS = (
          "write cannot be; the keeper reads a recorder verb's 73 by the "
          "same name (ADR-0037, #430, #422, #448)."),
     Twin("What the keepers read from a recorder verb",
-         ("EX_UNAVAILABLE", "EX_SOFTWARE", "EX_TEMPFAIL"),
+         ("EX_UNAVAILABLE", "EX_TEMPFAIL"),
          ORIGINAL, SUPERVISOR,
          "The keepers name each exit of `anchor`, `stamp` and `publish` "
          "for what it is, and say a calendar, an authority or a remote did "
          "not do what was asked only for 69; 70 is the recorder itself "
-         "failing, 75 another writer holding the chain's lock (ADR-0037, "
-         "#557)."),
+         "failing, read by the name below, 75 another writer holding the "
+         "chain's lock (ADR-0037, #557)."),
+    Twin("A crash is never a verdict",
+         ("EX_SOFTWARE", "EXIT_READER_GONE", "reader_gone", "run_main"),
+         ORIGINAL, BOTH,
+         "Every file ends through `run_main`: a crash prints its traceback "
+         "and exits 70, and a reader that hangs up gets a quiet 141, so "
+         "neither is read as an answer, least of all as 1, the recorder's "
+         "`BROKEN`, which `supervisor verify` passes on and the scan's "
+         "ladder counts (ADR-0037, #449)."),
     Twin("Writing to the console", ("speak_utf8",), ORIGINAL, BOTH,
          "Every file can print text a Windows console's code page cannot "
          "hold, and none of them may die on it (#294)."),
@@ -235,6 +243,14 @@ TWINS = (
          "digest's commands, and under it both read no variable but the "
          "ones the harness sets, so the store and the managed file they "
          "name are the built-in ones (ADR-0043)."),
+    Twin("A number from the environment", ("number_setting",), ORIGINAL,
+         BOTH,
+         "The supervisor and the receiver take a number from their "
+         "environment only when they can use it, and refuse any other by "
+         "name with 64 before any verb runs: never a traceback at import, "
+         "and never a wait longer than a wait can take (#487, #589). The "
+         "recorder's own knobs fall back to their defaults instead, and "
+         "it holds the original as it holds every twin's."),
     Twin("Finding a helper program", ("helper_path",), ORIGINAL, BOTH,
          "openssl, ssh-keygen, git, gh and claude run by the full path a walk of PATH "
          "finds, never from the working directory, in every file that "
