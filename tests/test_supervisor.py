@@ -2778,6 +2778,176 @@ class CompletenessTest(unittest.TestCase):
             self.assertNotIn(overclaim, words)
 
 
+# Three lines each, not one of them a transcript record: text that is
+# not JSON, JSON that is not an object, and bytes that are not UTF-8.
+GARBLED = {"text": b"not json\nnor this\n{\"cut\": \n",
+           "values": b"[1, 2]\n42\n\"a string\"\n",
+           "bytes": b"\xff\xfe\x00\n\x80\x81\n\xc3\x28\n"}
+GARBLED_WHY = "not one of its 3 lines is a JSON object"
+
+
+class UnreadableTranscriptTest(unittest.TestCase):
+    """#473: a transcript that holds bytes, not one line of which can be
+    read, was counted as a session that ran no tools, so a live session
+    the scan had called ALARM-SILENT read QUIET, exit 0. It reads
+    UNWITNESSED with why, as one that cannot be opened does (#386, #452),
+    with that row's exit. One readable line is enough to be read by
+    (#331); an empty transcript is a session only just started, and
+    stays QUIET; a transcript cut to fewer readable calls is not
+    reported, the limit docs/CLAIMS.md states."""
+
+    def setUp(self):
+        base = temp_folder(self)
+        self.root = base / "repos"
+        self.root.mkdir()
+        self.witness = base / "witness"
+        install_witness_hook(self.witness)
+        prime_memory(self.root)
+        self.env = isolated_env(base / "home")
+
+    def scan(self, expect):
+        result = run_scan(self.root, "--witness", str(self.witness),
+                          env=self.env)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, expect,
+                         result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["exit"], expect)
+        return {row["session"]: row
+                for row in report["completeness"]["sessions"]}, report
+
+    def live(self, session, project="alpha"):
+        """The issue's session: live, three calls the witness counts."""
+        return write_transcript(self.witness, self.root / project, session,
+                                event_times=[ago(600), ago(400), ago(120)])
+
+    def assert_unreadable(self, row, path, receipts=0):
+        self.assertEqual(row["state"], "UNWITNESSED")
+        self.assertEqual(row["tools"], 0)
+        self.assertEqual(row["receipts"], receipts)
+        self.assertIn(f"{path.as_posix()} cannot be read as a transcript: "
+                      f"{GARBLED_WHY}", row["note"])
+        # The words travel in a package and the note does not (#410).
+        self.assertIn("cannot be read", row["words"])
+        self.assertNotIn(row["session"], row["words"])
+
+    def test_a_chainless_transcript_garbled_whole_is_named_not_quiet(self):
+        for kind, garbled in GARBLED.items():
+            with self.subTest(garbled=kind):
+                session = f"sess-never-{kind}"
+                transcript = self.live(session)
+                rows, _ = self.scan(expect=6)
+                self.assertEqual(rows[session]["state"], "ALARM-SILENT")
+                transcript.write_bytes(garbled)
+
+                rows, _ = self.scan(expect=0)
+
+                self.assert_unreadable(rows[session], transcript)
+                transcript.unlink()
+
+    def test_a_chained_transcript_garbled_whole_is_named_not_quiet(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-chained",
+                   entries=1)
+        transcript = self.live("sess-chained")
+        rows, _ = self.scan(expect=6)
+        self.assertEqual(rows["sess-chained"]["tools"], 3)
+        transcript.write_bytes(GARBLED["text"])
+
+        rows, report = self.scan(expect=0)
+
+        self.assert_unreadable(rows["sess-chained"], transcript, receipts=1)
+        (chain,) = chains_by_session(report)[("alpha", "sess-chained")]
+        self.assertEqual(chain["verdict"], "VALID")
+
+    def test_an_empty_transcript_is_a_session_only_just_started(self):
+        # Ruling 2: zero bytes, and a file of blank lines alike; a blank
+        # line is no line that could not be read.
+        for kind, content in (("empty", b""), ("blank", b"\n\r\n  \n\t\n")):
+            with self.subTest(transcript=kind):
+                session = f"sess-{kind}"
+                self.live(session).write_bytes(content)
+                make_chain(self.root / "alpha" / "receipts",
+                           f"sess-chained-{kind}", entries=1)
+                self.live(f"sess-chained-{kind}").write_bytes(content)
+
+                rows, _ = self.scan(expect=0)
+
+                self.assertEqual(rows[session]["state"], "QUIET")
+                self.assertNotIn("note", rows[session])
+                # With a chain beside it, read as an empty witness always
+                # was: receipts no call is seen for.
+                self.assertEqual(rows[f"sess-chained-{kind}"]["state"],
+                                 "SURPLUS")
+
+    def test_one_readable_line_among_unreadable_ones_is_read_by(self):
+        # #331 left it so: the threshold is every line.
+        transcript = write_transcript(self.witness, self.root / "alpha",
+                                      "sess-one", chatter=1)
+        with transcript.open("ab") as out:
+            out.write(GARBLED["text"] * 20)
+
+        rows, _ = self.scan(expect=0)
+
+        self.assertEqual(rows["sess-one"]["state"], "QUIET")
+        self.assertNotIn("note", rows["sess-one"])
+
+    def test_readable_lines_with_no_tool_events_stay_quiet(self):
+        write_transcript(self.witness, self.root / "alpha", "sess-talk",
+                         chatter=3, metadata=2)
+
+        rows, _ = self.scan(expect=0)
+
+        self.assertEqual(rows["sess-talk"]["state"], "QUIET")
+
+    def garble_subagent(self, session, events=()):
+        path = write_subagent_transcript(self.witness, self.root / "alpha",
+                                         session, "aaa", event_times=events)
+        path.write_bytes(GARBLED["text"])
+        return path
+
+    def test_a_garbled_subagent_file_beside_a_clean_parent_is_named(self):
+        # The rule holds per file: the calls a garbled subagent file
+        # held are unknown, so a parent paid in full is no clean session.
+        make_chain(self.root / "alpha" / "receipts", "sess-sub",
+                   actions=["Bash: a", "Bash: b"])
+        write_transcript(self.witness, self.root / "alpha", "sess-sub",
+                         event_times=[ago(6000), ago(5990)])
+        rows, _ = self.scan(expect=0)
+        self.assertEqual(rows["sess-sub"]["state"], "ENDED-CLEAN")
+        sidechain = self.garble_subagent("sess-sub", events=[ago(5980)])
+
+        rows, _ = self.scan(expect=0)
+
+        self.assert_unreadable(rows["sess-sub"], sidechain, receipts=2)
+
+    def test_a_garbled_subagent_file_never_quiets_the_parents_alarm(self):
+        # A deficit the readable files show stands: a file that cannot be
+        # read can only hide more calls, never pay one. The file is named.
+        self.live("sess-loud")
+        sidechain = self.garble_subagent("sess-loud")
+
+        rows, _ = self.scan(expect=6)
+
+        row = rows["sess-loud"]
+        self.assertEqual(row["state"], "ALARM-SILENT")
+        self.assertEqual(row["tools"], 3)
+        self.assertIn(f"{sidechain.as_posix()} cannot be read as a "
+                      f"transcript: {GARBLED_WHY}", row["note"])
+
+    def test_a_session_before_the_memory_is_not_named_for_a_garbled_file(self):
+        # ADR-0029: the session's first call dates it before the memory
+        # began, so nothing about it is judged, its garbled file included.
+        prime_memory(self.root, age=3000)
+        write_transcript(self.witness, self.root / "alpha", "sess-old",
+                         event_times=[ago(6000), ago(5990)])
+        self.garble_subagent("sess-old")
+
+        rows, report = self.scan(expect=0)
+
+        self.assertNotIn("sess-old", rows)
+        self.assertEqual(report["completeness"]["before_memory"]["count"], 1)
+
+
 class CalibrationTest(unittest.TestCase):
     """Effective-dated coverage (ADR-0016): each session is judged by
     the matchers in force at its time, so a matcher change never
