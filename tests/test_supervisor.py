@@ -4820,9 +4820,10 @@ class RecorderDriftTest(unittest.TestCase):
             command=f'python "{script.as_posix()}" hook')
         return home, script
 
-    def notice(self):
-        result = run_scan(self.root, "--witness", str(self.witness), "--json",
-                          env=self.env)
+    def notice(self, timeout=120):
+        result = run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                     "--witness", str(self.witness), env=self.env,
+                     timeout=timeout)
         self.assertEqual(result.returncode, 0,
                          result.stdout + result.stderr)
         return json.loads(result.stdout)["recorder"]
@@ -4894,20 +4895,89 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertTrue(recorder["dirty"])
         self.assertIn("git has been told not to show them", recorder["note"])
 
+    def assert_unreadable_in_a_checkout(self, recorder, words):
+        """#621: git answered, so the checkout is read as one, and a
+        recorder that cannot be read as a file cannot be the committed
+        one."""
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertEqual(recorder["branch"], "main")
+        self.assertTrue(recorder["dirty"])
+        self.assertIn(words, recorder["note"])
+        self.assertNotIn("not in a git checkout", recorder["note"])
+        self.assertNotIn("clean", recorder["note"])
+        self.assertNotIn("told not to show", recorder["note"])
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
-    def test_a_pipe_in_the_recorders_place_is_named_never_hashed(self):
-        # #621: the bytes are hashed only of a regular file; git would
-        # wait on a pipe until its bound, and the read names it instead.
+    def test_a_pipe_in_the_recorders_place_is_named_never_read(self):
+        # An open of a pipe waits for a writer; the bound is the test's
+        # timeout, well under git's own.
         _, script = self.make_checkout()
         script.unlink()
         os.mkfifo(script)
-        started = time.monotonic()
+
+        recorder = self.notice(timeout=8)
+
+        self.assert_unreadable_in_a_checkout(recorder, "not a regular file")
+
+    def test_a_folder_in_the_recorders_place_is_named_in_the_checkout(self):
+        _, script = self.make_checkout()
+        script.unlink()
+        script.mkdir()
 
         recorder = self.notice()
 
-        self.assertLess(time.monotonic() - started, 9, "git waited on it")
-        self.assertIn("not a regular file", recorder["note"])
-        self.assertNotIn("clean", recorder["note"])
+        self.assert_unreadable_in_a_checkout(recorder, "is a folder")
+
+    def test_a_recorder_larger_than_any_is_never_read(self):
+        # Sized without writing it: the size is asked before any read,
+        # so the scan's cost does not grow with the file.
+        _, script = self.make_checkout()
+        with open(script, "r+b") as f:
+            f.truncate(1 << 30)
+
+        recorder = self.notice(timeout=8)
+
+        self.assert_unreadable_in_a_checkout(recorder, "larger than")
+
+    def test_a_committed_crlf_blob_under_autocrlf_is_not_drift(self):
+        # git converts nothing on checkout or on add when the blob itself
+        # holds CRLF, so the file is the committed bytes exactly.
+        home, script = self.make_checkout(autocrlf="false")
+        script.write_bytes(b"# committed with CRLF\r\nline two\r\n")
+        self.git("commit", "-q", "-am", "crlf", cwd=home)
+        self.git("config", "core.autocrlf", "true", cwd=home)
+        said = self.git("status", "--porcelain", "--", "loxodonta.py",
+                        cwd=home)
+        self.assertEqual(said.stdout.strip(), "")
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertFalse(recorder["dirty"])
+        self.assertIn("clean", recorder["note"])
+
+    @unittest.skipUnless(os.name != "nt", "a committed symbolic link; "
+                         "Windows checkouts write them as files by default")
+    def test_a_committed_link_as_the_recorder_is_not_drift(self):
+        # The commit holds the link's text, not its target's bytes.
+        home = self.base / "linked"
+        home.mkdir()
+        (home / "real.py").write_bytes(b"# the recorder's real bytes\n")
+        script = home / "loxodonta.py"
+        os.symlink("real.py", script)
+        self.git("init", "-b", "main", cwd=home)
+        self.git("config", "user.email", "t@example.com", cwd=home)
+        self.git("config", "user.name", "test", cwd=home)
+        self.git("add", "-A", cwd=home)
+        self.git("commit", "-q", "-m", "linked recorder", cwd=home)
+        install_witness_hook(
+            self.witness, command=f'python "{script.as_posix()}" hook')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertFalse(recorder["dirty"])
+        self.assertIn("clean", recorder["note"])
 
     def test_line_endings_converted_on_checkout_are_not_drift(self):
         # #621: with autocrlf the file on disk ends its lines in CRLF and
