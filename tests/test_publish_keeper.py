@@ -1182,14 +1182,39 @@ class HeadlessKeeperTest(ReceiverFixture):
         self.assertEqual(rest, "", "the same failure said on every tick")
         self.assertEqual(self.receiver.received, [])
 
-    def test_with_no_cadence_in_force_no_tick_turns_at_all(self):
-        # No flag, and a store whose marker names no profile: nothing is
-        # sent, and the baseline is never written, which is the proof
-        # that no scan ran — a `serve` nobody polls does what it always
-        # did, exactly nothing.
+    def test_a_watch_look_that_cannot_finish_is_said_once_and_it_runs_on(self):
+        # #281: the watch's clock is the keeper's, on a slower tick, and
+        # fails the same way: one line naming whose clock, no traceback,
+        # and the server alive.
+        home = self.root / "storehome"
+        home.write_text("not a folder\n", encoding="utf-8")
+
+        self.serve(store=True, LOXODONTA_HOME=str(home),
+                   SUPERVISOR_WATCH_TICK_SECONDS="0.1",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        said = read_line_within(self.proc.stderr)
+        time.sleep(2)  # many more turns, each failing the same way
+        alive = self.proc.poll() is None
+        self.proc.kill()
+        _, rest = self.proc.communicate(timeout=30)
+
+        self.assertRegex(
+            said, r"^error: the watch's scan did not finish: \w*Error")
+        self.assertNotIn("Traceback", said)
+        self.assertNotIn(str(self.root), said)
+        self.assertTrue(alive, "the failure took the server down")
+        self.assertEqual(rest, "", "the same failure said on every tick")
+
+    def test_with_no_cadence_and_the_watch_off_no_tick_turns_at_all(self):
+        # No flag, a store whose marker names no profile, and the watch's
+        # clock turned off (#281): nothing is sent, and the baseline is
+        # never written, which is the proof that no scan ran — `serve`
+        # as it was before the watch had a clock, a page waiting to be
+        # opened.
         log = make_chain(self.root / "alpha" / "receipts", "sess-quiet")
 
-        self.serve(SUPERVISOR_KEEPER_TICK_SECONDS="0.2")
+        self.serve(SUPERVISOR_KEEPER_TICK_SECONDS="0.2",
+                   SUPERVISOR_WATCH_TICK_SECONDS="0")
         quiet_until = time.monotonic() + 3
         while time.monotonic() < quiet_until:
             self.assertEqual(self.receiver.received, [])
@@ -1197,9 +1222,42 @@ class HeadlessKeeperTest(ReceiverFixture):
 
         self.assertIn("anchor off", self.said)
         self.assertIn("publish off", self.said)
+        self.assertIn("watch: none of its own "
+                      "(SUPERVISOR_WATCH_TICK_SECONDS=0)", self.said)
         self.assertEqual(memo_of(log), [])
         self.assertFalse((self.root / BASELINE_NAME).exists(),
-                         "a scan ran with no keeper cadence to run it for")
+                         "a scan ran with no clock to run it for")
+
+    def test_with_no_cadence_the_watch_looks_and_sends_nothing(self):
+        # #281: the watch's clock looks as a request does, and a request
+        # sends nothing no flag or profile asked for. The head here is
+        # the bait: `--publish-every 0s` would send it on the first turn.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-watched")
+        baseline = self.root / BASELINE_NAME
+
+        def scanned():
+            try:
+                return json.loads(baseline.read_text(
+                    encoding="utf-8"))["scanned"]
+            except (OSError, ValueError, KeyError):
+                return None
+
+        self.serve(SUPERVISOR_WATCH_TICK_SECONDS="0.2",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        self.wait_for(lambda: scanned() is not None,
+                      missing="the watch never looked")
+        first = scanned()
+        # A later look too, so this is the clock and not one turn.
+        self.wait_for(lambda: scanned() not in (None, first),
+                      missing="the watch looked once and stopped")
+        self._stop()
+
+        self.assertIn("anchor off", self.said)
+        self.assertIn("publish off", self.said)
+        self.assertIn("watch: a look of its own every 0.2s", self.said)
+        self.assertEqual(self.receiver.received, [])
+        self.assertEqual(memo_of(log), [])
+        self.assertFalse(Path(str(log) + ".anchors.jsonl").exists())
 
 
 class ProfileKeeperTest(unittest.TestCase):
