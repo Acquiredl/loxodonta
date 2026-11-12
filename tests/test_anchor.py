@@ -2057,9 +2057,11 @@ class UpgradeAsksNamedCalendarsTest(StoreCase):
                 # answer, as one unreachable always was.
                 self.assertEqual(done.returncode, 69,
                                  done.stdout + done.stderr)
+                # The method and its target; the HTTP version on the line
+                # is the Python's own (1.0 on 3.9).
                 self.assertEqual(
-                    [line.lower() for line in seen],
-                    ["connect a.pool.opentimestamps.org:443 http/1.1"] * 2)
+                    [line.lower().split()[:2] for line in seen],
+                    [["connect", "a.pool.opentimestamps.org:443"]] * 2)
                 self.assertNotIn("skipped calendar", done.stderr)
 
     def test_a_local_address_not_given_is_never_asked(self):
