@@ -31,6 +31,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The receiver refuses a `RECEIVER_DEADLINE_SECONDS` or `RECEIVER_TIMEOUT_SECONDS` it cannot use by name, exit 64, before it starts: it died at import with a traceback. A crash in it exits 70, never 1 (#589).
 - A number of seconds the supervisor or the receiver waits on, such as `SUPERVISOR_KEEPER_TICK_SECONDS=1e10`, is refused by name with 64 when no wait can take it: the keeper's first turn raised `OverflowError` (#589).
 - `supervisor serve` says nothing on its log when a client leaves before its reply is read: the request's thread printed a traceback there (#589).
+- A transcript holding lines, not one of them readable, reads `UNWITNESSED` naming the file and why, as one that cannot be opened does: it counted as a session that ran no tools, so a live alarm read `QUIET` (#473).
 
 ## [0.20.0] - 2026-11-12
 
