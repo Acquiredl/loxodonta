@@ -93,10 +93,26 @@ part is this tool's own.
 
 ### Measured
 
-Not yet. One run on the author's machine, over a real session:
-`supervisor show` reads `matches` for each tool the session used,
-including a call whose input a `PreToolUse` hook rewrote. If it does
-not, this decision is revisited.
+On 2026-11-12, on the author's machine: recorder 0.20.0 from a managed
+install, Claude Code 2.1.294, Windows. Two real sessions.
+
+- `supervisor show` reads `matches` for every tool the sessions used:
+  `Bash`, `PowerShell`, `Read`, `Edit` and two MCP tools. One of them
+  is an `Edit` the operating system refused.
+- A call whose input a `PreToolUse` hook rewrote reads `matches` too,
+  and what it matches is the input as the model sent it. The session
+  asked for `echo original-as-asked`, a `PreToolUse` hook in the
+  project's settings changed the command to
+  `echo rewritten-by-pretooluse`, and that is what ran and printed.
+  The receipt's action line and its hash hold the first command, and
+  so does the transcript.
+
+So on this version of the harness the hook that fires after a call is
+handed the input from before the rewrite. The receipt names the call
+attempted, as it claims below; where a `PreToolUse` hook rewrites an
+input, the command that ran is in neither the receipt nor the
+transcript. `docs/CLAIMS.md` states that as a limit of what a receipt
+holds.
 
 ### What it claims, and what it does not
 
